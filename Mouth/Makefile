@@ -25,10 +25,15 @@ build/test_modkit_provider: tests/test_modkit_provider.c $(DROPIN)
 integration: build/test_modkit_provider
 	./build/test_modkit_provider
 	python3 scripts/sync_bones_module.py --check
-test: build/test_codec integration
+build/test_session_api: tests/test_session_api.c src/mouth_lan.c include/mouth_lan.h
+	mkdir -p build
+	$(CC) $(CFLAGS) $(INC) tests/test_session_api.c src/mouth_lan.c -o $@ $(LIBS)
+test: build/test_codec build/test_session_api integration
 	./build/test_codec
+	./build/test_session_api
 loopback: all test
 	python3 tests/test_loopback.py ./build/mouth_lan_demo
+	python3 tests/test_session_network.py ./build/mouth_lan_demo
 sanitize:
 	mkdir -p build
 	$(CC) -std=c11 -g -O1 -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
@@ -36,4 +41,4 @@ sanitize:
 		-o build/test_codec_sanitize $(LIBS)
 	./build/test_codec_sanitize
 clean:
-	rm -f build/test_codec build/test_modkit_provider build/test_codec_sanitize build/mouth_lan_demo
+	rm -f build/test_codec build/test_session_api build/test_modkit_provider build/test_codec_sanitize build/mouth_lan_demo
