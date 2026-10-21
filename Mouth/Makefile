@@ -34,6 +34,7 @@ test: build/test_codec build/test_session_api integration
 loopback: all test
 	python3 tests/test_loopback.py ./build/mouth_lan_demo
 	python3 tests/test_session_network.py ./build/mouth_lan_demo
+	python3 tests/test_protocol_security.py ./build/mouth_lan_demo
 sanitize:
 	mkdir -p build
 	$(CC) -std=c11 -g -O1 -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
