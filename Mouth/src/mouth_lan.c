@@ -39,6 +39,7 @@ typedef int mouth_socket;
 #define MOUTH_TYPE_INPUT 3u
 #define MOUTH_TYPE_SNAPSHOT 4u
 #define MOUTH_TYPE_REJECT 5u
+#define MOUTH_TYPE_LEAVE 6u /* Best effort graceful leave; no ACK */
 #define MOUTH_INPUT_GRACE_MS 250u
 
 static MouthLan *registered_host; /* One module instance per process. */
@@ -132,9 +133,17 @@ static int nonblocking(mouth_socket fd){
     return flags>=0 && fcntl(fd,F_SETFL,flags|O_NONBLOCK)==0;
 #endif
 }
+static int send_packet(MouthLan *l,const uint8_t *p,int n);
 void mouth_lan_close(MouthLan *l){
     if(!l)return;
-    if(l->socket_active){mouth_sock_close(sock_of(l));l->socket_active=0;}
+    if(l->socket_active){
+        uint8_t leave[WIRE_HEADER];
+        if(l->status==MOUTH_LAN_CONNECTED && l->session_id &&
+           make_header(leave,sizeof(leave),MOUTH_TYPE_LEAVE,
+                       sizeof(leave),l->session_id))
+            (void)send_packet(l,leave,(int)sizeof(leave));
+        mouth_sock_close(sock_of(l));l->socket_active=0;
+    }
     l->socket_handle=MOUTH_LAN_INVALID_SOCKET;
     stop_network(l);l->services=NULL;l->status=MOUTH_LAN_OFF;
     if(registered_host==l)registered_host=NULL;
@@ -229,6 +238,12 @@ static void host_receive(MouthLan *l,const uint8_t *p,uint32_t n,
         l->last_input_ms=l->last_rx_ms=now;l->status=MOUTH_LAN_CONNECTED;
         l->last_error=MOUTH_SESSION_OK;l->ever_connected=1;
         send_welcome(l);return;
+    }
+    if(l->status==MOUTH_LAN_CONNECTED && matching_peer(l,from) &&
+       check_header(p,n,MOUTH_TYPE_LEAVE,WIRE_HEADER) &&
+       r32(p+8)==l->session_id){
+        reset_host_peer(l);
+        return;
     }
     if(l->status!=MOUTH_LAN_CONNECTED||!matching_peer(l,from)||
        !mouth_lan_decode_input(p,n,l->session_id,&seq,&f,&s,&yaw,&sp,&j)){
@@ -373,6 +388,14 @@ static void client_receive(MouthLan *l,const uint8_t *p,uint32_t n,uint64_t now)
         l->session_id=r32(p+8);l->last_rx_ms=now;
         l->last_snapshot_tick=0;l->status=MOUTH_LAN_CONNECTED;
         l->last_error=MOUTH_SESSION_OK;l->ever_connected=1;return;
+    }
+    if(l->status==MOUTH_LAN_CONNECTED &&
+       check_header(p,n,MOUTH_TYPE_LEAVE,WIRE_HEADER) &&
+       r32(p+8)==l->session_id){
+        l->last_error=MOUTH_SESSION_CONNECTION_LOST;
+        l->status=MOUTH_LAN_DISCONNECTED;
+        l->actor_count=0;
+        return;
     }
     if(l->status!=MOUTH_LAN_CONNECTED ||
        !check_header(p,n,MOUTH_TYPE_SNAPSHOT,0) ||
