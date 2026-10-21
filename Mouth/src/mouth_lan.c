@@ -186,6 +186,7 @@ static void send_reject(MouthLan *l,uint8_t code){
 }
 static void reset_host_peer(MouthLan *l){
     l->status=MOUTH_LAN_DISCONNECTED;l->session_id=0;
+    l->last_error=MOUTH_SESSION_CONNECTION_LOST;
     l->last_input_seq=0;l->forward=0;l->strafe=0;l->yaw_milliradians=0;
     l->sprint=l->jump=0;l->peer_addr=0;l->peer_port=0;
 }
@@ -193,6 +194,15 @@ static void host_receive(MouthLan *l,const uint8_t *p,uint32_t n,
                          const struct sockaddr_in *from,uint64_t now){
     MouthLanConfig offered;uint32_t nonce,seq;int f,s,yaw,sp,j;
     if(!p||n> MOUTH_LAN_PACKET_MAX||n<WIRE_HEADER){l->rejected_packets++;return;}
+    /* Versioned negative acknowledgement for an otherwise recognizable
+       HELLO. Does not evict an established peer. */
+    if(n>=WIRE_HEADER && p[0]=='M' && p[1]=='1' && p[2]=='4' &&
+       p[3]=='4' && p[5]==MOUTH_TYPE_HELLO &&
+       p[4]!=MOUTH_LAN_VERSION && l->status!=MOUTH_LAN_CONNECTED){
+        l->peer_addr=from->sin_addr.s_addr;l->peer_port=from->sin_port;
+        send_reject(l,2);l->peer_addr=0;l->peer_port=0;
+        return;
+    }
     if(check_header(p,n,MOUTH_TYPE_HELLO,WIRE_HELLO) &&
        mouth_lan_decode_hello(p,n,&offered,&nonce)){
         if(l->status==MOUTH_LAN_CONNECTED && !matching_peer(l,from))return;
@@ -217,6 +227,7 @@ static void host_receive(MouthLan *l,const uint8_t *p,uint32_t n,
         l->last_input_seq=0;
         l->forward=l->strafe=0;l->sprint=l->jump=0;l->yaw_milliradians=0;
         l->last_input_ms=l->last_rx_ms=now;l->status=MOUTH_LAN_CONNECTED;
+        l->last_error=MOUTH_SESSION_OK;l->ever_connected=1;
         send_welcome(l);return;
     }
     if(l->status!=MOUTH_LAN_CONNECTED||!matching_peer(l,from)||
@@ -281,8 +292,8 @@ static int32_t host_start(void *user,const BonesModServices *s){
     if(s->actor_get(s->host_context,l->config.remote_actor_id,&actor)!=BONES_MOD_OK||
        actor.owner!=l->config.remote_owner||actor.owner==0)return BONES_MOD_MISSING;
     l->services=s;
-    if(!socket_open(l,l->config.port)){l->services=NULL;return BONES_MOD_BAD_STATE;}
-    l->status=MOUTH_LAN_CONNECTING;return BONES_MOD_OK;
+    if(!socket_open(l,l->config.port)){l->services=NULL;l->last_error=MOUTH_SESSION_SOCKET_ERROR;return BONES_MOD_BAD_STATE;}
+    l->status=MOUTH_LAN_CONNECTING;l->last_error=MOUTH_SESSION_OK;return BONES_MOD_OK;
 }
 static void host_stop(void *user){mouth_lan_close((MouthLan*)user);}
 static void host_before(void *user){
@@ -309,7 +320,8 @@ static void host_after(void *user){
 }
 int mouth_lan_configure_host(MouthLan *l,const MouthLanConfig *cfg){
     if(!l||!cfg||!cfg->world_id||!cfg->port||!cfg->remote_actor_id||
-       !cfg->remote_owner||(registered_host&&registered_host!=l))return 0;
+       !cfg->remote_owner||(registered_host&&registered_host!=l)||
+       (registered_host==l&&l->socket_active))return 0;
     memset(l,0,sizeof(*l));l->config=*cfg;l->socket_handle=MOUTH_LAN_INVALID_SOCKET;
     l->host_mode=1;registered_host=l;return 1;
 }
@@ -332,9 +344,10 @@ int mouth_lan_client_open(MouthLan *l,const MouthLanConfig *cfg,const char *ip){
     if(mouth_inet_pton(AF_INET,ip,&addr)!=1)return 0;
     if(!socket_open(l,0))return 0;
     l->peer_addr=addr.s_addr;l->peer_port=htons(cfg->port);
-    l->client_nonce=(uint32_t)(mouth_lan_clock_ms() ^ cfg->seed ^ UINT32_C(0x198b144f));
+    l->connect_begin_ms=mouth_lan_clock_ms();
+    l->client_nonce=(uint32_t)(l->connect_begin_ms ^ cfg->seed ^ UINT32_C(0x198b144f));
     if(!l->client_nonce)l->client_nonce=1;
-    l->status=MOUTH_LAN_CONNECTING;return 1;
+    l->status=MOUTH_LAN_CONNECTING;l->last_error=MOUTH_SESSION_OK;return 1;
 }
 void mouth_lan_client_controls(MouthLan *l,int f,int s,int yaw,int sprint,int jump){
     if(!l||l->host_mode)return;
@@ -348,6 +361,9 @@ static void client_receive(MouthLan *l,const uint8_t *p,uint32_t n,uint64_t now)
     uint32_t i;uint64_t tick;
     if(l->status==MOUTH_LAN_CONNECTING &&
        check_header(p,n,MOUTH_TYPE_REJECT,13)&&r32(p+8)==0){
+        l->last_error=(p[12]==2)?MOUTH_SESSION_PROTOCOL_INCOMPATIBLE:
+                      (p[12]==1)?MOUTH_SESSION_WORLD_INCOMPATIBLE:
+                      MOUTH_SESSION_PROTOCOL_INCOMPATIBLE;
         l->status=MOUTH_LAN_REJECTED;return;
     }
     if(check_header(p,n,MOUTH_TYPE_WELCOME,WIRE_WELCOME) &&
@@ -355,7 +371,8 @@ static void client_receive(MouthLan *l,const uint8_t *p,uint32_t n,uint64_t now)
        r64(p+12)!=0 && r32(p+20)!=0 && r32(p+8)!=0){
         l->config.remote_actor_id=r64(p+12);l->config.remote_owner=r32(p+20);
         l->session_id=r32(p+8);l->last_rx_ms=now;
-        l->last_snapshot_tick=0;l->status=MOUTH_LAN_CONNECTED;return;
+        l->last_snapshot_tick=0;l->status=MOUTH_LAN_CONNECTED;
+        l->last_error=MOUTH_SESSION_OK;l->ever_connected=1;return;
     }
     if(l->status!=MOUTH_LAN_CONNECTED ||
        !check_header(p,n,MOUTH_TYPE_SNAPSHOT,0) ||
@@ -385,7 +402,8 @@ static void client_receive(MouthLan *l,const uint8_t *p,uint32_t n,uint64_t now)
 }
 void mouth_lan_client_poll(MouthLan *l){
     uint8_t p[MOUTH_LAN_PACKET_MAX];uint64_t now;unsigned i;
-    if(!l||l->host_mode||!l->socket_active||l->status==MOUTH_LAN_REJECTED)return;
+    if(!l||l->host_mode||!l->socket_active||l->status==MOUTH_LAN_REJECTED||
+       l->status==MOUTH_LAN_DISCONNECTED)return;
     now=mouth_lan_clock_ms();
     for(i=0;i<32;i++){
         struct sockaddr_in from;
@@ -405,8 +423,17 @@ void mouth_lan_client_poll(MouthLan *l){
        now-l->last_rx_ms>MOUTH_LAN_TIMEOUT_MS){
         l->status=MOUTH_LAN_CONNECTING;l->session_id=0;
         l->actor_count=0;l->next_input_seq=0;l->last_hello_ms=0;
+        l->last_error=MOUTH_SESSION_CONNECTION_LOST;
+        l->connect_begin_ms=now;
         l->client_nonce^=(uint32_t)now ^ UINT32_C(0x65be2a9d);
         if(!l->client_nonce)l->client_nonce=1;
+    }
+    if(l->status==MOUTH_LAN_CONNECTING &&
+       now-l->connect_begin_ms>=MOUTH_LAN_TIMEOUT_MS){
+        l->last_error=l->ever_connected?MOUTH_SESSION_CONNECTION_LOST:
+                          MOUTH_SESSION_TIMEOUT;
+        l->status=MOUTH_LAN_DISCONNECTED;
+        return;
     }
     if(l->status==MOUTH_LAN_CONNECTING){
         if(!l->last_hello_ms||now-l->last_hello_ms>=MOUTH_LAN_HELLO_MS){
@@ -422,4 +449,93 @@ void mouth_lan_client_poll(MouthLan *l){
              l->forward,l->strafe,l->yaw_milliradians,l->sprint,l->jump);
         if(n>0)(void)send_packet(l,p,n);
     }
+}
+
+
+/* === MOUTH SESSION API v1: UI-independent session boundary =============== */
+MouthSessionResult mouth_session_create(MouthLan *lan,
+                                         const MouthLanConfig *config) {
+    if(!lan||!config||!config->world_id||!config->port||
+       !config->remote_actor_id||!config->remote_owner||
+       config->remote_actor_id==1u) return MOUTH_SESSION_INVALID_ARGUMENT;
+    if(lan->socket_active||(registered_host&&registered_host!=lan))
+        return MOUTH_SESSION_BUSY;
+    if(!mouth_lan_configure_host(lan,config))return MOUTH_SESSION_BUSY;
+    lan->last_error=MOUTH_SESSION_OK;
+    return MOUTH_SESSION_OK;
+}
+MouthSessionResult mouth_session_join(MouthLan *lan,
+                                       const MouthLanConfig *config,
+                                       const char *host_ipv4) {
+    struct in_addr parsed;
+    if(!lan||!config||!config->world_id||!config->port)
+        return MOUTH_SESSION_INVALID_ARGUMENT;
+    if(lan->socket_active||(registered_host&&registered_host==lan))
+        return MOUTH_SESSION_BUSY;
+    if(!host_ipv4 || mouth_inet_pton(AF_INET,host_ipv4,&parsed)!=1 ||
+       parsed.s_addr==htonl(INADDR_ANY) ||
+       parsed.s_addr==htonl(INADDR_BROADCAST))
+        return MOUTH_SESSION_INVALID_ADDRESS;
+    if(!mouth_lan_client_open(lan,config,host_ipv4)){
+        lan->last_error=MOUTH_SESSION_SOCKET_ERROR;
+        return MOUTH_SESSION_SOCKET_ERROR;
+    }
+    return MOUTH_SESSION_OK;
+}
+MouthSessionResult mouth_session_disconnect(MouthLan *lan) {
+    if(!lan)return MOUTH_SESSION_INVALID_ARGUMENT;
+    mouth_lan_close(lan);
+    lan->actor_count=0;lan->ever_connected=0;
+    lan->session_id=0;lan->last_error=MOUTH_SESSION_OK;
+    return MOUTH_SESSION_OK;
+}
+MouthSessionResult mouth_session_get_status(const MouthLan *lan,
+                                             MouthSessionInfo *out) {
+    if(!lan||!out||out->size!=sizeof(*out))
+        return MOUTH_SESSION_INVALID_ARGUMENT;
+    memset(out,0,sizeof(*out));
+    out->size=sizeof(*out);
+    out->api_version=MOUTH_SESSION_API_VERSION;
+    out->error=lan->last_error;
+    out->is_host=lan->host_mode;
+    out->socket_open=lan->socket_active;
+    out->port=lan->config.port;
+    out->remote_actor_id=lan->config.remote_actor_id;
+    out->remote_owner=lan->config.remote_owner;
+    out->confirmed_tick=lan->last_snapshot_tick;
+    out->bytes_sent=lan->bytes_sent;
+    out->bytes_received=lan->bytes_received;
+    out->rejected_packets=lan->rejected_packets;
+    if(lan->status==MOUTH_LAN_REJECTED)out->phase=MOUTH_SESSION_INCOMPATIBLE;
+    else if(lan->status==MOUTH_LAN_CONNECTED)
+        out->phase=MOUTH_SESSION_CONNECTED;
+    else if(lan->status==MOUTH_LAN_DISCONNECTED && !lan->host_mode)
+        out->phase=lan->ever_connected?MOUTH_SESSION_LOST:MOUTH_SESSION_TIMED_OUT;
+    else if(lan->host_mode) {
+        if(lan->socket_active)out->phase=MOUTH_SESSION_WAITING_FOR_CLIENT;
+        else if(registered_host==lan)out->phase=MOUTH_SESSION_HOST_PREPARED;
+        else out->phase=MOUTH_SESSION_OFFLINE;
+    }else if(lan->status==MOUTH_LAN_CONNECTING)
+        out->phase=lan->ever_connected?MOUTH_SESSION_RECONNECTING:
+                                         MOUTH_SESSION_JOINING;
+    else out->phase=MOUTH_SESSION_OFFLINE;
+    return MOUTH_SESSION_OK;
+}
+MouthSessionResult mouth_session_poll(MouthLan *lan) {
+    if(!lan)return MOUTH_SESSION_INVALID_ARGUMENT;
+    if(lan->host_mode) return MOUTH_SESSION_NOT_READY; /* ModKit owns host ticks */
+    if(!lan->socket_active)return MOUTH_SESSION_NOT_READY;
+    mouth_lan_client_poll(lan);
+    return lan->last_error;
+}
+MouthSessionResult mouth_session_copy_snapshot(
+    const MouthLan *lan, MouthLanActor out[MOUTH_LAN_MAX_ACTORS],
+    uint64_t *out_tick) {
+    if(!lan||!out||!out_tick)return MOUTH_SESSION_INVALID_ARGUMENT;
+    if(lan->host_mode||lan->status!=MOUTH_LAN_CONNECTED||
+       lan->actor_count!=MOUTH_LAN_MAX_ACTORS||!lan->last_snapshot_tick)
+        return MOUTH_SESSION_NOT_READY;
+    memcpy(out,lan->actors,sizeof(lan->actors));
+    *out_tick=lan->last_snapshot_tick;
+    return MOUTH_SESSION_OK;
 }
