@@ -42,6 +42,10 @@ static void local_controls(BonesInput *input){
 }
 static void remote_controls(MouthLan *l){
 #ifdef _WIN32
+    /* Test-only automation; normal Windows users keep keyboard controls. */
+    if(getenv("MOUTH_DEMO_AUTOMOVE") && strcmp(getenv("MOUTH_DEMO_AUTOMOVE"),"1")==0){
+        mouth_lan_client_controls(l,1,0,0,0,0);return;
+    }
     int f=held('W')-held('S'),s=held('D')-held('A');
     int yaw=30*(held(VK_RIGHT)-held(VK_LEFT));
     mouth_lan_client_controls(l,f,s,yaw,held(VK_SHIFT),held(VK_SPACE));
