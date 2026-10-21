@@ -3,6 +3,7 @@
  * renderer with stable camera/near-plane samples (without changing physics). */
 #include "../../BONES/include/bones/modkit.h"
 #include "../../BONES/modules/eye/eye_modkit_ext.h"
+#include "../../BONES/third_party/eye/sw_renderer.h"
 #include <assert.h>
 #include <math.h>
 #include <stdint.h>
@@ -59,6 +60,30 @@ int main(void) {
     assert(measure(bones_eye_mod_pixels(),&x1,&y1)>100);
     fprintf(stderr,"Yaw probe: x0=%.3f y0=%.3f x1=%.3f y1=%.3f (delta=%.3f)\
 ", x0,y0,x1,y1,x1-x0);
+    /* Narrow the failure down to adapter vs. rasterizer. */
+    {
+        P144_Renderer *direct=(P144_Renderer*)malloc(sizeof(P144_Renderer));
+        P144_Camera cam={0};
+        P144_Quad probe={0};
+        float dx0,dy0,dx1,dy1;
+        assert(direct);
+        for(unsigned i=0;i<4u;i++) {
+            probe.v[i].pos=(P144_Vec3){q.vertices[i].x,q.vertices[i].y,q.vertices[i].z};
+            probe.v[i].u=q.vertices[i].u;probe.v[i].v=q.vertices[i].v;
+        }
+        p144_renderer_init(direct,0x01442026u);
+        p144_renderer_begin(direct,0x15202du);
+        p144_renderer_quad(direct,&cam,&probe,P144_MAT_STONE);
+        p144_renderer_crosshair(direct);
+        assert(measure(direct->pixels,&dx0,&dy0)>100);
+        cam.yaw=.12f;
+        p144_renderer_begin(direct,0x15202du);
+        p144_renderer_quad(direct,&cam,&probe,P144_MAT_STONE);
+        p144_renderer_crosshair(direct);
+        assert(measure(direct->pixels,&dx1,&dy1)>100);
+        fprintf(stderr,"DIRECT yaw test x0=%.3f x1=%.3f delta=%.3f\\n",dx0,dx1,dx1-dx0);
+        free(direct);
+    }
     assert(x1 < x0-5.f); /* View moves right, fixed wall shifts left. */
     f.camera_yaw=0;f.camera_pitch=.12f;
     d.present(d.user_context,&f);
