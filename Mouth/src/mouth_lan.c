@@ -213,7 +213,8 @@ static void host_receive(MouthLan *l,const uint8_t *p,uint32_t n,
             now ^ (now>>32) ^ (uint64_t)nonce ^ l->config.seed ^ (l->config.seed>>32) ^ 
             (uint64_t)l->peer_addr ^ ((uint32_t)l->peer_port<<16) ^ UINT32_C(0xb1441a44));
         if(!l->session_id)l->session_id=1;
-        l->last_input_seq=0;l->next_command_seq=0;
+        /* Per-actor Bones command sequence must survive UDP reconnection. */
+        l->last_input_seq=0;
         l->forward=l->strafe=0;l->sprint=l->jump=0;l->yaw_milliradians=0;
         l->last_input_ms=l->last_rx_ms=now;l->status=MOUTH_LAN_CONNECTED;
         send_welcome(l);return;
