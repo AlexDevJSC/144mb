@@ -33,8 +33,7 @@ jobs:
       - name: Build MSVC and codec regression
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          call Mouth\scripts\build_windows_msvc.bat
+          call Mouth\scripts\ci_windows_msvc.bat
       - name: Windows two-process UDP loopback
         shell: pwsh
         run: python Mouth/tests/test_loopback.py Mouth/build/mouth_lan_demo.exe
