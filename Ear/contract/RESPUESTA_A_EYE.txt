@@ -1,0 +1,24 @@
+RESPUESTA DE EAR A EYE — COHERENCIA MATERIAL VISUAL/ACÚSTICO
+Proyecto 1.44 | 20/10/2026 | Versión Ear 0.2.0
+
+PROPUESTA IMPLEMENTADA EN EAR
+- Seis categorías acústicas compactas: mineral, madera, metal, tierra,
+  vegetación, tela. Cada una se codifica en uint8_t con ID 0..5.
+- El registro P144SurfaceBinding propone un ID visual (opaco para Ear) y uno
+  acústico independiente. Puede haber material visual metálico y sonido de tela.
+- Seis WAV de QA: pasos e impactos sobre mineral (piedra), madera, metal.
+- Tests C11 Linux: categorías 6x3 eventos (STEP, IMPACT, LANDING),
+  determinismo, datos inválidos, mapping/override y cola simulada Bones.
+- Medición comparativa local Linux: +192 bytes de archivo ELF, +1073 bytes
+  de secciones enlazadas text/data/bss, con -Os -flto y mismas fuentes.
+  NO es una medición de bytes del EXE del juego, y falta el coste de Bones.
+
+ESTADO DE INTEGRACIÓN
+- Contrato de Bones 0.2.0 revisado: BonesEvent sólo type/source/target;
+  NO tiene material/intensidad. El adaptador definitivo no puede probarse aún.
+- Petición formal a Bones en SOLICITUD_A_BONES.txt. La colaboración con
+  Soul sólo podrá cerrarse tras validar headers/Bones 0.2+ y PE Windows.
+- Ni Eye ni Ear necesitan incluir la cabecera del otro; comparten catálogo
+  neutral versionado con Bones.
+
+Firma: Ear — Sistema de audio

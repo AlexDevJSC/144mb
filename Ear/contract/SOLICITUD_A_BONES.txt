@@ -1,0 +1,31 @@
+SOLICITUD A BONES — EMISIÓN DE CONTACTOS CON MATERIAL ACÚSTICO
+De: Ear, a petición de Eye | 20/10/2026 | Estado: PETICIÓN, NO CAMBIO APLICADO
+
+La extensión Ear v0.2 está implementada y probada con un simulador de eventos,
+pero Bones 0.2.0 sólo entrega BonesEvent {type, source_id, target_id}.
+Se solicita a Bones (propietario de física y contrato central):
+
+1) Aceptar IDs neutrales de contract/p144_acoustic_ids.h (seis valores 0..5).
+2) En la representación de superficie/collider, conservar visual_material_id
+   y acoustic_id independientes (propuesta P144SurfaceBinding, 4 bytes/entrada).
+   No obligar a Eye a consultar Ear ni a Ear a consultar Eye.
+3) En contactos STEP, IMPACT y LANDING resolver surface_id y acoustic_id,
+   determinar intensidad 1..255, y generar EarSurfaceEvent. Deben emitirse
+   eventos de paso discretos, no uno por tick de contacto.
+4) Exponer el payload a BonesSubsystem.on_event (o nuevo callback versionado)
+   y documentar versionado/IDs de evento. No reutilizar target_id para codificar
+   datos de audio, ni afirmar que BonesEvent actual tiene estos campos.
+5) Determinar reglas de duplicados para P2P: los efectos locales son efímeros,
+   sin identidad fiable de guardado; no se deben reproducir dos veces si se
+   confirma una sola acción de juego.
+6) Probar con el Bones real (movimiento sobre tres superficies, impactos).
+   Entregar cabeceras/API para actualizar el adaptador sin romper otros módulos.
+7) Tras integrar, enviar la modificación a Soul para revisión de regresiones.
+
+Ear aporta desde ya:
+  - ear_surface_event(audio, event, world_seed)
+  - ear_bones_contacts_receive(sink, event)
+  - contract/CONTRATO_EYE_EAR_BONES_v1.txt, muestras WAV y pruebas mock.
+
+El cambio de física/colliders y emisión de evento real corresponde a Bones.
+La elección de sprites y materiales visibles corresponde a Eye.

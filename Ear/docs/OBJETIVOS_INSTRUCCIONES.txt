@@ -1,0 +1,47 @@
+EAR — OBJETIVOS E INSTRUCCIONES GENERALES (v1)
+Origen: PROYECTO_144_Plan_Maestro_v1.md, §§3,7.5,13.1,13.3,14,20.
+
+PRINCIPIO RECTOR
+  Audio procedimental reutilizable en RAM. Presupuesto compartido de
+  'Interfaz, entrada adicional y sonido' = 65 KiB ORIENTATIVOS de todo el
+  videojuego, no tamaño demostrado ni presupuesto exclusivo de Ear.
+
+MISIONES
+  1. Componer música ambiental sin archivos de grabación: armonía tonal,
+     cadencias, motivos recurrentes, variaciones controladas y patrones.
+  2. Generar SFX con osciladores, ruido filtrado, barridos y envolventes.
+  3. Render PCM 16-bit por bloques, sin malloc en la rutina de audio.
+  4. Aleatoriedad derivada de semillas explícitas; sin rand() global.
+  5. SDK C11 que no dependa de Win32 ni de Bones para poderse probar.
+  6. Adaptar eventos semánticos Bones a cues Ear, sin interferir en física,
+     semilla de simulación, guardados o integridad P2P.
+  7. Windows: dispositivo de audio del SO; sin redistribuibles obligatorios.
+  8. Medición final de bytes EXE y pruebas en Windows antes de dar por válido.
+
+HOJA DE RUTA
+  RUEDA:   osciladores/flujos PCM, presets básicos, WAV CLI, tests C.
+  TRICICLO: 16 compases A-A'-B-A, 4 perfiles, 7 SFX, pruebas de secuencias,
+            adaptador Bones contract-level, fuente WinMM y documentación.
+  MOTO:    benchmarking WinMM, cola eventos deduplicada, stereo, transición
+            sin cortes, gestión dinámica por zonas, instrumentación profiling.
+  COCHE:   música que reaccione a amenaza, hora y entorno, ecología acústica
+            procedural, sonido posicional, presupuesto integrado de 1.44MB.
+
+REGLAS DE CÓDIGO Y DE DOCUMENTACIÓN
+  - C11, control de rangos, headers privados por plataforma.
+  - Sin asignaciones dinámicas ni I/O en callback/render de audio.
+  - Audio engine es PRESENTACION; no escribir estado autoritativo de Bones.
+  - No inventar eventos/cabeceras ausentes. Medir ABI y modificar adaptador.
+  - Cada commit de código: modificar docs/REGISTRO_CAMBIOS.txt y
+    docs/ESTADO_REAL.txt; actualizar ADR si hay decisiones nuevas.
+  - Añadir/regresar tests y registrar bytes del binario que realmente exista.
+  - Mantener plan maestro original inmutable; cambio de formato versionado.
+
+ACEPTACION DE ESTA ETAPA
+  [x] Musical score de 16 compases, 4 estilos, reproducible por semilla.
+  [x] Formato de recetas SFX y herramienta WAV offline.
+  [x] Mezclador sin heap con 16 voces música + 8 voces efectos.
+  [x] Pruebas C11 (composición, PCM, seeds, UI, puente Bones).
+  [x] Puente diseñado sobre BonesModule contrato, sin alterar Bones.
+  [ ] Probar el adaptador con el header real de Bones (no disponible).
+  [ ] Ejecutar juego final con waveOut en Windows y medir EXE.

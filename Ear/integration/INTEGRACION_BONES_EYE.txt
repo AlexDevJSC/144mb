@@ -1,0 +1,72 @@
+EAR <-> BONES / EYE — CONTRATO DE INTEGRACION PROPUESTO (v1)
+
+BASE ENCONTRADA Y LEIDA
+  - BONES_Objetivos_Instrucciones_v0_1.txt (20/10/2026)
+  - BONES_Contrato_Eye_v0_1.txt (20/10/2026)
+  - PROYECTO_144_Plan_Maestro_v1.md
+  NO se ha recibido ni compilado include/bones/bones.h real ni el proyecto
+  Bones compilado. La adaptación está diseñada según contratos, NO probada
+  contra el código real. No declarar homologación Bones-Ear hasta integrarlo.
+
+LO CONOCIDO DE BONES POR LOS DOCUMENTOS
+  - C11 portable, función bones_register_module(engine, module), máx 8.
+  - BonesModule tiene: version, user_data, on_tick, on_scene.
+  - on_tick(user_data,BonesEngine*), on_scene(user_data,const BonesEngine*,BonesScene*).
+  - BONES_API_VERSION comprueba contrato de versión.
+  - BONES tiene gravedad, salto, movimiento, cámara y colisiones cinemáticas
+    en prototipo Triciclo. La prueba en Windows sigue pendiente.
+  - Bones renderiza con backend Eye; Eye mantiene la parte de quads y píxeles.
+  - Bones controla el estado y el tiempo fijo; Ear produce muestras PCM para
+    API de audio de Windows y recibe sólo eventos de acciones validados.
+
+CAPAS DE INTEGRACION
+  1) src/ear_music.c + ear_synth.c: C11 independiente, sin tocar Bones/Eye.
+  2) src/ear_bones_bridge.c: traduce el evento lógico (paso, impacto,
+     hechizo...) a un preset SFX, generando variantes por ID y world_seed.
+  3) integration/ear_bones_module.[ch]: adapta BonesModule de contrato v1.
+     No incluye función pública de registro porque firma por valor/puntero
+     de bones_register_module no está verificada con el header real.
+  4) src/ear_winmm.c: presenta PCM mediante waveOut del sistema (winmm.lib).
+     La app debe llamar ear_winmm_pump() en cada frame gráfico; no en
+     on_tick ni on_scene. Misma hebra para emisión de eventos y bombeo.
+
+CICLO TENTATIVO EN LA APP (PSEUDOCODIGO, NO API REAL VERIFICADA)
+  EarScore music;
+  EarEngine audio;
+  EarWinMM audio_device;
+  EarBonesModule ear_adapter;
+  EarMusicConfig theme = {world_seed, 0, 0, EAR_STYLE_DUNGEON};
+  ear_compose(&music, theme);
+  ear_init(&audio, &music);
+  ear_bones_module_init(&ear_adapter, &audio, world_seed);
+  // registrar ear_adapter.module EN Bones mediante la firma que tenga el header;
+  ear_winmm_open(&audio_device, &audio);
+  // bucle Win32: procesar mensajes / ticks Bones / render Eye
+  ear_winmm_pump(&audio_device);
+  // Cuando Bones CONFIRME que un ataque comenzó:
+  ear_bones_emit(&ear_adapter.bridge, EAR_BONES_ATTACK_SWING, event_id);
+  // Al terminar:
+  ear_winmm_close(&audio_device);
+
+ADVERTENCIAS IMPORTANTES
+  - Al producirse un evento de Bones, NO tocar posiciones ni físicas.
+  - on_tick NO produce sonido automáticamente: Bones aún no especifica en la
+    documentación una API de eventos; hacerlo requerirá contrato de eventos.
+  - Si se reejecuta el mismo evento por rollback/red, podría sonar de nuevo.
+    Hace falta una cola confirmada y deduplicación por event ID en el anfitrión.
+  - La música es presentación LOCAL. No debe consumir RNG compartido ni
+    alterar hashes del mundo, guardados, física o sincronización P2P.
+  - ear_set_score referencia memoria prestada: EarScore debe continuar vivo;
+    para cambio de zona en ejecución, usar doble buffer y transición futura.
+  - EarWinMM no es multihilo; no llamar desde callbacks concurrentes sin
+    una cola de mensajes sincronizada.
+  - La latencia nominal con 4 buffers x 512 muestras es ~93 ms, no medida.
+  - Si la app incumple el ritmo de bombeo, habrá cortes de audio (underruns).
+  - El binario de Windows completo debe caber en 1.474.560 bytes; la suma
+    está PENDIENTE por falta de build real.
+
+PRUEBAS PENDIENTES ANTES DE DECLARAR COMPATIBILIDAD REAL
+  - Obtener ZIP o Git de Bones, revisar include/bones/bones.h real.
+  - Compilar Ear junto al Bones real, registrar módulo, iniciar y salir.
+  - Probar escena Eye + audio WinMM, 60 ticks/s y cambios de escena.
+  - Medir latencia, clipping, discontinuidad al cambiar música y EXE final.

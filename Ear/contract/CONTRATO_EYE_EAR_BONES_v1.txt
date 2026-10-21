@@ -1,0 +1,84 @@
+PROYECTO 1.44 — PROPUESTA DE CONTRATO DE SUPERFICIES SONORAS v1
+Emisor: Ear   Solicitante: Eye   Fecha: 20/10/2026
+ESTADO: PROPUESTA PROBADA EN DOBLE DE BONES; PENDIENTE ACEPTACION EN BONES 0.2
+
+1. DISTRIBUCIÓN DE RESPONSABILIDADES
+   Eye: material y presentación visual; no calcula choques, pasos ni mezcla.
+   Bones: almacena material de contacto, colisión, fuente de contacto,
+          intensidad, ticks, identidad de objetos y despacho de evento efímero.
+   Ear: sintetiza PCM y mezcla desde la CATEGORÍA ACÚSTICA del evento.
+   Soul: verifica compatibilidad entre versiones / integración completa.
+   No existen llamadas Eye -> Ear ni Ear -> Eye.
+
+2. IDS ACÚSTICOS ESTABLES (uint8, P144_ACOUSTIC_VERSION=1)
+   0 MINERAL    piedra, ladrillo, yeso
+   1 WOOD       madera
+   2 METAL      metal
+   3 EARTH      tierra
+   4 VEGETATION vegetación
+   5 FABRIC     tela
+   6..255 no asignados; se rechazan en Ear v0.2.
+   Los nombres visuales representan familias, NO una numeración real de Eye.
+   No diferenciar pintura, desgaste o tonalidad por defecto.
+
+3. VINCULACION EN EL MUNDO (shared record propuesto)
+   P144SurfaceBinding {uint16 visual_material_id; uint8 acoustic_id; uint8 flags;}
+   Tamaño en compilación C11 Linux: 4 bytes por ENTRADA DE TABLA, no por píxel.
+   El valor visual se considera OPACO por Ear. Eye no necesita incluir ear.h.
+   Bones resuelve la superficie y usa su atributo acoustic_id para contactos.
+   El mundo admite overrides: visual=METAL, acoustic=FABRIC para metal forrado.
+   p144_surface_default_binding() es un ejemplo de autoría, NO el mapeo real
+   de Eye ni responsabilidad de su renderer. El editor/escena deben versionarlo.
+   La estructura NO es formato serializado; padding/endianness no garantizados.
+
+4. EVENTO ACÚSTICO VOLÁTIL PROPUESTO (include/ear_surface.h)
+   EarSurfaceEvent:
+      uint64 event_id: clave opcional de variación; no deduplicación P2P
+      uint64 source_id: personaje u objeto que causa contacto
+      uint64 surface_id: superficie/collider resuelto por Bones
+      uint32 tick: paso lógico Bones
+      uint8  kind: STEP=1; IMPACT=2; LANDING=3
+      uint8  acoustic: 0..5
+      uint8  intensity: 1..255; 0 silencioso/rechazado
+      uint8  reserved: 0
+   No transportar punteros, datos de colisión o parámetros de gráfica.
+   La representación binaria NO se envía por red ni se guarda directamente.
+   Volatilidad: las notificaciones de audio NO son un journal de guardado.
+   En multijugador la autoridad decidirá qué efectos se reproducen localmente
+   y si algún contacto confirmado remoto debe replicarse, sin dobles disparos.
+
+5. REGISTRO CON BONES 0.2.0: PUNTO PENDIENTE (NO INVENTAR API)
+   Su contrato actual sólo expone BonesEvent {type, source_id, target_id},
+   con eventos BONES_EVENT_JUMP y BONES_EVENT_LAND y BONES_EVENT_CUSTOM>=256.
+   NO aporta acoustic, intensity ni ID de contacto fiable. Por tanto
+   BonesSubsystem.on_event no puede generar estos sonidos correctamente SIN
+   una ampliación del contrato de Bones. La API anterior BonesModule v1 de
+   Ear se conserva SOLO como compatibilidad de pruebas, no como integración v2.
+   Solicitud formal a Bones:
+     a) aceptar P144AcousticCategory como catálogo neutral;
+     b) guardar binding visual/acústico en metadata de material o collider;
+     c) comunicar EarSurfaceEvent para pasos, impactos y aterrizajes;
+     d) documentar tipos/números de eventos y serialización si procede;
+     e) versionar el contrato/BONES_API_VERSION si cambia el ABI;
+     f) aportar header real, ejemplo de recepción y tests contra física real.
+   NO emitir un STEP en cada tick con contacto permanente: un paso es un evento
+   con cadencia física calculada por Bones, no por Eye ni por Ear.
+
+6. IMPLEMENTACIÓN DE EAR, DISPONIBLE YA
+   ear_surface_event(audio,event,world_seed) convierte categoría+tipo+intensidad
+     en 1-2 voces existentes (ruido, percusión, cuerdas o campana sintética).
+   ear_bones_contacts_receive(sink,event) es punto de entrada neutral de Ear;
+     un integrador Bones futuro lo invocará con el payload correcto.
+   Ambos aceptan eventos ya resueltos; nunca infieren materiales por coordenadas.
+   No se requiere Eye para compilar o probar.
+
+7. CRITERIOS DE ACEPTACIÓN
+   [OK, TEST LOCAL] tabla de ocho familias propuesta a seis categorías.
+   [OK, TEST LOCAL] override visual metal + acústico tela.
+   [OK, TEST LOCAL] tres pasos y tres impactos sobre piedra/madera/metal.
+   [OK, TEST LOCAL] 6 categorías x 3 clases de evento generan PCM no nulo.
+   [OK, TEST LOCAL] streams completos/fragmentados idénticos en mismo entorno.
+   [OK, TEST LOCAL] simulación de cola Bones y validación de valores inválidos.
+   [PENDIENTE BONES] recepción de evento real de Bones 0.2+.
+   [PENDIENTE WINDOWS] enlace con juego y medición incremental PE.
+   [PENDIENTE EYE] confirmación de ids reales y mapping de la escena.

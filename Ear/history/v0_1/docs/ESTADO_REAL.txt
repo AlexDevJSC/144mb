@@ -1,0 +1,70 @@
+EAR — ESTADO REAL v0.1.0 — 20/10/2026
+Fuente: PLAN_MAESTRO_REFERENCIA_v1.md; Bones v0.1 contratos documentales.
+
+QUE ESTA IMPLEMENTADO Y PROBADO EN LINUX
+ [OK] C11 engine con sintetizador procedural: 7 timbres para una mezcla simple.
+ [OK] Score a 16 compases, 4 secciones A-A'-B-A, 4 estilos, 4/4,
+      notas en 480 PPQ, armonía, bajo, melodía, percusión según estilo.
+ [OK] 7 presets SFX: pasos, espada, daño, recogida, hechizo, UI y puerta.
+ [OK] Efecto SFX creado desde EarSfxRecipe (forma, volúmenes, duración,
+      frecuencias de inicio/fin, seed).
+ [OK] CLI 'ear_tool': generar música o SFX desde código a WAV PCM sin
+      necesidad de assets de entrada. WAV 16-bit mono 22.050 Hz.
+ [OK] Mezclador mono 16-bit, hasta 16 voces música y 8 efectos con barridos,
+      envolventes, limitador suave; sin malloc ni I/O en ear_render.
+ [OK] Score deterministic por semilla: hash canonizado de notas por entero.
+ [OK] Puente independiente EarBonesBridge: events => sfx y area => score.
+ [OK] Test con dobles del CONTRATO DOCUMENTADO BonesModule v1 (no Bones real).
+ [OK] Scripts de compilación local Linux y fuentes de Win32 preparadas.
+ [OK] WAVs generados por compilación de Ear en Linux y convertidos a OGG
+      mediante ffmpeg *fuera* del juego (sólo preview para QA/usuario).
+
+CODIFICADO PERO NO VALIDADO EN WINDOWS
+ [NO PROBADO] src/ear_winmm.c, waveOut/winmm, 4 buffers x 512 frames (~93ms
+      de buffering nominal, no latencia medida); header sólo bajo _WIN32.
+ [NO PROBADO] tools/ear_play_win.c para reproducir 10 s sin archivo WAV.
+ [NO PROBADO] scripts_build_windows.bat, build de herramientas con MSVC.
+ [NO PROBADO] integration/ear_bones_module.c contra el auténtico bones.h;
+      tests usaron sólo TEST DOUBLE de la interfaz que declaran documentos.
+ [NO MEDIDO] EXE 1,44 MB final ni cuota efectiva audio+UI+input (65 KiB
+      orientativos en maestro, no cuota exclusiva de Ear).
+
+LO QUE NO EXISTE (NO SIMULAR QUE ESTA COMPLETO)
+  - Motor interactivo por intensidad y cambios musicales suaves (crossfade).
+  - Cola de eventos autoritativos, rollback/deduplicación P2P, spatial SFX,
+    reverberación, buffers adaptativos, mezclador estéreo y sinfonía orquestal.
+  - Integración comprobada en Windows con el núcleo real de Bones.
+  - Firma real de bones_register_module; no se inventó en el adaptador.
+
+PRUEBAS REALES
+  Makefile: make all && make test, GCC -O2 -std=c11 -Wall -Wextra -Wpedantic.
+  GCC + ASan/UBSan, ambas suites pasan en la ejecución local.
+  test_ear: 16 compases, semillas, tamaño y orden de notas, emisión sonora,
+            igualdad PCM por buffers segmentados, código SFX inválido,
+            mapeo Bones, rangos volumen.
+  test_bones_contract: interfaz sintética documentada de BonesModule v1;
+                       callbacks invocables; NO compila contra Bones real.
+  sample WAVs válidos, con energía RMS > 0; salida a OGG mediante ffmpeg.
+  TAVERN_HASH (seed 0x12345678) = 923dd055b4cff7bb
+  Hash del score, NO hash de PCM multiplataforma.
+
+ORIENTACIONES MUSICALES ACTUALES
+  dungeon: 66 bpm, menor, flauta/bajo/horn 16 compases ~58.2 s.
+  tavern: 104 bpm, mayor, laúd/bajo + pulso 16 compases ~36.9 s.
+  wilderness: 82 bpm, dórico, flauta/bajo/horn 16 compases ~46.8 s.
+  combat: 132 bpm, menor, horn/bajo/drum 16 compases ~29.1 s.
+  La forma tonal y la reproducibilidad se prueban. Calidad artística y
+  plausibilidad acústica aún requieren valoración auditiva de usuarios.
+
+INTEROPERABILIDAD
+  Documento consultado: BONES_Contrato_Eye_v0_1.txt
+  Documento consultado: BONES_Objetivos_Instrucciones_v0_1.txt
+  Bones v0.1: Triciclo físico; módulo BONES_API_VERSION, on_tick,on_scene.
+  API sugerida: ear_bones_emit(&adapter.bridge, kind, committed_event_id).
+  Aplicación Win32: llamar ear_winmm_pump después de procesar ticks/render.
+  Solo la presentación local depende de Windows; núcleo C portable.
+  Consultar integration/INTEGRACION_BONES_EYE.txt para integrador.
+
+REGLAS DE ENTREGA
+  Toda modificación futura actualiza ESTE archivo, REGISTRO_CAMBIOS.txt
+  y DECISIONES_TECNICAS.txt si cambia arquitectura; tests acompañan código.

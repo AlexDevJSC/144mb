@@ -1,0 +1,22 @@
+ADR-001 | 20/10/2026 | ACEPTADA PROVISIONALMENTE
+C11 / 22050 Hz / PCM16 mono. Solo librería matemática estándar y API
+winmm del sistema. Evitar librerías de audio redistribuibles. No es elección
+inalterable: comparar coste CPU, latencia, ejecutable y calidad en Windows.
+
+ADR-002 | 20/10/2026 | ACEPTADA
+EarScore contiene eventos de nota relativos a ticks musicales (480 PPQ), no
+muestras PCM. El cue se construye en entero desde semilla explícita. La
+síntesis se realiza en audio frames, no en el tick de simulación de Bones.
+Hash de partituras canónico por bytes explícitos; NO se promete paridad
+bit a bit PCM entre arquitecturas al usar sinf/powf de math.h.
+
+ADR-003 | 20/10/2026 | ACEPTADA / VALIDACION PENDIENTE
+Como fuente de Bones se dispone del contrato documental BonesModule v1,
+con version/user_data/on_tick/on_scene. Adaptador opcional C cuya compilación
+exige el header real. Ear no infiere eventos por posiciones. Se llama mediante
+eventos de juego confirmados (cuando se definan) para evitar duplicados P2P.
+
+ADR-004 | 20/10/2026 | ACEPTADA PROVISIONALMENTE
+Motor de audio mezcla voces en PCM en cada bloque. No registra ni genera
+archivos en producción: el ejecutable de desarrollo ear_tool genera archivos
+WAV sólo para QA/escucha. waveOut presenta bloques desde bucle de la app.

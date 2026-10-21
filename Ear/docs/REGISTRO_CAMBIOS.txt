@@ -1,0 +1,73 @@
+EAR — REGISTRO DE CAMBIOS
+
+[0.1.0] 20/10/2026 — Motor procedural y adaptador contractual Bones
+
+IMPLEMENTACION
+  include/ear.h: API C11, config musical, partituras, voces, SFX receta.
+  src/ear_music.c: generador A-A'-B-A de 16 compases y 4 perfiles de música,
+                   semillas por dominio, armonía y melodías legibles.
+  src/ear_synth.c: 7 patches, 7 SFX preset, osciladores/ruido, ADSR simple,
+                   volumen, mezcla PCM16 22.050 Hz sin heap, limitador.
+  tools/ear_tool.c: CLI composer/SFX/recipe => archivo WAV de QA.
+  src/ear_bones_bridge.c: mapeo explícito de eventos de Bones a SFX.
+  integration/ear_bones_module.[ch]: BonesModule v1 según fuente documental;
+                                       en runtime real PENDIENTE de header.
+  src/ear_winmm.c y include/ear_winmm.h: salida WinMM no testeada en Windows.
+  tools/ear_play_win.c: smoke test de audio para Windows no testeado aquí.
+  Makefile: compilación portable, pruebas, generación de ejemplos.
+  scripts_build_windows.bat: MSVC offline tool/tests/playback, NO probado.
+  tests/test_ear.c: score, SFX, semilla, mix, volumen, reproducibilidad.
+  tests/test_bones_contract.c + tests/fixtures/bones/bones.h: contract test con
+      doble del API documentado; NOTA: el header del test NO es Bones real.
+
+CORRECCIONES DE ROBUSTEZ DEL MISMO CICLO
+  - MSVC C: comprobación explícita de flotantes finitos, sin confiar en macro
+    isfinite inexistente en algunas versiones del CRT.
+  - WaveOut: 4 x 512 frames; buffer nominal reducido a ~93ms desde 372ms.
+  - Audio en sim tick separado del buffer; evita bloquear bucle de Bones.
+  - Validación de recetas evita NaN, volúmenes y frecuencias inválidas.
+
+DOCUMENTACION ACTUALIZADA EN ESTA ENTREGA
+  docs/OBJETIVOS_INSTRUCCIONES.txt
+  docs/ESTADO_REAL.txt
+  docs/REGISTRO_CAMBIOS.txt (este fichero)
+  docs/DECISIONES_TECNICAS.txt
+  integration/INTEGRACION_BONES_EYE.txt
+  README.txt
+  docs/PLAN_MAESTRO_REFERENCIA_v1.md (copia sin cambiar)
+
+VALIDACION EJECUTADA EN LINUX
+  - GCC C11 release/tests: PASS.
+  - GCC AddressSanitizer/UndefinedBehaviorSanitizer: PASS.
+  - Test del adaptador contra mock documental BonesModule v1: PASS.
+  - WAV audibles/exportables y OGG convertidos: creación PASS, sin prueba de
+    escucha humana; analizaron picos y energía no nulos.
+  - Windows x64/MSVC/winmm, ABI real Bones y EXE del juego: NO PROBADOS.
+
+[0.2.0] 20/10/2026 — Respuesta a Eye: acústica por superficie
+Requisitos: conservar identidad visual y acústica separadas; asociación
+compacta y plausible de pasos e impactos; sin tocar los motores de Eye/Bones.
+Código añadido:
+  contract/p144_acoustic_ids.h: categorías neutrales estables 0..5.
+  contract/surface_materials.h, src/surface_materials.c: registro visual/acústico
+    independiente y ejemplo de asignación con overrides.
+  include/ear_surface.h, src/ear_surface.c: STEP, IMPACT, LANDING en 6
+    categorías usando voces existentes + intensidad y seed.
+  include/ear_bones_contacts.h, src/ear_bones_contacts.c: interfaz receptora
+    propuesta para la ampliación de eventos de Bones.
+  tools/ear_surface_tool.c: 6 ejemplos WAV para QA.
+  tests/test_surface.c: 6x3 tipos, variación, determinismo y cola Bones mock.
+  tests/benchmark_delta.c + scripts/measure_surface.sh: medición ELF enlazado.
+Compilación: Makefile y scripts_build_windows.bat ampliados (Windows sin probar).
+Adaptador legado v1 protegido con #error claro si se usa con Bones API v2.
+Documentación cambiada:
+  contract/CONTRATO_EYE_EAR_BONES_v1.txt, docs/ESTADO_REAL.txt,
+  docs/REGISTRO_CAMBIOS.txt, docs/DECISIONES_TECNICAS.txt, README.txt.
+Validación: PASS GCC C11 + ASan/UBSan; NO Bones real / Windows/PE.
+Tamaño medido Linux ELF: +192 bytes archivo (y +1073 texto); el impacto del
+EXE Windows integrado se desconoce. Limitación: el evento de Bones 0.2
+no transmite acústica/intensidad y requiere un cambio de contrato por Bones.
+Actualización final de integración/documentación 0.2.0:
+  contract/SOLICITUD_A_BONES.txt (propietario de lógica física),
+  contract/RESPUESTA_A_EYE.txt (respuesta explícita al solicitante),
+  scripts/measure_integrated_pe.ps1 (procedimiento para medición pendiente).
