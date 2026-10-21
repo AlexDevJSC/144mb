@@ -14,11 +14,13 @@ static int32_t add_quad_stub(void *ctx,const BonesModQuad *q) {
     (void)ctx;return (q&&q->size==sizeof(*q))?BONES_MOD_OK:BONES_MOD_EINVAL;
 }
 static int measure(const uint32_t *pixels,float *cx,float *cy) {
-    double sx=0,sy=0;int n=0;
+    double sx=0,sy=0;int n=0; int left=320,right=-1,top=200,bottom=-1;
     for(unsigned y=0;y<200u;++y)for(unsigned x=0;x<320u;++x) {
         uint32_t c=pixels[y*320u+x]&0xffffffu;
-        if(c!=0x15202du && c!=0xe5dabeu){ sx+=x;sy+=y;++n;}
+        if(c!=0x15202du && c!=0xe5dabeu){ sx+=x;sy+=y;++n; if((int)x<left)left=(int)x; if((int)x>right)right=(int)x; if((int)y<top)top=(int)y; if((int)y>bottom)bottom=(int)y;}
     }
+    fprintf(stderr,"MEASURE n=%d bbox=[%d,%d,%d,%d] centroid=%.2f,%.2f\
+",n,left,top,right,bottom,n?sx/n:0.0,n?sy/n:0.0);
     if(n){*cx=(float)(sx/n);*cy=(float)(sy/n);}
     return n;
 }
