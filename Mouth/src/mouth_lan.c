@@ -10,6 +10,8 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#define mouth_inet_pton InetPtonA
 typedef SOCKET mouth_socket;
 #define MOUTH_SOCK_BAD INVALID_SOCKET
 #define mouth_sock_close closesocket
@@ -18,6 +20,7 @@ typedef SOCKET mouth_socket;
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#define mouth_inet_pton inet_pton
 #include <unistd.h>
 #include <fcntl.h>
 typedef int mouth_socket;
@@ -321,7 +324,7 @@ int mouth_lan_client_open(MouthLan *l,const MouthLanConfig *cfg,const char *ip){
     if(!l||!cfg||!ip||!cfg->world_id||!cfg->port)return 0;
     memset(l,0,sizeof(*l));l->socket_handle=MOUTH_LAN_INVALID_SOCKET;
     l->config=*cfg;
-    if(inet_pton(AF_INET,ip,&addr)!=1)return 0;
+    if(mouth_inet_pton(AF_INET,ip,&addr)!=1)return 0;
     if(!socket_open(l,0))return 0;
     l->peer_addr=addr.s_addr;l->peer_port=htons(cfg->port);
     l->client_nonce=(uint32_t)(mouth_lan_clock_ms() ^ cfg->seed ^ UINT32_C(0x198b144f));
