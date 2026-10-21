@@ -11,12 +11,10 @@ Referencia revisada: `BONES/third_party/eye/sw_renderer.c`, `BONES/modules/eye/m
 
 ## Prueba automatizada (Eye, sin Windows)
 
-Compilar desde la carpeta del paquete Eye:
+Ejecutar desde la raíz del repositorio (o desde cualquier carpeta, porque el script se reposiciona automáticamente):
 
 ```sh
-cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -I modules/eye \
-  modules/eye/eye_display.c tests/test_eye_display.c -lm -o test_eye_display
-./test_eye_display
+sh Eye/scripts/test_eye_display.sh
 ```
 
 Prueba: 64.000 píxeles negros (`all_black=1`); 64.000 del color de limpieza de Eye (`clear_only=1`); fondo Eye + retícula (`other_rgb=16`, no visible geometría 3D); base GAME; copia oscurecida; fondo de menú estable; guardia de desbordamiento; signo de yaw/pitch y salto vertical a yaw/pitch=0. La prueba de cámara reutiliza la **fórmula analítica** del transformador, NO el ejecutable real de Bones.
