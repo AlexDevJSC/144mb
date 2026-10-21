@@ -1,0 +1,42 @@
+PROYECTO 1.44 — EYE 0.5.1 — CORRECCION Y CIERRE DEL PROTOTIPO
+============================================================
+RESPONSABLE: Eye (graficos). Bones, Soul y restantes no se modifican.
+
+FALLOS OBSERVADOS EN EYE 0.5.0
+1) En las vertientes largas, el eje V del atlas seguia el largo de la casa
+   en lugar de la pendiente. Las filas de tejas quedaban orientadas mal.
+2) Tejado a cuatro aguas tenia 7 superficies sin remates diagonales ni
+   aleros delanteros/traseros; se veia inacabado.
+3) La cumbrera usaba textura de madera, no de la propia cubierta.
+4) La salida visual del mensaje anterior tuvo un elemento vacio.
+
+IMPLEMENTACION CORRECTIVA
+- Los ejes U de las texturas discurren paralelos a los aleros.
+- Los ejes V discurren de cumbrera a alero (direccion de escorrentia).
+- Tejado a 2 aguas conserva 9 superficies; cubierta a 4 aguas usa 13.
+- Anade 4 bandas sobre limatesas y 2 aleros horizontales para las aguas cortas.
+- Las bandas de cumbrera/limatesas reutilizan la cubierta existente; la
+  madera se usa unicamente para fascia. No se requieren nuevos IDs.
+- Geometria sigue siendo de prueba; no hay generacion de colisionadores.
+- Formato serializado EYE5 NO cambia: mismos 60 bytes de las cuatro recetas.
+- No se alteran generadores EYE1, EYE2, EYE3, EYE4.
+
+PRUEBAS (realizadas en Linux)
+- make test (GCC C11): 9 pruebas correctas, incluida EYE5 embebida.
+- test_eye5 (Clang C11): correcto.
+- test_eye5 (Clang -fsanitize=address,undefined): correcto.
+- Igualdad SHA256 del paquete de recetas original y 0.5.1: SI.
+- Previews PPM generadas por tools/eye5_preview.c; comparativa PNG
+  derivada directamente de esos PPM con Pillow (solo herramienta de autor).
+
+NO CERRADO
+- Compatibilidad compilada con fuentes reales Bones 0.2.1.
+- Mas de 3 IDs materiales por escena (RFC pendiente de Bones+Soul).
+- Un edificio transitable y colisionable (competencia de Bones).
+- Validacion estetica contra texturas originales de Daggerfall 84%.
+- Tamaño del PE final Windows y verificacion en FAT12 fisico.
+
+CRITERIO DE SIGUIENTE HITO
+- Bones confirma nuevo contrato de materiales y publica API real.
+- Eye adapta mesa de materiales y prueba una casa de 2/4 aguas integrada.
+- Soul verifica regresiones, comparativa artistica y presupuesto total.
