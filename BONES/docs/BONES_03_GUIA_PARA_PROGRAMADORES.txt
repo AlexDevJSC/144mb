@@ -1,0 +1,63 @@
+PROYECTO 1.44 / BONES 0.3 - GUIA DE INTEGRACION PARA ESPECIALISTAS
+=====================================================================
+
+A) Todos los programadores
+   1. Trabajad dentro de modules/<vuestro_nombre>/. Conservad module.c.
+   2. Exportad BonesSubsystem bones_mod_<nombre>_create(void *context).
+   3. Descriptor version BONES_SUBSYSTEM_API_VERSION=1 y struct_size.
+   4. Sin dependencias si no son reales. Si las hay, declarad requires.
+   5. El registro se genera con scripts/gen_registry.py al compilar.
+   6. No modifiqueis include/bones/bones.h ni el nucleo para implementar
+      vuestra especialidad; pedid la interfaz que falte al programador Bones.
+   7. El contexto de Brain/Ear/Skin/Mouth apunta a BonesFoundation; Eye
+      recibe puntero a su BonesEye existente. Debe durar hasta bones_stop.
+   8. Los callbacks son codigo confiable, comparten el mismo proceso. Una
+      infraccion de contrato puede corromper el juego; no hay sandbox.
+   9. PRs a Soul: cambios, dependencia, compatibilidad, tests, tamaños.
+
+B) Eye / Gráficos
+   modules/eye/module.c SOLO reusa bones_eye_subsystem(&eye).
+   Puede consumir BonesScene mediante present; si necesita entidades,
+   la consulta es bones_foundation_find (solo lectura) en adaptacion futura.
+   Texturas EYE1/EYE2 requieren sus .c/.h antes de alegar integracion.
+   NO hacer colision de la geometria visual por defecto.
+   No cambiar bones.h ni la semantica de material sin acuerdo con Soul.
+
+C) Brain / IA
+   El callback after_tick puede usar BonesCommand para enviar decisiones
+   del SIGUIENTE tick de un NPC (issuer=0, seq creciente, tick+1).
+   El codigo de ejemplo examples/integracion_especialistas.c enseña el uso.
+   Brain no modifica .feet, .velocity o .grounded manualmente.
+   Pendientes: API de percepcion, comandos de ataque/interaccion,
+   distancias validas, vida/perfil NPC, pathfinding y rutinas.
+
+D) Mouth / Red
+   Mouth autentica la conexion REAL (todavia no implementada) antes de
+   asociar el propietario (issuer) a un comando recibido.
+   Bones rechaza propietario incorrecto, tick incorrecto y repeticion;
+   NO es un protocolo UDP, NO evita suplantacion si Mouth confia en el
+   numero issuer enviado por un cliente sin autenticar.
+   Mouth es dueño del transporte, fiabilidad y reconexion; Bones tiene
+   que expandir replicacion de estados, relevancia de sectores y politica
+   de confirmacion sin dar acceso directo al estado mutable.
+
+E) Skin / UI + plan de guardados (orden posterior del director)
+   UI: usa queries de solo lectura. No modifica estado fisico desde menus.
+   Guardados: bones_foundation_export/restore ofrecen bloques fisicos BSF1,
+   sin E/S a disco. Skin diseña archivos, atomocidad, recuperacion,
+   metadatos de ancestros y politica de versionado general. La fusión
+   semantica necesita una decision adicional de responsabilidad.
+   La snapshot incluye cambios de colisionadores y hechos pendientes,
+   pero aun NO inventarios, economia, clases o misiones; requieren codecs.
+
+F) Ear / Audio
+   Usa on_event de BonesSubsystem para notificaciones temporales de
+   salto y aterrizaje; puede consultar posiciones con fundamento.
+   No tratar esos eventos como hechos confirmados del juego online.
+   Ear es dueño de sintesis, samples, volumen, mezcla y espacializacion.
+
+G) Soul / Control de integracion
+   Antes de aprobar Foundation API1, comprobad modulo real de cada
+   especialista, reproduccion de estado, Windows y size budget.
+   Este codigo es una preintegracion compatible con API2, no la
+   aprobacion automatica de las decisiones arquitectonicas abiertas.

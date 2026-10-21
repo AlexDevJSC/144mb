@@ -1,21 +1,18 @@
-# BONES — Núcleo de Proyecto 1.44
+# BONES 0.4.0 — Proyecto 1.44
 
-Responsable: Bones (programación del núcleo, entidades, estructuras, físicas y contratos de integración).
+Código y documentación originales de la entrega `PROYECTO_144_Bones_ModKit_v0_4_0.zip`, sincronizados en `BONES/`.
 
-Versión de referencia: 0.3.0 (C11). API de Bones v2; foundation.h experimental pendiente de revisión de Soul.
+## Contenido
+- `include/bones/`: API central y ModKit experimental.
+- `src/`: motor, fundación, integración de Eye y aplicaciones de prueba.
+- `modules/`: puntos de inserción de Eye, Ear, Brain, Skin y Mouth.
+- `tests/`, `scripts/`, `tools/`, `examples/`, `samples/`: pruebas, compilación y ejemplos.
+- `docs/`: contratos, plan maestro y documentación histórica.
 
-Este directorio contiene la base modular del motor y se organiza en `include/`, `src/`, `modules/`, `tests/`, `scripts/`, `tools/`, `examples/` y `docs/`.
+## Compilación
+En Linux, `make test` y `make modkit_test` desde `BONES/`. La compilación Windows debe verificarse en una máquina compatible mediante los scripts incluidos.
 
-- Bones es autoridad de entidades, transformaciones, simulación y colisiones.
-- Eye implementa gráficos y materiales.
-- Ear implementa audio.
-- Brain implementa IA.
-- Skin implementa interfaz y el sistema de guardados asignado por dirección.
-- Mouth implementa conectividad y multijugador.
-- Soul revisa integración y regresiones.
+## Compatibilidad
+API de Bones 2; ModKit ABI 1 **experimental, pendiente de revisión de Soul**. La publicación final persigue un EXE Windows ≤1.474.560 bytes, **aún no certificado**. Los módulos de especialidad no están todos implementados: algunos son conectores de integración.
 
-Los conectores de módulos no son las implementaciones completas de sus especialistas. El ejecutable Windows de 1,44 MB todavía no ha sido validado.
-
-Para compilar y probar en Linux: `make test` y `make core`. Para Windows revisar los scripts de `scripts/`.
-
-Se conserva la arquitectura de un único ejecutable final; los módulos son unidades de código fuente enlazadas, no DLL dinámicas.
+El archivo `docs/MODKIT_v0_4_SHA256.txt` documenta hashes de la distribución de referencia. Los archivos de código y documentación publicados aquí mantienen el contenido del ZIP original.

@@ -1,0 +1,77 @@
+PROYECTO 1.44 — BONES ESTADO REAL Y CHANGELOG v0.4.0
+Fecha: 21 de octubre de 2026.
+
+BASE: Bones 0.3.0, de la que se conservaron físicas, arquitectura, escenas,
+Foundation, generación de mundo de prueba, adaptador y tests heredados.
+La cabecera include/bones/bones.h permanece intacta (API 2).
+
+IMPLEMENTADO NUEVO:
+- include/bones/modkit.h ABI 1: descriptor estable de módulo, roles, capacidades,
+  estructuras de vista de entidades, comandos y eventos, y escena por frame.
+- include/bones/modkit_host.h: runtime host de módulos (API de integración).
+- src/modkit/modkit.c: registro, dependencias, arranque topológico, rollback,
+  callbacks, autorización por servicio, lectura de entidad, órdenes, eventos,
+  snapshots, lectura de hechos, construcción/presentación de escena.
+- Soporte DLL/shared-library en desarrollo; smoke test .so en Linux.
+- Generación por build de registro estático en src/generated/modkit_registry.c;
+  cinco especialistas + extensiones en directorios detectados.
+- modules/*/modkit.c: cinco puntos de entrada con permisos específicos;
+  Eye convierte BonesModFrame en el renderizador original; los restantes
+  son interfaces aún sin comportamiento de su especialidad.
+- src/app/win32_main.c usa BonesModHost en el bucle real Win32 (no ejecutado
+  ni compilado en Windows en este entorno).
+- scripts/build_windows_msvc.bat, build_windows_mingw.bat adaptados a registro
+  ModKit, modo estático sin cargador dinámico y verificación del tamaño.
+- scripts/build_windows_modkit_dev.bat: receta para una DLL/host de prueba,
+  pendiente de validar en Windows.
+- tools/modkit_demo.c y tools/modkit_headless.c: demo y captura real.
+- samples/plugin/clock_mod.c: módulo .so/.dll insertable de ejemplo.
+- samples/static_extension: extensión insertable por carpeta.
+- tests/test_modkit.c y test_modkit_dll.c: validación de contrato completo.
+
+CONSERVADO: archivos históricos, contratos 0.2, Foundation 0.3, pruebas
+antiguas, generador legacy y código del renderizador incluido.
+
+MODIFICADOS: Makefile, src/app/win32_main.c, scripts/windows, README.txt,
+docs/ARQUITECTURA_BONES.txt, docs/ESTADO_REAL.txt, docs/REGISTRO_CAMBIOS.txt,
+docs/PLAN_MAESTRO_ACTUALIZACION_BONES.md.
+
+NO IMPLEMENTADO: IA, sonido, interfaz, red, reconciliación de guardados,
+EC/PBW completo, plugin de materiales de Eye 0.5, caras unilaterales,
+colisiones entre actores, terreno desnivelado, contenido RPG avanzado.
+
+LIMITACIONES:
+- No hot reload; no sandbox contra DLL maliciosas. Válido solo proceso
+  nativo confiable y compiladores/ABI compatibles.
+- La escena del contrato base sigue limitada a 96 quads/8 sprites, 3 materiales.
+- El estado central BSF1 no incluye datos privados ni eventos semánticos RPG.
+- Validez determinista entre compiladores/plataformas aún no demostrada.
+- Cuotas <=1,44 MB y Windows sin certificación.
+
+MEDIDAS REALES (LINUX, gcc -O2, sin flags GC adicionales, headless):
+  0.3.0: 48.792 bytes
+  0.4.0: 58.384 bytes
+  Diferencia: +9.592 bytes. Incluye el renderizador software de muestra.
+  NO medir como tamaño PE Windows ni coste del juego completo.
+  Variante 0.4 Linux -Os + GC y sin loader: 44.576 bytes (no comparable a O2).
+  Memoria pico de una ejecución headless de la variante optimizada:
+  1.280 KiB RSS (entorno de pruebas Linux; no es presupuesto de producción).
+
+PRUEBAS:
+  make test (las cuatro suites previas): superado
+  make modkit_test: suites de contratos + carga real .so: superado
+  make modkit_demo: superado
+  make modkit_preview: captura producida
+  clang -O2 -Wall -Wextra -Wpedantic -Werror: superado
+  Clang ASan + UBSan: test_modkit superado
+  Prueba insertando modules/clock_ext/modkit.c: registro de seis módulos
+  y ejecución: superado
+  Windows/MSVC/MinGW: NO ejecutados en esta entrega.
+
+CRITERIO DE INTEGRACIÓN: Soul debe revisar ABI 1 antes de oficializarla.
+- Añadido manifest de plugins versionado (implementation_version,
+  state_schema_version) consultable por Skin/Mouth, con validación de versión.
+- Extensiones de carpeta detectadas automáticamente (ejemplo clock_ext);
+  el generador de registro ya no está limitado a los cinco proveedores.
+- build/libbones_modkit.a disponible mediante make modkit_core, para
+  enlazar la base con el gestor de módulos sin Eye.

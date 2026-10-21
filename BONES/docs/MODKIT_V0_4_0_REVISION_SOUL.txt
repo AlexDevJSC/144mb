@@ -1,0 +1,22 @@
+SOLICITUD DE REVISIÓN ARQUITECTÓNICA PARA SOUL
+Proyecto 1.44, BONES 0.4.0 ModKit ABI1 (propuesta).
+
+DECISIONES QUE SOUL DEBE REVISAR ANTES DE ESTABILIZAR:
+1) ABI C v1 y tamaño/layout de estructuras en Windows x64 MSVC/MinGW;
+   solo se verificó Linux GCC/Clang y .so.
+2) Roles exclusivos (Eye/Ear/Brain/Skin/Mouth) y extensiones múltiples.
+3) Matriz de permisos funcionales; recordar que NO es sandbox nativo.
+4) Orden de arranque Skin->Brain->Ear->Mouth->Eye por prioridad de restauración.
+5) Limitación de eventos efímeros y journal BSF1; no son eventos PBW confiables.
+6) Necesidad futura de un contrato de chunks versionados para estado PRIVADO
+   de módulos, guardados fusionables y conservación de chunks desconocidos.
+7) Escena gráfica: base 0..2 materiales, sin culling, 96 quads: decidir API
+   de ampliación con Eye antes de implementar EyE 0.5 generalizado.
+8) Rutas de compilación Windows PE, ABI de DLL y medición del EXE final.
+9) Identidad y autorizaciones de Mouth: emisor issuer necesita sesión real,
+   no se afirma autenticación ni seguridad contra cheats.
+10) Reentrancia/hot reload: actualmente prohibido cambiar módulos iniciado.
+
+CAMBIO PÚBLICO: nueva include/bones/modkit.h; ninguna modificación en
+include/bones/bones.h (BONES_API_VERSION 2 sigue igual).
+No se solicita adoptar la ABI1 como canónica sin aprobación del director.

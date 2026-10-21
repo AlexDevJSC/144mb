@@ -1,0 +1,108 @@
+PROYECTO 1.44 — ARQUITECTURA BONES v0.2.0 — 20/10/2026
+================================================================
+Fuente: docs/PLAN_MAESTRO_ORIGINAL_v1.md (intacto).
+
+                           APP / INPUT / CLOCK / WINDOW
+                                      |
+                                      v
+  +------------------------- BONES C11 --------------------------+
+  | bones_init / bones_start / bones_step / bones_stop            |
+  | mundo + físicas 60Hz + estado autoritativo + escena           |
+  |          |                                                     |
+  |          v                                                     |
+  |  REGISTRO ESTATICO: BonesSubsystem (5 ranuras opcionales)     |
+  +----------+------------+----------+----------+----------+------+
+             |            |          |          |          |
+            EYE          EAR       BRAIN       SKIN       MOUTH
+         render       eventos    lógica NPC  visuales    UI/texto
+          REAL        stub API   stub API    stub API   stub API
+       adaptador                  (futuro)  (futuro)    (futuro)
+             |
+       Eye software
+       de prueba (GDI en host Win32)
+
+  Los nombres de responsabilidad futuros son propuestas, no requisitos
+  oficiales del plan. Bones no incluye cabeceras de ninguno de ellos.
+
+ESTADO EN BONES
+  BonesWorld: seed+versión+colliders estáticos (16 AABB en demo).
+  BonesPlayer: pies, velocidad, orientación, dimensiones y grounded.
+  BonesEngine: mundo, jugador, tick, extensiones legadas, slots de módulos,
+               orden de arranque, cola de 32 eventos, banderas de estado.
+  BonesScene: cámara FPS, 96 quads, 8 sprites, derivados del mundo.
+  Simulación local: fixed delta 1/60 s; no red ni persistencia implementada.
+
+FASES DEL BUCLE
+  1) La app recoge input y llama bones_step.
+  2) Inicio de subsistemas: al primer paso, o explícitamente.
+  3) before_tick de módulos activos, según orden de dependencias.
+  4) Bones aplica física de jugador y actualiza tick.
+  5) Bones despacha eventos efímeros (salto/aterrizaje).
+  6) after_tick + eventos generados por esos callbacks.
+  7) Callback on_tick legado (compatibilidad de fuentes, no recomendado).
+  8) Cuando haya que dibujar, bones_render_frame arma escena UNA vez.
+  9) build_scene permite añadir primitivas (Skin/Mouth hipotéticos).
+ 10) EYE.present recibe la escena inmutable, la rasteriza y Win32 presenta.
+ 11) Al cerrar la app, bones_stop recorre los módulos al revés.
+
+NO CAMBIA CON LA MODULARIZACION
+  - Colisión de cilindro aproximado contra AABB, gravedad, salto, sprint.
+  - Escenario de prueba, semilla y claves de sectores.
+  - Eye conserva third_party/eye/sw_renderer.[ch] sin cambios.
+  - No existe formato de guardado ni contrato P2P; eventos actuales NO
+    satisfacen la persistencia semántica descrita en el plan maestro.
+
+GESTION DE ERRORES
+  attach: bool; rechaza descriptor, slot, version, dependencias inválidas.
+  start: bool; valida grafo, orden determinista, rollback de recursos.
+  step: bool; rechaza dt inválido o startup fallido; en fallos de
+        callbacks no existe mecanismo de error universal (void).
+  emit_event: bool; false y event_overflow sticky en desbordamiento.
+  render_frame: bool; false si Eye no está conectado/arranca sin present.
+  draw_scene: bool; verifica callbacks y versión del backend visual.
+  OJO: módulos son código de confianza con punteros, no procesos aislados.
+
+PRESUPUESTO / ESTABILIDAD
+  Estructuras estáticas de tamaño fijo evitan enlazado a plugins/DLLs y
+  heap en el núcleo. Esto es un prototipo: max 5 slots, 32 eventos,
+  16 AABB, 96 quads y 8 sprites. El límite de 1.44MB se controla en
+  build_windows_*.bat, pendiente de ejecutar y medir sobre Windows.
+
+INTEROPERABILIDAD
+  Header único público include/bones/bones.h.
+  La integración real del renderer está en src/adapters/eye_adapter.[ch].
+  La librería libbones.a se compila solamente con src/bones/*.c.
+  Compilar cambios de API implica recompilar TODOS los adaptadores.
+  El plan maestro original queda inmutable y se actualiza en un anexo.
+
+PRUEBAS
+  make test, make sanitize, make preview, make core.
+  tests/test_bones.c: física y escena heredadas.
+  tests/test_subsystems.c: cinco módulos, validación, dependencias,
+                            rollback y Eye funcionando.
+
+
+ANEXO v0.2.1 — TEST DE EDIFICIO Y PROVEEDOR DE EYE
+  La escena mantiene quads/UV del API 2 sin modificacion.
+  src/demo/test_house.c es una fuente visual de prueba agregada por
+  BonesModule.on_scene; NO interviene en el mundo/colliders.
+  src/adapters/eye_adapter.c permite inyectar pixeles generados por
+  Eye a su propio rasterizador, con un tile temporal de 16 KiB.
+  El conjunto de 3 texturas se almacena UNA sola vez por Eye.
+  En un futuro acordar modulo generador real y material ID ampliado
+  sin modificar a escondidas BonesScene ni contrato de fisicas.
+
+== ANEXO 0.3.0: NUEVA CAPA DE FUNDACION ==
+BonesFoundation agrega BonesEngine, entidades, comandos, namespace de ramas,
+hechos persistibles y snapshots base; todos usan el controlador fisico comun.
+Los modulos fuente se organizan bajo modules/*/module.c y el registro
+se autogenera en scripts/gen_registry.py. Fuente actual de detalle:
+docs/BONES_03_CONTRATO_Y_ARQUITECTURA.txt. La API2 anterior no cambia.
+
+=== Ampliación v0.4 — ModKit (ABI 1) ===
+El núcleo mantiene el estado autoritativo. Las especialidades reciben una
+interfaz C independiente modkit.h, sin BonesEngine*.
+BonesModHost gestiona servicios, capacidades, ciclos, DLL opcionales durante
+el desarrollo y registro estático para el EXE. El viejo BonesSubsystem queda
+conservado por compatibilidad. Las nuevas APIs están pendientes de revisión
+Soul; consultar MODKIT_V0_4_0_CONTRATO.txt.

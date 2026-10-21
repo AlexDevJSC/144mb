@@ -1,0 +1,64 @@
+PROYECTO 1.44 — BONES <-> EYE — CONTRATO DE INTEGRACION v2
+20/10/2026 | Bones core 0.2.0 | API=2 | Subsystems API=1
+================================================================
+
+FUNCIONES DE EYE (mantenidas)
+  bones_eye_init(BonesEye *eye, uint32_t texture_seed)
+     -> inicializa rasterizador software de prueba, materiales y backend.
+  bones_render(const BonesEngine*,const BonesRenderBackend*)
+     -> interfaz anterior para render directo; conservada en fuentes.
+  bones_draw_scene(const BonesScene*,const BonesRenderBackend*)
+     -> interfaz nueva, dibuja una escena ya construida.
+
+NUEVA INTEGRACION MODULAR RECOMENDADA
+  BonesEye eye;
+  BonesEngine engine;
+  bones_init(&engine,seed);
+  bones_eye_init(&eye,(uint32_t)seed);
+  BonesSubsystem m=bones_eye_subsystem(&eye);
+  bones_attach_subsystem(&engine,&m);
+  bones_start(&engine);
+  bones_render_frame(&engine);
+  bones_stop(&engine);
+
+  bones_eye_subsystem crea descriptor de BONES_SLOT_EYE sin dependencias
+  obligatorias y con present -> bones_draw_scene. El adaptador conserva
+  la propiedad de sus buffers. Bones NO conoce P144_Renderer/Win32/GDI.
+  Solo Eye posee el callback present. Skin/Mouth pueden contribuir con
+  quads/sprites durante build_scene antes de presentar; no pueden
+  presentar el framebuffer directamente mediante ese callback.
+
+DATOS ENVIADOS
+  Escena: camara (posición/yaw/pitch), quads con UV, sprites 2D.
+  Unidades: metros, Y arriba, Z hacia delante, X derecha/izquierda.
+  Eye tiene texturas provisionales piedra, suelo y madera. Ninguna
+  textura ni sprite define volumen de colisión: lo decide Bones.
+
+COMPATIBILIDAD
+  API 1 -> API 2: recompilar adaptador y app, porque BonesEngine ha
+  ampliado estructura y BONES_API_VERSION ha pasado a 2. El código de
+  third_party/eye/sw_renderer.c NO se ha modificado. Los callbacks del
+  backend conservan su forma actual pero ahora exigen version=2.
+
+MANTENER ACUERDO DE RESPONSABILIDAD
+  EYE no cambia estado físico ni fuente de mundo, ni escribe guardados.
+  Si Eye necesita nuevas UV, materiales, capas, tintes o animaciones,
+  acordar ampliación de BonesScene con versión y test de ambos lados.
+  El renderer de prueba no es Direct3D11; se evaluará más adelante.
+  Ver docs/CONTRATO_SUBSISTEMAS_v1.txt para ciclo y dependencias.
+
+
+ACTUALIZACION COMPATIBLE v0.2.1 — GEOMETRIA Y MATERIALES
+  Se mantiene BONES_API_VERSION=2,
+  BONES_SUBSYSTEM_API_VERSION=1 y el renderer de Eye existente.
+  Los quads admiten UV independientes y techos inclinados.
+  Los triangulos se representan provisionalmente duplicando un vertice.
+  Eye puede proporcionar tiles 64x64 por callback mediante
+  bones_eye_load_textures; esta funcion vive SOLO en eye_adapter.h.
+  La casa de ensayo dispone de 4 muros, suelo, puerta visual,
+  2 frontones y 2 vertientes, compartiendo ids STONE/FLOOR/WOOD.
+  Sin EYE1/EYE2 real disponible, el proveedor se prueba con un stub.
+  Las posibles extensiones a triangulos publicos, sidedness y MatId
+  ampliado siguen SIN APROBAR.
+  Documento normativo de propuesta y pruebas:
+  docs/CONTRATO_GEOMETRIA_MATERIALES_EYE_v0_2_1.txt

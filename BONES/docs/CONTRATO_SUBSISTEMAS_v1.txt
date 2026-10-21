@@ -1,0 +1,133 @@
+PROYECTO 1.44 — BONES / CONTRATO DE SUBSISTEMAS v1
+20 de octubre de 2026 | Núcleo Bones 0.2.0 | API pública: include/bones/bones.h
+==========================================================================
+
+0. PROCEDENCIA Y DECISIONES
+  Fuente: plan maestro original v1, apartados 3, 6, 13, 14, 17 y 20.
+  El plan NO asigna funciones oficiales a los nombres Ear/Brain/Skin/Mouth.
+  Por tanto la siguiente división es una PROPUESTA OPERATIVA, NO una
+  definición canónica que Bones pueda imponer al resto de responsables:
+
+    BONES: estado lógico, física, colisión y orden de pasos (existente).
+    EYE: visualización/presentación; actual rasterizador software de prueba.
+    EAR: audio y reproducción de efectos (propuesto, no implementado).
+    BRAIN: lógica/decisiones de NPC (propuesto, no implementado).
+    SKIN: apariencia, materiales, animaciones (propuesto, no implementado).
+    MOUTH: diálogo, mensajes, UI (propuesto, no implementado).
+
+  No se han implementado audio, IA, apariencia avanzada, ni diálogo. Se
+  han implementado RANURAS, CONTRATOS y tests de integración simulados.
+  No se cargan DLL: enlace estático C11 y registro al inicio. Se evita
+  requerir nuevas bibliotecas distribuidas al usuario final (1,44 MB).
+
+1. TIPOS DE API Y VERSIONES
+  BONES_API_VERSION = 2: revisión de la estructura BonesEngine en fuentes;
+     los adaptadores/objetos precompilados para API=1 deben recompilarse.
+  BONES_SUBSYSTEM_API_VERSION = 1: versión del descriptor BonesSubsystem.
+  BonesSubsystem { version, struct_size, slot, requires, context,
+    startup, shutdown, before_tick, after_tick, on_event,
+    build_scene, present }.
+  El registro es por copia del descriptor; context sigue perteneciendo
+  al módulo y debe permanecer vivo hasta bones_stop. No se garantiza ABI
+  binaria estable entre DLL ni se expone sistema de plugins dinámicos.
+
+2. RANURAS FIJAS Y OPCIONALES
+  BONES_SLOT_EYE   0
+  BONES_SLOT_EAR   1
+  BONES_SLOT_BRAIN 2
+  BONES_SLOT_SKIN  3
+  BONES_SLOT_MOUTH 4
+
+  Todas las ranuras son OPCIONALES. Sin Eye pueden ejecutarse tests y
+  ticks sin interfaz visual (headless). Sin Ear no hay sonido. Una ranura
+  solo admite una instancia; no es un límite para el número de entidades
+  gestionadas internamente por un subsistema futuro.
+
+3. ARRANQUE Y CIERRE
+  bones_init(engine, seed)
+  bones_attach_subsystem(engine, &descriptor)  <- antes del primer tick
+  bones_start(engine)                         <- opcionalmente automático
+  bones_step(engine, &input, BONES_TICK_DT)
+  bones_render_frame(engine)                  <- requiere Eye.present
+  bones_stop(engine)
+
+  Se rechazan slots repetidos, versiones/tamaños erróneos, dependencias
+  propias o bits desconocidos, uso de present fuera de Eye y registro en
+  ejecución. Las dependencias declaradas con BONES_SLOT_BIT(slot) son
+  obligatorias: si falta alguna, el arranque FALLA (no la añade por
+  cuenta propia). Los ciclos se rechazan sin inicializar nada.
+  Orden de preferencia estable: Brain -> Ear -> Skin -> Mouth -> Eye,
+  reordenado cuando es necesario por dependencias declaradas. Nunca
+  depende del orden en que un usuario llame a attach.
+  Si startup retorna false, Bones invoca shutdown de los subsistemas
+  arrancados anteriormente en orden inverso y el intento falla. El
+  módulo que falla debe limpiar sus propios recursos antes de retornar.
+  bones_stop es idempotente; cierre en orden inverso; no invocar start,
+  stop o attach desde callbacks de módulos.
+
+4. ORDEN DE CADA TICK Y ESCENA
+  start (solo una vez) -> before_tick (orden resuelto) -> Bones física
+  -> incrementar tick -> despachar eventos -> after_tick -> eventos
+  -> módulos legados on_tick.
+  Escena: Bones crea cámara, mundo, NPC -> módulos legados on_scene ->
+  build_scene de módulos iniciados -> Eye.present recibe escena inmutable.
+  El callback present solo se permite al slot Eye; obtiene UNA escena
+  por frame con bones_render_frame, sin recomputarla internamente.
+  Eye está integrado mediante bones_eye_subsystem(eye), que hace la
+  conversión de BonesScene a BonesRenderBackend del renderer de Eye.
+
+5. COLA DE EVENTOS VOLÁTILES
+  BonesEvent {type, source_id, target_id}, BONES_MAX_EVENTS=32.
+  BONES_EVENT_JUMP y BONES_EVENT_LAND se producen en la física actual.
+  BONES_EVENT_CUSTOM (=256) y superiores reservados provisionalmente para
+  consumidores del juego; asignar rangos y versionarlos antes de añadir
+  eventos persistentes. BONES IDs '1' en los eventos físicos actuales
+  son prototipos, no identificadores de red/guardado canónicos.
+
+  bones_emit_event devuelve false al estar llena la cola y activa
+  engine.event_overflow hasta bones_clear_event_overflow o bones_stop.
+  Los suscriptores reciben mensajes FIFO en un tick; mensajes añadidos
+  por callbacks se consumen durante el mismo despacho si cabe la cola.
+  No hay recursión ni heap. Un módulo inactivo no recibe eventos.
+  IMPORTANTE: estos eventos son notificaciones efímeras para audio, UI
+  o tareas similares. NO son un journal fiable de compras, propiedad,
+  combat events confirmados, guardado PBW ni replicación P2P.
+
+6. CONTRATOS DE DOMINIO / RESPONSABILIDAD
+  Bones ES fuente autoritativa de posición, velocidad, contacto y tick.
+  Eye NO reinterpreta choques, y Skin no debe modificar cuerpos de
+  colisión durante el callback de representación. Ear escucha eventos
+  y administra audio bajo su responsabilidad. Brain deberá gestionar
+  decisiones usando órdenes/acciones validadas: aún no existe ese API.
+  Mouth no debe confirmar transacciones de inventario mediante UI.
+  Solo crear escena visual mediante bones_scene_add_quad/sprite, que
+  devuelven false si se supera su capacidad. No existe texto/UI canónico.
+  Los callbacks tienen acceso C confiable a punteros: los límites de
+  autoridad SON UNA REGLA DE DISEÑO, NO UNA SANDBOX de memoria/seguridad.
+
+7. EJEMPLO MINIMO: Ear
+  Ver examples/subsistema_ejemplo.c; sin dependencia de otras ranuras.
+  EarExampleState state = {0};
+  BonesSubsystem ear = ear_example_descriptor(&state);
+  bones_attach_subsystem(&game, &ear);
+  bones_start(&game);
+  ... ticks ...
+  bones_stop(&game);
+  Para Eye: bones_eye_init(&eye, seed),
+            BonesSubsystem m = bones_eye_subsystem(&eye), attach, start,
+            bones_render_frame(&game).
+
+8. CAMBIOS Y EVOLUCION
+  Si cambia BonesSubsystem, subir BONES_SUBSYSTEM_API_VERSION, modificar
+  header, adaptadores, tests, este contrato y REGISTRO_CAMBIOS.
+  No introducir una dependencia directa Ear -> Eye ni Eye -> física.
+  Para futuros comandos de IA, render avanzado, voz o diálogo, acordar
+  primero sus estructuras sin codificar su lógica dentro de Bones.
+  Para límites del ejecutable medir el PE de Windows, NO un ELF Linux.
+
+9. VALIDACION ACTUAL
+  Pruebas tests/test_subsystems.c: cinco slots, registro desordenado,
+  arranque y cierre, duplicados, máscaras inválidas, ciclos, dependencias
+  no satisfechas, rollback tras fallo, eventos de salto/aterrizaje,
+  cola acotada, escena y render Eye determinista. No valida funciones
+  reales de Ear, Brain, Skin o Mouth porque todavía no existen.

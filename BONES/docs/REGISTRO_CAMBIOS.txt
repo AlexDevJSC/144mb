@@ -1,0 +1,138 @@
+PROYECTO 1.44 — REGISTRO DE CAMBIOS DEL MOTOR BONES
+
+[2026-10-20] BONES 0.1.0 (primera entrega)
+REQUISITO
+  Separar motor central/físicas del motor visual de Eye, reutilizar material
+  gráfico de prueba y entregar código/objetivos/documentación reproducibles.
+FUENTE
+  docs/PLAN_MAESTRO_ORIGINAL_v1.md, secciones 3, 5, 6, 13-20.
+ARCHIVOS NUEVOS
+  include/bones/bones.h: interfaz general, tipos, módulo, renderer, tick.
+  src/bones/core.c: init, versión, seeds y registro y ticks de modulos.
+  src/bones/world.c: sala de prueba; claves; altas y bajas AABB validadas.
+  src/bones/physics.c: gravedad, salto con latch, cinemática, AABB/cilindro.
+  src/bones/scene.c: snapshots visuales con quads, sprites, cámara y backend.
+  src/adapters/eye_adapter.[ch]: traducción física -> renderer Eye.
+  src/app/win32_main.c: bucle y ventana Windows adaptados a Bones.
+  third_party/eye/sw_renderer.[ch]: copia íntegra de Eye v0.1 sin cambios.
+  tools/headless.c: demo autónoma, dos cuadros PPM, Linux portable.
+  tests/test_bones.c: casos físicos, mundo, modulos, render, invalidaciones.
+  Makefile (tambien construye libbones.a aislada) + scripts/*.bat +
+  scripts/verificar_tamano.ps1.
+  docs/OBJETIVOS_E_INSTRUCCIONES_BONES.txt, ARQUITECTURA_BONES.txt,
+       CONTRATO_EYE.txt, ESTADO_REAL.txt, REGISTRO_CAMBIOS.txt,
+       PLAN_MAESTRO_ACTUALIZACION_BONES.md y README.txt.
+IMPLEMENTADO Y PROBADO
+  - Normalización de diagonal, aceleración, frenado.
+  - Caminar, sprint, salto y gravedad; bloqueos y deslizamiento.
+  - Colliders con ID únicos; consistencia de sala física/visual.
+  - Módulos con versión, callbacks y límites estrictos.
+  - Render de Eye de prueba sin enlace del core a Eye.
+  - GCC y Clang C11 en Linux (mismo hash de frame), y ASan/UBSan.
+INCOMPATIBILIDAD CON DEMO VISUAL ANTERIOR
+  src/core/engine.* de Eye ya NO gobierna cámara/movimiento en este paquete.
+  Eye sí conserva su src/render/sw_renderer.* ahora en third_party/eye/.
+  La conexión es src/adapters/eye_adapter.c; NO hay migraciones de guardado.
+ESTADO NO VALIDADO
+  No existe binario .exe Windows compilado en esta sesión, ni cifras
+  de bytes reales de release Windows, ni controles verificados en Windows.
+ROLLBACK
+  Conservar el proyecto Eye anterior PROYECTO_144_Motor_Visual_v0_1.zip;
+  Bones se entrega en paquete separado, sin modificar el proyecto de Eye.
+PROXIMAS MODIFICACIONES
+  Prueba Windows; física de alturas y rampas, actores de mundo, integración
+  con sistemas de entidades y sectorización, sincronización con guardados.
+
+NORMA DE DOCUMENTACION CONTINUA
+  Todo nuevo commit sobre el código debe registrar archivos, comportamiento,
+  pruebas, resultado en Windows (si se dispone) y actualización de ESTADO_REAL.
+
+[2026-10-20] BONES 0.2.0 — HOST MODULAR (EYE/EAR/BRAIN/SKIN/MOUTH)
+REQUISITO
+  Preparar el núcleo de físicas para alojar los cinco motores
+  complementarios por contrato versionado sin acoplar sus códigos.
+FUENTE
+  Plan maestro original v1 secciones 3, 6, 13, 14, 17, 20; nueva
+  petición del diseñador (nombres de módulos, sin funciones canónicas).
+CODIGO CAMBIADO
+  include/bones/bones.h: BONES_API_VERSION 1 -> 2; slots, máscaras,
+    BonesSubsystem API v1, eventos volátiles y funciones de ciclo de vida.
+  src/bones/subsystems.c [NUEVO]: registro, dependencias, topología,
+    startup/rollback/shutdown, eventos FIFO y bones_render_frame.
+  src/bones/core.c: startup implícito y callbacks pre/post físicos.
+  src/bones/bones_internal.h: prototipo del despachador de eventos.
+  src/bones/physics.c: emite salto y aterrizaje.
+  src/bones/scene.c: callbacks build_scene y nuevo bones_draw_scene.
+  src/adapters/eye_adapter.[ch]: bones_eye_subsystem, Eyeslot real.
+  src/app/win32_main.c y tools/headless.c: presentación modular de Eye,
+    arranque y cierre controlados.
+  scripts/build_windows_*.bat y Makefile: incluyen subsystems.c;
+    nueva suite de módulos y biblioteca core independiente.
+  tests/test_subsystems.c [NUEVO]: cinco ranuras, dependencias, error
+    y rollback, evento de movimiento y hash de renderer.
+  examples/subsistema_ejemplo.c [NUEVO]: ejemplo integrador Ear.
+DOCUMENTACION CAMBIADA
+  docs/CONTRATO_SUBSISTEMAS_v1.txt [NUEVO], docs/ARQUITECTURA_BONES.txt,
+    docs/CONTRATO_EYE.txt, docs/ESTADO_REAL.txt, README.txt,
+    docs/OBJETIVOS_E_INSTRUCCIONES_BONES.txt,
+    docs/PLAN_MAESTRO_ACTUALIZACION_BONES.md.
+VERIFICACIONES
+  GCC make test, make sanitize, make preview, make core; ejemplo
+  compilado como C11 sin dependencia de audio. Primer renderer Eye sigue
+  dando el mismo hash visual de compatibilidad 31f712cc9903b4e0
+  desde bones_render heredado. Se prueba la ruta modular nueva.
+LIMITACIONES
+  No existen motores reales Ear/Brain/Skin/Mouth ni acoplamiento de
+  arte definitivo. Sin pruebas MSVC/MinGW ni bytes PE certificado.
+  Los eventos no son journal persistente ni protocolo de red.
+MIGRACION
+  Recompilar adaptadores API v1 con headers v2. No hay cambios de
+  guardado/generador. La extensión legada BonesModule se mantiene en
+  fuentes por compatibilidad temporal; desarrollos nuevos deben usar
+  BonesSubsystem.
+ROLLBACK
+  Mantener el ZIP Bones 0.1.0 intacto; este v0.2 se entrega separado.
+
+
+[v0.2.1] 20/10/2026 — Respuesta compatible a la solicitud de Eye
+  NUEVO  src/demo/test_house.[ch]: 10 quads de casa, frontones y tejado.
+  NUEVO  src/adapters/eye_adapter.[ch]: bones_eye_load_textures y
+         BonesEyeTextureGenerator (API PRIVADA de adaptador, no Core API).
+  NUEVO  tests/test_geometry.c: UV, triangulo, normal, Z, cache, regen.
+  MOD    tools/headless.c: demo frontal y camara elevada de tejado.
+  MOD    src/app/win32_main.c: instala el modulo visual de casa.
+  MOD    Makefile y scripts Windows: incluyen fuente del demo/pruebas.
+  MOD    docs/CONTRATO_EYE.txt, ESTADO_REAL.txt, ARQUITECTURA_BONES.txt,
+         OBJETIVOS_E_INSTRUCCIONES_BONES.txt, PLAN_MAESTRO_ACTUALIZACION_BONES.md,
+         INFORME_PRUEBAS_v0_2.txt y README.txt con alcance y limitaciones.
+  NUEVO  docs/CONTRATO_GEOMETRIA_MATERIALES_EYE_v0_2_1.txt,
+         docs/FUENTES_ACTUALIZAR_v0_2_1.txt.
+  INALTERADO include/bones/bones.h, third_party/eye/sw_renderer.[ch]
+         y todos los archivos src/bones/*.c (fisica, mundo, sim y escena).
+  COMPAT  BONES_API_VERSION=2, BONES_SUBSYSTEM_API_VERSION=1 intactas.
+  LIMITES  No EYE1/EYE2 real ni PE de Windows; puerta solo decorativa.
+  MEDIDO  ELF Linux headless +4.360 bytes frente a base 0.2.0
+          (misma compilacion GCC -O2), sin variacion de .bss.
+
+==========================================================================
+BONUS/ANEXO BONES 0.3.0 - 21/10/2026 - Arquitectura modular para especialistas
+==========================================================================
+- Nuevo wrapper BonesFoundation y header separado; bones.h intacto (API2).
+- Entidades con namespace por rama, actor id estable y propiedad.
+- Controlador fisico refactorizado para multiples actores, sin duplicarlo.
+- Ordenes por tick y secuencia, autoridad minima de owner; sin UDP.
+- Snapshots BSF1 LE/CRC y restauracion atomica de actores, colisionadores y
+  hechos pendientes. Identidad de mundo separada de la semilla.
+- Carpeta mod por especialista, registro fuente autogenerado, enlace estatico.
+- Integracion en aplicaciones de prueba, tests de regresion y ejemplos.
+- Documentacion revisada; cambios de API nueva pendientes de Soul.
+- Correccion posterior 0.3.0: separacion de la cola de ordenes consumidas
+  de la cola del tick siguiente; validacion de before_tick/after_tick.
+- Snapshot incluye colisionadores; serializacion por rama y facts sin ACK.
+
+=== BONES 0.4.0 — MODKIT ABI 1 (21/10/2026) ===
+Se conservan Bones API2 y Foundation v1. Nueva capa opcional de ABI para
+proveedores con servicios por capacidades, bibliotecas dinámicas en desarrollo,
+registro automático de extensiones estáticas, tests y adaptador Eye real.
+Consultar MODKIT_V0_4_0_ESTADO_Y_CAMBIOS.txt para detalles, mediciones
+verificadas y límites. Requiere revisión de Soul antes de estabilizar ABI1.

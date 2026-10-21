@@ -1,0 +1,91 @@
+PROYECTO 1.44 — BONES MODKIT v0.4.0
+Contrato técnico propuesto, sujeto a revisión de Soul.
+
+AUTORIDAD DOCUMENTAL
+- Plan maestro: C11, Windows, una sola distribución EXE <= 1.474.560 bytes,
+  mundo procedural, 1-4 jugadores, PBW / guardados fusionables.
+- Protocolo de responsabilidades: Bones core/física; Eye gráficos;
+  Ear audio; Brain IA; Skin interfaz y guardados (decisión posterior del director);
+  Mouth red; Soul compatibilidad y regresiones.
+- El contrato histórico BONES_API_VERSION=2 y BONES_SUBSYSTEM_API_VERSION=1
+  no se ha modificado. Foundation v1 tampoco cambia.
+
+DOS MODOS DE MODULARIDAD
+A) Desarrollo: módulo opcional compilado como DLL (Windows) o .so (Linux)
+   con símbolo público bones_mod_query_v1. Se carga exclusivamente en el
+   arranque. No existe hot reload. Requiere ABI C/plataforma/toolchain compatibles.
+B) Distribución: source modules/<nombre>/modkit.c enlazado al EXE único.
+   gen_modkit_registry.py crea un registro estático ordenado. Sin DLLs
+   ni Python necesarios para ejecutar el juego.
+No es un formato de mods de usuarios no confiables: las librerías nativas
+comparten proceso y pueden acceder a memoria arbitraria. Los permisos por
+servicio evitan usos indebidos accidentales, NO aíslan código malicioso.
+
+MODKIT ABI 1 — include/bones/modkit.h
+- Contrato exclusivo para especialistas. No incluir bones.h ni foundation.h.
+- Descriptor BonesModDescriptor: size, abi, id, role, required_roles,
+  requested_permissions, context y callbacks start/stop/before_tick/
+  after_tick/on_event/build_scene/present.
+- 5 proveedores exclusivos (eye, ear, brain, skin, mouth), hasta 16 módulos
+  totales incluyendo extensiones de lectura, con IDs ASCII únicos.
+- Dependencias declaradas por rol, orden topológico determinista.
+- Startup rollback de módulos ya iniciados ante error; stop inverso.
+- Callbacks de un hilo y servicios válidos hasta stop; no descarga a mitad
+  de tick. Los módulos no guardan punteros a frames después del callback.
+- Las solicitudes fuera de límites (tamaños, versiones, permisos, rangos,
+  comandos) son rechazadas antes de alterar el núcleo.
+
+SERVICIOS
+- tick: consulta del paso fijo (60 Hz), no reloj de render.
+- actor_count/at/get: copias de estado, no BonesEntity*. ID de mundo y entidad
+  siguen bajo autoridad de Bones, con propietario y secuencia lógica.
+- submit_move: Brain solo actores owner=0; Mouth solo actores owner>0,
+  validación de comandos, secuencia, tick y propietario; la identidad issuer
+  declarada por Mouth TODAVÍA requiere autenticación y sesión real de Mouth.
+- snapshot_export: estado BASE confirmado en formato BSF1 de Foundation,
+  excluye órdenes volátiles para el próximo tick. Skin almacena el resultado
+  con escritura segura, comprobaciones y metadatos de ramas que implemente.
+- snapshot_restore_at_start: SOLO Skin y SOLO en su callback start, ANTES
+  del primer tick. La restauración en caliente no existe.
+- facts_since: lectura no destructiva de hechos limitados de creación/borrado.
+  Sigue sin existir el merge PBW: un journal semántico de RPG es pendiente.
+- emit_event: eventos >=256, volátiles, para Brain. Notificaciones físicas
+  JUMP/LAND (1 y 2) derivadas de la simulación para Ear y otros interesados.
+  Nunca usar como registro persistente de propiedad/compras/muertes.
+- scene_add_quad/sprite: solo Eye durante build_scene; está limitado por
+  BonesScene a 96 quads y 8 sprites; materiales válidos 0..2; no se añade
+  automáticamente colisión. Eye administra los píxeles de sus texturas.
+- present: solo Eye, con BonesModFrame inmutable de vida efímera.
+  Eye puede reemplazar el puente del renderizador heredado dentro de su módulo.
+
+LIMITACIONES Y APROBACIONES PENDIENTES
+- La ABI 1 es NUEVA y propuesta; Soul debe revisar antes de adoptarla como
+  contrato oficial entre programadores. No se rompió API2.
+- Faltan material IDs >2, normales/culling, buffers de escena más grandes,
+  API de UI 2D para Skin y un contrato de sonido espacial para Ear.
+- Faltan serialización de ESTADO PRIVADO por módulo, negociación de schemas,
+  migración y tratamiento de versiones/fusión entre módulos. Skin no debe
+  asumir que BSF1 incluye sus datos de UI o la IA de Brain.
+- La nueva arquitectura crea el puente de extensión, pero no implementa
+  IA, audio, online, interfaz completa, comercio, economía o merge PBW.
+- Ejecutable Windows y cumplimiento final <=1.44 MB siguen sin validarse.
+
+INSTRUCCIONES POR ESPECIALISTA
+Eye: sustituir módulos/eye/modkit.c, conservar BonesModFrame como entrada;
+     material ampliado necesita validación de Soul y contrato específico.
+Ear: implementar on_event, leer actor y tick para audio espacial.
+Brain: consultar actores, enviar comandos owner=0 con tick y secuencia válidos.
+Skin: usar exportación/restauración de BSF1; diseñar guardado atómico,
+      historial y chunks adicionales mediante revisión previa con Soul.
+Mouth: autenticar issuer antes de enviar comandos owner>0, diseñar UDP,
+       replicación y reconciliación; los snapshots BSF1 no sustituyen UDP.
+
+NO MODIFICAR POR CUENTA PROPIA LOS CONTRATOS DEL RESTO DE ESPECIALISTAS.
+
+METADATOS DE MÓDULO
+- Descriptor incluye implementation_version >= 1 y state_schema_version (0:
+  sin estado privado persistible). No debe confundirse versión ABI con versión
+  funcional ni con versión del mundo procedural.
+- Skin/Mouth disponen de module_count / module_at para identificar qué
+  especialistas hay y qué versiones se usaron. NO existe aún import/export
+  del estado privado: requerirá un contrato de chunks y migración con Soul.

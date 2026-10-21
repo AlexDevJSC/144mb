@@ -1,0 +1,71 @@
+BONES 0.2.0 — ESTADO REAL DE LA IMPLEMENTACION — 20/10/2026
+================================================================
+IMPLEMENTADO Y PROBADO EN LINUX C11
+  [OK] Núcleo desacoplado de Eye y Windows (libbones.a).
+  [OK] Físicas de la versión 0.1: gravedad, salto, sprint, AABB,
+       colisiones y movimiento en sala de prueba.
+  [OK] Ranuras fijas únicas y opcionales Eye/Ear/Brain/Skin/Mouth.
+  [OK] API de descriptor con comprobación de versión y tamaño.
+  [OK] Dependencias por bitmask, orden topológico y ciclo detectado.
+  [OK] Inicio/cierre, rollback por fallo de arranque y cierre idempotente.
+  [OK] Prevención de attach/start/stop reentrante durante transición.
+  [OK] before_tick, after_tick, build_scene, on_event y Eye.present.
+  [OK] Cola en memoria de 32 eventos FIFO, full queue detectable.
+  [OK] Emisión de eventos de salto/aterrizaje desde física.
+  [OK] Adaptador Eye con presentación de escena única.
+  [OK] Tests de simuladores de 5 subsistemas, físicas y compatibilidad
+       del renderer; sin acceso al código no implementado de otros equipos.
+  [OK] GCC C11, ASan/UBSan y ejecutable headless Linux.
+  [OK] Plantilla de integración Ear compilable sin módulos reales.
+
+SOLO CONTRATO / PRUEBA SIMULADA
+  [STUB] Ear: on_event probada, NO audio.
+  [STUB] Brain: before_tick probada, NO IA ni órdenes de NPC.
+  [STUB] Skin: build_scene probada, NO pipeline definitivo de materiales.
+  [STUB] Mouth: build_scene probada, NO texto, diálogo ni UI real.
+  [PROV] Roles nominales de los cuatro módulos pendientes de confirmar.
+
+PENDIENTE DE VALIDAR
+  [PEND] Compilación/ejecución Win32 MSVC y MinGW-w64 (scripts incluidos).
+  [PEND] Medición PE de Windows <=1.474.560 bytes; límite NO demostrado.
+  [PEND] D3D11, GPU reales, FPS en Windows, CPU objetivo.
+  [PEND] Integración con las versiones reales futuras de Ear/Brain/Skin/Mouth.
+  [PEND] Concurrencia y determinismo multiplataforma/entre compiladores.
+  [PEND] Persistencia, networking, journal semántico PBW y simulación RPG.
+
+COMANDOS PARA REPRODUCIR
+  make test && make sanitize && make core && make preview
+  gcc -std=c11 -Wall -Wextra -Wpedantic -c examples/subsistema_ejemplo.c
+  Windows: scripts\build_windows_msvc.bat o scripts\build_windows_mingw.bat
+
+VERSIONES
+  BONES_API_VERSION=2 (antes 1; requiere recompilar consumidores).
+  BONES_SUBSYSTEM_API_VERSION=1 (nuevo).
+  BONES_GENERATOR_VERSION=1 (sin cambio en algoritmo del escenario).
+  NO hay cambios a formatos de guardado porque NO existe guardado.
+
+
+ACTUALIZACION REAL v0.2.1 (COMPATIBLE CON BONES 0.2.0)
+  IMPLEMENTADO: casa visual con 10 quads, UV repetidos, dos frontones
+  triangulares degenerados, dos quads inclinados, 3 IDs compartidos.
+  IMPLEMENTADO: funcion de inyeccion de 64x64 ARGB desde Eye a cache
+  del rasterizador existente; conservacion de tile al fallar una receta.
+  PROBADO: tests/test_geometry.c y tests legados.
+  NO IMPLEMENTADO: banco real EYE1/EYE2 (no proporcionado),
+  materiales arbitrarios/variantes, backface culling, puerta real,
+  colision de tejado/edificio, gestion LRU, compilacion Windows.
+  ABI PUBLICA: sin cambio; src/bones e include/bones/bones.h intactos.
+  LIMITES: medicion de incremento ELF no sustituye medicion PE.
+
+== ACTUALIZACION BONES 0.3.0 (21/10/2026) ==
+Ver docs/BONES_03_ESTADO_Y_CAMBIOS.txt como estado vigente. El texto anterior
+se conserva como registro de la version 0.2.1; ya NO representa los avances
+aditivos de Foundation. La cabecera bones.h continua en API 2.
+Entidades, comandos, namespace de ramas y BSF1 para fisicas: implementados
+como infraestructura; NO constituye sistema de online o guardados completo.
+
+=== Estado BONES 0.4.0 ===
+ModKit ABI1 funcional en Linux: 5 puertos, extras estáticos detectados,
+.so en desarrollo, comandos/escena/snapshot vía servicios, permisos, pruebas.
+Eye existente funcional; Ear, Brain, Skin y Mouth: conectores no motores.
+Windows no probado. Ver MODKIT_V0_4_0_ESTADO_Y_CAMBIOS.txt.

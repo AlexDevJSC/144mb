@@ -1,0 +1,112 @@
+PROYECTO 1.44 — BONES v0.4.0
+GUÍA PARA EYE / EAR / BRAIN / SKIN / MOUTH / SOUL
+
+1. PREPARAR LA CARPETA
+   modules/eye/modkit.c
+   modules/ear/modkit.c
+   modules/brain/modkit.c
+   modules/skin/modkit.c
+   modules/mouth/modkit.c
+
+   NO se exige alterar include/bones/bones.h ni src/bones/*.c.
+   Cada programador puede añadir .c/.h bajo su carpeta. Para enlazarlos,
+   añadir sus archivos al sistema de compilación; la detección automática
+   incluye solo el punto de entrada modkit.c de cada carpeta.
+   Añadir otros módulos tipo 'mods' copiando
+   samples/static_extension/ -> modules/clock_ext/.
+   scripts/gen_modkit_registry.py detecta nuevos directorios modkit.c.
+   El símbolo esperado es bones_mod_<nombre_carpeta>_query.
+   Los módulos adicionales usan normalmente role=EXTENSION.
+
+2. RUTA SIMPLE: CÓDIGO FUENTE INSERTABLE
+   Implementar int32_t bones_mod_<carpeta>_query(uint32_t,BonesModDescriptor*).
+   Comprobar out->size == sizeof(BonesModDescriptor), host ABI=1.
+   Inicializar struct con memset, poner descriptor.size/abi/id/role,
+   permissions, callbacks. Mantener estado propio en user_context.
+   Ejecutar python3 scripts/gen_modkit_registry.py; make modkit_demo.
+   make modkit_test; make test; make modkit_preview.
+   Para distribución Windows usar scripts/build_windows_msvc.bat o mingw.
+   El EXE de distribución enlaza código y no requiere DLL.
+
+3. RUTA DLL PARA PROBAR UN MÓDULO AISLADO
+   Compilar un .dll (Windows) o .so (Linux) con símbolo exportado
+   bones_mod_query_v1 y código que solo incluya modkit.h.
+   Ejemplo: samples/plugin/clock_mod.c. Linux: make dll_test.
+   Windows: scripts/build_windows_modkit_dev.bat (sin verificar en Windows).
+   API ABI1 no significa que cualquier dll de otro compilador/arquitectura
+   sea compatible; para Windows usar inicialmente x64, C y CRT compatible.
+   Evitar cargar código descargado/no confiable.
+
+4. CICLO DE VIDA
+   bones_mod_host_create(&foundation)
+   bones_mod_register_builtins(host) / bones_mod_host_load(host,path)
+   bones_mod_host_start(host)
+   cada tick: bones_mod_host_step(host,&input)
+   cada fotograma: bones_mod_host_frame(host)
+   bones_mod_host_destroy(host)
+
+   Dependencias y permisos se validan ANTES de ejecutar callbacks.
+   Rol principal único por especialidad, extensiones múltiples hasta 16.
+   Skin arranca antes para poder restaurar; Brain/Ear/Mouth/Eye después.
+   Un callback after_tick solo podrá planear acciones del tick siguiente.
+   NO llamar APIs de host de ciclo de vida desde callbacks.
+
+5. EYE
+   Implementado: un módulo Eye real basado en el renderizador heredado.
+   Recibe BonesModFrame (cámara, arrays de quads/sprites, UV y IDs).
+   Puede añadir quads mediante build_scene+scene_add_quad.
+   No crea colisionadores ni cambia físicas.
+   NO habilitado todavía: ID de material >2, culling unilateral,
+   escena ilimitada o contrato EYE1/EYE2 completo.
+   Eye es dueño de render y de la futura resolución de materiales.
+
+6. EAR
+   ModKit entrega on_event con JUMP/LAND de actores, id y tick.
+   actor_get permite consultar posición para audio 3D.
+   Aún no existen audio ni mezclador ni occlusion; son de Ear.
+
+7. BRAIN
+   actor_at/get: copia del estado sin acceso al BonesEngine.
+   submit_move: issuer=0 y propietario de entidad=0 para NPC.
+   Cualquier movimiento usa la física común y su validación.
+   Sin motor IA, pathfinding, perceptores, enemigos o BT: los implementa Brain.
+
+8. SKIN
+   snapshot_export: bytes del estado central confirmado BSF1.
+   snapshot_restore_at_start: solo Skin; validación de mundo/versión,
+   y restauración antes del primer tick. No restauración en caliente.
+   facts_since: feed volátil/limitado sin confirmar transferencias.
+   Skin diseña gestión de archivos, escritura segura, recuperación,
+   interfaz, guardado extra de otros módulos; merge PBW pendiente de decisión.
+   Skin NO obtiene del snapshot los datos privados de Brain, UI, sonido,
+   red, economía, inventarios o misiones que todavía no existen.
+
+9. MOUTH
+   actor_at/get + submit_move para propietario != 0.
+   Sin sockets, canal fiable, NAT traversal ni autenticación incorporados.
+   Mouth valida identidad de conexión -> issuer antes de submit_move;
+   el motor solo comprueba que coincide con actor.owner y secuencia.
+   Usar mundo/versión/hash y snapshots para protocolo de sesión,
+   no afirmar conectividad universal ni determinismo interplataforma.
+
+10. SOUL
+    Revisar: ABI de DLL, funciones/roles, fases, estados privados, APIs de
+    render / materiales, seguridad, regresiones de tamaños, compilación PE.
+    La v0.4.0 es una propuesta IMPLEMENTADA, no una ruptura de API2.
+
+11. CONTRATO DE CAMBIO
+    No modificar arbitrariamente modkit.h (ABI 1) una vez aprobado.
+    Proponer PR/ADR a Soul, añadir pruebas y versión incremental.
+    Un módulo puede evolucionar internamente siempre que respete su API.
+
+12. METADATOS VERSIONADOS
+    El descriptor debe establecer implementation_version >= 1.
+    state_schema_version=0 indica que el módulo no declara estado persistente.
+    Skin/Mouth consultan module_count/module_at para inventariar versiones.
+    Esto NO significa que el módulo ya se guarde ni que sea migrable.
+
+13. LIBRERÍAS CENTRALES
+    make core          -> build/libbones.a, base C11 sin ModKit ni Eye.
+    make modkit_core   -> build/libbones_modkit.a con núcleo, entidades y host
+                          ModKit; enlazar también dependencias del sistema.
+    Estas librerías son artefactos de desarrollo, no archivos de distribución.

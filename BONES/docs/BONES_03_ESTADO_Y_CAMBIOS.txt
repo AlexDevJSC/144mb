@@ -1,0 +1,32 @@
+BONES 0.3.0 - ESTADO REAL Y CAMBIOS
+==================================
+BASE: Bones 0.2.1 sin cambio de include/bones/bones.h.
+NUEVO:
+ - include/bones/foundation.h: API de fuente experimental optativa.
+ - src/foundation/foundation.c: entidades, comandos, tick, identidades,
+   hechos pendientes, snapshot BSF1, restauracion validada y hash.
+ - src/bones/physics.c: controlador reutilizable entre actores; pruebas
+   anteriores siguen pasando; ninguna colision actor-actor.
+ - modules/{eye,ear,brain,skin,mouth}/module.c: adaptadores separados;
+   solo Eye tiene renderer funcional en el paquete.
+ - scripts/gen_registry.py + src/generated/module_registry.c: descubrimiento
+   de fuentes por carpetas y enlace estatico sin DLL obligatorias.
+ - apps Windows/headless: usan la nueva capa, con Eye heredado.
+ - tests/test_foundation.c: autoridad, identificacion por ramas,
+   agenda de ordenes desde callbacks sin adelantar ni perder un tick,
+   colision compartida, snapshots, rollback, CRC, reproducibilidad y UI.
+ - examples/integracion_especialistas.c: patrones sin implementar areas ajenas.
+CORREGIDO EN ARQUITECTURA:
+ - El jugador local ya no es la unica entidad representable en el runtime.
+ - Branch IDs evitan solapamiento trivial de IDs creados en historias separadas.
+ - Rutas de captura/restauracion separadas de la implementacion Skin.
+NO HECHO:
+ - Sockets/UDP, serializacion de mensajes de red, rollback/prediccion,
+   autenticacion, lag compensation, sincronizacion de 2-4 clientes real.
+ - Guardado a disco seguro, PBW/merge, inventarios, economia, misiones.
+ - IA real, sonido, menus, HUD, materiales arbitrarios de Eye 0.5.
+ - Actores contra actores, desniveles, slopes, terreno largo, streaming.
+ - ABI DLL/"hot mods" ni carga en caliente.
+ - Validacion Windows nativa ni presupuesto final certificado.
+SITUACION: nucleo tecnico modular utilizable para integrar otros motores;
+no juego completo, no formato save definitivo ni motor online funcional.

@@ -1,0 +1,32 @@
+PROYECTO 1.44 — QUÉ PONER EN FUENTES AL RECIBIR BONES v0.4.0
+
+SUBIR:
+1. PROYECTO_144_Bones_ModKit_v0_4_0.zip (código fuente completo).
+2. BONES_04_CONTRATO_MODKIT.txt (versión autónoma del contrato).
+3. BONES_04_GUIA_PROGRAMADORES.txt (instrucciones de integración).
+4. BONES_04_ESTADO_CAMBIOS.txt (estado real, tests y límites).
+5. BONES_04_FUENTES.txt (estas instrucciones).
+
+CONSERVAR EN FUENTES:
+- PROYECTO_144_Plan_Maestro_v1.md (autoridad de producto).
+- Usos de los chats.txt (responsabilidades vigentes).
+- BONES_Contrato_Modulos_v0_2.txt (LEGACY API 2, referencia de migración).
+- BONES_Contrato_Geometria_Materiales_v0_2_1.txt (todavía aplicable a
+  renderizador heredado mientras Eye y Soul aprueban extensiones).
+
+SUSTITUIR:
+- PROYECTO_144_Bones_Foundation_v0_3_0.zip por el nuevo ZIP v0.4.0.
+  Conservar v0.3.0 fuera de Fuentes como respaldo/historial.
+- BONES_03_CONTRATO_Y_ARQUITECTURA.txt y BONES_03_GUIA_PARA_PROGRAMADORES.txt
+  por los nuevos documentos 0.4, para no presentar ModKit antiguo como actual.
+- BONES_03_ESTADO_Y_CAMBIOS.txt por BONES_04_ESTADO_CAMBIOS.txt.
+
+NO ELIMINAR:
+- Plan maestro, decisiones de Soul o contratos oficiales que aún no tengan
+  sucesores formalmente aprobados. La ABI ModKit 1 es una propuesta concreta,
+  no una sustitución unilateral del contrato oficial antiguo.
+
+GITHUB:
+La carpeta BONES/ que se había creado antes permanece incompleta hasta
+sincronizar TODOS los archivos de esta entrega. El ZIP es la fuente completa
+verificada de v0.4.0; no afirmar que GitHub está sincronizado sin comprobarlo.

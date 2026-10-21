@@ -1,0 +1,54 @@
+PROYECTO 1.44 - INFORME REPRODUCIBLE - BONES 0.3.0
+21/10/2026
+===================================================
+
+SISTEMA VALIDADO: compilacion Linux x86_64 con gcc y clang. El PE Windows
+NO se ha generado o ejecutado en este entorno.
+
+make test
+  PASS tests/test_bones.c - fisicas/render anteriores
+  PASS tests/test_subsystems.c - 5 ranuras, eventos, dependencias, Eye
+  PASS tests/test_geometry.c - quad/triangulos/UV/casa/materiales anteriores
+  PASS tests/test_foundation.c - entidades, ownership y secuencia, tick,
+       colisiones de NPC, namespace de ramas, estado LE con checksum,
+       recuperacion atomica, copia de colisionadores, journal, reproducibilidad
+       intrabuild, integracion de 5 modulos y Eye real; ordenes enviadas desde
+       after_tick se ejecutan en el tick SIGUIENTE (sin desaparecer).
+
+Sanitizadores GCC (ASan/UBSan)
+  Las 4 suites pasaron antes de la correccion final del manejo de callbacks.
+  En la repeticion final, las 3 suites antiguas pasaron, pero el proceso
+  completo agotó el tiempo durante la compilacion de test_foundation_sanitize.
+  La suite test_foundation final se recompilo por separado con -O0 -g0
+  -fsanitize=address,undefined y PASO. No anunciar ultima ejecucion conjunta
+  de make sanitize como completamente terminada.
+
+Clang -O2 -Wall -Wextra -Wpedantic -Werror + test_foundation
+  PASS en el control previo; la ultima correccion se verifico con GCC y
+  con el test nuevo bajo ASan/UBSan, no se ha repetido Clang en la version
+  final en este informe.
+
+make preview; make core
+  PASS; build/bones_headless y build/libbones.a se producen correctamente.
+
+COMPARACION DE BINARIOS LINUX ELF (NO WINDOWS PE), GCC -O2:
+  antiguo 0.2.1: 39.416 bytes
+  nuevo   0.3.0: 48.792 bytes
+  INCREMENTO:    9.376 bytes
+
+La medicion es orientativa (ejecutables headless comparables en el mismo
+entorno), no el tamano final de publicacion ni de todos los modulos.
+No existe aun prueba de ejecutable final <= 1.474.560 bytes en Windows.
+
+LIMITACIONES NO PROBADAS (no anunciar como funcional):
+  - Autenticacion remota, sockets, P2P, paquetes, sincronizacion de 2-4 peers.
+  - Determinismo bit-a-bit entre maquinas/sistemas/compiladores.
+  - Snapshots bajo ataques de red (no exponer el parser sin sandbox y limites).
+  - Fisicas dinamicas actor-actor, pendientes, colisiones por malla, streaming.
+  - Guardado atomico a disco, merge semantico y evolucion de BSF1.
+  - Proveedor Eye EYE1/EYE2 real y cache de 256 materiales.
+  - Resiliencia de build nativo Windows y presupuesto 1.44MB final.
+
+RECOMENDACION SOUL:
+  Pruebas de nueva rama con cada modulo real; Windows MSVC/MinGW; test
+  A/B de bytes y memoria; contrato stable cuando haya integracion real.

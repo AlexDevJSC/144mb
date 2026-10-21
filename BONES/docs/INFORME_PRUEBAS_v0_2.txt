@@ -1,0 +1,48 @@
+BONES 0.2.0 — INFORME DE PRUEBAS REPRODUCIBLES
+20/10/2026 | Entorno: Linux x86_64, C11, GCC y Clang 17
+================================================================
+COMANDOS
+  make -B test core preview
+  make sanitize
+  make CC=clang CFLAGS='-std=c11 -O2 -Wall -Wextra -Wpedantic -Werror' -B test core preview
+
+TESTS / RESULTADOS
+  tests/test_bones.c       PASS regresión de movimiento y renderer.
+  tests/test_subsystems.c  PASS cinco slots y dependencia/rollback.
+  Render legado de Eye desde Bones       hash 31f712cc9903b4e0.
+  Render via plugin de Eye              hash e0a5ae42c08c60a2.
+  Las imágenes provienen de escenas diferentes en tests; cada hash se
+  compara consigo mismo para determinismo en mismo ejecutable.
+  Escenario headless                        139 ticks y dos capturas.
+  Sanitizadores GCC ASan y UBSan             PASS sin problemas reportados.
+  Clang 17 -Werror                         PASS sin avisos de compilación.
+  Compilación del core sin Eye               PASS (libbones.a).
+  Plantilla Ear                              compila como C11.
+  Documento maestro original                comparado byte a byte intacto.
+
+TAMAÑOS DE COMPILACION LINUX (CLANG -O2, PROVISIONALES)
+  libbones.a         21.002 bytes (archivo .a de desarrollo, NO PE).
+  test_bones         45.528 bytes (ELF tests).
+  test_subsystems    45.624 bytes (ELF tests).
+  bones_headless     34.768 bytes (ELF test).
+  NO se extrapola ninguno de estos tamaños al EXE de Windows.
+
+ADVERTENCIAS CRITICAS
+  - NO se probó Windows/MSVC/MinGW ni se midió el límite de 1,44MB.
+  - Los tests usan simuladores para Ear/Brain/Skin/Mouth. Sus motores
+    reales no existen todavía en esta entrega.
+  - Determinismo del mundo multiplataforma y P2P no probados.
+  - El renderer Eye actual es software de prueba, no D3D11.
+
+
+ANEXO PRUEBAS v0.2.1 — 20-10-2026
+  GCC C11 -O2 -Wall -Wextra -Wpedantic: make test PASS (3 suites).
+  GCC AddressSanitizer/UBSan: make sanitize PASS (3 suites).
+  Proveedor externo simulado: 64x64 0xFFRRGGBB, 3 recetas, seed
+  determinista, fallos por material y cache conservada.
+  Validacion textura EYE1/EYE2 REAL: NO REALIZADA (fuentes ausentes).
+  ELF headless original 35.056 B, actualizado 39.416 B, +4.360 B.
+  Clases .text +2.413 B, .data +8 B, .bss +0 B.
+  sizeof Eye 561.208 B; sizeof escena 8.284 B; quad 84 B.
+  Stack temporal material 16.384 B.
+  Sin compilacion nativa Windows ni medicion PE.

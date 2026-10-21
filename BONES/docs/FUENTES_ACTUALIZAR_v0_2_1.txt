@@ -1,0 +1,38 @@
+QUE PONER EN FUENTES DEL PROYECTO — BONES v0.2.1
+================================================
+
+ARCHIVOS NUEVOS — ANADIR A FUENTES
+  1. BONES_Contrato_Geometria_Materiales_v0_2_1.txt
+     Acuerdo trabajado Bones/Eye: API sin cambios, UV, IDs, proveedor,
+     costes medidos, futuras extensiones pendientes de aprobacion.
+  2. BONES_Cambios_v0_2_1.txt
+     Registro de cambios y compatibilidad.
+  3. PROYECTO_144_Bones_Geometria_Eye_v0_2_1.zip
+     Fuente C, pruebas, herramientas, adaptador y capturas de la entrega.
+     Para consulta directa del codigo, extraer y anadir .c/.h si se
+     necesitan entre colaboradores; un ZIP no reemplaza una lectura
+     de los archivos fuente individuales.
+
+SUSTITUIR / ACTUALIZAR EN FUENTES
+  - BONES_Estado_Real_v0_2.txt por BONES_Estado_Real_v0_2_1.txt.
+  - BONES_Registro_Cambios_v0_2.txt por BONES_Cambios_v0_2_1.txt,
+    que INCLUYE los cambios historicos anteriores.
+  - Si subiste PROYECTO_144_Bones_Modular_v0_2.zip, sustituirlo
+    como version de trabajo por el ZIP v0.2.1 (archivar el anterior
+    fuera de Fuentes como respaldo).
+
+CONSERVAR EN FUENTES
+  - PROYECTO_144_Plan_Maestro_v1.md (referencia canonica).
+  - BONES_Contrato_Modulos_v0_2.txt (API modulos permanece igual).
+  - Todos los contratos independientes de Ear/Brain/Skin/Mouth.
+
+NO ANADIR COMO CONTRATO DEFINITIVO
+  - Una API Bones v3 con BonesTriangle o MatId de 16 bits:
+    propuesta aun sin aprobar, ver apartado 8 del contrato nuevo.
+  - El codigo EYE1/EYE2: no esta en esta entrega.
+
+NOTA PARA EYE
+  Para cerrar la integracion final, aportar archivos .c/.h de las
+  recetas EYE1/EYE2, contrato de IDs y semilla/variante. No basta
+  con conocer que existe un generador 64x64: hay que compilarlo
+  contra el adaptador y ejecutar los tests sobre el binario final.

@@ -1,0 +1,33 @@
+PROYECTO 1.44 - ACTUALIZACION DE FUENTES DESPUES DE BONES 0.3.0
+================================================================
+
+AÑADIR A FUENTES DEL PROYECTO:
+  1. PROYECTO_144_Bones_Foundation_v0_3_0.zip
+     [fuentes C11, proyectos, pruebas, ejemplos y documentos].
+  2. BONES_03_CONTRATO_Y_ARQUITECTURA.txt
+     [nueva API aditiva y limites; revision pendiente de Soul].
+  3. BONES_03_GUIA_PARA_PROGRAMADORES.txt
+     [instrucciones exactas para Eye/Ear/Brain/Skin/Mouth].
+  4. BONES_03_ESTADO_Y_CAMBIOS.txt
+     [cambios implementados vs propuestas y prueba de regresion].
+
+CONSERVAR SIN MODIFICAR:
+  - PROYECTO_144_Plan_Maestro_v1.md
+  - Usos de los chats.txt
+  - BONES_Contrato_Modulos_v0_2.txt (sigue API2/subsystem v1)
+  - BONES_Contrato_Geometria_Materiales_v0_2_1.txt
+  - Decisiones aprobadas de Eye 0.5 y de Soul, si las hubiera.
+
+SUSTITUIR EN FUENTES:
+  - PROYECTO_144_Bones_Geometria_Eye_v0_2_1.zip por el ZIP 0.3.0.
+    Guardar 0.2.1 fuera de Fuentes como respaldo/version historica.
+  - Documentacion de ESTADO y CAMBIOS 0.2.1 por la version 0.3.0.
+
+NO SUSTITUIR:
+  - Contrato modular 0.2 ni plan maestro. Foundation 0.3 es ANEXO
+    experimental compatible y no es una aprobacion de nueva ABI.
+
+NOTA: si las Fuentes no permiten analizar ZIPs, subir individualmente
+  include/bones/foundation.h, docs/BONES_03_CONTRATO_Y_ARQUITECTURA.txt,
+  docs/BONES_03_GUIA_PARA_PROGRAMADORES.txt y el README del proyecto.
+  El ZIP sigue siendo imprescindible para transportar el codigo integro.

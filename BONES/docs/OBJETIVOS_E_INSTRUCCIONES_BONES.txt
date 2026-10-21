@@ -1,0 +1,105 @@
+PROYECTO 1.44 — OBJETIVOS / REGLAS DE DESARROLLO DEL MOTOR CENTRAL BONES
+Versión: 1.0 | 20 octubre 2026 | Responsable: Bones
+Documento subordinado a PLAN_MAESTRO_ORIGINAL_v1.md.
+
+1. MISIÓN Y LÍMITES
+  Bones gobierna el estado autoritativo y las físicas locales, no los píxeles.
+  Debe permitir instalar motores complementarios (Eye para gráficos; más
+  adelante mundo, NPC, RPG, inventario, networking, guardado, audio).
+  Mantener la ambición del RPG procedural, singleplayer y cooperativo P2P 2-4.
+  No declarar implementados motores complementarios aún inexistentes.
+  Objetivo A: EXE Windows único hasta 1.474.560 bytes; NO límite de fuentes.
+  No es legítimo sacrificar identidad de objetos o integridad de guardados
+  solo para mejorar gráficos/rendimiento.
+
+2. PRINCIPIOS DE ARQUITECTURA
+  A. Core C11 sin incluir windows.h, Direct3D, GDI ni headers de Eye.
+  B. Ticks de simulación de duración fija, independientes de render y entrada.
+  C. Geometría lógica, colisiones y escena visual derivadas del mismo mundo.
+  D. Sin memoria dinámica para estructuras de prototipo: arrays acotados.
+  E. Sistemas en orden explícito; sin un RNG global dependiente de visitas.
+  F. Semilla, versión y dominio son entradas explícitas a claves de sectores.
+  G. La UI y Eye consumen snapshots; nunca mueven al personaje directamente.
+  H. Los módulos se registran antes del primer tick (máximo 8 en demo).
+  I. Versión API controlada; nuevo ABI / formato exige contrato actualizado.
+  J. Dependencias hacia dentro: App -> Bones; Adaptador -> Bones y Eye.
+
+3. CONVENCIONES C Y ORGANIZACION
+  - C11 portable, stdint.h, stdbool.h, tipos estructurados y prefijos bones_.
+  - Nombres públicos Bones*, constantes BONES_*, funciones bones_*.
+  - Evitar variables globales en el core; las de la demo Win32 son privadas.
+  - Validar índices, tamaños de arrays, ids, rangos de colisión y dt inválido.
+  - Construcción determinista sin rand(), reloj del SO o punteros en seeds.
+  - Usar single-thread sim para fase Triciclo; paralelización posterior
+    requerirá colas, orden de eventos y pruebas explícitas.
+  - No escribir en disco en core. Persistencia será responsabilidad SAVE.
+  - No confundir la librería de desarrollo con EXE distribuido.
+
+4. FILOSOFIA DE FISICAS
+  - Espacio: metros aproximados, Y vertical, X horizontal, Z profundidad.
+  - Personaje: cuerpo vertical radio 0.32, altura 1.80, ojos a 1.65.
+  - Caminar: objetivo 3.0 m/s, sprint 5.5, aceleración y frenado.
+  - Salto: impulso de 5.0 m/s, gravedad 14.0 m/s²; piso plano y=0.
+  - Colisión: círculo en XZ x intervalo Y contra cajas AABB estáticas.
+  - Movimiento X y Z separado para deslizarse por paredes.
+  - Movimientos fraccionados para minimizar pasos a través de obstáculos.
+  - No prometer física rígida, colisiones precisas de malla ni escalones.
+  - Antes de añadir dinámicas complejas medir estabilidad y tamaño real.
+
+5. RUTA DE DESARROLLO: RUEDA -> TRICICLO -> MOTO -> COCHE
+  RUEDA (base) — HECHO EN C11, VALIDADO EN LINUX:
+    estructuras, tick fijo, compilación básica, motor visual de prueba.
+  TRICICLO (vertical slice física) — PROTOTIPO ACTUAL:
+    gravedad, salto, aceleración, límites y obstáculos, ejemplo de módulos,
+    sala 3D, Eye de backend, tests. PENDIENTE ejecutarlo en Windows real.
+  MOTO (motor de mundo):
+    suelo por altura, rampas, escalones, plataformas, actores dinámicos,
+    entidades id estables, streaming de sectores, colisiones espaciales y
+    sincronización de ticks/entradas predecible.
+  COCHE (integración RPG):
+    NPC y AI autoritativos, inventario/eventos, combate, guardado binario,
+    red P2P, fusión de historias. Validar cada puerta del plan maestro.
+
+6. DEFINITION OF DONE PARA CADA CAMBIO
+  1) Explicar requisito y límites en el fichero de componente.
+  2) Escribir código limpio (sin duplicar responsabilidades de Eye).
+  3) Añadir/regresar tests, incluidos casos límite (no solo happy path).
+  4) Ejecutar compilación C11 y tests; probar sanitizadores si aplica.
+  5) Registrar cambios exactos en docs/REGISTRO_CAMBIOS.txt.
+  6) Actualizar docs/ESTADO_REAL.txt, arquitectura y contrato si cambian.
+  7) Medir binario de Windows final; sin toolchain marcar NO VALIDADO.
+  8) Dejar ruta de rollback o nota de incompatibilidad de interfaz/datos.
+
+7. RIESGOS / DECISIONES NO TOMADAS
+  - Direct3D 11 no decidido de forma definitiva (Eye ha prototipado SW/GDI).
+  - No hay determinismo de coma flotante entre compiladores/CPU demostrado.
+  - Sin implementación aún de guardados / merge / UDP / economía / AI.
+  - Salas/dungeons procedurales y mundo virtualmente infinito, futuros.
+  - Física actual es cinemática, NO simulación universal.
+  - La asignación de los 1.44 MB sigue abierta y requiere mediciones reales.
+
+7. REVISION 0.2 — NUEVO ESTANDAR PARA MOTORES COMPLEMENTARIOS
+  - Ear, Eye, Brain, Skin y Mouth se registran mediante BonesSubsystem,
+    no mediante enlaces de DLL o modificación del código Bones.
+  - Usa include/bones/bones.h y docs/CONTRATO_SUBSISTEMAS_v1.txt.
+  - Los motores nuevos crean un descriptor de slot con version, size,
+    requiere bits y contexto estable, NO alteran las cabeceras privadas.
+  - Solo Eye es presentador final. Los otros cuatro slots pueden recibir
+    eventos o aportar escena; sus funciones finales aún deben acordarse.
+  - Registrar antes del tick; iniciar antes de uso (o primer tick auto),
+    detener antes de liberar datos privados.
+  - No usar eventos volátiles para transferencias de bienes ni para merge.
+  - No modificar third_party/eye/sw_renderer.c desde Bones.
+  - Toda ruptura de contrato debe incluir versión, migración, tests,
+    registro de cambios, actualización de estado y medición Windows PE.
+  - El registro de 8 extensiones BonesModule es LEGADO; no usarlo para
+    estos cinco motores salvo migración temporal controlada.
+
+
+NORMA OPERATIVA v0.2.1
+  Todas las ampliaciones de geometria deben demostrar material
+  compartido, UV correctas y no alterar la simulacion.
+  Si un cambio precisa nueva ABI, presentar propuesta al responsable
+  antes de tocar include/bones/bones.h. Medir costes de binario y RAM.
+  Cada entrega: documentar, probar, registrar cambios y listar archivos
+  que se anaden/sustituyen en Fuentes del proyecto.

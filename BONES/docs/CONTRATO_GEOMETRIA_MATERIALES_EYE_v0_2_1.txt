@@ -1,0 +1,146 @@
+PROYECTO 1.44 — BONES / EYE — RESPUESTA A SOLICITUD GEOMETRICA
+Contrato de trabajo compatible v0.2.1 | 20-10-2026
+ESTADO: parte implementada y probada; propuestas ABI pendientes de acuerdo.
+
+1. MARCO CONTRACTUAL: NO SE CAMBIA LA API PUBLICA
+  BONES_API_VERSION=2; BONES_SUBSYSTEM_API_VERSION=1.
+  include/bones/bones.h es BYTE A BYTE IGUAL a Bones 0.2.0.
+  Eye continua usando src/adapters/eye_adapter.c, BonesEye,
+  bones_eye_subsystem, bones_draw_scene y BonesScene.
+  El software renderer de prueba de Eye permanece sin cambios.
+  Ni src/bones/core.c, physics.c, world.c, scene.c, subsystems.c
+  ni las estructuras/funciones publicas han cambiado.
+
+2. GEOMETRIA IMPLEMENTADA CON LA API ACTUAL
+  BonesScene contiene quads en vertices[4], cada BonesVertex tiene
+  posicion xyz y UV (float u,v); una superficie usa uint8_t material.
+  El renderizador descompone cada quad (0,1,2) y (0,2,3), hace
+  clipping near, perspectiva correcta y test de profundidad.
+  Techo: 2 quads PLANARES inclinados, uno por vertiente.
+  Fronton: BonesQuad con vertices[3]=vertices[2]. Asi el primer
+  triangulo es el real y el segundo tiene area cero. Se puede
+  realizar la alternativa repitiendo vertex[1]=vertex[0],
+  dejando el triangulo (0,2,3) como superficie real.
+  Ventaja: no cambia BonesScene ni su version. Inconveniente:
+  1 quad/triangulo logico; Eye procesa una mitad degenerada.
+  Eliminar este coste requeriria proponer nueva API publica.
+  Winding/normales: xyz en metros, Y hacia arriba. Orientar vertices
+  por normal exterior derivada de cross(B-A,C-A). La casa demo tiene
+  paredes, frontones y ambos faldones con orientacion exterior.
+  El rasterizador software ACTUAL dibuja las DOS caras; no hay
+  culling unilateral ni campo de sidedness. No afirmar lo contrario.
+
+3. MATERIAL ID Y UV: CONTRATO EFECTIVAMENTE ACEPTADO
+  Id por superficie: uint8_t, sin enlaces a EyeRecipe.
+  Validacion: 0 STONE, 1 FLOOR, 2 WOOD; 3..255 invalido en
+  bones_scene_add_quad y en colliders, NO se envian a Eye.
+  Un material NO representa la forma de la superficie.
+  La semilla que Eye recibe es uint32_t (renderer.seed).
+  UV: float por vertice, adimensional, (0,0) -> (1,1) equivale a
+  recorrer una tesela de 64x64; UV 0..4 repite cuatro veces; UV
+  negativos tambien repiten mediante floor+wrap; el patron NO se
+  recorta para adaptarse a un triangulo.
+  Escala/rotacion visual se expresan actualmente editando UV, no
+  por un campo extra en BonesQuad. Evitar dependencias a recetas.
+  Id ausente en escena: se rechaza el quad, sin accesos fuera de
+  rango. Fallo del generador externo: se conserva el ultimo material
+  valido de Eye (inicialmente la textura heredada procedural).
+
+4. NUEVA FUNCION DEL ADAPTADOR (NO AMPLIACION DE BONES.H)
+  src/adapters/eye_adapter.h declara:
+    typedef bool (*BonesEyeTextureGenerator)(
+      void *context, uint32_t material_id, uint32_t seed,
+      uint32_t *out_argb, uint32_t width, uint32_t height);
+    unsigned bones_eye_load_textures(
+      BonesEye *eye, BonesEyeTextureGenerator generator, void *context);
+
+  En integracion normal: despues de bones_eye_init y antes de
+  renderizar, Eye facilita un callback EYE1/EYE2 o equivalente que
+  rellena la matriz de 64x64 RGBA empaquetado como 0xFFRRGGBB.
+  NOTA: el canal es ARGB empaquetado a nivel de bits (alpha FF),
+  no un puntero a bytes RGBA; usar uint32_t como especificado.
+  La funcion llama como maximo una vez al generador por cada uno
+  de los 3 ids, guarda el resultado en tex[id] DEL RENDERIZADOR EYE;
+  NO crea una textura por quad/triangulo/edificio.
+  Usa una UNICA tesela temporal de 16 KiB en pila, reutilizada.
+  Si un callback falla, NO se copia su salida parcial al cache,
+  sino que permanece la textura anterior; retorno = numero
+  efectivamente cargado (0,1,2,3). No hay malloc ni I/O.
+  Bones no conoce ninguna estructura de EyeRecipe.
+  Se conserva el renderer/atlas heredado; NO hay segundo renderizador.
+  NO ES aun la conexion directa a EYE1/EYE2, pues su fuente no
+  ha sido proporcionada. Se ha probado con un proveedor externo
+  simulado que genera pixeles diferenciados por material/seed.
+
+5. CACHE Y TIEMPO DE VIDA
+  Eye es propietario del array tex[3][64*64] = 49.152 bytes.
+  Se inicializa al hacer bones_eye_init y se reemplaza SOLO cuando
+  se invoca bones_eye_load_textures; el frame no regenera recetas.
+  No se persiste ninguna textura en disco ni se incluye un atlas
+  adicional en el ejecutable. La cache es por instancia Eye.
+  Todavia NO existe cache LRU, id para materiales arbitrarios ni
+  gestion automatica por carga/descarga de regiones. Eso pertenece
+  a una futura negociacion Bones/Eye/Skin y no se simula aqui.
+
+6. DEMO DE ACEPTACION
+  src/demo/test_house.c usa 10 quads:
+    4 muros STONE
+    1 suelo FLOOR
+    1 puerta WOOD (superficie sobre muro; no puerta transitable)
+    2 frontones STONE con tercer/cuarto vertice duplicados
+    2 faldones de tejado WOOD, planarmente inclinados
+  No se ha generado NINGUNA textura por forma geometrica.
+  La casa es decorado VISUAL, sin collider, hueco transitable,
+  puertas funcionales ni alteracion de la simulacion existente.
+  El demo la agrega con BonesModule.on_scene LEGADO, conservando
+  la ruta del render modular Eye: bones_eye_subsystem -> present.
+  Esto no constituye una nueva API de generacion de edificios.
+
+7. ENSAYOS Y MEDICIONES
+  tests/test_geometry.c:
+   - 10 quads de casa y recuento por material;
+   - triangulo en primera/segunda mitad de quad, UV iguales;
+   - winding exterior y render actual por ambas caras;
+   - UV U/V independientes, offset entero/negativo repetible;
+   - oclusion Z independiente del orden de dibujo;
+   - regen determinista, fallo de proveedor sin corromper tile;
+   - proveedor llamado solo al cargar, no cada frame;
+   - rechazo al exceder capacidad de escena.
+  Tests legados fisica/subsistemas se mantienen.
+  ELF Linux, build/bones_headless GCC -O2:
+    original v0.2.0 = 35.056 bytes; nuevo v0.2.1 = 39.416 bytes.
+    Diferencia +4.360 bytes (incluye demo, puente y vista previa).
+    .text +2.413 bytes; .data +8 bytes; .bss +0 bytes.
+  sizeof(BonesEye)=561.208 B; sizeof(BonesScene)=8.284 B;
+  sizeof(BonesQuad)=84 B; 10 quads = 840 B del espacio YA
+  reservado para la escena (capacidad fija), sin nuevos arrays.
+  Buffer temporal de material: 16.384 B de pila, SOLO al cargar.
+  No se ha medido un PE Windows. Se mantiene la meta 1.474.560 B
+  pero NO se declara cumplimiento en Windows ni de RAM pico universal.
+
+8. CAMBIOS PUBLICOS A DEBATIR — NO IMPLEMENTADOS
+  a) BONES_API_VERSION=3 si se altera BonesQuad/BonesScene:
+     `vertex_count=3|4` o nuevo BonesTriangle economizaria
+     raster de triangulo degenerado, pero amplia serializacion,
+     capacidad de escena y callbacks. Evaluar bytes medidos.
+  b) MatId 16 bits, reservado rango 0..2; IDs 3+ asignados por
+     registro estable, versionado y mapeo de recetas separado.
+     Definir si son IDs globales, por banco o handles transitorios;
+     no confundir id estable con offset o puntero de cache.
+  c) Flags de doble cara vs frontal, opcion de normals explicitas.
+     Requiere revisar winding de las escenas heredadas y clasificar
+     caras interiores. La version actual NO aplica backface culling.
+  d) Variante visual semilla local / tintes, bajo responsabilidad
+     de Eye/Skin, sin acoplar Bones a EYE1/EYE2.
+  e) API de fuentes de geometria por sector, sin abuso del hook legado,
+     cuando exista el generador formal de asentamientos.
+  Para adoptar estas ampliaciones: aprobacion de Eye y responsables,
+  versionar header, adaptadores, pruebas, contract docs y changelog.
+  No cambiar unilateralmente la API 2.
+
+9. BLOQUEO ACTUAL PARA INTEGRACION EYE1/EYE2 FINAL
+  Solicitar a Eye fuente+header compilable del banco EYE1/EYE2,
+  su firma de generacion y su regla de resolucion de variantes.
+  Cuando llegue, implementar la funcion callback correspondiente
+  en Eye (no en Bones) y correr el mismo test de render/semilla
+  contra su generador real; medir el tamaño PE del juego enlazado.

@@ -1,0 +1,146 @@
+PROYECTO 1.44 - BONES 0.3.0 - FUNDACION MODULAR (C11)
+21/10/2026
+ESTADO: implementación técnica funcional; API aditiva EXPERIMENTAL sujeta a revisión de Soul.
+==========================================================================
+
+0. JERARQUIA DE DOCUMENTOS
+   1) Usos de los chats.txt = responsabilidades actuales.
+   2) PROYECTO_144_Plan_Maestro_v1.md = requisitos del producto.
+   3) BONES_Contrato_Modulos_v0_2.txt = API oficial del nucleo v0.2.
+   4) Este anexo = capacidades aditivas de v0.3, NO reemplaza el contrato.
+   La decision posterior del director asigna GUARDADOS a SKIN. No se
+   adjudica automaticamente la fusion semantica sin decision explicita.
+
+1. OBJETIVO
+   Permitir que los especialistas programen codigo independiente en
+   modules/eye, modules/ear, modules/brain, modules/skin, modules/mouth.
+   Los modulos se enlazan ESTATICAMENTE al generar un UNICO EXE final.
+   NO existe actualmente carga directa de DLL, .mod, plugins de usuario,
+   ni hot reload. "Estilo mods" se refiere a paquetes fuente autocontenidos,
+   desarrollables/probables individualmente y conectados por descriptores.
+   Si se pide DLL en desarrollo, Soul debe evaluar implicaciones de ABI,
+   seguridad, dependencias y contrato de distribucion antes de introducirla.
+
+2. COMPATIBILIDAD CON BONES 0.2.1
+   include/bones/bones.h NO SE HA MODIFICADO (identico byte a byte).
+   BONES_API_VERSION = 2; BONES_SUBSYSTEM_API_VERSION = 1.
+   NUEVA CABECERA OPTATIVA: include/bones/foundation.h
+   BONES_FOUNDATION_VERSION = 1 (API de fuente experimental, no ABI DLL).
+   Nuevo centro de integracion: BonesFoundation, que CONTIENE BonesEngine.
+   No existen dos motores de fisicas paralelos: el movimiento de todos los
+   actores reutiliza bones_physics_step_actor y el jugador local pasa por
+   bones_step original. src/adapters/eye_adapter.c se mantiene sin cambios.
+   Aplicacion Windows y herramienta headless YA usan BonesFoundation.
+   PRECAUCION: bones_step directo omite el resto de actores. La aplicacion
+   integrada usa bones_foundation_step exclusivamente.
+
+3. MODULOS EN CARPETAS SEPARADAS
+   modules/<especialista>/module.c exporta:
+       BonesSubsystem bones_mod_<especialista>_create(void *context);
+   scripts/gen_registry.py genera src/generated/module_registry.c leyendo
+   los cinco directorios existentes. El build enlaza modules/*/module.c.
+   No se deben tocar archivos centrales al reemplazar una implementacion.
+   La funcion bones_register_project_modules(f,eye_context) es la unica
+   operacion de registro en el host. Eye usa bones_eye_subsystem existente.
+   Ear, Brain, Skin, Mouth son ENCHUFES VACIOS sin logica especializada.
+   El registro no equivale a autenticacion ni a sandbox de C.
+   Cinco slots fijos; mas slots requeririan cambio de contrato y Soul.
+   Registro ANTES de bones_start. Todos los punteros context deben durar
+   hasta bones_stop. No registrar ni cerrar durante un callback.
+
+4. ENTIDADES Y FISICAS
+   Maximo actual: 32 entidades; ID uint64_t estable en (world_id,entity_id).
+   La entidad local inicial es id=1, reservada. Para creaciones nuevas:
+       entity_id = (uint64_t)branch_id << 32 | serial_de_rama;
+   world_id != semilla de generacion; branch_id!=0. SKIN debe conservar IDs
+   de mundo/rama y garantizar que dos ramas divergentes reciben distintos
+   branch_id. Esto previene coincidencia trivial por contadores locales;
+   NO constituye un algoritmo de merge ni reemplaza el ancestro comun.
+   Tipos: PLAYER, NPC, OBJECT; owner=1 jugador inicial, owner>0 cliente,
+   owner=0 mundo/NPC/objeto. El sistema almacena transformacion/cuerpo,
+   velocidad, yaw, pitch, cilindro y estado de salto.
+   fisica comun: gravedad, movimiento horizontal, choque con AABB del mundo,
+   salto, colision y deslizamiento; NO actor-actor, mallas arbitrarias,
+   vehiculos, pendientes, escalones ni suelo variable.
+   Estructuras publicas siguen visibles en C; se confia en los modulos.
+   Para cambios de estado se DEBE usar API en vez de editar entidades.
+
+5. ORDENES PARA BRAIN / MOUTH
+   BonesCommand {actor_id,tick,sequence,issuer,forward,strafe,
+                 yaw_milliradians,sprint,jump}.
+   - tick debe ser el proximo tick (engine.tick+1).
+   - 1 orden por actor/tick; 32 ordenes en cola como maximo.
+   - issuer debe coincidir con owner de la entidad.
+   - sequence debe ser creciente en cada entidad, para evitar repeticion.
+   - desplazamiento discretizado: -1,0,+1; yaw acotado por tick.
+   - bones_foundation_submit valida; bones_foundation_step aplica el tick.
+   - Brain puede programar una orden del siguiente tick en after_tick.
+   - Mouth debe AUTENTICAR al cliente antes de pasar issuer a Bones.
+   - No hay conexion UDP, prediccion, interpolacion de red, ack ni RTT aun.
+   - El after_tick puede agendar la orden siguiente sin perderla;
+     before_tick NO puede insertar comandos para el tick en curso.
+   - No hay replay historico de todos los inputs a partir del journal.
+   - Misma semilla + mismas ordenes en la MISMA compilacion => hash igual
+     en el caso de prueba; equivalencia entre maquinas NO demostrada.
+
+6. CONTRATO PARA SKIN - GUARDADOS
+   bones_foundation_export: buffer canonico BSF1, versionado, bytes LE,
+   floats IEEE754 32 bits, checksum CRC32, entidades, tick, IDs, cuerpos,
+   colisionadores y HECHOS PENDIENTES de confirmacion (spawn/remove).
+   bones_foundation_restore: valida version, checksum, mundo, rama,
+   generador, limites, IDs, valores y duplicados ANTES de aplicar cambios.
+   No abre ficheros; Skin implementara ficheros temporales, atomicidad,
+   recuperacion, versionado del contenedor total, datos especificos de
+   otros modulos, ancestros, merge y UI si se decide en su contrato.
+   Una restauracion se realiza sobre runtime recien inicializado SIN
+   subsistemas/modulos activos, ni ordenes/facts pendientes.
+   No usar struct memcpy como almacenamiento persistente ni serializar
+   punteros. CRC32 detecta corrupción accidental, NO es firma criptografica.
+   BSF1 v1 es VERSION DE PROTOTIPO, NO FORMATO FINAL DE SAVE PUBLICO.
+
+7. HECHOS CONFIRMADOS VS EVENTOS EFIMEROS
+   bones_emit_event: cola efimera de 32 para audio/UI (JUMP/LAND).
+   BonesFact: hechos de identidad de mundo (SPAWN/REMOVE), con tick,
+   secuencia y subject, capacidad 64 sin heap. Se incluyen sin confirmar
+   en export BSF1; despues de incorporacion durable Skin puede llamar a
+   bones_foundation_ack_facts. Si la cola se llena se rechaza el spawn/
+   remove para evitar perdida silenciosa. El juego no posee aun un journal
+   persistente completo de combate, inventarios o transacciones.
+   El hash canonico incluye los hechos pendientes; ACK cambia el hash.
+
+8. ESCENA / EYE
+   bones_foundation_make_scene ensambla BonesScene heredada y añade
+   billboards provisionales de actores adicionales. Sin crear colisiones
+   a partir de las mallas de Eye. Si se exceden 8 sprites, retorna false
+   en vez de omitir actores sin avisar. Los 96 quads y 3 materiales actuales
+   siguen limitados por la API visual existente. No se ha implementado
+   la ampliacion de materiales de Eye 0.5 ni EYE1/EYE2 real.
+   bones_foundation_render_frame usa el Eye.present EXISTENTE.
+
+9. LIMITES, TAMAÑO Y COMPATIBILIDAD
+   BONES_MAX_COLLIDERS=16; BONES_MAX_QUADS=96; BONES_MAX_SPRITES=8.
+   BONES_FOUNDATION_MAX_ENTITIES=32; COMMANDS=32; FACTS=64.
+   No se simula el mundo infinito, no se implementa P2P ni guardado a disco.
+   Numero de bytes Linux medidos mediante build HEADLESS de referencia:
+   0.2.1 = 39.416 B; 0.3.0 = consultar docs/PRUEBAS_03.txt (build final).
+   Comparar un ELF Linux no confirma ni predice el PE de Windows.
+   La cuota de 1.474.560 bytes aplica al ejecutable Windows FINAL completo.
+   Solo la distribucion esta limitada, no fuentes/herramientas/saves.
+
+10. PENDIENTE DE APROBACION POR SOUL / ESPECIALISTAS
+   - Versionar y estabilizar foundation.h como contrato publico cuando
+     Soul compruebe Eye/Ear/Brain/Skin/Mouth en sus ramas reales.
+   - IDs con namespaces (longitud, atribucion, creacion procedural/por rama).
+   - Formato de estado de componentes y codec de extensiones por modulo.
+   - Fisica de actores entre si, streaming por sectores y limites de escena.
+   - Autenticacion, rollback/prediccion y confirmaciones de Mouth.
+   - Modelo canonico de eventos durables e invariantes economicas para Skin.
+   - Pruebas Windows nativas y certificacion del tamaño final.
+
+11. COMANDOS PARA EL DESARROLLADOR
+   Linux: make test; make preview; make core; make sanitize.
+   Windows: scripts\\build_windows_msvc.bat o build_windows_mingw.bat.
+   Python es solo una herramienta de BUILD para generar el registro.
+   El jugador NO requiere Python ni herramientas de desarrollo.
+
+FIN.
