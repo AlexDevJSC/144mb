@@ -196,11 +196,15 @@ static void host_receive(MouthLan *l,const uint8_t *p,uint32_t n,
     if(check_header(p,n,MOUTH_TYPE_HELLO,WIRE_HELLO) &&
        mouth_lan_decode_hello(p,n,&offered,&nonce)){
         if(l->status==MOUTH_LAN_CONNECTED && !matching_peer(l,from))return;
-        l->peer_addr=from->sin_addr.s_addr;l->peer_port=from->sin_port;
         if(offered.world_id!=l->config.world_id||offered.seed!=l->config.seed||
            offered.generator_version!=l->config.generator_version){
-            send_reject(l,1);l->peer_addr=l->peer_port=0;return;
+            if(l->status!=MOUTH_LAN_CONNECTED){
+                l->peer_addr=from->sin_addr.s_addr;l->peer_port=from->sin_port;
+                send_reject(l,1);l->peer_addr=0;l->peer_port=0;
+            }
+            return; /* Invalid HELLO must not disrupt an established peer. */
         }
+        l->peer_addr=from->sin_addr.s_addr;l->peer_port=from->sin_port;
         if(l->status==MOUTH_LAN_CONNECTED){
             if(nonce==l->client_nonce){l->last_rx_ms=now;send_welcome(l);}
             return;
