@@ -1,0 +1,93 @@
+PROYECTO 1.44 / MOUTH LAN v0.3.0 - UDP CON BONES MODKIT ABI 1
+Fecha: 21/10/2026
+
+FUENTES DE CONTRATO:
+  BONES/include/bones/modkit.h (ABI 1)
+  BONES/include/bones/foundation.h (Foundation v1)
+  BONES/docs/MODKIT_V0_4_0_CONTRATO.txt
+  PROYECTO_144_Plan_Maestro_v1.md
+
+ALCANCE
+  Prototipo LAN 2 jugadores: host autoritativo + cliente remoto, IPv4 UDP,
+  puerto configurable (14444 por defecto). Sin servidores dedicados ni NAT.
+  Host ejecuta Bones Foundation/ModKit; cliente transmite controles y recibe
+  instantáneas compactas. No transmite texturas, mapas ni archivos de escena.
+  La modalidad host autoritativo es P2P en sentido host->amigo; no es un
+  sistema de consenso entre autoridades iguales.
+
+CONTRATO CON BONES
+  Host llama bones_foundation_spawn(BONES_KIND_PLAYER, owner=2).
+  Host registra mouth_lan_query a través de bones_mod_host_add.
+  mouth_lan_query implementa BonesModDescriptor ABI1, role MOUTH,
+  permissions READ_ACTORS | READ_TIME | SEND_COMMANDS.
+  start valida actor_id/owner reales de Bones; before_tick recibe paquetes,
+  valida orden/owner y usa submit_move(issuer=owner, tick=actual+1).
+  after_tick lee actor_get de los jugadores y transmite snapshots.
+  Bones decide colisiones, movimiento, salto y velocidad.
+  No hay modificaciones en BONES ni accesos directos a BonesEngine desde
+  el módulo Mouth. Para registrar Mouth en el host integrado del juego en
+  lugar del demo, sustituir el placeholder de Bones con coordinación con
+  Bones/Soul. NO enlazar simultáneamente ambos proveedores del rol MOUTH.
+  El cliente guarda transformaciones confirmadas; NO restaura Bones en
+  caliente ni modifica la física local del anfitrión.
+
+WIRE FORMAT 1 (TODOS LOS MULTIBYTE LITTLE-ENDIAN, SIN PADDING)
+  Cabecera común: magic 'M144'[4], version=1 u8, type u8,
+  length u16, session u32 -> 12 bytes.
+  Tipo 1 HELLO, length 36: world_id u64, seed u64,
+      generator_version u32, client_nonce u32. session=0.
+  Tipo 2 WELCOME, length 36: actor_id u64, owner u32,
+      echoed_client_nonce u32, host_tick u64; session!=0.
+  Tipo 3 INPUT, length 22: sequence u32, forward i8 (-1..1),
+      strafe i8 (-1..1), yaw_milliradians i16 (-300..300),
+      sprint u8 (0..1), jump u8 (0..1). session!=0.
+  Tipo 4 SNAPSHOT, length 21+28*N, N=2:
+      host_tick u64, count u8, luego N actores:
+      actor_id u64, owner u32, x_mm i32, y_mm i32, z_mm i32,
+      yaw_milliradians i32. Para N=2: 77 bytes de aplicación.
+  Tipo 5 REJECT, length 13: reason u8 (1=mundo/generador/semilla
+      incompatibles). session=0.
+  Las longitudes se validan ANTES de leer payload. Coordenadas
+  cuantizadas a milímetros. Limitadas provisionalmente al rango
+  +/-200000 metros, que requiere extensión por sector del mundo infinito.
+  La transformación del anfitrión es la fuente de verdad.
+
+PROTOCOLO DE SESIÓN
+  Client HELLO cada 500 ms hasta WELCOME que confirme nonce y actor.
+  Host se fija al primer endpoint válido y rechaza otro mientras activo.
+  Un segundo HELLO idéntico permite recuperar WELCOME perdido.
+  Client envía INPUT a 60 Hz desde su instancia. Host filtra secuencias
+  repetidas o anteriores y somete una orden por tick a Bones; retiene
+  el último input <=250ms, luego aplica input neutro.
+  Host emite snapshots 20 Hz (cada tercer tick de Bones).
+  Client acepta solo snapshots de session válida, tick creciente y
+  actores conocidos; paquetes incompletos no actualizan estado.
+  5 segundos sin mensajes -> desconexión; reconexión básica por HELLO.
+  El anfitrión no migra, no existe rollback ni predicción ni suavizado.
+
+SEGURIDAD Y COMPATIBILIDAD: AVISOS
+  No existe autenticación criptográfica. nonce/session son marcadores
+  anti-confusión, no secretos. Comprobar IP/puerto+session no protege contra
+  suplantación dentro de la LAN. Uso exclusivamente en LAN de confianza.
+  El anfitrión enlaza owner=2 al actor creado localmente antes de usar
+  submit_move; NO acepta issuer ni actor arbitrarios del paquete INPUT.
+  Versiones wire distintas se descartan. Semilla/generador/world_id distintos
+  producen rechazo. FALTAN: hash de reglas y huella de bibliotecas Eye,
+  negociación de módulos, comprobación de ancestro/checkpoint de guardado,
+  control de congestión, retransmisión de transacciones fiables y cifrado.
+  No conectar a una partida persistente real sin desarrollar esos controles.
+  Los hechos importantes no se envían aún por este protocolo.
+
+ANCHO DE BANDA NOMINAL (SOLO BYTES UDP DE APLICACIÓN, SIN IP/UDP)
+  INPUT 22 B * 60/s = 1320 B/s cliente->host.
+  SNAP 77 B * 20/s = 1540 B/s host->cliente.
+  Total nominal sesión=2860 B/s + HELLO/WELCOME/reintentos/eventos
+  y overhead físico (no medido).
+  No se realizaron capturas Wireshark ni pruebas de rendimiento reales.
+
+CRITERIOS DE PRÓXIMA VERSIÓN
+  1. Prueba nativa en dos Windows de la misma LAN, cortafuegos, FPS/RTT.
+  2. Integración Eye: render local de sprites de dos actores, interpolación.
+  3. Autenticación de unión y hash de reglas/generador/materiales.
+  4. Envío confirmado de eventos semánticos y snapshot sincronizable.
+  5. Clientes múltiples 2-4, desconexión y reconexión contra BSF1+Skin.
