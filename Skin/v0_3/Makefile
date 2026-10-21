@@ -6,11 +6,12 @@ all: test
 build/test_modkit_ui: tests/test_modkit_ui.c $(MOD)
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ $^
-test: build/test_modkit_ui build/test_eye_skin build/test_lan_ui build/test_mouth_bridge
+test: build/test_modkit_ui build/test_eye_skin build/test_lan_ui build/test_mouth_bridge build/test_layout_regression
 	./build/test_modkit_ui
 	./build/test_eye_skin
 	./build/test_lan_ui
 	./build/test_mouth_bridge
+	./build/test_layout_regression
 sanitize:
 	mkdir -p build
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_modkit_ui_san tests/test_modkit_ui.c $(MOD)
@@ -43,5 +44,10 @@ build/test_lan_ui: tests/test_lan_ui.c $(MOD)
 	$(CC) $(CFLAGS) -o $@ $^
 
 build/test_mouth_bridge: tests/test_mouth_bridge.c $(MOD)
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $^
+
+# UI geometry regression: no full-screen assets or Eye dependencies.
+build/test_layout_regression: tests/test_layout_regression.c $(MOD)
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ $^
