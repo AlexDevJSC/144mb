@@ -47,4 +47,7 @@ jobs:
       - name: Windows two-process UDP loopback
         shell: pwsh
         run: python Mouth/tests/test_loopback.py Mouth/build/mouth_lan_demo.exe
+      - name: Windows session errors and disconnect
+        shell: pwsh
+        run: python Mouth/tests/test_session_network.py Mouth/build/mouth_lan_demo.exe
 
