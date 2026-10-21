@@ -1,0 +1,22 @@
+# From repo/Ear/tests/ using the REAL BONES ModKit header and module.
+CC ?= cc
+CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror
+SRC = ../../BONES/modules/ear/modkit.c
+.PHONY: test sanitize dll_test
+build/test_ear04: test_modkit_ear04.c $(SRC)
+	mkdir -p build
+	$(CC) $(CFLAGS) -DEAR_MODKIT_TEST -o $@ $^ -lm
+test: build/test_ear04
+	./build/test_ear04
+sanitize:
+	mkdir -p build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -DEAR_MODKIT_TEST -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_ear04_asan test_modkit_ear04.c $(SRC) -lm
+	ASAN_OPTIONS=detect_leaks=1 ./build/test_ear04_asan
+build/ear_mod04.so: $(SRC)
+	mkdir -p build
+	$(CC) -std=c11 -O2 -fPIC -shared -DEAR_MODKIT_DLL -o $@ $(SRC) -lm
+build/test_ear04_so: test_modkit_ear04_so.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $< -ldl
+dll_test: build/ear_mod04.so build/test_ear04_so
+	./build/test_ear04_so ./build/ear_mod04.so
