@@ -1,0 +1,61 @@
+name: Proyecto 144 Windows Installer (main)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "Installer/**"
+      - ".github/workflows/installer-main.yml"
+permissions:
+  contents: read
+jobs:
+  build-installer:
+    name: Build and test integrated installer
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build Bones ModKit with static modules and run Mouth tests
+        shell: cmd
+        run: call Mouth\scripts\ci_windows_msvc.bat
+      - name: Find or install Inno Setup 6 on CI runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $x86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+          $iscc = if ($x86) { Join-Path $x86 'Inno Setup 6\ISCC.exe' } else { '' }
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue) -and
+              -not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+            choco install innosetup -y --no-progress --limit-output
+            if ($LASTEXITCODE -ne 0) { throw "Chocolatey Inno Setup install failed" }
+          }
+          $found = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if (-not $found -and -not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+            throw "ISCC.exe not found after installation"
+          }
+      - name: Compile setup EXE and portable ZIP
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          ./Installer/scripts/build_installer.ps1 -GitSha $env:SOURCE_SHA
+      - name: Verify installer and uninstaller on Windows
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          $short = $env:SOURCE_SHA.Substring(0, 10).ToLowerInvariant()
+          ./Installer/scripts/test_installer.ps1 -Installer "Installer/dist/Proyecto144_Instalador_$short.exe" -GameExe "BONES/build/Proyecto144_Bones_ModKit.exe"
+      - name: Upload verified Windows installer and portable game
+        uses: actions/upload-artifact@v4
+        with:
+          name: Proyecto144_Windows_Main_${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            Installer/dist/Proyecto144_Instalador_*.exe
+            Installer/dist/Proyecto144_Portable_*.zip
+            Installer/dist/VERSION.txt
+            Installer/dist/MANIFEST.json
