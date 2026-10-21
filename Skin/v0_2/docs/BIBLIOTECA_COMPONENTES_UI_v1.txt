@@ -1,0 +1,39 @@
+BIBLIOTECA SKIN — ELEMENTOS UI REUTILIZABLES v1
+20/10/2026
+
+PRINCIPIO
+Dibujar con primitivas comunes, no almacenar imágenes completas para
+ventanas, botones, inventarios o elementos repetidos. Eye puede sustituir
+posteriormente su representación aportando paleta/iconos/símbolos sin que
+Skin cambie lógica de navegación.
+
+FAMILIAS (IMPLEMENTADAS)
+- Skin2Theme: 13 colores empaquetados ARGB32, propuesta apagada; colores
+  concretos a acordar con Eye (no se han recibido números de Eye).
+- Nine-patch lógico: esquinas pequeñas, bordes superior/inferior/laterales,
+  fondo central y relieve de 2 píxeles repetible cada 8 px.
+- Button: región táctil visual de color seleccionado + borde + etiqueta.
+  Todavía navegación por teclado, NO clic ratón.
+- Bitmap font 5x7: 0-9/A-Z y unos pocos signos, escala virtual 1x/2x.
+  Fuente compartida con UI1; no hay tipografía externa ni Unicode.
+- InventoryGrid: 5 columnas x 4 filas de 34x28 px, selección contigua,
+  recorte seguro y datos de lectura del host. Icono DEMO es anillo geométrico.
+- Stats HUD: barras de HP/MP y moneda/oro.
+- Notice: mensaje contextual máximo 43 caracteres almacenados por UI.
+
+PANTALLAS ACTUALES
+  MAIN: nueva partida, continuar, opciones, salir.
+  GAME: HUD sobre escena sin cubrir el centro.
+  PAUSE: continuar, guardar, cargar, inventario, opciones, menú principal.
+  INVENTORY: veinte ranuras con detalle de objeto y oro; ESC vuelve.
+  SETTINGS: HUD normal/ampliado; no modifica configuración de Eye.
+
+DATOS, NO REGLAS
+  Items, cantidades, PV, PM y oro se suministran mediante Skin2View.
+  Un icono no es una instancia física ni permite duplicar el objeto.
+  La UI devuelve intención, no realiza una operación de dominio.
+
+PENDIENTE
+  Ratón, foco accesible, gamepad, localización/acentos/Unicode, fuentes
+  grandes y UI independiente de la proporción 16:10. Efectos de Eye, atlas
+  de símbolos definitivos y pruebas con usuarios son fases posteriores.

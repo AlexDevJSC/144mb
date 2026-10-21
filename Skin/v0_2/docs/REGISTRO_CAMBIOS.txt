@@ -1,0 +1,76 @@
+SKIN v0.2.0 — 20/10/2026 — UI2 / SOLICITUD DE EYE
+Implementado:
+- include/skin/ui2.h y src/ui2.c: UI2 independiente Bones/Eye, capa de
+  composición de color 32 bits, alfa y clipping, viewport y HUD/menús.
+- src/ui_font.[ch]: extraída fuente bitmap compartida; src/ui.c legacy
+  usa la misma tabla (sin cambiar menús ni sus estados).
+- tests/test_ui2.c: alpha, recorte, ausencia escritura fuera del viewport,
+  navegación, inventario sin equipar, solo lectura del modelo UI.
+- tools/ui2_preview.c y herramientas benchmark/tamaños; ejemplos Win32
+  nuevos con datos demo y scripts para compilar Win32 cuando esté disponible.
+- Actualizados Makefile y scripts viejos para enlazar ui_font.
+Resultados: GCC + Clang C11 OK, sanitizadores OK, GNU GCC -Wconversion OK;
++4832 bytes ELF en comparación controlada, sin medida del PE final.
+Documentación actualizada en este mismo cambio:
+  docs/RESPUESTA_EYE_SKIN_v0_2.txt
+  docs/CONTRATO_COMPOSICION_EYE_SKIN_v1.txt
+  docs/BIBLIOTECA_COMPONENTES_UI_v1.txt
+  docs/QA_Y_MEDICIONES_UI2.txt
+  docs/ESTADO_REAL.txt, REGISTRO_CAMBIOS.txt, README.txt
+No modificado: formato SAVE v1, protocolos de red, Bones/Eye real.
+Limitaciones: arte, paleta exacta, GPU, UX Windows y accesibilidad pendientes.
+
+PROYECTO 1.44 — SKIN — REGISTRO DE CAMBIOS
+
+2026-10-20 | v0.1.0 — Primera implementación.
+Requisito del plan: §§ 10-12 (host/cambios/guardado), §13.1 (UI y save),
+§16 (persistencia verificable), §20 (documentacion/versionado).
+
+CODIGO AÑADIDO:
+ - include/skin/skin.h: API Skin, journal acotado, guardado y tema de menús.
+ - src/skin.c: hook Bones.on_tick, observación de geometría mundo, eventos
+   de contacto, muestras jugador 30 ticks, altas/bajas/updates AABB, acciones
+   semánticas host-confirmadas a solicitud, guardia de semilla/versión.
+ - src/save.c: formato binario versionado, LE, CRC32, validación antes de cargar,
+   doble slot a/b, escritura atómica via temporal y sincronización de disco.
+ - src/ui.c: fuente bitmap 5x7, navegación, menús/HUD/pause, paleta SkinPalette,
+   dibujo directamente en framebuffer Eye o buffer de prueba, escenario
+   grafico provisional sin assets externos.
+ - tests/fixtures/bones/bones.h + tests/mock_bones.c: DOBLE de prueba alineado
+   con el contrato Bones v0.1 visible; NO contiene los algoritmos reales Bones.
+ - tests/test_skin.c: tests de observación, update AABB, recuperación de ranura,
+   fallo por CRC, truncamiento, carga transaccional, invalidez de identidad,
+   eventos desbordados, UX y capturas reales de los menús.
+ - examples/win32_skin_demo.c: demostración UI independiente de Bones real,
+   compilable con MSVC/MinGW cuando haya toolchain disponible.
+ - scripts/build_windows_demo_msvc.bat, scripts/build_windows_demo_mingw.bat,
+   scripts/verify_bytes.ps1, Makefile.
+
+CORRECCIONES REALIZADAS DURANTE LA ENTREGA:
+ - Decoder valida longitud real antes de checksum/parsing, evitando leer
+   regiones de memoria no inicializadas en archivos truncados.
+ - Guardado rechaza sobrescribir otra rama/mundo en path ya ocupado.
+ - Valida cambios de propiedades de AABB, no solo alta y baja por ID.
+ - Valida semilla y generator_version originales antes de guardar.
+ - Función font fallback corregida y avisos GCC de indentación resueltos.
+
+DOCUMENTACION CREADA EN ESTE CAMBIO:
+ README.txt, docs/OBJETIVOS_E_INSTRUCCIONES_SKIN.txt,
+ docs/CONTRATO_BONES_EYE.txt, docs/FORMATO_GUARDADO_v1.txt,
+ docs/ESTADO_REAL.txt, docs/REGISTRO_CAMBIOS.txt,
+ docs/PLAN_MAESTRO_ANEXO_SKIN.md.
+ Se preserva docs/PLAN_MAESTRO_ORIGINAL_v1.md sin editar.
+
+VALIDACION EJECUTADA:
+ - GCC C11 -O2 -Wall -Wextra -Wpedantic: PASS.
+ - Clang C11 con mismos flags: PASS.
+ - AddressSanitizer/UBSan: PASS.
+ - Fotos de menu principal, HUD y pausa provienen realmente de src/ui.c.
+ - No se compilaron ni ejecutaron programas Win32 en este entorno.
+ - No se certificó tamaño final Windows.
+
+INCOMPATIBILIDAD / ADVERTENCIA:
+ Skin no incorpora ni altera fuentes de Bones/Eye anteriores. Sustituir el
+ header de prueba por el header REAL Bones en compilación de juego.
+ No implementar fusion automática de PBW usando estos eventos sin añadir
+ ancestro común, estados RPG y políticas por tipo de transacción.

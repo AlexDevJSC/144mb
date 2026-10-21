@@ -1,0 +1,74 @@
+CONTRATO TÉCNICO EYE ↔ SKIN / HUD / MENÚS / INVENTARIO
+Versión del contrato: 1.0, 20/10/2026
+Implementación fuente: include/skin/ui2.h, src/ui2.c
+
+0. LÍMITES DE RESPONSABILIDAD
+Skin construye interfaz, estado de navegación, compositores UI y contratos
+visuales. Eye construye/representa mundo y proporciona recursos visuales. El
+juego (Bones y otros módulos) proporciona DATOS DE PRESENTACIÓN, en copia o
+vista de solo lectura. Skin no asume inventario real, guardado o transacciones.
+
+1. CANAL DE DATOS DEL HOST HACIA SKIN
+  Skin2View: { hp, hp_max, mp, mp_max, gold, level, item_count, items[20] }.
+  Cada Skin2Item: name[24], count uint16, icon uint16.
+  Son campos DE DEMOSTRACIÓN; no representan esquema RPG definitivo.
+  La función skin2_draw(const Skin2Ui*,const Skin2View*,Skin2Canvas*)
+  no modifica Skin2View ni el estado lógico de Bones.
+  El host construye Skin2View a partir de los sistemas propietarios actuales.
+
+2. COMPOSICIÓN DE CAPAS
+  A. App crea destino de composición color (32 bits/píxel).
+  B. Eye renderiza mundo 3D en su render target y lo lleva al destino del host.
+  C. Skin dibuja HUD, menú o inventario en destino del HOST; no recibe Z-buffer.
+  D. Host presenta imagen final al dispositivo de pantalla.
+  La implementación software dibuja directamente sobre el color final del
+  host con mezcla source-over. Eso NO modifica geometría, texturas, depth de
+  Eye ni sus estructuras. Con backend GPU hay que implementar por Eye/host
+  otra ruta de compositing, sin exponer apuntadores internos de Eye.
+  Orden recomendado: Mundo -> efectos espaciales -> HUD -> modales -> cursor.
+
+3. COLORES Y TRANSPARENCIAS
+  Color pack: 0xAARRGGBB (uint32_t). En Windows little endian la memoria es
+  BGRA. Canales de origen NO premultiplicados; alfa 0 = invisible, alfa 255
+  = opaco. Con SRC_OVER sobre destino opaco:
+    c_out = (c_src*alpha + c_dst*(255-alpha)+127)/255
+  El resultado es opaco (alpha 255); se redondea al entero más cercano.
+  Formato de superficie: BGRA32 4 bytes, stride expresado en PÍXELES.
+  No se implementa blending lineal-gamma ni HDR en el prototipo.
+  Si Eye trabaja con sRGB/HDR/premultiplied alpha: conversión especificada
+  en el backend de composición, nunca en el estado físico de Bones.
+
+4. COORDENADAS Y ESCALADO DE LA INTERFAZ
+  Coordenadas virtuales de Skin UI2: 320x200, NO heredadas del render 3D.
+  Frame de destino: Skin2Canvas {pixels,width,height,stride,viewport}.
+  El viewport UI maximiza 16:10 dentro de la ventana física; si se dibuja
+  en 1280x720 -> viewport (64,0,1152,720), barras laterales intactas.
+  skin2_canvas_init valida dimensiones <=8192 y stride>=width.
+  skin2_fill convierte coordenadas virtuales a destino de host y recorta.
+  Se conserva escalado tipo píxel más cercano; texto de 5x7 lógico.
+  Contrato pendiente: HUD anclado al área del mundo en pantallas ultrawide
+  y ampliación de texto/alto DPI independiente del modo low-res de Eye.
+
+5. REUTILIZACIÓN Y MEMORIA
+  panel() construye nueve zonas lógicas mediante colores y bandas/corners.
+  Botones: planos y texto; iconos: primitivas reutilizables. UI 2 no carga
+  texturas de Eye ni crea texturas nuevas por botón. Fuente 5x7 compartida
+  entre API legacy y UI2: src/ui_font.c, una sola copia de glifos en archivo.
+  Sin malloc en la ruta UI2 y sin buffers temporales de pantalla.
+
+6. ENTRADA Y AUTORIDAD
+  skin2_input(Skin2Ui*,Skin2Key) -> Skin2Action declarativa.
+  Acciones START, LOAD, SAVE, QUIT, MAIN_REQUEST, RESUME, APPLY_SETTINGS.
+  Host valida/ejecuta acciones; Skin no escribe archivos ni llama a Bones.
+  PAUSE, INVENTORY y SETTINGS deben consumir el input antes de enviarlo a
+  movimiento. Inventario: selección de ranura SIN equipar/comprar/descartar.
+  El control HUD AMPLIADO cambia el aspecto local de HUD en Skin; no modifica
+  gráficos 3D, resolución interna de Eye, audio o controles del juego.
+
+7. CONTRATO DE VERSIONES
+  SKIN_UI2_VERSION = 1. Cabe en un módulo separado (ui2.c+ui_font.c), sin
+  incluir skin.h ni Bones. Los proyectos consumidores pueden compilar esta
+  unidad aislada. El código legacy v0.1 queda disponible para regresión y
+  guardados históricos, pero sigue usando un fixture Bones API 1 para test.
+  El Bones real más reciente, API 2, AÚN no se ha enlazado en esta entrega.
+  No confundir contrato fuente C11 con ABI binaria/DLL estable.

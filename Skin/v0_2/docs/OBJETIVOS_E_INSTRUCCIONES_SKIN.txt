@@ -1,0 +1,68 @@
+PROYECTO 1.44 — SKIN: OBJETIVOS, ALCANCE Y PLAN DE TRABAJO
+VERSION 1.0 | 20/10/2026
+REFERENCIA: PLAN_MAESTRO_ORIGINAL_v1.md (secciones 10-13, 16, 19-20).
+
+NOMBRE Y RESPONSABILIDAD
+  Skin es un módulo acoplable al motor central Bones, encargado de:
+  (A) observación controlada de cambios ya confirmados por la simulación,
+  (B) snapshot persistente, journal semántico acotado y lectura segura,
+  (C) interfaz HUD y UX (menús, diálogos y notificaciones).
+  Skin no ejecuta físicas, no arbitra P2P, no genera contenido y no modifica
+  el código de Eye. Es una capa de servicio e interacción. No es un juego.
+
+CONTRATOS OBLIGATORIOS
+  1. Bones posee la autoridad sobre el estado. Skin recibe BonesEngine*.
+  2. El modulo se instala mediante BonesModule.on_tick; no bloquea en I/O.
+  3. La escritura se invoca fuera del tick al pulsar GUARDAR o con una tarea
+     de snapshot programada por el host; no se guarda cada fotograma.
+  4. Solo registrar acciones semánticas despúes de que el host las confirme.
+  5. IDs de mundo y rama explícitos; una semilla no identifica por sí sola mundo.
+  6. Serialización endian LE/versionada, no memcpys de structs con padding.
+  7. Validar longitud, CRC, campos e identidad ANTES de tocar la simulación.
+  8. Dos ranuras de guardado con recuperación. Nunca destruir voluntariamente
+     la última ranura comprobada como íntegra.
+  9. Un evento sin semántica de fusión NO se trata como fusionable.
+ 10. UI escribe sobre framebuffer de Eye pero no determina estados del juego.
+ 11. Cada cambio fuente actualiza ESTADO_REAL, REGISTRO_CAMBIOS y contratos.
+ 12. Auditar bytes solo en binario WIN FINAL <= 1.474.560 bytes (modo A).
+
+ESCALERA DEL PROYECTO
+  RUEDA — estado observable, interfaz callbacks, tests, sin archivos en tick.
+           IMPLEMENTADO Y PROBADO CON BONES SIMULADO.
+  TRICICLO — snapshot persistente, respaldo, carga, menú/HUD/pausa y
+           adaptador al framebuffer. IMPLEMENTADO/PROBADO AISLADO; pendiente
+           acoplar y medir el Bones/Eye reales bajo Windows.
+  MOTO — sistemas de eventos propios de RPG, transacciones de propiedad,
+           batches, autosave asíncrono controlado, recuperación idempotente,
+           mapas, inventario e interfaz responsiva; pruebas estrés.
+  COCHE — PBW: ancestro común, ramas divergentes, merge tres vías, conflictos
+           y decisiones documentadas con UI de resolución; host autoritativo.
+           NO IMPLEMENTADO; el plan maestro requiere reglas específicas.
+
+GUI Y UX
+  - Resolución 320x200 de prueba; datos de diseño, colores y marco adaptables.
+  - Navegación con flechas, Enter y Esc; textos de confirmación/error.
+  - Menú principal: Nueva partida / Continuar / Salir.
+  - Menú pausa: Volver / Guardar / Cargar / Menú principal.
+  - HUD diagnóstico: tick y posición, sustituible por HUD final del RPG.
+  - Tema predeterminado de piedra oscura/oro solo PLACEHOLDER.
+  - No fabricar diseño definitivo mientras Eye no proporcione su librería
+    visual; la API SkinPalette es punto de integración de su trabajo.
+
+REGLA DE CODIGO LIMPIO
+  - C11, sin dependencias externas de runtime; Win32 solo en demo y I/O
+    especifico protegido por #if. Sin malloc dentro de on_tick.
+  - Datos de guardado son buffers LE y CRC32; compatibilidad explícita.
+  - Tests con mocks publicados, no hacer pasar resultados de mock por
+    integración completa del motor central real.
+  - Incrementar SKIN_VERSION para cambios de formato binario.
+  - Incrementar versión API cuando se rompa integración pública.
+  - Cifrado, firma criptográfica o seguridad contra jugador malicioso están
+    fuera de alcance del primer prototipo; CRC detecta corrupción accidental.
+
+PUERTAS INMEDIATAS
+  1. Pedir de Bones su distribución real y confirmar headers/tick callback.
+  2. Recibir elementos visuales de Eye y sustituir el tema placeholder.
+  3. Probar una instancia del juego en Windows, medir binario y uso de RAM.
+  4. Crear eventos con significado de comercio/cofres/propiedad/cadáveres.
+  5. Probar dos instancias, dos ramas y fusión con ejemplos no ambiguos.

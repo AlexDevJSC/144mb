@@ -1,0 +1,69 @@
+SKIN <> BONES <> EYE — CONTRATO PARA INTEGRACIÓN (v0.1)
+20 octubre 2026
+
+IMPORTANTE: la distribución de Bones/Eye construida en la conversación
+anterior no se encuentra montada en este turno; las pruebas de este paquete
+usan un DOBLE de Bones creado con el contrato v0.1 conocido. No se ha
+verificado enlace nativo contra los códigos originales.
+
+BONES -> SKIN
+  include/skin/skin.h incluye bones/bones.h (header CANÓNICO, aportar de Bones).
+  Orden:
+    BonesEngine game;
+    Skin skin;
+    bones_init(&game,SEED);
+    skin_init(&skin,&game,(SkinWorldId){WORLD_HI,WORLD_LO},BRANCH_ID);
+    skin_attach(&skin,&game);              // SOLO ANTES primer bones_step
+    while (...) {
+       // los módulos Bones ejecutan Skin.on_tick después de física
+       bones_step(&game,&input,BONES_TICK_DT);
+       // una vez fuera del tick, ante solicitud explicita de menu:
+       if (accion == SKIN_ACTION_SAVE) skin_save(&skin,&game,"partida/slot_01");
+       if (accion == SKIN_ACTION_LOAD) skin_load(&skin,&game,"partida/slot_01");
+    }
+  Los módulos se registran en un array de BONES_MAX_MODULES del propio Bones.
+  Se copia solo el ESTADO a disco, NUNCA los punteros on_tick/on_scene.
+  Al cargar se conservan las funciones de los módulos ya instalados.
+
+  Para registrar acciones semánticas aceptadas por el anfitrión:
+    if (accion_confirmada_por_host)
+        skin_record_confirmed(&skin,&game,entity_id,action_code);
+  Esta API solo registra IDs/códigos sin decidir propiedad, saldo o conflictos.
+  No llamar a partir de predicción cliente ni de resultados aún no confirmados.
+
+EYE -> SKIN
+  Eye proporciona píxeles BGRA de su framebuffer de software (o textura UI
+  compatible). Después de bones_render(...,&eye.backend), dibujar Skin:
+    skin_ui_draw(&ui,&game,eye.renderer.pixels,320,200);
+  Con un backend de GPU, la adaptación propuesta es una textura UI o quad
+  de overlay con alpha gestionado por Eye. No existe adaptador GPU Skin ahora.
+  Eye NO debe conocer SkinSave, eventos ni filesystem.
+  Skin NO conoce recetas ni atlas de Eye. Cambiar skin_ui_init().palette con
+  colores de Eye, y sustituir glyphs/rectangles por sus elementos cuando lleguen.
+  Los dibujos placeholder son código de demostración, NO assets del juego.
+
+ENTRADAS / CONTROLES
+  Interceptar navegación del menú antes de enviar entradas a movimiento Bones.
+  SKIN_KEY_UP, DOWN, ACCEPT y BACK devuelven acciones declarativas.
+  Skin NO ejecuta directamente "nueva partida" o "quit" sin host.
+  Aplicar SkinAction en la capa app: inicio, carga, guardado, reanudar, salir.
+  En modo GAME, Esc abre pausa; en PAUSE, Esc vuelve a GAME.
+  En modo MAIN, Esc no cierra sin decisión del usuario.
+
+REGLA DE PERSISTENCIA
+  Guardados en base.a / base.b; recuperar la ranura íntegra más reciente con
+  mismo World ID, Branch ID, seed y version de generador. No mezclar ramas.
+  Las escrituras crean base.tmp, fflush + _commit/fsync y sustitución de la
+  ranura MÁS ANTIGUA, dejando otra versión sin tocar. POSIX fsync directorio
+  tras rename; Windows MoveFileExA con WRITE_THROUGH.
+  Un .tmp abandonado no se utiliza para cargar automáticamente.
+  CRC32 = DETECCIÓN de daños; no es autenticación ni protección antitrampas.
+
+FORMATO ACTUAL Y LIMITES
+  v1 almacena WorldID, BranchID, generation, seed/version, tick, jugador,
+  colisionadores activos, eventos acotados. No guarda economía/objetos/quests.
+  Registro de eventos máximo 128; al desbordar establece history_truncated,
+  visible para que futuros merges rechacen historial incompleto. No hay
+  política automática de compactación sin semántica de ancestro común.
+  El motor puede tener modificaciones que Skin no detecta: toda transacción
+  semántica de RPG ha de llamar de forma explícita tras confirmación.

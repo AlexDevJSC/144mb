@@ -1,0 +1,78 @@
+ACTUALIZACIÓN v0.2.0 — RESPUESTA A EYE, 20/10/2026
+[OK] API de UI2 C11 SIN referencias a Bones o Eye: include/skin/ui2.h.
+[OK] Color ARGB32/BGRA memory, alfa SRC_OVER en superficie del HOST.
+[OK] Composición de menús/HUD sin recibir ni modificar Z-buffer de Eye.
+[OK] Escala virtual UI independiente 320x200, viewport centrado 16:10.
+[OK] Menú, pausa, inventario 20 casillas, opciones HUD y navegación.
+[OK] Nine-patch procedimental, botones, iconos de prueba, fuente 5x7 común.
+[OK] Tests Linux GCC/Clang C11 y ASAN/UBSAN; PNGs reales C11.
+[OK] RAM UI2 108 bytes; datos host 588; no scratch UI2; incremento ELF
+     comparativo +4.832 bytes con -Os, métricas NO Windows/PE.
+[PENDIENTE] Paleta EXACTA y recursos de Eye (solo colores descriptivos dados).
+[PENDIENTE] Integración con Bone API 2 real, Eye render/GPU y hardware Windows.
+[PENDIENTE] Prueba usuarios a 320x200, ratón/gamepad, Unicode, alto DPI.
+[NO REALIZADO] Ninguna nueva lógica de persistencia o negocio; la fuente
+             legacy anterior sigue en el paquete sin cambios funcionales.
+Consulta docs/QA_Y_MEDICIONES_UI2.txt para límites/metodología.
+
+PROYECTO 1.44 — SKIN v0.1.0 — ESTADO REAL
+20/10/2026
+
+HECHO Y PROBADO EN LINUX (GCC/CLANG C11)
+ [SI] API separada de motor gráfico: include/skin/skin.h.
+ [SI] Observador del callback BonesModule.on_tick (en mock Bones compatible).
+ [SI] Detecta id de altas, bajas y cambios de propiedades de AABB.
+ [SI] Detecta cambios de suelo y muestras de movimiento cada 30 ticks.
+ [SI] Registra accion_confirmada por host únicamente por llamada explícita.
+ [SI] Registro máximo 128 eventos; desbordar indica history_truncated.
+ [SI] Protección contra cambio de seed/versión del mundo durante sesión.
+ [SI] Guardado snapshot completo de jugador, mundo mínimo, tick, eventos/IDs.
+ [SI] Binario little endian con magic, version, longitud, CRC32, validaciones.
+ [SI] 2 ranuras A/B: si la reciente falla, se lee la anterior válida.
+ [SI] Carga no modifica la memoria si el guardado es inválido.
+ [SI] Escribir mediante .tmp + flush/fsync + reemplazo de ranura.
+ [SI] UI principal, pause y HUD con controles por teclado, estados y avisos.
+ [SI] Colores SkinPalette personalizables, fuente bitmap 5x7, salida BGRA.
+ [SI] Capturas de la UI real generadas por las pruebas.
+ [SI] GCC y Clang Linux: compilan tests y hashes no obligatorios idénticos.
+ [SI] AddressSanitizer + UndefinedBehaviorSanitizer, sin incidencias.
+ [SI] make build/libskin.a produce un archivo estático ELF/LINUX de Skin.
+
+CODIFICADO, NO VALIDADO EN WINDOWS
+ [PEND] examples/win32_skin_demo.c: app independiente Win32/teclado/GDI.
+ [PEND] scripts/build_windows_demo_mingw.bat / msvc.bat.
+ [PEND] Durabilidad real de reemplazo de archivos Windows.
+ [PEND] Tamaño .exe Windows y rendimiento con motor Bones/Eye completos.
+
+NO REALIZADO / LIMITACIONES IMPORTANTES
+ [NO] Enlace con código FUENTE REAL de Bones y Eye: no montados en el turno.
+ [NO] Artwork/menús finales de Eye, aún no entregados. Solo placeholder.
+ [NO] Mundo completo, historia de eventos RPG, inventario, economía, NPC.
+ [NO] Replay determinista de eventos / merge / resolución de conflictos.
+ [NO] Transacciones idempotentes de propiedad / protección de items únicos.
+ [NO] Carga/guardar multijugador/host autoritativo en entorno P2P real.
+ [NO] Autosave en background (manualmente fuera del tick por diseño inicial).
+ [NO] Ratón clic en menús, remapeo teclas, textos localizados o gamepad.
+ [NO] Pruebas de OS Windows o EXE final <= 1.474.560 bytes.
+
+ARCHIVOS RELEVANTES
+ include/skin/skin.h — API pública para Bones e interfaz.
+ src/skin.c — módulo observable y journal.
+ src/save.c — archivo snapshot v1 y double-slot crash recovery.
+ src/ui.c — UI sobre framebuffer y tema estilístico provisional.
+ tests/fixtures/bones/bones.h — copia de CONTRATO, NO fuente canónica.
+ tests/mock_bones.c — stub funcional, NO física Bones.
+ tests/test_skin.c — validación y exportación PPM.
+ build/skin_menu.png — imagen REAL producida por renderizador UI Skin.
+ build/skin_pausa.png — imagen REAL producida por renderizador UI Skin.
+ build/skin_hud.png — imagen REAL producida por renderizador UI Skin.
+
+MEDICION LOCAL (NO ES LA MEDICION DE DISTRIBUCION)
+ build/libskin.a: librería estática para Linux, aproximadamente 32 KiB
+ build/test_skin: ejecutable de tests ELF Linux, aproximadamente 48 KiB
+ NO permiten afirmar que el juego Windows cumple el objetivo de 1.44MB.
+
+CONTRATO Y VERSIONADO
+ SKIN_VERSION=1 (formato). BONES_API_VERSION=1 (contrato fixture).
+ Cambiar formato en disco: subir SKIN_VERSION y añadir migraciones/test.
+ El programa final sigue subordinado al documento maestro v1.0.

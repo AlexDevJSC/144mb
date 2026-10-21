@@ -1,0 +1,91 @@
+SKIN SAVE v1 — ESPECIFICACION BINARIA EXACTA
+20/10/2026
+
+EXTENSIONES DEL SLOT: <base>.a, <base>.b y temporal <base>.tmp.
+Los slots a/b contienen snapshot completo (no deltas). La versión más nueva
+que pase validación de identidad e integridad gana. La ranura anterior permanece.
+Solo se guardan estados confirmados; archivos pueden exceder 1,44 MB según el
+plan maestro, aunque esta implementación prototipo impone un tope de 32 KiB.
+
+BYTE ORDER: little endian para todos los enteros.
+FLOAT: 32 bits tipo IEEE754 en target compatible, guardado bit a bit como uint32.
+TEXT: no existe en v1, no hay dependencia de locale.
+
+CABECERA (20 bytes)
+Offset | Tamaño | Campo
+ 0        8      magic = ASCII SKIN144 + byte 01
+ 8        2      format_version = 1 (u16 LE)
+10        2      flags (bit0 history_truncated, bits restantes reservados 0)
+12        4      total_length (u32 LE, DEBE coincidir con tamaño de archivo)
+16        4      CRC32/IEEE del PAYLOAD bytes [20,total_length), NO criptográfico
+
+PAYLOAD (orden fijo)
+ u64   save_generation (>=1, monótono por slot válido)
+ u64   world_id.hi
+ u64   world_id.lo
+ u64   branch_id (no cero)
+ u64   world_seed
+ u32   generator_version (no cero)
+ u64   simulation_tick
+ u64   next_event_sequence (>=1)
+ u16   collider_count (0..16)
+ u16   event_count (0..128)
+ f32x3 player.feet
+ f32x3 player.velocity
+ f32   player.yaw
+ f32   player.pitch
+ f32   player.radius
+ f32   player.height
+ f32   player.eye_height
+ u8    player.grounded (0/1)
+ u8    player.jump_held (0/1)
+
+REPETIR collider_count veces (ID único)
+ u64   collider.id
+ f32x3 collider.bounds.min
+ f32x3 collider.bounds.max
+ u8    collider.solid
+ u8    collider.render_box
+ u8    collider.material  (actualmente 0..2)
+
+REPETIR event_count veces (secuencias ascendentes)
+ u64   event.sequence
+ u64   event.tick
+ u32   event.kind
+ u64   event.entity_id
+ u64   event.argument
+
+LIMITES
+ - Save completo máximo 32.768 bytes. No se acepta longitud extra.
+ - Capacidad eventos 128, colisionadores 16; si cambia Bones, revisar.
+ - No se serializan punteros de callbacks ni posiciones de memoria.
+ - No se guarda UI, theme, texturas, ni memoria del render.
+ - No persiste RPG, inventario ni NPC con estados propios: NO PBW completo.
+
+CRITERIOS DE VALIDACION
+ - magic, versión, flags, tamaño, CRC, worldID, branchID, seed y versión.
+ - colliders con ID no cero, límites min < max, floats finitos, sin duplicados.
+ - jugador con radios y altura dentro de cotas; eventos ordenados, tipos
+   conocidos y ticks/seqs no mayores que los del snapshot.
+ - leer a estructura temporal y COMMIT a Bones SOLO tras validar completo.
+ - en error se conserva todo el estado previo en RAM sin alterarlo.
+
+PROCEDIMIENTO DE GUARDADO (sin acceso a disco dentro de on_tick)
+ - Examinar slots válidos a/b; rechazar guardar sobre saves válidos de otro
+   mundo, otra rama o generación incompatibles.
+ - Elegir ranura más antigua o a si no hay ninguna válida.
+ - Serializar en RAM, calcular checksum y escribir base.tmp.
+ - fflush + _commit (Windows) / fsync (POSIX), fclose.
+ - Sustituir ranura seleccionada (MoveFileExA REPLACE/WRITE_THROUGH en
+   Windows, rename POSIX + fsync directorio).
+ - Actualizar save_generation y limpiar bandera dirty SOLO tras éxito.
+ - En carga se ignora archivo temporal residual base.tmp.
+
+LIMITACION DEL JOURNAL
+ - Registra eventos de colisión y acciones host confirmadas, pero NO hay
+   esquema de efectos RPG ni ancestro/base y no se puede reconstruir
+   inventario, tiendas o NPC solo a partir del journal.
+ - Un desbordamiento marca history_truncated. La app debería bloquear merges
+   futuros cuando esa marca esté activa. El juego aún no implementa merge.
+ - Dos slots protegen contra corrupción individual, NO fallo simultáneo ni
+   eliminación total del directorio. No se afirma garantía universal.
