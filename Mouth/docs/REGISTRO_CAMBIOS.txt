@@ -18,6 +18,9 @@ Archivos:
 Corrección dentro de 0.3:
  - Parser IPv4 explícito de Windows y declaración de GetTickCount64.
  - Cliente valida snapshot íntegro y actores conocidos antes de publicarlo.
+ - Un HELLO incompatible no borra la dirección de un cliente conectado.
+ - Test del codec corregido: el valor neutro 0 es válido para un eje;
+   las mutaciones se basan en un paquete válido en cada iteración.
 
 Estado de pruebas: NINGUNA PRUEBA DE COMPILACIÓN/EJECUCIÓN REPRODUCIDA
 por este entorno. Fuentes y scripts publicados; ejecutar y subir logs
