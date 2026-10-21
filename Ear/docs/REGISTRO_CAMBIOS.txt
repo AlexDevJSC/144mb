@@ -94,3 +94,5 @@ Actualización final de integración/documentación 0.2.0:
 - Sin cambios a BONES/include o BONES/src; module.c legado permanece.
 - Pruebas locales GCC/Clang/ASan/UBSan y .so: correctas con fixture ABI1;
   pendiente validar host real y salida Windows.
+
+21/10/2026: GitHub Actions Windows MSVC PASS, hardware absent (Ear error 4/native 2), PE 206848 -> 222720 (+15872 bytes), audibilidad sigue pendiente. https://github.com/AlexDevJSC/144mb/actions/runs/39608044774

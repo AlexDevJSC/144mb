@@ -118,3 +118,15 @@ pausa/reanudar sin cerrar, retry explícito, deduplicación JUMP/LAND.
 PASS Linux GCC/Clang/ASan/UBSan + fake/no-device/headless + test legado v0.3.
 NO VERIFICADO: audibilidad Windows real, PE MSVC, rendimiento Windows.
 Ver docs/ESTADO_MODKIT_AUDIO04.txt y contratos Skin/Bones.
+
+
+VALIDACION WINDOWS REAL (GitHub Actions Windows 2022 / MSVC, 21/10/2026)
+- Job run 39608044774: compilación Ear Win32/MSVC y Bones integrado PASS.
+- Dispositivo NO disponible: waveOutOpen error Ear=4, nativo=2;
+  el smoke test confirmó un diagnóstico recuperable, SIN audibilidad.
+- Real PE baseline (Bones con Ear placeholder): 206848 bytes.
+- Real PE con Ear 0.4 integrado: 222720 bytes. Delta: +15872 bytes.
+- Límite global 1474560 bytes respetado para ESTE build, no futuras versiones.
+- NO VERIFICADO: reproducción audible, bombeo real de dispositivo abierto,
+  waveOutPause/Restart ni limpieza de headers tras apertura válida.
+- Evidencia: https://github.com/AlexDevJSC/144mb/actions/runs/39608044774

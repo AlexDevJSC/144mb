@@ -45,3 +45,6 @@ Prueba audio Windows: `Ear\\scripts\\test_windows_audio.bat`.
 Medida Windows PE (aún pendiente): `Ear/scripts/measure_pe_ear.ps1`.
 
 Windows build/PE CI: `.github/workflows/ear-winmm-ci.yml`; CI sin salida no prueba audibilidad.
+
+
+Windows CI MSVC: [ejecución 39608044774](https://github.com/AlexDevJSC/144mb/actions/runs/39608044774), PE 206848 → 222720 bytes (+15872). El runner no tiene dispositivo de audio; audibilidad pendiente.
