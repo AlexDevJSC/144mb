@@ -1,0 +1,101 @@
+PROYECTO 1.44 - MOUTH 0.3.1 / INSTALACION EN BONES MODKIT 0.4.0
+Fecha: 21/10/2026 - autor: Mouth
+Fuente de verdad: BONES/include/bones/modkit.h ABI1, Bones ModKit v0.4.0.
+Complementa el plan maestro; NO cambia los contratos del núcleo.
+
+1. COMPATIBILIDAD DE FUENTES VERIFICADA
+Bones gen_modkit_registry.py busca modules/<id>/modkit.c y enlaza la funcion
+bones_mod_<id>_query(uint32_t, BonesModDescriptor*). El compilador de Bones
+sólo selecciona modkit.c por modulo, sin incorporar automaticamente otros
+*.c. Mouth añade tres archivos bajo BONES/modules/mouth:
+ - modkit.c: entrada bones_mod_mouth_query y modo offline por defecto
+ - mouth_lan.h: API del protocolo LAN, incluye ../../include/bones/modkit.h
+ - mouth_lan.c: implementación UDP. modkit.c lo incluye como C source.
+Ese include directo es intencional para compatibilidad con el build actual.
+NO compilar mouth_lan.c como objeto independiente ADEMÁS de modkit.c.
+No se modifican bones.h, foundation.h, modkit.h ni los sistemas de física.
+
+2. INSTALACION MANUAL DE UN ZIP PARA BONES
+Descargar/clonar fuente completa de Bones v0.4.0.
+Ejecutar desde la raíz del repositorio:
+  python Mouth/scripts/sync_bones_module.py --check
+  python Mouth/scripts/sync_bones_module.py --pack
+El ZIP generado Mouth/build/MOUTH_Bones_ModKit_0_4.zip contiene:
+  modules/mouth/modkit.c
+  modules/mouth/mouth_lan.h
+  modules/mouth/mouth_lan.c
+  modules/mouth/README.txt
+Extraer el ZIP DENTRO de la carpeta principal de BONES (donde se
+encuentran include/, src/, modules/, scripts/), sustituyendo el conector
+provisional de mouth. Si hay cambios pendientes en el destino, revisar antes
+de sobrescribir. La estructura queda BONES/modules/mouth/... .
+Para sincronizar el repositorio de desarrollo:
+  python Mouth/scripts/sync_bones_module.py --apply
+El comando modifica exclusivamente esos tres archivos en el directorio
+de Mouth de Bones. No altera Eye/Ear/Brain/Skin.
+
+3. COMPILAR EN WINDOWS
+Usar la consola x64 Developer de Visual Studio, con Python de build.
+Desde BONES:
+  scripts\build_windows_msvc.bat
+El script:
+ - regenera src/generated/modkit_registry.c;
+ - compila unidades con nombres de objeto distintos (evita sobrescritura
+   de los distintos modkit.c de diferentes especialidades);
+ - enlaza ws2_32.lib porque Mouth usa Winsock2;
+ - crea build\Proyecto144_Bones_ModKit.exe;
+ - comprueba su tamaño como artefacto de prueba.
+MinGW-w64: scripts\build_windows_mingw.bat, necesita -lws2_32.
+No distribuir Python, scripts, ZIP ni archivos de desarrollo dentro
+del ejecutable compacto.
+
+4. QUE FUNCIONA Y QUE NO SE ACTIVA SOLO
+Sin llamada previa a mouth_lan_configure_host, bones_mod_mouth_query
+registra un proveedor válido pero INERTE. Permite singleplayer y tests sin
+abrir sockets. El ejecutable Win32 de Bones no ofrece todavía controles
+online ni descubre sesiones automáticamente.
+
+Para usarlo como anfitrión, el integrador crea con Bones Foundation
+un jugador remoto de owner=2, configura world_id/seed/generator_version,
+puerto y actor_id/owner mediante mouth_lan_configure_host(&state,&config)
+ANTES de llamar a bones_mod_register_builtins() y start(). Debe conservar
+state hasta bones_mod_host_destroy(). El host permite sólo un jugador remoto
+y envía comandos al servicio submit_move; Bones resuelve las físicas.
+
+Ejemplo de ejecución ya probado en CI:
+  Mouth\scripts\build_windows_msvc.bat
+  Mouth\build\mouth_lan_demo.exe host 14444
+  Mouth\build\mouth_lan_demo.exe join 192.168.1.10 14444
+La segunda línea en otro ordenador con IP REAL del host, abierto el puerto
+UDP 14444 en red privada. Dos PC físicos aún no se han probado; CI cubre
+únicamente dos procesos en loopback Windows/Linux.
+
+5. MODO DLL FUTURO
+Bones_mod_host_load existe en herramienta de desarrollo y carga plugins
+con simbolo bones_mod_query_v1. Este paquete NO implementa autodetección,
+autoload desde mods/, instalación en caliente ni DLL propia distribuida.
+La compilación final normalmente define BONES_MODKIT_NO_DYNLIB.
+Una distribucion final de 1,44 MB incluirá módulos enlazados estaticamente.
+No confundir nuestro script de SINCRONIZACION DE FUENTES de desarrollo
+con un gestor de instalación automática dentro del videojuego.
+
+6. PRUEBAS Y EVIDENCIA DE COMPATIBILIDAD
+GitHub Actions run 39594728594:
+ - GCC Linux make -C Mouth loopback (Bones fisica): PASS.
+ - GCC Linux make -C BONES modkit_test (registro 5 módulos y DLL de ejemplo): PASS.
+ - MSVC Windows Mouth demo + codec + descriptor: PASS.
+ - MSVC Windows BONES/scripts/build_windows_msvc.bat: PASS.
+ - MSVC Windows dos procesos UDP loopback: PASS.
+ - BONES build\Proyecto144_Bones_ModKit.exe = 190.976 bytes.
+ - Mouth demo PE = 189.440 bytes.
+No valida el límite del juego FINAL (aun incompleto), 2 PCs Windows en LAN,
+congestión, reconexión sostenida, autenticación ni guardados simultáneos.
+
+7. PENDIENTES Y PROPIETARIOS
+ - Mouth: 2-4 clientes, rollback/interpolación, fiabilidad persistente, pruebas
+   de pérdida/jitter, seguridad y handshake de guardados/recetas.
+ - Bones: futura UI/host de creación de sesiones necesita usar el proveedor
+   correctamente; APIs existentes permanecen intactas.
+ - Eye: dibujado del cliente y sprites actualizados en escena.
+ - Skin: presentación de crear/unirse y continuidad/guardados autorizados.
+ - Soul: revisión de impacto, regresiones y presupuesto final.
