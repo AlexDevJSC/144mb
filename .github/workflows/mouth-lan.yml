@@ -4,11 +4,13 @@ on:
     paths:
       - "Mouth/**"
       - "BONES/**"
+      - "Skin/**"
       - ".github/workflows/mouth-lan.yml"
   pull_request:
     paths:
       - "Mouth/**"
       - "BONES/**"
+      - "Skin/**"
       - ".github/workflows/mouth-lan.yml"
   workflow_dispatch:
 jobs:
