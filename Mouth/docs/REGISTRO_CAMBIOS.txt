@@ -55,3 +55,32 @@ DEUDAS ABI Y BLOQUEANTES
 
 [0.3.1] Módulo fuente integrable por registro Bones 0.4;
 demo previa sin API de sesión tipada. Ver historial Git.
+
+
+[QA-S1, 21/10/2026] Pruebas de resiliencia y propuesta de mundos desconocidos
+ - Mouth/tests/test_lan_loss_proxy.py: NUEVO; relé UDP Python de pruebas
+   con 15% pérdida aleatoria reproducible, corte continuo de 1,2 segundos,
+   12 segundos cliente, aislación actor1/actor2 y snapshots confirmados.
+ - Mouth/Makefile: target loss; pipeline .github/workflows/mouth-lan.yml
+   ejecuta el mismo test en Windows MSVC y Linux GCC.
+ - Mouth/docs/PLAN_PRUEBAS_LAN_CONJUNTAS_v1.md: matriz de aceptación
+   Individual -> Host -> Join -> control actor2 -> snapshot -> LEAVE,
+   plan físico 2 Windows y requisitos Skin/Bones/Eye/Soul.
+ - Mouth/docs/PROPUESTA_DESCUBRIMIENTO_MUNDOS_LAN_v0.md: OPCIONES de
+   invitación fuera de banda (sin wire nuevo) o M144/2 (NO IMPLEMENTADO);
+   aprobación solicitada a Bones/Soul en issue #23.
+ - Comunicación GitHub: issues #19 Skin, #20 Bones y #5 antiguo
+   actualizados con contrato 0.4.0 vigente, sin duplicar API.
+ - Ejecución de referencia 39614303198: Linux y Windows PASS.
+   Windows 229 descartes, 96 durante corte, 731 reenviados,
+   último tick client=732; Linux 229 descartes, 96 en corte,
+   733 reenviados, tick cliente=738.
+ - Ejecución main 39614541148: PASS en ambos sistemas.
+ - Las cifras son de relé simulado localhost, no de dos PCs ni
+   certificación de carga/latencia durante horas.
+ - NO se modificaron fuentes C de Mouth ni BONES/modules/mouth.
+ - M144/1 y MOUTH_SESSION_API_VERSION=1 siguen VIGENTES.
+ - Validación conjunta gráfica NO EJECUTADA; esperar integración #19/#20.
+ - PR #21 Bones 0.4.2 en rama experimental tiene fallos de loopback
+   en su propia CI (cliente phase=8/cause=9). No atribuir causa a
+   Mouth main ni integrar cambios sin analizar el orden temporal del host.
