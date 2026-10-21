@@ -1,40 +1,57 @@
 REGISTRO DE CAMBIOS — MOUTH
+21/10/2026
 
-[0.3.0] 21/10/2026 — Primer prototipo UDP LAN conectado a Bones 0.4.
-Responsable: Mouth (red/multijugador).
-Archivos:
- - include/mouth_lan.h: API LAN v1 y estado por sesión.
- - src/mouth_lan.c: UDP transport, handshake, vínculo endpoint/owner,
-   secuencia de entradas, snapshots de dos actores y adaptador ModKit.
- - examples/lan_demo.c: anfitrión Bones + cliente de consola.
- - tests/test_codec.c: formato/longitud/versión/sesión/rangos inválidos.
- - tests/test_loopback.py: dos procesos con movimiento del actor controlado
-   en Bones (prueba ofrecida, pendiente de ejecutar).
- - Makefile, scripts/build_windows_msvc.bat, build_windows_mingw.bat.
- - docs/PROTOCOLO_LAN_V1.txt: wire format y contrato de autoridad.
- - docs/ESTADO_REAL.txt: límites reales y pruebas pendientes.
- - README.md: instrucciones de compilación y ejecución.
+[0.3.1] — Compatibilidad real con Bones 0.4.0 / instalación por fuentes
+Responsable: Mouth (red, integración de módulo).
 
-Corrección dentro de 0.3:
- - Parser IPv4 explícito de Windows y declaración de GetTickCount64.
- - Cliente valida snapshot íntegro y actores conocidos antes de publicarlo.
- - Un HELLO incompatible no borra la dirección de un cliente conectado.
- - Reconectar no reinicia la secuencia de órdenes del actor en Bones; solo
-   la secuencia de datagramas de la nueva sesión.
- - Test del codec corregido: el valor neutro 0 es válido para un eje;
-   las mutaciones se basan en un paquete válido en cada iteración.
+Código fuente:
+ - BONES/modules/mouth/modkit.c: bones_mod_mouth_query, modo offline seguro
+   y puente ABI 1 al transporte existente de Mouth.
+ - BONES/modules/mouth/mouth_lan.c/.h: fuentes autocontenidas para el árbol
+   Bones; incluye C fuente en modkit.c porque el registro solo compila ese.
+ - Mouth/adapter/modkit.c: original reproducible del adaptador para Bones.
+ - Mouth/scripts/sync_bones_module.py: --check, --apply y --pack; sincroniza
+   únicamente fuentes de Mouth y produce ZIP fuentes extraíble en Bones.
+ - Mouth/examples/lan_demo.c y Makefile: compilan el proveedor instalado real
+   en Bones/modules/mouth en vez de una variante desconectada.
+ - Mouth/tests/test_modkit_provider.c: prueba de contrato ABI1 y uso offline.
+ - Mouth/scripts/build_windows_msvc.bat y mingw: compilación y pruebas
+   contra adaptador instalado; MSVC evita colisiones de modkit.obj.
+ - BONES/scripts/build_windows_msvc.bat: corrige colisión entre nombres
+   modkit.c, compila con /Fo único y enumera SOLO archivos existentes.
+ - BONES/scripts/build_windows_mingw.bat: añade -lws2_32.
+ - Ambos scripts de Windows enlazan Winsock2 (ws2_32.lib/-lws2_32).
+ - .github/workflows/mouth-lan.yml: añade regresión completa BONES
+   ModKit en Linux y ejecutable estándar Windows al pipeline.
+ - Mouth/scripts/ci_windows_msvc.bat: MSVC+Mouth+Bones en misma consola.
 
-Resultados de pruebas GitHub Actions (21/10/2026):
- - Linux GCC / Ubuntu: compilacion C11 de codec y demo + test de dos
-   procesos UDP en localhost usando Bones Foundation. PASS.
- - Windows MSVC / VS 2026: compilación de demo y test codec PASS,
-   test de dos procesos UDP/loopback con movimiento en Bones PASS.
- - Run de referencia: 39586493847. PE Mouth demo: 188.928 bytes.
- - Prueba con dos ordenadores en LAN privada: PENDIENTE.
- - Sanitizadores, pérdida y jitter de red: PENDIENTES.
- - Nueva infraestructura CI: .github/workflows/mouth-lan.yml.
- - Mouth/scripts/ci_windows_msvc.bat detecta la versión de VS mediante
-   vswhere para evitar asumir rutas de Visual Studio 2022.
+Documentación actualizada EN EL MISMO CAMBIO:
+ - BONES/modules/mouth/README.txt
+ - Mouth/README.md
+ - Mouth/docs/INTEGRACION_BONES_0_4.txt (nuevo)
+ - Mouth/docs/ESTADO_REAL.txt
+ - Mouth/docs/REGISTRO_CAMBIOS.txt (este registro)
 
-No se modificaron los fuentes/cabeceras de BONES. Rollback: borrar los
-ficheros v0.3 añadidos bajo Mouth, mantener el resto del repositorio.
+RESULTADOS REALES (GitHub Actions 39594728594)
+ - Linux GCC test codec y provider PASS; dos procesos UDP PASS;
+   BONES modkit_test PASS con 5 proveedores y .so de desarrollo.
+ - Windows MSVC test codec/provider PASS; dos procesos UDP PASS;
+   BONES scripts/build_windows_msvc.bat PASS, 5 proveedores.
+ - Fuente del módulo comparada con referencia: PASS.
+ - PE BONES prueba oficial: 190.976 bytes / 1.474.560 techo futuro.
+ - PE Mouth demo: 189.440 bytes.
+
+LIMITACIONES A REVISAR POR SOUL
+ - Script Bones Windows alterado en build (sin cambio de ABI ni física).
+ - ModKit ABI 1 experimental: dependencia del contrato de Bones 0.4.
+ - Modo SINGLE PLAYER registra Mouth offline sin abrir un socket.
+ - No se ha integrado una UI multijugador en BONES ni se ha probado
+   una sesión entre dos PCs Windows físicos.
+ - No se ofrece una DLL instalable ni autoload; solo modo fuentes estático.
+ - No se certifica el presupuesto de bytes ni estabilidad del RPG final.
+
+[0.3.0] — Primera LAN UDP (anterior)
+ - Mouth/src/mouth_lan.c, include/mouth_lan.h, examples/lan_demo.c.
+ - Conexión 2 procesos IPv4 UDP, host ejecuta Bones physics via submit_move.
+ - Pruebas codec + loopback confirmadas. M144/1, sin autenticación fuerte.
+ - Fuente de eventos visuales v0.2 todavía pendiente de integración.
