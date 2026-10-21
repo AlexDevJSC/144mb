@@ -14,7 +14,7 @@ cl /nologo /std:c11 /TC /O2 /GL /MT /W4 /DBONES_MODKIT_NO_DYNLIB /D_CRT_SECURE_N
  src\app\win32_main.c src\bones\core.c src\bones\world.c src\bones\physics.c src\bones\scene.c src\bones\subsystems.c src\foundation\foundation.c src\modkit\modkit.c src\generated\modkit_registry.c !MODULE_FILES! ^
  src\demo\test_house.c src\adapters\eye_adapter.c third_party\eye\sw_renderer.c ^
  /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG ^
- user32.lib gdi32.lib kernel32.lib /OUT:build\Proyecto144_Bones_ModKit.exe
+ user32.lib gdi32.lib kernel32.lib ws2_32.lib /OUT:build\Proyecto144_Bones_ModKit.exe
 if errorlevel 1 exit /b 1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verificar_tamano.ps1 build\Proyecto144_Bones_ModKit.exe
 exit /b %errorlevel%
