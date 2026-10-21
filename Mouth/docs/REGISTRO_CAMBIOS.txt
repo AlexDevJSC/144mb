@@ -19,6 +19,8 @@ Corrección dentro de 0.3:
  - Parser IPv4 explícito de Windows y declaración de GetTickCount64.
  - Cliente valida snapshot íntegro y actores conocidos antes de publicarlo.
  - Un HELLO incompatible no borra la dirección de un cliente conectado.
+ - Reconectar no reinicia la secuencia de órdenes del actor en Bones; solo
+   la secuencia de datagramas de la nueva sesión.
  - Test del codec corregido: el valor neutro 0 es válido para un eje;
    las mutaciones se basan en un paquete válido en cada iteración.
 
