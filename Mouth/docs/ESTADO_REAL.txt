@@ -18,7 +18,7 @@ COMPATIBILIDAD DE ORIGEN (VERIFICADA)
   instalados en Bones con los originales de Mouth/ (más adapter/modkit.c).
   --pack produce un ZIP instalable fuente. NO instala DLLs en ejecución.
 
-PRUEBAS EJECUTADAS EN GITHUB ACTIONS RUN 39594728594
+PRUEBAS EJECUTADAS EN GITHUB ACTIONS RUNS 39594728594 Y 39595310238
  [OK] Linux Ubuntu/GCC codec y descriptor Mouth ABI1.
  [OK] Linux dos procesos UDP 127.0.0.1, entrada remota pasa por Bones.
  [OK] Linux BONES/modkit_test: registro cinco proveedores, permisos,
@@ -28,7 +28,7 @@ PRUEBAS EJECUTADAS EN GITHUB ACTIONS RUN 39594728594
       registro de 5 proveedores, compilación y link del ejecutable oficial.
  [OK] Windows dos procesos UDP localhost / movimiento confirmado.
  [OK] Sincronización de archivos fuentes (script --check).
- [MEDIDO] PE oficial Bones ModKit de prueba: 190.976 bytes.
+ [MEDIDO] PE oficial Bones ModKit de prueba: 192.512 bytes (último CI; antes 190.976).
  [MEDIDO] PE Mouth LAN demo de consola: 189.440 bytes.
  Estos tamaños NO incluyen todas las funcionalidades futuras del RPG.
 
