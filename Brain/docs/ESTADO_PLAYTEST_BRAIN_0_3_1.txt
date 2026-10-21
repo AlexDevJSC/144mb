@@ -23,3 +23,13 @@ Soul antes de incorporar Brain en main.
 
 TEST REAL FUTURO: bridge/bones_0_4/tests/run_real_bones_tests.sh, a ejecutar
 tras merge de Bones; no modificar Bones para satisfacer test sin acuerdo.
+
+ACTUALIZACION REVISION 21/10/2026
+Bones PR11 YA TIENE CODIGO CORREGIDO Y CI WINDOWS PASS en su propia rama,
+pero no consta aprobacion explicita de Soul ni merge en la revision inspeccionada.
+Se ha preparado test adicional con casa REAL, puerta y Foundation+ModKit;
+NO EJECUTADO hasta que Soul autorice baseline y se disponga de checkout.
+No confundir tamaño PE de Bones PR11 (243200) con tamaño PE combinado.
+Eye1/2: generadores y bancos versionados reales; BVR1 no integrado en Bones.
+E: PR21 aporta selector interno, NO callback o contrato ModKit.
+Referencia detallada: docs/REVISION_DEPENDENCIAS_2026_10_21.md.

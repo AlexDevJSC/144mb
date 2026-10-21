@@ -80,3 +80,12 @@ v0.3.1 — PREPARACIÓN DE REVALIDACIÓN PLAYTEST (sin merge)
                            -> ejecutar SOLO sobre Bones corregido y publicado.
   docs/HANDOFF_BRAIN_0_3_1_BONES_SOUL.md contiene requisitos y tabla de evidencia.
   Este parche no implica que las incidencias de Bones hayan sido resueltas.
+
+REVISION PR9 — EJECUCION CONDICIONADA A SOUL
+  docs/REVISION_DEPENDENCIAS_2026_10_21.md: matriz de funcionalidades reales
+  frente a mocks/propuestas. No existe aun aprobacion final Bones PR11.
+  bridge/bones_0_4/tests/run_house_after_soul_approval.sh: fixture de
+  casa, puerta y host REAL, requiere aprobacion explicita de Soul y Bones 0.4.1.
+  tests/run_eye1_eye2_boundary.sh: prueba cruzada opcional con los C de Eye
+  del mismo checkout; no compilar modulos Eye ni Bone por duplicado.
+  No cambia Brain ModKit ni su implementacion de patrulla v0.3.1.

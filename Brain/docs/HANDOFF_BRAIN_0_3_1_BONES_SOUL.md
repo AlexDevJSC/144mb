@@ -54,3 +54,13 @@ Luego playtest Windows: NPC pegado a muro exterior/interior de casa, pillar, por
 ## Revisión Soul
 
 Revisar ausencia de cambios en ABI1, autoridad de jugadores, `brain_npc.c` enlazado solo una vez, contadores sin acceso a hilos paralelos, carácter temporal del heurístico de recuperación y ausencia de persistencia de estado privado (`state_schema_version=0`). Dejar la PR sin fusionar hasta confirmación del nuevo Bones y aprobación.
+
+## Actualización tras publicación PR Bones #11, 21/10/2026
+
+Se ha verificado código `bones_house_register_colliders` y `bones_house_open_door` de la rama #11 (SHA `7444855afbd6274c4eaaf5e0661a2314e68d2182`), y CI Windows informado PASS por Bones con PE de 243.200 bytes. Ninguna review aprobatoria de Soul encontrada en PR #11; continúa abierta. **No se ha usado esa rama como baseline aprobado para ejecutar tests Brain**.
+
+NUEVO: `tests/test_brain_house_fixture.c`, ejecutable con el ModKit y el test house REALES (cerrado/abierto, rechazo por conflicto de orden, owner=0 y host WASD/Space). Script de bloqueo: `run_house_after_soul_approval.sh`. Ejecutar después de aprobación Soul y de incorporar PR11 al checkout; el test no es un mock y debe PASS antes de concluir compatibilidad. Distinguirlo de `test_brain_real_bones.c` con collider sintético.
+
+E: PR Bones #21 es selector interno sin callback Brain ModKit; se conserva saludo puramente semántico; no enchufar E antes de contrato y Soul.
+
+Eye: se revisaron generadores y códecs reales EYE1/EYE2 y el contrato de Eye 0.5.1. BVR1 sigue separado de `BonesModFrame` y los formatos SAVE. Detalles, implementación efectiva, y las decisiones exactas pendientes para Eye/Bones/Soul: `Brain/docs/REVISION_DEPENDENCIAS_2026_10_21.md`.

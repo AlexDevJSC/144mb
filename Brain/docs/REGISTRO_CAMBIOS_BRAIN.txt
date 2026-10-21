@@ -90,3 +90,12 @@ Documentación actualizada EN EL MISMO CAMBIO:
  - docs/REGISTRO_CAMBIOS_BRAIN.txt y Makefile
 BLOQUEADO por nuevas físicas/colisiones Bones y revisión Soul. No se cambia
 core, contrato ModKit, ni scripts de Bones; no se declara BUG-001 cerrado.
+
+[0.3.1 - revisión de dependencias PR9, 21/10/2026]
+ Código añadido (solo Brain): tests/test_eye1_eye2_boundary.c, tests/run_eye1_eye2_boundary.sh; bridge/bones_0_4/tests/test_brain_house_fixture.c y run_house_after_soul_approval.sh.
+ Documentación añadida: docs/REVISION_DEPENDENCIAS_2026_10_21.md.
+ Actualizaciones: HANDOFF_BRAIN_0_3_1_BONES_SOUL.md, ESTADO_PLAYTEST_BRAIN_0_3_1.txt, README.txt.
+ PR11 de Bones (SHA 7444855a) publicado sin aprobación formal de Soul encontrada; casa real y Windows quedan sin ejecutar, NO certificados.
+ PR21 selector interno sin contrato ModKit E; respuesta semántica de Brain ya existía, NO duplicada.
+ Eye1/Eye2 codificación + generadores implementados en Eye, BVR1 codificación Brain independiente; vínculo de superficies aún pendiente.
+ Tests existentes Brain 0.3.1 PASS en GCC Linux; nuevos tests externos son preparados, no ejecutados. No se toca el núcleo Bones ni ABI1.
