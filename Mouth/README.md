@@ -46,3 +46,11 @@ NAT traversal, internet auth, full persistence or multiplayer save merge.
 No physical two-PC network validation or complete game-graphics playtest.
 The 1.44 MB constraint is for the entire final game, not this demo.
 Skin/Bones integration and Soul verification are still outstanding.
+
+
+## Coordinación del playtest (sin cambio de API 0.4.0)
+- [Plan conjunto Individual → LAN → actor remoto → snapshot → salida](docs/PLAN_PRUEBAS_LAN_CONJUNTAS_v1.md): matriz verificable, pasos para dos PCs Windows y responsabilidades.
+- [Propuesta de acceso a mundo desconocido](docs/PROPUESTA_DESCUBRIMIENTO_MUNDOS_LAN_v0.md): **diseño pendiente de aprobación**, opción código de invitación M144/1 u opción M144/2. Ningún protocolo nuevo implementado.
+- [Solicitud de aprobación Bones y Soul #23](https://github.com/AlexDevJSC/144mb/issues/23), [Skin #19](https://github.com/AlexDevJSC/144mb/issues/19), [Bones #20](https://github.com/AlexDevJSC/144mb/issues/20).
+- Test reproducible de resiliencia: make -C Mouth loss, ejecutado en Linux y Windows con 15% de paquetes UDP perdidos y corte 1,2s sobre loopback. [CI PASS](https://github.com/AlexDevJSC/144mb/actions/runs/39614303198).
+- No hay prueba conjunta de menú del juego ni cliente Eye gráfico, y no se ha cambiado ningún código C de producción de Mouth.
