@@ -1,21 +1,27 @@
 # Estado de versiones — Proyecto 1.44
 
-**Corte inicial:** 21/10/2026. **Repositorio:** `AlexDevJSC/144mb`, rama `main`. Estado según el árbol de GitHub consultado y los archivos identificables del proyecto ChatGPT.
+**Revisión:** 21/10/2026 · rama `main` · árbol observado `8a3216adb0e6239130c6b88c47c70e0512b60659`.
 
-| Especialista | Última entrega ZIP localizada en archivos del proyecto | Versión declarada o deducida del nombre | Publicación visible en GitHub | Diagnóstico |
-|---|---|---|---|---|
-| BONES | `PROYECTO_144_Bones_Foundation_v0_3_0.zip` | 0.3.0 (coincide con `BONES/README.md`) | `BONES/` 0.3.0, solo parte del árbol | **Versión nominal coincidente; publicación incompleta** |
-| EYE | `Eye_0_5_1_Tejados_Corregidos.zip` | 0.5.1 (también en `CORRECCION_EYE5_1.txt`) | No existe carpeta de código EYE independiente | **No publicada / sin comparación de código** |
-| BRAIN | `PROYECTO_144_Brain_v0_2_Eye_Bones.zip` | 0.2 (nombre de entrega) | Solo `BONES/modules/brain/module.c` | **Conector Bones, no prueba de publicación del motor Brain** |
-| EAR | `EAR_Motor_Audio_v0_2_Materiales.zip` | 0.2 (nombre de entrega) | Solo `BONES/modules/ear/module.c` | **Conector Bones, no prueba de publicación del motor Ear** |
-| SKIN | `PROYECTO_144_Skin_UI_Integracion_Eye_v0_2.zip` | 0.2 (nombre de entrega) | Solo `BONES/modules/skin/module.c` | **Conector Bones, no prueba de publicación del motor Skin** |
-| MOUTH | `MOUTH_P2P_Bones_Visual_v0_2.zip` | 0.2 (nombre de entrega) | Solo `BONES/modules/mouth/module.c` | **Conector Bones, no prueba de publicación del motor Mouth** |
+| Especialista | Fuente/versión visible en GitHub | Coincidencia con entregas localizadas | Integración con el juego |
+|---|---|---|---|
+| BONES | `BONES/README.md`: **0.4.0 ModKit** y fuentes de núcleo, tests, scripts | 0.4.0 aparece en código y documentos; el archivo `ESTADO_SINCRONIZACION_0_4.md` afirma todavía incompleto mientras README afirma sincronización. No se contrastaron SHA contra ZIP | **Demo Bones+Eye legacy; otros proveedores ModKit son conectores** |
+| EYE | `Eye/` **0.5.1**, generadores EYE1–EYE5, fuentes y tests | `Eye/ESTADO_SUBIDA.md` declara 102/102 y hashes Git blob coincidentes con el ZIP; **declaración del responsable, no revalidación independiente** | No integrado con Bones ModKit/escena ampliada; las pruebas usan dobles en casos de Bones |
+| BRAIN | `Brain/README.md` **0.2.0**, código de IA y tests | Versión nominal coincide con la entrega v0.2 localizable | Demo y stub; no integrado con Bones real |
+| EAR | `Ear/README.md` **0.2.0**, motor y tests | Versión nominal coincide con la entrega v0.2 localizable | Prototipo aislado; puente Bones por verificar |
+| SKIN | `Skin/v0_2/`, UI **0.2.0** | Versión nominal coincide con entrega v0.2 localizable | Interfaz autónoma; no integrada con Bones/Eye reales |
+| MOUTH | `Mouth/README.md`: solo guía y script de importación | Entrega `MOUTH_P2P_Bones_Visual_v0_2.zip` localizada en archivos del proyecto | **Código v0.1/v0.2 aún no publicado; no hay integración P2P** |
 
-## Fuentes y límites de esta revisión
-- Árbol GitHub `main`: `BONES/`, `README.md`; dentro de Bones existen `include/bones/foundation.h`, `src/bones/{core,physics,world}.c` y conectores `modules/*/module.c`, entre otros documentos.
-- `BONES/ESTADO_SUBIDA.md` reconoce expresamente que la carpeta está incompleta y no se ha compilado desde GitHub.
-- Los ZIP anteriores se han **localizado por metadatos de archivos** del proyecto ChatGPT. No se ha ejecutado ni leído su contenido binario para esta comparación.
-- Los nombres de versiones de ZIP de BRAIN, EAR, SKIN y MOUTH son referencias nominales; confirmar su API interna cuando los archivos fuente estén disponibles.
-- No afirmar que se ha leído la última respuesta de cada chat ni que los ZIP más recientes están necesariamente todos indexados.
+## Hallazgos verificables del código
 
-La revisión de código y las pruebas sobre las entregas completas están pendientes.
+- El árbol GitHub carece de compilación principal en la raíz; `BONES/scripts/build_windows_msvc.bat` genera `BONES/build/Proyecto144_Bones_ModKit.exe`, prototipo de Bones con el renderizador Eye heredado y módulos restantes de muestra.
+- `BONES/modules/brain/modkit.c` se declara expresamente un placeholder sin lógica de Brain.
+- `BONES/modules/eye/modkit.c` convierte a escena de 3 materiales y omite IDs >2; por tanto, **no reproduce toda la gama de Eye 0.5.1**.
+- `BONES/docs/MODKIT_V0_4_0_ESTADO_Y_CAMBIOS.txt` reconoce ausencia de módulos reales especializados, mundo/guardado/networking completo y validación Windows.
+- No se ha ejecutado compilación ni prueba sobre este checkout en esta revisión. No confundir el código publicado con juego integrado o aceptado.
+
+## Próximas puertas
+1. Validar fuente de Bones 0.4 mediante manifest/hashes y compilar el EXE Windows de demo.
+2. Integrar adaptadores reales EYE, BRAIN, EAR, SKIN y MOUTH sin romper `BONES_API_VERSION=2` ni fijar ABI experimental sin aprobación.
+3. Ejecutar pruebas de integración, sanitizadores, LAN y compilación PE final con medida de 1.474.560 bytes.
+
+Registro detallado: [DISCREPANCIAS.md](DISCREPANCIAS.md).
