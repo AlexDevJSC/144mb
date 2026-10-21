@@ -67,3 +67,26 @@ EVIDENCIAS
  No se modifican APIs Brain v0.2, contratos Bones ni lógica de render.
  El adaptador incorpora el algoritmo original brain_npc_decide.
  Test GCC C11 -Werror, ASan/UBSan: PASS; ejecución BONES completa pendiente.
+
+[0.3.1 - PREPARACION / PR SIN FUSIONAR] 21/10/2026 — Verificación tras playtest
+Código añadido/modificado:
+ - bridge/bones_0_4/modules/brain/modkit.c: seguimiento breve de posición,
+   antiatasco de duración acotada, contador saturado de órdenes aceptadas/
+   rechazadas, validación lectura de actores y de propietarios. Sigue ABI1.
+ - bridge/bones_0_4/modules/brain/brain_mod_diagnostics.h: snapshot solo lectura
+   y en un hilo. Idénticas fuentes preparadas para BONES/modules/brain/.
+ - src/brain_interaction.c e include/brain/brain_interaction.h: respuesta de
+   saludo semántica tras validación futura de objetivo, sin evento E todavía.
+Pruebas añadidas:
+ - bridge/bones_0_4/tests/test_brain_playtest_mock.c; run con GCC,
+   -Werror y sanitizadores ASan/UBSan: PASS.
+ - bridge/bones_0_4/tests/test_brain_real_bones.c y shell de ejecución:
+   preparado, NO ejecutado (falta fix Bones).
+ - tests/test_brain_interaction.c: PASS.
+Documentación actualizada EN EL MISMO CAMBIO:
+ - docs/HANDOFF_BRAIN_0_3_1_BONES_SOUL.md
+ - docs/ESTADO_PLAYTEST_BRAIN_0_3_1.txt, docs/ESTADO_BRAIN.txt
+ - bridge/bones_0_4/modules/brain/README.txt y README.txt
+ - docs/REGISTRO_CAMBIOS_BRAIN.txt y Makefile
+BLOQUEADO por nuevas físicas/colisiones Bones y revisión Soul. No se cambia
+core, contrato ModKit, ni scripts de Bones; no se declara BUG-001 cerrado.

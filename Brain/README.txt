@@ -64,6 +64,7 @@ EXTENSIÓN v0.2.0 — SOLICITUD DE EYE
   - Eye y Bones no están integrados realmente en este ensayo.
   - Ver spec/CONTRATO_BRAIN_EYE_REFERENCIAS_v1.txt para roles y límites.
 
+
 NUEVO v0.3 — BONES v0.4.0
   Paquete autocontenido del módulo: bridge/bones_0_4/modules/brain/.
   Copiar modkit.c, brain.h, brain_npc.c y README.txt a BONES/modules/brain/.
@@ -71,3 +72,11 @@ NUEVO v0.3 — BONES v0.4.0
   verificar integración completa ejecutar make modkit_test desde BONES/.
   Detalles y límites: docs/CONTRATO_BRAIN_BONES_MODKIT_0_4.txt.
   Los módulos anteriores de economía/BVR1 permanecen sin integrarse en host.
+
+v0.3.1 — PREPARACIÓN DE REVALIDACIÓN PLAYTEST (sin merge)
+  make test                -> incluye mock de pared, rechazos e interacción pura.
+  make playtest-mock       -> mock de pared/obstáculo, no prueba física Bones real.
+  bridge/bones_0_4/tests/run_real_bones_tests.sh
+                           -> ejecutar SOLO sobre Bones corregido y publicado.
+  docs/HANDOFF_BRAIN_0_3_1_BONES_SOUL.md contiene requisitos y tabla de evidencia.
+  Este parche no implica que las incidencias de Bones hayan sido resueltas.

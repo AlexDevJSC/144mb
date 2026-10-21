@@ -1,0 +1,25 @@
+BRAIN 0.3.1 — ESTADO DE REGRESIÓN POST-PLAYTEST
+21/10/2026 | REVISIÓN PENDIENTE DE BONES + SOUL
+
+LA CORRECCIÓN DE BONES TODAVÍA NO ESTÁ PUBLICADA EN main
+Revisión consultada: f9fcb3550a9cd8d2dac2374af5cf9d4448f0a5fa.
+Fuente: Soul/COORDINACION_CORRECCIONES_PLAYTEST_2026-10-21.md.
+
+IMPLEMENTADO: protocolo Brain de patrulla ABI1, filtrado de dueño, diagnóstico
+explícito de rechazos/errores, reacción local antiatasco, intención pura de
+saludo a NPC (sin tecla E). No se han editado físicas/colisiones de Bones.
+
+PRUEBAS SÍ EJECUTADAS: compilación GCC C11 de Brain, regresiones Brain v0.1/v0.2,
+prueba mock con pared, área libre, rechazo, cámara del jugador y owner;
+ASan/UBSan del test de mock. Todas PASAN en este entorno Linux.
+
+NO EJECUTADAS: test contra BonesFoundation real, casa y collider real,
+compatibilidad funcional con nuevos controles físicos, Windows y PE <=1,44 MB.
+NO PROBAR CONTRA CODIGO ANTIGUO Y DECLARAR INCIDENCIAS CERRADAS.
+
+BONES: debe publicar física y colisiones corregidas, con fixture pared visual
+sólida, abertura de puerta transitable y posiciones de NPC. Se demanda revisión
+Soul antes de incorporar Brain en main.
+
+TEST REAL FUTURO: bridge/bones_0_4/tests/run_real_bones_tests.sh, a ejecutar
+tras merge de Bones; no modificar Bones para satisfacer test sin acuerdo.

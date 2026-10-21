@@ -89,3 +89,12 @@ ACTUALIZACIÓN v0.3 — COMPATIBILIDAD BONES 0.4 / MODKIT ABI 1 (21/10/2026)
   - Integración Bones/Windows/bytes PE reales: PENDIENTE de ejecutar.
   - Instalar en BONES/modules/brain/. No tocar el kernel ni las cabeceras.
   - Más detalle: docs/CONTRATO_BRAIN_BONES_MODKIT_0_4.txt.
+
+ESTADO v0.3.1 (21/10/2026): PR de preparación para playtest.
+- Adaptador ModKit ABI1 continúa sin cambios de ABI ni del núcleo de Bones.
+- Diagnósticos y evitación de atasco por movimiento observado, NO pathfinding.
+- Pruebas de mock Linux (incl. ASan/UBSan) y biblioteca Brain: PASS.
+- Test BonesFoundation real PREPARADO pero NO EJECUTADO: correcciones Bones
+  de la casa, movimiento y control no publicadas al verificar main.
+- E: intención pura de saludo, sin interfaz de selección/entrada.
+- Ver docs/HANDOFF_BRAIN_0_3_1_BONES_SOUL.md y ESTADO_PLAYTEST_BRAIN_0_3_1.txt.
