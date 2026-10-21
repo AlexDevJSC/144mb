@@ -24,9 +24,17 @@ Corrección dentro de 0.3:
  - Test del codec corregido: el valor neutro 0 es válido para un eje;
    las mutaciones se basan en un paquete válido en cada iteración.
 
-Estado de pruebas: NINGUNA PRUEBA DE COMPILACIÓN/EJECUCIÓN REPRODUCIDA
-por este entorno. Fuentes y scripts publicados; ejecutar y subir logs
-antes de considerar el hito LAN validado.
+Resultados de pruebas GitHub Actions (21/10/2026):
+ - Linux GCC / Ubuntu: compilacion C11 de codec y demo + test de dos
+   procesos UDP en localhost usando Bones Foundation. PASS.
+ - Windows MSVC / VS 2026: compilación de demo y test codec PASS,
+   test de dos procesos UDP/loopback con movimiento en Bones PASS.
+ - Run de referencia: 39586493847. PE Mouth demo: 188.928 bytes.
+ - Prueba con dos ordenadores en LAN privada: PENDIENTE.
+ - Sanitizadores, pérdida y jitter de red: PENDIENTES.
+ - Nueva infraestructura CI: .github/workflows/mouth-lan.yml.
+ - Mouth/scripts/ci_windows_msvc.bat detecta la versión de VS mediante
+   vswhere para evitar asumir rutas de Visual Studio 2022.
 
 No se modificaron los fuentes/cabeceras de BONES. Rollback: borrar los
 ficheros v0.3 añadidos bajo Mouth, mantener el resto del repositorio.
