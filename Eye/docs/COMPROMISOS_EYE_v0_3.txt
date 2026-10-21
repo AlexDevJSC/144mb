@@ -1,0 +1,39 @@
+PROYECTO 1.44 — COMPROMISOS DE EYE / SEGUIMIENTO v0.3
+20/10/2026. Responsable: Eye, desarrollador gráfico.
+
+OBJETIVO: gráfica RPG 90 inspirada en Daggerfall; datos compactos dentro del
+objetivo global de EXE Windows <= 1.474.560 bytes. No confundir datos del
+material, herramientas de desarrollo, ELF Linux ni tamaño final PE Windows.
+
+COMPROMISOS DEL DISEÑADOR, Y ESTADO REAL A FECHA DE HOY
+1. Generador C11: [HECHO] EYE1/EYE2/EYE3, compilados y probados Linux.
+2. Paletas envejecidas y patrones: [HECHO PARCIAL] EYE3 con color apagado,
+   cubiertas/caminos/ornamentos; falta test artístico Daggerfall en juego.
+3. Versionado EYE1/EYE2: [HECHO] conservados; EYE3 independiente.
+4. Determinismo: [HECHO] texturas por semilla y golden tests con C11.
+5. Triángulos/quads: [HECHO SOLO DEMO] triángulos UV en preview Eye offline;
+   Bones no integrado todavía con nuevas superficies y material IDs.
+6. RAM/presentación Bones: [HECHO PARCIAL] caché LRU en RAM cliente,
+   puente 3 slots simulado; no enlazado con Bones real.
+7. Sprites y efectos: [PENDIENTE] solo materiales; no sprites nuevos.
+8. Sin assets externos obligatorios: [HECHO EN RUNTIME EYE] recetas embebibles;
+   pruebas de Bones real pendientes.
+9. Medición: [HECHO PARCIAL] receta 12B, biblioteca 16 = 204B; ELF mínimo
+   EYE2 14.464B vs EYE3 18.560B; no PE final.
+10. Pruebas/docs: [HECHO] test, integración con doble, especificaciones,
+   ADR, changelog y contratos de entrega Soul/Bones.
+
+EL RESTO DE RESPONSABLES
+- Bones: núcleo, escena/triángulos, física, conexión del adaptador Eye.
+- Skin: interfaces, HUD y UX.
+- Brain: IA/NPC según protocolo responsabilidades v1.0.
+- Ear: audio. Mouth: comunicaciones/red. Soul: QA.
+- Persistencia lógica/economía aún sin responsable definitivo según protocolo;
+  Eye no adjudica ese trabajo por su cuenta.
+
+ORDEN PRÓXIMO
+1. Bones confirma/implementa IDs de material/UV en escena real y responde a
+   PETICION_BONES_EYE_0_3.txt.
+2. Eye integra la caché con adaptador real y muestra casa renderizada EN BONES.
+3. Soul comprueba pixel regression, RAM, FPS y PE Windows; EYE3 estilizado.
+4. Eye desarrolla sprites compactos sólo tras validar materiales de entorno.

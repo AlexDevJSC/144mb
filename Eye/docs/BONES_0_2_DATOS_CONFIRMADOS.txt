@@ -1,0 +1,49 @@
+CONTRATO BONES 0.2.0 — DATOS SUMINISTRADOS POR EL USUARIO
+20/10/2026
+
+ORIGEN
+Información copiada del mensaje del usuario de esta conversación y
+contrastada con los TXT del proyecto BONES_Contrato_Modulos_v0_2.txt y
+BONES_Estado_Real_v0_2.txt. No se tiene fuente Bones real compilable.
+
+1. Bones 0.2.0 es core C11, responsable del motor central, colisiones,
+   física, mundo de demostración. El plan maestro original sigue intacto.
+2. Su código público está en include/bones/bones.h.
+3. Bones incluye cinco ranuras opcionales: Eye, Ear, Brain, Skin, Mouth.
+4. BONES_API_VERSION=2; BONES_SUBSYSTEM_API_VERSION=1.
+5. La integración nueva va por BonesSubsystem, con slot Eye 0.
+6. src/adapters/eye_adapter.[ch] enlaza Bones con el Eye existente.
+7. third_party/eye/sw_renderer.[ch] es el renderizador software anterior.
+8. bones_render_frame construye/entrega UNA escena; Eye.present la dibuja.
+9. La capa de Windows muestra framebuffer; no compete al generador Eye.
+10. Bones real no compilado en esta entrega; compatibilidad lógica de interfaz,
+    pero la verificación integral requiere ZIP de fuentes de Bones.
+
+PROCEDIMIENTO PROPUESTO (CON CAMBIOS MÍNIMOS)
+A. En Bones/src/adapters/eye_adapter.c, localizar la función de inicialización
+   que configura el renderer después de p144_renderer_init. NO registrar otra
+   ranura Eye, NO cambiar bones_step ni bones_render_frame.
+B. Incluir eye2.h, eye_bones_bridge.h y header de pack embebido de 276 bytes.
+C. Crear EyeTextureBank en estado persistente del adaptador (no en pila de tick).
+D. eye_bank_open(&bank, PACK_DATA, PACK_SIZE) una sola vez.
+E. Cuando el renderer ya tenga su buffer de texturas, llamar a
+   eye_bones_legacy_fill con slots stone/floor/wood = recetas [0,10,7].
+   Véase examples/bones_legacy_integration.c para compilación con doble de
+   header; contrastar P144_Renderer real antes de usarlo en Bones.
+F. Al dibujar un frame no generar las texturas: usar los píxeles en RAM.
+G. Bones sigue asignando material en quads y usando UV/sprites usuales.
+H. Probar con Bones real y comprobar que p144_renderer_init NO se invoca
+   otra vez después de la instalación, porque borraría los píxeles.
+I. Si Bones mantiene más o menos que 3 texturas, parar con _Static_assert
+   y negociar cambios en adaptador/contrato, no sobrescribir memoria.
+J. Medir build Windows real integrado y presupuestar el código extra del
+   generador; 276 B sólo cuentan recetas, NO exe de 1,44 MB.
+
+RESTRICCIONES
+- No tocar movimientos, posición, gravedad, ID ni colisiones de Bones.
+- No sumar subsistemas Eye: se usa el adaptador que ya existe.
+- Materiales RGBA empaquetados como uint32_t 0xFFRRGGBB y 64×64.
+- No requerir disco en tiempo de ejecución, todo embebido en ejecutable.
+- Se conserva decodificador EYE1 para mundos que lo necesiten.
+- EYE2 usa checksum de header y records; evita renombrado EYE2->EYE1.
+- Los archivos tests/mock_bones son dobles, NO la implementación de Bones.

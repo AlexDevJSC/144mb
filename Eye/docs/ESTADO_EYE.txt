@@ -1,0 +1,38 @@
+PROYECTO 1.44 / EYE 0.5.1 — ESTADO TÉCNICO
+=========================================
+RESPONSABLE: Eye, programador de render/texturas/representación visual.
+BASE: copia de Eye0.4, fuentes EYE1/2/3/4 conservadas; extensión EYE5 aislada.
+
+IMPLEMENTADO Y PROBADO (LINUX C11)
+[OK] EYE5: cuatro materiales de cubierta, píxeles 64x64 deterministas.
+[OK] Formato EYE5 propio: 12 bytes/receta; 4 recetas = 60 bytes total.
+[OK] Envejecimiento, piezas repetibles, patrones alineados y paletas apagadas.
+[OK] Generador de dos aguas con aleros, cumbrera y remates (9 quads).
+[OK] Geometría a cuatro aguas (13 superficies, 2 triangulares, 4 limatesas, 2 aleros extra).
+[OK] Renderer headless de desarrollo con depth buffer y muestras de UV.
+[OK] Caché de materiales en RAM del llamante con descarte/regeneración.
+[OK] CLI produce cabecera C embebida desde recetas binarias.
+[OK] Regresiones EYE1-EYE4, test_eye5 y test_eye5_embed en GCC Linux.
+[OK] Nuevo test EYE5 con Clang y GCC ASan/UBSan.
+[OK] Demo 4 cubiertas + una a cuatro aguas, sin internet ni assets externos.
+
+PARCIAL / PENDIENTE
+[PEND] Materiales >3 en motor Bones 0.2.1 (RFC de IDs aún no aprobado).
+[PEND] Integración real contra include/bones/bones.h y eye_adapter.c de Bones.
+[PEND] Casas navegables y colisiones; demo visual independiente del motor.
+[OK] Orientación de filas corregida en ambos tipos de tejado; pruebas de UV.
+[PARC] Detalle artístico y continuidad visible en las limatesas aún requieren evaluación en Bones.
+[PEND] Comparativa de >=0.84 de similitud individual con materiales originales.
+[PEND] Ejecutable Windows PE, FPS y comprobación del disco FAT12 de arranque.
+
+REVISIÓN DE COMPETENCIAS
+Bones: API central y físicas; Eye: gráficos; Soul: QA; Skin: UI;
+Brain: IA; Mouth: P2P; Ear: sonido. No se asumen otras funciones.
+
+VER: FORMATO_EYE5.txt, RFC_BONES_EYE5_INTEGRACION.txt, MEDICION_EYE5.txt.
+
+CAMBIOS 0.5.1
+[OK] Sin cambios en recetas EYE1-EYE5, compatibilidad de paquetes binarios.
+[OK] Render C regenerado y comparativa antigua/nueva.
+[OK] GCC make test, Clang test_eye5, ASan/UBSan test_eye5.
+[OK] Binario Linux de sonda de tamaño medido, no Windows PE.

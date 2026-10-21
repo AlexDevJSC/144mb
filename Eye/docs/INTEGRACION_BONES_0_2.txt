@@ -1,0 +1,56 @@
+INTEGRACION EYE v0.2 CON BONES v0.2 — VERIFICACION DE CONTRATO
+20 octubre 2026
+
+Fuente consultada: BONES_Contrato_Modulos_v0_2.txt y BONES_Estado_Real_v0_2.txt.
+Estos documentos sitúan Bones en versión API 2 y subsistema API 1.
+No se pudo materializar PROYECTO_144_Bones_Modular_v0_2.zip de la Library.
+POR TANTO ESTA ENTREGA NO DECLARA COMPATIBILIDAD BINARIA VERIFICADA.
+
+QUÉ ESTÁ RESUELTO
+  - Eye conserva C11, arrays RGBA 0xFFRRGGBB, material 64x64, sin Win32.
+  - Interface EyeTextureBank + eye_bank_open + eye_bank_render;
+    soporta EYE1/EYE2 con discriminador explícito, sin cambiar Bones.
+  - include/eye_bones_compat.h exige macro API 2 / Subsistema API 1
+    si las cabeceras originales están presentes en la compilación final.
+  - Las recetas se cargan una vez desde bytes incrustados, sin fichero.
+  - No se alteran físicos/ticks/IDs, ni el orden de llamadas de Bones.
+
+POR QUÉ NO CAMBIAR BONES
+  El contrato Bones v0.2 indica que Eye.present recibe UNA BonesScene ya
+  construida. Eye gestiona sólo el backend. Para generar una textura el
+  subsistema Eye puede usar eye_bank_render en startup o carga de sector.
+  El adaptador Bones->Eye existente deberá obtener de ese buffer los texels.
+  Esto no requiere cambiar descriptor BonesSubsystem ni modificar BonesScene
+  siempre que se conserven IDs de materiales que el backend ya entienda.
+
+PENDIENTE EN LA INTEGRACIÓN REAL
+  1. Montar código fuente Bones v0.2 y revisar su actual enum de materiales.
+  2. Sustituir función de síntesis en el backend Eye (NO bones_step).
+  3. Mapear material ID de Bones a índice de EyeTextureBank y probar bounds.
+  4. Ejecutar pruebas cruzadas render y versiones de módulo 2/1.
+  5. Capturar galería IN-GAME, FPS e incremento de bytes del PE final.
+
+Solo después de esos cinco pasos declarar "Bones v0.2 integrado".
+
+ADENDA Eye 0.2.1 / contrato remitido por el usuario
+  - Confirmada estructura de módulos Bones 0.2.0 con adaptador Eye actual
+    src/adapters/eye_adapter.[ch] y renderer en third_party/eye/sw_renderer.
+  - Nuevo include/eye_bones_bridge.h + src/eye_bones_bridge.c.
+  - Función eye_bones_legacy_fill: 3 slots de 64x64 en almacenamiento
+    del caller; IDs validados antes de copiar, sin disco ni cambio de tick.
+  - examples/bones_legacy_integration.c ilustra un punto de inserción.
+  - tests/test_bones_bridge.c y test_bones_adapter_example.c compilan con
+    tests/mock_bones: pruebas de disposición, NO integración real.
+  - Véase docs/BONES_0_2_DATOS_CONFIRMADOS.txt.
+  - Prohibido anunciar integración real hasta enlazar contra Bones original.
+
+ADENDA EYE 0.3 / API Bones SIN MODIFICAR
+  - Banco EyeTextureBank decodifica EYE1, EYE2 y EYE3 de modo explícito.
+  - eye_bones_legacy_fill admite recetas EYE3 pero conserva solo 3 slots.
+  - EYE3 nuevo formato 12B de recetas/12B cabecera, familias roof, cobble y
+    carving; sample Q16 y caché RAM opcional. Archivo EYE2 histórico no cambia.
+  - La nueva vista de casa es offline, NO una captura de Bones en ejecución.
+  - Para edificios con >3 variantes simultáneas, Bones debe acordar el nuevo
+    material ID y caché con Eye. No modificar aquí BonesScene ni descriptor.
+  - Puerta de aceptación: compilar con Bones real, probar UV y medir Windows PE.
+  - Referencia: docs/PETICION_BONES_EYE_0_3.txt y FORMATO_EYE3.txt.

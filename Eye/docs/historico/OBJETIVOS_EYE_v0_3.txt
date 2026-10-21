@@ -1,0 +1,76 @@
+EYE — PLAN TÉCNICO DE TEXTURAS Y CONTENIDO ULTRACOMPACTO
+
+Fuente de producto: PROYECTO_144_Plan_Maestro_v1.md, secciones 3, 6, 7,
+13, 14 y 20. Esta planificación no sustituye el plan maestro.
+
+MISIÓN
+Mantener el coste de materiales muy por debajo del almacenamiento bruto
+sin depender de recursos externos ni generar archivos persistentes necesarios
+para abrir el juego. Herramienta de autor separada del runtime C ligero.
+
+OBJETIVOS DE INGENIERÍA
+  1) Apariencia de RPG de los noventa, inspirada en Daggerfall, con materiales
+     distinguibles, tiles de 64x64, píxeles legibles y variación controlada.
+  2) Recetas binarias de parámetros reproducibles a partir de semilla.
+  3) Datos simples: no usar floats, estado global mutable ni aleatoriedad global.
+  4) Independencia del motor gráfico/API: salida de pixels 0xFFRRGGBB.
+  5) Crear texturas únicamente al cargar un material/sector en RAM.
+  6) Cachear en RAM por clave (familia, parametros, semilla, version).
+  7) Exportar recetas como bytes C embebidos para el EXE autocontenido.
+  8) Medir por separado: bytes de recetas + coste del decoder + RAM de atlas.
+  9) Compilar y probar el generador con sanitizadores de memoria.
+ 10) Las previews PNG/PPM pertenecen al desarrollo; no se copian con el EXE.
+
+FAMILIAS DE TEXTURAS DEL PRIMER PROTOTIPO
+  stone: sillares medievales de piedra con juntas/bordes y musgo
+  brick: ladrillo rectangular alternado, desgaste
+  wood: tablas verticales, juntas y fibra
+  dirt: tierra con grano y piedras
+  metal: placas, remaches y oxido
+  cloth: trama textil, bandas
+  foliage: grano vegetal y manchas
+  plaster: estuco/yeso con desgaste
+
+FASES FUTURAS
+  EYE 0.1 (HECHO EN LINUX): render C de ocho familias; 22 recetas demo,
+          pack EYE1, CLI, atlas y exportacion a header, tests y documentación.
+  EYE 0.2 (PENDIENTE): editor visual con controles, comparación antes/después,
+          exportacion de batch, soporte de máscaras/ornamentos en pocos bytes.
+  EYE 0.3 (PENDIENTE): mejor acabado artístico estilo Daggerfall mediante
+          perfiles de color, arcos, tallas, mosaicos, vetas y desgaste estructural.
+  EYE 0.4 (PENDIENTE): sprites de objetos decorativos con transparencia,
+          patrones combinables, animación por variación de receta y atlas.
+  EYE 1.0 (PENDIENTE): integración medida con el motor, cache RAM, carga por
+          sector, benchmark Windows y límite de bytes del EXE final comprobado.
+
+RIESGOS Y NORMAS
+  - 12 bytes por material NO implican exe completo de tamaño minúsculo.
+  - Algoritmos proceduralmente compactos pueden ser visualmente repetitivos.
+  - El objetivo de referencia artística NO es clonar archivos de Bethesda.
+  - No cambiar el algoritmo de EYE1 sin política de compatibilidad, versionado
+    y pruebas de hashes; el generador forma parte del contrato de contenidos.
+  - La perfección de la unión entre texturas mosaico se evalúa también a ojo.
+  - El runtime no leerá .txt ni archivos desde disco en el objetivo A.
+
+ACTUALIZACIÓN 20/10/2026 — EYE v0.2.0
+  [HECHO] EYE2 con generación artística mejorada y versión propia.
+  [HECHO] Banco de texturas de RAM EyeTextureBank, acceso EYE1/EYE2.
+  [HECHO] Protegida también la cabecera en checksum de EYE2.
+  [HECHO] Contrato de integración Bones v0.2 documentado (API 2).
+  [PENDIENTE] Editor visual de parámetros en tiempo real.
+  [PENDIENTE] Prueba del código fuente real Bones v0.2, GPU y bytes de PE.
+  [PENDIENTE] Evaluación perceptiva contra Daggerfall en una escena 3D.
+  Esta revisión avanza la calidad prevista en la antigua fase 0.3;
+  el plan de fases original no queda totalmente concluido.
+
+ACTUALIZACIÓN EYE 0.3 / 20-10-2026
+  [HECHO EN LINUX] Tres nuevos patrones arquitectura y paleta envejecida.
+  [HECHO EN LINUX] EYE3 versión propia: EYE1/EYE2 sin regresión.
+  [HECHO EN LINUX] UV repeat Q16 y caché LRU 1..16 materiales (RAM del caller).
+  [HECHO EN LINUX] Casa 2.5D con muros, tejado triangular, puerta y camino;
+    geometría y texturas sin archivos adicionales de formas.
+  [HECHO] 16 recetas = 204 bytes. Tamaño PE Windows/Bones NO comprobado.
+  [PENDIENTE] Editor GUI, sprites y calidad validada frente al Daggerfall real.
+  [PENDIENTE] Integración fuente nativa Bones de IDs y quads/triángulos/UV.
+  Se mantienen fases del plan original; el trabajo en v0.3 cubre motivos y
+  prueba visual parcial, no certifica cumplimiento total de todos los puntos.

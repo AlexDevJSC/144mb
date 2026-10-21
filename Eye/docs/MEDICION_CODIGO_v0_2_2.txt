@@ -1,0 +1,49 @@
+MEDICION REAL DE TAMAÑO — EYE v0.2.2
+Fecha: 20/10/2026. Equipo de comprobación: Linux, GCC.
+
+VALORES REVISADOS CON stat() Y COMPILACIÓN REAL
+Eye 0.2.1 C + headers (src/*.c e include/*.h):    32.377 bytes
+Eye 0.2.2 C + headers (src/*.c e include/*.h):    34.936 bytes
+Incremento de C y headers por tono/puente:          +2.559 bytes
+
+Eye 0.2.1 CLI de desarrollo Linux ELF (build/eye): 39.664 bytes
+Ese archivo NO se incluye en el juego. Es el conversor de autoría.
+
+EYE2: cada receta 12 bytes; paquete 22 materiales 276 bytes.
+Textura regenerada: 4096 pixels * 4 = 16.384 bytes de RAM.
+
+MEDICION DE RUNTIME MINIMO, NO BONES REAL
+El programa tests/runtime_size_probe.c genera una textura y calcula su hash.
+Ambos binarios Linux se compilaron con GCC -Os, separación de funciones,
+--gc-sections y stripping. Se enlaza libc del entorno Linux dinámicamente.
+ No incluyen el CLI, ni Bones, ni Win32, ni todos los recursos del videojuego.
+ Sin tono      build/measure/eye2_basico_linux  14.464 bytes (ELF)
+ Con tono      build/measure/eye2_apagado_linux 18.560 bytes (ELF)
+ Diferencia de fichero ELF                          4.096 bytes
+ 4.096 bytes es diferencia de tamaño DE ARCHIVO en ese enlazado particular;
+ NO es tamaño exacto del algoritmo: influye alineación y metadatos ELF.
+ La sección .text del binario varió 4.984 -> 5.197 bytes (+213 bytes).
+ La .text de src/eye_tone.c objeto optimizado tiene 289 bytes.
+ Estos números no predicen el incremento de bytes del PE final de Windows.
+
+MUESTRA ARTISTICA DESDE EL CODIGO (8 materiales)
+Saturación relativa media aproximada: 42,5% original -> 26,65% envejecido.
+Calculada como promedio de (máximo RGB - mínimo RGB) / máximo RGB,
+no como HSL ni percepción humana, y sobre esos 8 materiales concretos.
+Imagen de comparación: build/previews/comparacion_tonos_eye.png.
+
+COMPATIBILIDAD
+El paquete 276B, EYE1/EYE2 y los hashes de decodificación BASE no cambian.
+Puente a buffers de Bones con contrato simulado pasa tests. No se puede
+asegurar enlace real con Bones 0.2.0 sin sus fuentes ni su PE Windows.
+
+REPRODUCCION
+  make CFLAGS='-std=c11 -O1 -Wall -Wextra -Wpedantic -Wconversion' test
+  make CFLAGS='-std=c11 -O1 -Wall -Wextra -Wpedantic -Wconversion' tonepreview
+  gcc -std=c11 -Os -ffunction-sections -fdata-sections -Wl,--gc-sections -s
+      -Iinclude tests/runtime_size_probe.c src/eye.c src/eye2.c -o baseline
+
+NOTA DE PRESUPUESTO
+No confundir el tamaño de las recetas (276 B) con el del generador,
+el editor CLI o el EXE total del RPG. El límite de 1.474.560 bytes
+sigue sin estar verificado tras enlazar todas las partes de Bones.

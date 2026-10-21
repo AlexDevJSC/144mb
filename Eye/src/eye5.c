@@ -11,6 +11,7 @@ static uint32_t rgba5(int r,int g,int b) {
     return UINT32_C(0xff000000)|((uint32_t)clamp5(r)<<16)|
            ((uint32_t)clamp5(g)<<8)|(uint32_t)clamp5(b);
 }
+/* Explicit, desaturated pigments. 4 roof families x 4 variants. */
 static const uint8_t palette5[4][4][3]={
     {{76,81,80},{93,91,84},{66,75,79},{96,93,83}},
     {{117,76,59},{106,70,55},{123,91,69},{99,67,53}},
@@ -23,6 +24,7 @@ int eye5_valid(const Eye5Recipe *r) {
         (r->course==8u||r->course==16u)&&
         r->stagger<=3u&&r->wear<=15u&&r->edge<=15u&&r->flags==0u;
 }
+/* Periods are 64 in both directions, including staggered odd rows. */
 int eye5_generate(const Eye5Recipe *r,uint32_t *out,size_t n) {
     unsigned x,y;
     if(!eye5_valid(r)||!out||n<EYE5_TILE_PIXELS)return 0;
@@ -40,24 +42,28 @@ int eye5_generate(const Eye5Recipe *r,uint32_t *out,size_t n) {
         int seam=0,high=0;
         switch(r->family) {
           case EYE5_SLATE:
+            /* thin overlapping slabs, beveled lower lip and stone chips */
             seam=(yy==r->course-1u||xx==0u);
             high=(yy==0u || xx==r->width-1u);
             delta+=(int)((hash5(tile ^ (xx/3u)*117u ^ (yy/2u)*977u)>>27)&7u)-4;
             if((grain&255u)<(unsigned)r->wear*3u && yy>1u) delta-=22;
             break;
           case EYE5_CLAY:
+            /* overlapping terracotta, curved channel highlight */
             seam=(yy==r->course-1u || xx==0u);
             high=(xx==r->width/3u || yy==0u);
             delta+= ((int)(xx<r->width/2u?xx:r->width-1u-xx)-3)*3;
             if((grain&127u)<r->wear)delta-=18;
             break;
           case EYE5_WOOD:
+            /* wood shingles, grain runs downhill, uneven edges */
             seam=(yy==r->course-1u||xx==0u);
             high=yy==0u;
             delta+=(int)((hash5(tile^(xx/2u)*991u)>>26)&15u)-7;
             if(xx==r->width-2u && yy>r->course/2u)delta-=12;
             break;
           default:
+            /* straw reed clumps, directional fibers and thick course ends */
             seam=(yy==r->course-1u || yy==r->course-2u);
             high=yy==0u || (grain&31u)==0u;
             delta+= ((int)(hash5(r->seed^((x/2u)&31u)*199u^row*701u)>>27)&15)-8;
@@ -68,6 +74,7 @@ int eye5_generate(const Eye5Recipe *r,uint32_t *out,size_t n) {
         else if(high)delta+=7+(int)r->edge/2;
         if(yy>r->course-4u && !seam)delta-=4;
         if((grain&255u)<(unsigned)r->wear*2u)delta-=8;
+        /* The whole recipe is periodic; no FPS-dependent randomness. */
         const uint8_t *base=palette5[r->family][r->palette];
         out[y*64u+x]=rgba5((int)base[0]+delta,(int)base[1]+delta,(int)base[2]+delta);
     }
@@ -136,9 +143,14 @@ static int append5(Eye5RoofMesh *m,Eye5Vertex a,Eye5Vertex b,Eye5Vertex c,Eye5Ve
     s->vertex[0]=a;s->vertex[1]=b;s->vertex[2]=c;s->vertex[3]=d;
     s->vertex_count=(uint8_t)n;s->role=(uint8_t)role;return 1;
 }
+/* A hip cap covers the discontinuity between two sloped planes.
+ * The geometry stays visual-only and is built using the same two recipes:
+ * roof pixels for weatherproof caps and wood for fascia. */
 static void hip_cap5(Eye5RoofMesh *m, float x0,float y0,float z0,
                      float x1,float y1,float z1){
     float dx=x1-x0,dz=z1-z0;
+    /* Cheap length approximation: UV and trim width are visual-only.
+     * Avoid libm dependency in the executable. Max relative error ~8%. */
     float ax=dx<0.f?-dx:dx,az=dz<0.f?-dz:dz;
     float length=ax>az?ax+0.4f*az:az+0.4f*ax;
     float sx=-dz/length*0.050f,sz=dx/length*0.050f;
@@ -160,7 +172,10 @@ int eye5_build_roof(const Eye5RoofSpec *s,Eye5RoofMesh *out){
     w=s->half_width+s->overhang;z0=-s->half_depth-s->overhang;
     z1=s->half_depth+s->overhang;e=s->wall_height;
     r=e+s->roof_rise;side=z1-z0;
+    /* U runs parallel to eaves; V runs downhill (ridge -> eave).
+     * Both roof slopes therefore put shingles in horizontal courses. */
     u_long=side*0.59f;
+    /* Approximate sloping length without pulling in libm. */
     v_slope=(w>s->roof_rise?w+0.4f*s->roof_rise:
              s->roof_rise+0.4f*w)*0.62f;
     if(s->form==EYE5_GABLE){
@@ -172,14 +187,19 @@ int eye5_build_roof(const Eye5RoofSpec *s,Eye5RoofMesh *out){
                   4,EYE5_SURFACE_ROOF);
         r0=z0;r1=z1;
     }else{
+        /* Ridge length adapts to the footprint; avoids an overlong ridge
+         * on a near-square building while leaving a nonzero flat ridge. */
         float inset=side*0.38f;
         r0=z0+inset;r1=z1-inset;
+        /* Trapezoidal long slopes: U follows world Z; V follows pitch. */
         append5(&m,v5(-w,e,z0,0,v_slope),v5(0,r,r0,inset*0.59f,0),
                   v5(0,r,r1,(r1-z0)*0.59f,0),v5(-w,e,z1,u_long,v_slope),
                   4,EYE5_SURFACE_ROOF);
         append5(&m,v5(0,r,r0,inset*0.59f,0),v5(w,e,z0,0,v_slope),
                   v5(w,e,z1,u_long,v_slope),v5(0,r,r1,(r1-z0)*0.59f,0),
                   4,EYE5_SURFACE_ROOF);
+        /* Hipped ends: U runs across the front/back eave, V downhill.
+         * The original EYE5 wrongly used a different tile orientation. */
         append5(&m,v5(-w,e,z0,0,v_slope),v5(w,e,z0,w*1.18f,v_slope),
                   v5(0,r,r0,w*0.59f,0),v5(0,r,r0,w*0.59f,0),
                   3,EYE5_SURFACE_ROOF);
@@ -187,6 +207,8 @@ int eye5_build_roof(const Eye5RoofSpec *s,Eye5RoofMesh *out){
                   v5(-w,e,z1,0,v_slope),v5(-w,e,z1,0,v_slope),
                   3,EYE5_SURFACE_ROOF);
     }
+    /* Ridge flashing: use the same covering material, not unrelated wood.
+     * Fascia remains wood and is shared between all four roof families. */
     append5(&m,v5(-0.065f,r+0.025f,r0,0,0),v5(0.065f,r+0.025f,r0,0,0.3f),
               v5(0.065f,r+0.025f,r1,(r1-r0)*0.59f,0.3f),
               v5(-0.065f,r+0.025f,r1,(r1-r0)*0.59f,0),4,EYE5_SURFACE_RIDGE);
@@ -207,6 +229,7 @@ int eye5_build_roof(const Eye5RoofSpec *s,Eye5RoofMesh *out){
             }
         }
     }else{
+        /* Front/back eave beams and four hip ridge seams. */
         for(unsigned j=0;j<2u;++j){
             float z=j?z1:z0;
             append5(&m,v5(-w,e+0.035f,z,0,0),v5(w,e+0.035f,z,w*2.f,0),

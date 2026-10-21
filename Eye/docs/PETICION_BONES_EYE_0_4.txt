@@ -1,0 +1,30 @@
+PROPUESTA DE INTEGRACION EYE4 -> BONES (responsable Bones, 21/10/2026)
+=======================================================================
+CONTRATO DOCUMENTAL ACTUAL (NO VERIFICADO CONTRA FUENTES BONES REAL)
+ Bones API 2; subsystem API 1; src/adapters/eye_adapter.[ch] e interfaz
+ legacy para sw_renderer.[ch]. Scene: quads y sprites; 3 materiales legacy.
+ NO HAY PRUEBA DE COMPILACION EN EL REPOSITORIO BONES 0.2 REAL.
+
+NECESIDAD EYE
+ Un texel 64x64 0xFFRRGGBB, material_id unsigned, UV por vértice.
+ eye4_read(embedded_bytes,len,bank) -> Eye4Bank.
+ eye4_cache_init(cache,&bank,storage,capacity,slots) -> estable.
+ eye4_cache_get(cache,material_id) -> const uint32_t[4096], prestado.
+ NO GUARDAR ese puntero si puede haber futuras expulsiones LRU.
+ Generar cuando se ACTIVE un material; no regenerar cada frame.
+ El game loop llama BonesSubSystem Eye.present con UNA BonesScene inmutable.
+ Eye NO actualiza actor, colisiones, gravedad, NPC, mundo ni salvados.
+
+PEDIDO A BONES
+ 1. Selección de al menos 8 materiales en lugar de 3 legacy; ideal ID
+    material estable por superficie, no por color ni textura reconstruida.
+ 2. UV en quads/triángulos; test con cubiertas inclinadas y frontones.
+ 3. Política clara de vida de buffers de caché y streaming sin acceso a
+    texeles expulsados. Preferible resolver textura por ID antes de dibujar.
+ 4. Integración del pack en una cabecera C y link estático, sin file I/O.
+ 5. Test REAL Bones 0.2 API 2 con render y medición de bytes de PE.
+ 6. No crear un segundo registro de EYE, utilizar eye_adapter actual.
+ 7. Si hace falta cambiar API o ABI, acordar e incrementar versión Bones.
+
+PARA SOUL: compare hash de recarga/caché y dos pasos sucesivos de render,
+corre GPU/software, analiza fallos de tamaño, y etiqueta test mocks como mocks.

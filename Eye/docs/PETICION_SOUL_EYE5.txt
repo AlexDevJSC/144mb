@@ -1,0 +1,15 @@
+PETICIÓN EYE 0.5 A SOUL — REVISIÓN DE CALIDAD
+==============================================
+1) Ejecutar: make test eye5integration eye5 eye5size en Linux (GCC/Clang).
+2) Revisar regresiones EYE1-EYE4: no se han editado sus fuentes/formatos.
+3) Comprobar que Eye5 realiza únicamente geometría visual y no toca BonesWorld.
+4) Auditar el formato EYE5 (LE, length, flags, checksum, rango) y el ciclo LRU.
+5) Comprobar UV/winding; revisar seam en faldones HIP, todavía experimental.
+6) Comprobar los limites de 96 quads / 3 materiales efectivos de Bones 0.2.1.
+7) Si Bones aprueba RFC-GFX-01, medir costo PE Windows real y caché.
+8) La similitud objetivo >=0.84 individual NO está demostrada:
+   faltan imágenes base limpias, comparables y una métrica acordada.
+9) Probar EXE final sobre imagen FAT12 de 1.44MB, acceso a disco y arranque
+   desde entorno Windows compatible. El script solo calcula capacidad.
+10) Registrar resultados comprobados como tales; rechazar equivalencias
+    entre mock de Bones e integración con Bones 0.2.1 real.

@@ -1,0 +1,69 @@
+PROYECTO 1.44 / EYE 0.5 / FORMATO DE CUBIERTAS
+================================================
+ESTADO: Implementado y probado en generador Eye C11; NO aprobado por Bones.
+
+OBJETIVO
+  Codificar material de cubierta como receta fija. El ejecutable lleva
+  instrucciones y recetas, NUNCA contiene PNG/PPM de producción.
+  Las texturas se regeneran de forma determinista en RAM cuando se solicitan.
+
+PAQUETE .eye5 (independiente, no sustituye EYE1/EYE2/EYE3/EYE4)
+  12 bytes de cabecera:
+    0..3 = ASCII EYE5
+    4 = longitud de receta 12
+    5 = cantidad de recetas 1..64
+    6..7 = 0 reservado
+    8..11 = FNV-1a32 LE de todo el paquete SALTANDO bytes [8..11]
+  N registros de 12 bytes cada uno:
+    0 = familia (0 pizarra, 1 cerámica, 2 tablilla, 3 paja)
+    1 = paleta (0..3)
+    2 = ancho de pieza (8 o 16)
+    3 = altura del curso/fila (8 o 16)
+    4 = alternancia (0..3; 0 sin desplazamiento, otras: media pieza)
+    5 = desgaste (0..15)
+    6 = intensidad de junta/arista (0..15)
+    7 = flags reservado = 0
+    8..11 = semilla uint32 LE
+  Longitud exacta = 12+N*12. La demo lleva N=4: 60 bytes.
+  La posición del registro es el índice local, NO un ID global de Bones.
+  No serializar un struct con padding ni suponer endian implícito.
+  El checksum detecta errores accidentales, NO autenticidad.
+
+SÍNTESIS
+  EYE5 genera textura 64x64, uint32 por texel 0xFFRRGGBB.
+  Anchos/altos limitados a 8/16 aseguran bordes repetibles cada 64 px.
+  Incluye juntas, piezas alternas, variación de tono, daños puntuales,
+  fibras/chips y paletas desaturadas. Todas las operaciones de píxel
+  utilizan aritmética entera y hashes de semilla sin PRNG global.
+  Los valores de píxel son deterministas con la implementación versionada.
+  Cambiar el algoritmo que altere los píxeles REQUIERE nuevo formato o
+  política explícita de migración. No reinterpretar EYE5 como EYE4.
+
+RUNTIME
+  eye5_read valida cabecera/rangos/longitud y después publica el banco.
+  eye5_cache_init recibe memoria RAM propiedad del llamante. Máx 16 slots.
+  eye5_cache_get devuelve const uint32_t* del slot en caché, válido solo
+  hasta una operación que pueda expulsar ese slot. Prohibido conservar
+  esos punteros tras la expulsión. Para render, copiar o fijar tiles usados
+  por el fotograma antes de admitir reemplazo.
+  Una textura = 4096 * 4 = 16384 bytes RAM; caché 2 slots = 32768 bytes.
+  Cuatro texturas simultáneas = 65536 bytes RAM.
+  El encoder CLI y las vistas previas NO forman parte del ejecutable final.
+
+GEOMETRÍA VISUAL SEPARADA DEL BINARIO DE RECETAS
+  Eye5RoofSpec: half_width, half_depth, wall_height, roof_rise, overhang,
+  form = 0 dos aguas / 1 cuatro aguas.
+  Eye5RoofMesh contiene quads/triángulos de coordenadas float3+UV,
+  role=roof/trim/ridge; no representa colisionadores ni datos persistentes.
+  El tejado a dos aguas genera 9 superficies visuales en este prototipo.
+  El tejado a cuatro aguas genera 13 superficies (11 quads y 2 triángulos).
+  Incluye 4 remates de limatesa y aleros en las cuatro caras.
+  UV: U paralelo a los aleros; V de cumbrera hacia alero.
+  EYE5 0.5.1 cambia SOLO el mallado visual; el formato de 12 bytes
+  y los resultados de cada receta rasterizada no cambian.
+  La casa demo añade otros quads que no son parte del constructor de techo.
+
+PRUEBAS
+  tests/test_eye5.c: codec, validación, determinismo, caché, tipos de tejado.
+  tests/test_eye5_embed.c: recetas C embebidas, descarte y reconstrucción.
+  No se ha verificado todavía paridad de hashes entre MSVC/GCC Windows.

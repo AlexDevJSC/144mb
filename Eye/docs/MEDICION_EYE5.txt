@@ -1,0 +1,23 @@
+MEDICIONES EYE 0.5 — 21/10/2026
+================================
+MEDIDO EN ARTEFACTOS REALES
+- 4 recetas EYE5: 12*4+12 = 60 bytes, incl. cabecera.
+- 1 textura 64x64x4: 16.384 bytes de RAM. 4 = 65.536 bytes.
+- 2 slots cache: 32.768 bytes RAM de texeles (sin struct/metadatos).
+- ELF de sonda Eye4 -Os -flto -s, GCC Linux: 18.632 bytes.
+- ELF de sonda Eye4+Eye5 (generador+geometría) mismo entorno: 22.728 bytes.
+- Delta binarios concretos: +4.096 bytes, con ELF/alineación/linker
+  y distintas funciones llamadas; NO es delta preciso del código ni PE.
+- Procedimiento: make eye5size.
+
+NO MEDIDO
+- Tamaño del ejecutable PE Windows con Bones/Eye integrado.
+- Consumo real de RAM y FPS del juego en Windows.
+- Similitud Daggerfall >= 0.84 por textura (sin referencias limpias).
+- Costo de material lookup para >3 ids dentro de Bones (no implementado).
+
+FLOPPY FAT12
+- Disquete 1.44MB: 1.474.560 bytes brutos.
+- Volumen FAT12 típico vacío: ~1.457.664 bytes para contenido de archivos.
+- Límite FAT12 no demuestra que el programa arranque desde floppy.
+- Scripts Windows heredados son recetas, no se ejecutaron aquí.

@@ -1,0 +1,69 @@
+EYE — ADR DE TEXTURAS / 20.10.2026
+
+ADR-001 (v0.1, CONSERVADA): texturas de 64x64, RGB opaco, compuestas de
+recetas C11 deterministas; datos EYE1 v1 para generación v1.
+
+ADR-002 (v0.2, ACEPTADA): mejora artística en ALGORITMO EYE2, manteniendo
+12 bytes por receta pero con cabecera EYE2. EYE1 se lee y dibuja sin cambios.
+El coste binario es mayor por tener dos implementaciones en desarrollo; para
+el release completo se decidirá si migrar assets o compilar también legado.
+
+ADR-003 (v0.2, ACEPTADA): cabezas C11 independientes de Bones, con banco
+EyeTextureBank. Bones sigue autoridad de físicas y escena; el subsistema Eye
+controla la síntesis y cache de texturas. No hay enlace directo confirmado.
+La compatibilidad de fuente/API con Bones 0.2 deberá probarse cuando se
+puedan incluir realmente sus cabeceras y el módulo.
+
+ADR-004 (v0.2, ACEPTADA): checksum EYE2 incluye magic/cabecera y payload,
+excluyendo bytes checksum. Evita que corrupción del byte de versión permita
+interpretación silenciosa de EYE2 como EYE1. EYE1 antiguo no se reescribe.
+
+ADR-005 (v0.2.1, ACEPTADA): puente unidireccional hacia array de texturas
+legacy de Bones. Eye no implementa BonesSubsystem ni llama a funciones de
+física/escena. Introducirlo tras init del renderer. Se mantienen pruebas con
+mock y se prohíbe declarar integración verificada hasta compilar Bones real.
+
+ADR-006 (v0.2.1, CORRECCIÓN EYE2): el checksum se calcula sobre bytes 0..7
+Y bytes 12..fin; la implementación v0.2.0 documentaba este contrato pero sólo
+calculaba el payload. La revisión 0.2.1 regenera EYE2 con el checksum correcto.
+Como no hay consumidores Bones reales publicados en este proyecto, se trata
+como corrección del formato EYE2 aún experimental. EYE1 no cambia.
+
+
+2026-10-20 / ADR-004 — Perfil cromático sin tocar EYE2
+Decisión: ajuste de saturación/polvo POSTERIOR a decodificación, optativo,
+por textura o por banco. No altera hashes del algoritmo EYE2 ni paquetes
+persistidos; evita obligar a EYE3 para un cambio puramente de presentación.
+El perfil elegido forma parte de la configuración visual (no física ni
+persistencia del mundo). Si se decide versionar una apariencia canónica,
+deberá definirse su propia versión y pruebas de regresión de color.
+Bones 0.2: mantener único EyeSubsystem real existente, sólo aportar texels
+al renderer legacy en inicialización. Sin validación contra fuente Bones real.
+
+2026-10-20 / ADR-007 — EYE3 ARTÍSTICO ARQUITECTÓNICO
+Los píxeles envejecidos canónicos y nuevos motivos se identifican con
+magic EYE3; EYE1/EYE2 quedan congelados para compatibilidad de contenidos.
+12 bytes por receta, nuevo coste en código medido aparte. La forma de
+tejados/ventanas pertenece a geometría de Bones, NO a máscaras adicionales.
+
+2026-10-20 / ADR-008 — UV Y CACHÉ DE MATERIALES
+Eye expone muestreo Q16 nearest repeat (incluye UV negativos) y caché LRU
+monohilo sin heap, con memoria del consumidor. Los triángulos, normals,
+colisiones, Z-buffer y tamaño de la escena son responsabilidad del núcleo
+Bones y de su renderizador acordado. El ejemplo visual de Eye es OFFLINE.
+
+21/10/2026 | ADR-EYE4-01 — NUEVO, ACEPTADO EN PROTOTIPO
+   Modelo de recetas híbridas para arquitectura de fachadas. EYE4 nueva
+   versión 16B por receta: 12B EYE3 + cuatro bytes de composicion.
+   Tres rutas comparadas visualmente: procedural, estática por operadores
+   vectoriales compartidos, híbrido. Se recomienda híbrida PROVISIONALMENTE;
+   la evaluación contra originales limpios no se ha completado.
+21/10/2026 | ADR-EYE4-02 — NUEVO, ACEPTADO EN PROTOTIPO
+   Texturas se materializan en RAM del consumidor; caché LRU con arena
+   aportada por Bones, sin archivos de imagen persistentes. Un puntero
+   puede invalidarse tras expulsión. La autoría puede usar imágenes para
+   comparar, pero no se empaquetan como assets finales.
+21/10/2026 | ADR-EYE4-03 — PENDIENTE EN BONES REAL
+   Necesidad de material_ids >3 y UV quads/triángulos, sin romper
+   BONES_API_VERSION=2 unilateralmente. Sin fuente del motor real no se
+   declara compatibilidad de ejecución; sólo contrato de datos.

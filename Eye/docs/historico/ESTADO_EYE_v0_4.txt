@@ -1,0 +1,77 @@
+EYE 0.4.0 — ESTADO REAL | 21/10/2026
+========================================
+RESPONSABLE: Eye (programador de render/graficos, no subsistema autonomo).
+BASE: Eye 0.3 del ZIP de la entrega anterior; fuentes EYE1/2/3 sin cambios.
+
+IMPLEMENTADO / COMPROBADO EN LINUX (GCC Y CLANG)
+- Nuevo src/eye4.c / include/eye4.h: 3 métodos de reconstrucción sobre 8
+  motivos arquitectónicos (entramado, refuerzo, ventana, puerta, tejado,
+  cimiento, camino y frontón).
+- PROCEDURAL: superficie base existente EYE3. Sin dibujos arquitectónicos.
+- ESTATICO: comandos compactos en tablas C para dibujar siluetas y detalles.
+- HIBRIDO: misma tabla + fondo EYE3 + sombreado/desgaste local determinista.
+- Formato EYE4 versión nueva, 16 bytes/receta y 12 de cabecera, 140 bytes
+  para 8 motivos; ver FORMATO_EYE4.txt.
+- CLI C11 con build/inspect/embed, exportable como header de bytes static const.
+- eye4_cache_init/get con memoria del llamante y LRU máximo 16 slots.
+- Sin dependencias OS, sin malloc, sin archivos raster de runtime.
+- Una casa dibujada por un visualizador C de desarrollo con triángulos, UV y
+  texturas (NO Bones real, NO colisiones, NO malla navegable interactiva).
+- Pruebas originales EYE1/EYE2/EYE3, puente legado mock y tone: PASS.
+- Nuevo test_eye4: tres algoritmos, determinismo, codec, daños, LRU: PASS.
+- Nuevo test_eye4_embed: cabecera embebida sin fichero runtime, descartar y
+  regenerar textura: PASS.
+- GCC/Clang Linux, AddressSanitizer/UndefinedBehaviorSanitizer nuevos: PASS.
+
+COSTES REALES — NO CONFUNDIR CON EL JUEGO TERMINADO
+- Tres bancos (8 recetas) = 140 bytes cada uno: no se distribuyen los tres
+  bancos simultáneamente; la ruta recomendada es un banco híbrido de 140 B.
+- 1 textura 64x64x4 = 16.384 bytes RAM; 8 texturas = 131.072 bytes RAM.
+- Cache de 2 slots = 32.768 bytes RAM + metadatos Eye4Cache.
+- ELF mínimo Linux GCC -Os/-flto/-s EYE3: 14.464 bytes.
+- ELF mínimo Linux GCC -Os/-flto/-s EYE4: 18.632 bytes.
+- Diferencia entre binarios de prueba: +4.168 bytes, NO delta PE real Bones.
+- El CLI y el visualizador de pruebas NO forman parte del ejecutable final.
+- Código de generador/recetas forma parte de EXE; texturas se crean en RAM.
+
+COMPATIBILIDAD/PROPIEDAD
+- Código Eye3 EYE1/2/3 intacto; Eye4 decodifica EYE4 mediante su PROPIO
+  eye4_read, no mediante eye_bank_open (que solo acepta EYE1/2/3).
+- Contrato documental Bones 0.2 API 2/Subsistema API 1; NO se ha enlazado
+  contra Bones 0.2 fuente real ni probado Windows ni 1.44MB PE final.
+- No asumir que 3 slots legacy bastan para 8 materiales de una casa.
+- Eye entrega material id->textura 64x64 0xFFRRGGBB, no colisiones ni NPC.
+
+REFERENCIA Y SIMILITUD
+- Referencia elegida: captura exterior de casa entramada Daggerfall 1996,
+  incluida visualmente en articulo Revisiting The Elder Scrolls II: Daggerfall.
+- No se distribuye captura original en ZIP; enlace en REFERENCIA_ARTISTICA.txt.
+- No hemos conseguido originales limpios/alineados por material y por tanto
+  NO EXISTE MEDICION verificable SSIM >= 0.84 por cada material.
+- Se incluye script de verificación de 8 pares cuando existan referencias
+  válidas: tools/medir_similitud.py, usa Pillow y scikit-image SOLO desarrollo.
+- Nuestra demo usa un modelo conceptual y no reproduce la geometría exacta.
+
+LIMITE FLOPPY
+- El disquete bruto de 1.44 MB son 1.474.560 bytes.
+- En FAT12 estándar (2880 sectores, FAT x2 y root 224) espacio de datos
+  total = 1.457.664 bytes; EXE debe caber como archivo real, con margen.
+- script verificar_floppy.py es PREFILTRO de capacidad, no monta FAT12 ni
+  arranca Windows. Prueba de disco físico real pendiente.
+
+PENDIENTE
+1. Criterio 84% con originales limpios, alineados por material; evaluación
+   cromática/estructural y aceptación del responsable de arte/dirección.
+2. Integrar 8+ texturas reales en el renderizador de Bones >=0.2; probar en
+   Windows, rendimiento, memoria y PE final; ese código es responsabilidad
+   conjunta de Eye/Bones según contrato y debe ser verificado por Soul.
+3. Completar geometría caminable y física desde Bones; la demo no es juego.
+4. Explorar modos de reducir coste binario final (código muerto, operadores
+   compartidos, tablas paramétricas) comparando PE en la compilación real.
+5. Proteger LRU si el futuro motor hace acceso concurrente. Evitar acceso a
+   punteros de texturas tras expulsión; reenlazar correctamente por frame.
+
+ARCHIVOS DE REVISION VISUAL POR MATERIAL
+  build/materiales_hibridos/(entramado,vigas,ventana,puerta,tejado,
+  cimiento,camino,fronton).png = candidatos alineables de Eye, 64x64.
+  No existen en este repositorio las referencias originales correspondientes.

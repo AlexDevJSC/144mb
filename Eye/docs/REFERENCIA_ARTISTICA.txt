@@ -1,0 +1,23 @@
+EYE4 — REFERENCIA ARTISTICA OBJETIVO (NO ASSET INCORPORADO)
+URL de captura revisada de Daggerfall 1996 (vigas, yeso, celosías azules):
+https://medium.com/super-jump/revisiting-the-elder-scrolls-ii-daggerfall-6c468626d827
+
+Fuente visual alternativa (exterior de la cofradía, ladrillos/ventanas):
+https://en.m.uesp.net/wiki/Daggerfall:Dark_Brotherhood
+
+La comparación es de estilo: casas low-poly, entramado visible, contraste
+suave, madera oscura envejecida, relleno claro polvoriento, cristales azules
+pequeños con trama diagonal, cubierta de textura repetible.
+No se entregan ni redistribuyen imágenes originales del juego; no se han
+extraído ni copiado los píxeles de sus archivos originales. El modelo de
+prueba de Eye4 es una INTERPRETACION y no una reconstrucción 1:1.
+
+COMPROBACION OBJETIVO >=84%
+Cuando se disponga de ocho referencias de MATERIAL en vista plana,
+mismo tamaño y UV alineadas, guardar con los nombres entramado, vigas,
+ventana, puerta, tejado, cimiento, camino, fronton en referencias/*.png y
+sus parejas generadas con mismos nombres en muestras/*.png.
+Ejecutar python tools/medir_similitud.py referencias muestras.
+SSIM >= 0.84 por cada par es un posible control CUANTITATIVO, no garantiza
+84% de similitud percibida. La aceptación final requiere revisión humana.
+SIN esos archivos no existe medición ni se afirma cumplimiento.

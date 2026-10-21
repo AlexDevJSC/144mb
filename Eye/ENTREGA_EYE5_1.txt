@@ -1,0 +1,12 @@
+Eye 0.5.1 — Entrega corregida
+
+Pruebas GCC/Clang/ASan-UBSan realizadas.
+Construccion EYE5 a 2 aguas = 9 superficies; a 4 aguas = 13.
+Se corrigen UV, se agregan limatesas y aleros.
+Recetas EYE5: 60 bytes, formato sin cambios.
+Se suministran previews PNG y PPM; solo son desarrollo, no assets runtime.
+No integrado con binario Bones real; hace falta RFC-GFX-01 aprobado.
+No certificado el objetivo visual 84% ni el ejecutable en floppy real.
+
+Inicio: README_EYE5.txt.
+Ver: docs/CORRECCION_EYE5_1.txt, docs/MEDICION_EYE5_1.txt.

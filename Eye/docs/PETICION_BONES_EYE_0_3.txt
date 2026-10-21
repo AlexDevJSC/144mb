@@ -1,0 +1,43 @@
+PROYECTO 1.44 — ENTREGA DE EYE 0.3 A BONES
+20/10/2026 — Coordinacion ENTRE DESARROLLADORES, no módulos homónimos.
+
+BONES: motor central, estructuras geométricas, físicas, colisiones e integración.
+EYE: gráficos, textura/UV/render, materiales y sprites visuales.
+SKIN: menús/HUD/UX. SOUL: QA transversal.
+No introducir otro BONES_SLOT_EYE. Reutilizar src/adapters/eye_adapter.[ch].
+Fuente de referencia: BONES_Contrato_Modulos_v0_2.txt y README-BONES.
+
+LO QUE ENTREGA EYE (C11)
+ - include/eye3.h / src/eye3.c: materiales arquitectura EYE3 y funciones de
+   generación sin OS/heap; eye_bank_render() soporta formatos 1,2,3.
+ - eye_uv_sample_repeat(): UV Q16.16 firmadas con repetición simétrica.
+ - EyeMaterialCache: caché LRU para 1..16 texturas; memoria aportada por Bones
+   o el adaptador; no asigna heap, sin I/O por render.
+ - eye_bones_legacy_fill(): carga slots 0,1,2 en layout descrito por BONES 0.2
+   incluso a partir de recetas EYE3 (puente probado SOLO con test double).
+ - 16 recetas arquitectónicas en 204 B; sin archivos gráficos distribuidos.
+
+QUE SOLICITA EYE A BONES
+ 1. Revisar el contrato real del renderizador sw_renderer.[ch] / Eye adapter.
+ 2. Permitir material_index por superficie en escena, con resolución a banco
+    EYE3. El actual enum de 3 materiales no sirve para 16 superficies únicas.
+ 3. Verificar quads inclinados y dos triángulos por quad con UV interpoladas:
+    tejados a dos aguas NO necesitan textura recortada ni máscara especial.
+ 4. Si no es expresable, acordar un triángulo explícito con 3 vértices UV,
+    culling definido y winding documentado (sin triangulación degenerada).
+ 5. Exponer textura 64x64 0xFFRRGGBB por material ID desde caché Eye; el
+    tiempo de generación no debe consumir un frame de render por material.
+ 6. Verificar origin/wrap/UV, cambios de tamaño de sector, colisiones
+    independientes de dibujo, Z-buffer y correcta visibilidad una/dos caras.
+ 7. Sólo si cambia API pública, subir BONES_API_VERSION con migración/tests.
+ 8. Medir tamaño final PE Windows, velocidad de carga, RAM y FPS tras enlace.
+
+CONTRATO DE DEMOSTRACIÓN
+  tools/eye_architecture_preview.c crea una maqueta pseudo-3D OFFLINE en C;
+  NO usa BonesScene ni demuestra que Bones 0.2 pueda renderizar el ejemplo.
+  tests/mock_bones es un DOBLE. No etiquetar esta maqueta como integración.
+
+CRITERIO DE ENTREGA CONJUNTA
+  Construir una casa en Bones real con paredes, frontones y cubierta, usando
+  el mismo material de cubierta en los triángulos de cada faldón, y un único
+  atlas/banco de materiales. Adjuntar screenshot, errores, FPS, RAM y bytes PE.

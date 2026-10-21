@@ -1,0 +1,21 @@
+OBJETIVOS EYE 0.5.0 — 21/10/2026
+================================
+PRIORIDAD: rescatar la calidad de los tejados del modelo Eye4.
+  1. Generar cuatro cubiertas legibles: pizarra, teja, tablilla, paja.
+  2. Separar material raster de geometría visual (planos inclinados,
+     aleros, cumbrera, remates; 2 aguas y prototipo 4 aguas).
+  3. Mantener recetas/datos dentro del ejecutable; generar/caducar en RAM.
+  4. Preservar todos los formatos EYE1-EYE4 sin mutar sus píxeles.
+  5. Usar solo IDs/escena del contrato aprobado de Bones; no cambiar física.
+  6. Remitir a Bones y Soul RFC de ampliación de 3 a <=256 materiales.
+  7. Preservar el objetivo de floppy FAT12; medir archivos PE REALES.
+  8. Comparar cada material con referencia válida Daggerfall (objetivo >=84%,
+     NO alcanzado o validado en esta entrega; no fabricar porcentajes).
+  9. Exigir tests de codec, hashes, streaming RAM, UV y uso de memoria.
+ 10. Registrar cada cambio en docs/REGISTRO_CAMBIOS_EYE.txt.
+
+PRIORIDADES POSTERIORES
+  - Corregir UV de hip roof y uniones complejas.
+  - Incorporar eaves/ridge trim en catálogo versionado Eye/Bones real.
+  - Medir/cachear texturas mediante frames/streaming por sectores.
+  - Casa transitable solo tras contratos con Bones, responsable de físicas.

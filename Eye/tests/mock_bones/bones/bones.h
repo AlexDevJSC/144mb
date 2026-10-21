@@ -1,0 +1,7 @@
+/* ONLY A COMPILE-TIME DOUBLE. Not the real Bones headers. */
+#ifndef BONES_H_TEST_DOUBLE
+#define BONES_H_TEST_DOUBLE
+#define BONES_API_VERSION 2u
+#define BONES_SUBSYSTEM_API_VERSION 1u
+#define BONES_SLOT_EYE 0
+#endif

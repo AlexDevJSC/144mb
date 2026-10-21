@@ -1,0 +1,172 @@
+EYE — REGISTRO DE CAMBIOS
+
+2026-10-20 / Eye v0.2.0 — CALIDAD VISUAL / COMPATIBILIDAD BONES
+IMPLEMENTACIÓN:
+ - src/eye2.c e include/eye2.h: algoritmo texturizado EYE2, enteros C11,
+   8 familias, relieve de bloques, biseles, fisuras, grano mineral, desgaste
+   localizado, vetas y nudos de madera, remaches, tejido, vegetación y yeso.
+ - EYE2 usa recetas de 12 bytes, conserva la estructura interna de EYE1,
+   pero usa magic EYE2 y checksum protegido de cabecera + registros.
+ - EyeTextureBank selecciona EYE1/EYE2 al cargar y despacha generador adecuado.
+ - include/eye_bones_compat.h y examples/README_BONES.txt formalizan API 2 y
+   SUBSYSTEM API 1 para futuro vínculo real (no enlazado aún).
+ - tools/eye_cli.c: comando compile2; inspect/render/atlas/embed detectan EYE2.
+   El comando compile original sigue generando EYE1 sin alterar bytes.
+ - Makefile y dos scripts Windows: compilan src/eye2.c y tests nuevos.
+ - tests/test_eye2.c: 8 familias, tiling, hash determinista, codec, integridad,
+   migración, banco embebido, tamaño exacto y rechazo de rangos inválidos.
+ - tests/consumer_embed.c: usa EYE2 para el pack de ejemplo incrustado.
+
+DOCUMENTACIÓN MODIFICADA:
+ - README.txt, docs/ESTADO_EYE.txt, docs/DECISIONES_EYE.txt,
+   docs/REGISTRO_CAMBIOS_EYE.txt, docs/FORMATO_EYE2.txt,
+   docs/INTEGRACION_BONES_0_2.txt, examples/README_BONES.txt.
+ - docs/FORMATO_EYE1.txt y docs/PLAN_MAESTRO_REFERENCIA_v1.md SIN cambios.
+
+MEDICIONES:
+ - 22 recetas EYE2: 276 bytes (mismos 276 bytes que EYE1).
+ - 64x64 RGBA: 16.384 bytes por textura en RAM.
+ - Tests C11 GCC/Clang (Linux) pasan. Hash antiguo EYE1 sin variación.
+ - Render de preview nuevo: build/previews/Eye2_comparativa.png.
+ - Benchmark Windows, Bones enlazado, ejecutable 1.44MB: NO comprobados.
+
+LIMITACIONES:
+ - Las ganancias visuales son cualitativas, pendientes de test artístico.
+ - El algoritmo necesita más CPU y bytes de código; presupuesto sin medir en PE.
+ - El pack EYE2 no se interpreta con runtime exclusivo EYE1; versionado claro.
+ - Sin nuevo motor/escena Bone real no se ha medido la iluminación del mundo.
+
+2026-10-20 / Eye v0.2.1 — ADAPTADOR PARA CONTRATO BONES 0.2.0
+Código realizado:
+ - Nuevo puente de texturas sin dependencia Win32/Bones en
+   include/eye_bones_bridge.h + src/eye_bones_bridge.c.
+ - Ejemplo de subida de 3 texturas al renderer legado compatible con
+   descripción de Bones 0.2, compila contra DOBLE de cabecera.
+ - tests/test_bones_bridge.c: tres texel buffers, correspondencia materiales,
+   buffer corto, id inválido y EYE1/EYE2 sobre el mismo layout.
+ - tests/test_bones_adapter_example.c: contrato API 2/subsystem 1 simulado;
+   la compilación NO prueba la API real de Bones.
+ - Checksum EYE2 corregido para verificar bytes de cabecera + payload,
+   sin tocar codec EYE1. El archivo EYE2 se regenera, píxeles idénticos.
+ - Nuevas targets Makefile y pruebas de puente en scripts Windows (no ejecutados).
+Documentos actualizados EN ESTA MISMA REVISIÓN:
+ - README.txt, docs/ESTADO_EYE.txt, docs/INTEGRACION_BONES_0_2.txt,
+   docs/BONES_0_2_DATOS_CONFIRMADOS.txt y registro de cambios presente.
+ - examples/README_BONES.txt y docs/DECISIONES_EYE.txt revisados.
+ - docs/FORMATO_EYE2.txt verificado frente a la nueva implementación checksum.
+Pruebas verificadas:
+ - Linux Clang C11: test_eye, test_eye2, test_bones_bridge,
+   test_bones_adapter_example y consumer_embed en compilaciones locales.
+ - Linux GCC (anterior): compatibilidad v0.2 verificada en la iteración previa.
+ - NO realizado: enlazado con Bones real, PE Windows, métricas de FPS/bytes.
+
+
+2026-10-20 / Eye v0.2.2 — PERFIL DE COLOR APAGADO DE DEMOSTRACIÓN
+Código:
+ - include/eye_tone.h + src/eye_tone.c: postproceso de texels C11
+   con desaturación aritmética 3/8 y matiz polvo; original sin cambios.
+ - eye_bones_legacy_fill_tone en puente existente, integrado en 3 slots
+   sin alterar memoria física/cámara/escena de Bones.
+ - tools/eye_tone_preview.c: PPM original/apagado a partir de EYE2 real.
+ - tests/test_eye_tone.c: preservación de píxeles originales, rango
+   inválido, 3 materiales, misma receta y datos sin mutación.
+ - Makefile y scripts Windows actualizados para enlazar el perfil y
+   probarlo. No comprobados en Windows en esta entrega.
+Documentación actualizada junto al código:
+ - README.txt, ESTADO_EYE.txt, REGISTRO_CAMBIOS_EYE.txt,
+   DECISIONES_EYE.txt, MEDICION_CODIGO_v0_2_2.txt.
+Resultados:
+ - GCC C11 O1 (Linux), suites eye1, eye2, Bones mock, ejemplo mock,
+   nuevo test de tono: PASAN.
+ - EYE2 pack 22 recetas: 276 bytes sin alteración.
+ - Demo cromática visual: build/previews/comparacion_tonos_eye.png.
+Limitación: el ajuste de tono es una propuesta artística; no es
+reproducción fiel verificada de la paleta comercial original.
+
+2026-10-20 / EYE v0.3.0 — MATERIALES ARQUITECTÓNICOS REUTILIZABLES
+CAMBIOS DE CODIGO
+ - include/eye3.h / src/eye3.c: nueva familia versionada EYE3 con 3 nuevos
+   motivos (cubierta, empedrado, ornamento), perfil envejecido en 8 familias
+   preexistentes sin alterar los bytes o pixels EYE1/EYE2.
+ - Codificador/decodificador EYE3 con checksum de cabecera y payload,
+   registro 12 bytes, rechazo de corrupción y validación transaccional.
+ - src/eye2.c (solo despachador de banco): lector/render EYE3 por magic.
+ - src/eye_bones_bridge.c (solo validación): 3 slots legados EYE3.
+ - eye_uv_sample_repeat: UV fixed Q16 con nearest y periodicidad negativa.
+ - EyeMaterialCache LRU 1..16 slots, RAM del consumidor y sin heap interno.
+ - tools/eye_cli.c: subcomando compile3, inspección y previews EYE3.
+ - tools/eye_architecture_preview.c: casa pseudo-3D REAL dibujada en C con
+   quads/triángulos y 7 materiales compartidos, salida PPM.
+ - assets/materiales_arquitectura.eye.txt: 16 recetas nuevas (204 bytes pack).
+ - tests/test_eye3.c: 11 familias, repeat x/y, hash golden, codecs aislados,
+   checksum, UV negativos, caché y bridge con textura de nueva familia.
+ - Makefile y scripts Windows actualizados para Eye3 (Windows NO probado).
+DOCUMENTOS ACTUALIZADOS CON CODIGO
+ - docs/ESTADO_EYE.txt (reemplaza estado anterior, mantiene limitaciones).
+ - docs/REGISTRO_CAMBIOS_EYE.txt (este histórico).
+ - docs/DECISIONES_EYE.txt (ADR nueva versión y caché).
+ - docs/FORMATO_EYE3.txt (contrato binario).
+ - docs/PETICION_BONES_EYE_0_3.txt y PETICION_SOUL_EYE_0_3.txt.
+ - README.txt (nuevos comandos y alcance).
+NO MODIFICADO
+ - src/eye.c, src/eye2.c algoritmo pixel, docs/FORMATO_EYE1.txt,
+   docs/FORMATO_EYE2.txt; hashes golden EYE1/EYE2 permanecen iguales.
+EVIDENCIA
+ - Linux GCC -std=c11 -O2 -Wall -Wextra -Wpedantic -Wconversion: suite pasa.
+ - Linux Clang C11 + ASan/UBSan: test_eye3 pasa.
+ - EYE3 roof golden hash=30b5d99dd2751a38; 16 recetas=204 bytes.
+ - ELF mínimo EYE2=14.464 B; ELF mínimo EYE3=18.560 B; no PE Windows.
+ - Maqueta de casa no demuestra funcionamiento en Bones real.
+LIMITACIONES
+ - No hay acceso a fuentes reales de Bones 0.2 para enlazar.
+ - Los 3 materiales heredados de Bones no bastan para todas variantes sin
+   ampliar el sistema de asignación de materiales dentro de Bones.
+
+[0.4.0] 21/10/2026 — Eye4 recetas arquitectónicas, derivado de 0.3.
+ - NUEVO include/eye4.h + src/eye4.c: codec EYE4 16B, tres rutas,
+   8 motivos arquitectónicos, biblioteca compacta de operadores, paletas
+   sobrias, deterioro estable y LRU de memoria del llamante.
+ - NUEVO tools/eye4_cli.c: construir/inspeccionar/embeber 8 recetas.
+ - NUEVO tools/eye4_house_preview.c: misma casa con los tres métodos,
+   capa geométrica de desarrollo; no sustituye Bones real.
+ - NUEVO tools/eye4_materials_preview.c: atlas de materiales individuales.
+ - NUEVO tests/test_eye4.c + test_eye4_embed.c: EYE4 end-to-end sin disco.
+ - NUEVO tests/runtime_size_probe4.c; herramientas de SSIM opcionales.
+ - NUEVO scripts/verificar_floppy.py, capacity FAT12 > chequeo nominal.
+ - ACTUALIZADOS Makefile (test/eye4/eye4integration), scripts MSVC/MinGW.
+ - DOCUMENTOS revisados: ESTADO_EYE, OBJETIVOS_EYE, DECISIONES_EYE,
+   REGISTRO_CAMBIOS_EYE; añadidos FORMATO_EYE4, MEDICION_EYE4,
+   REFERENCIA_ARTISTICA, PETICION_BONES_EYE_0_4.
+ - Pruebas: GCC C11, Clang C11, ASan/UBSan OK Linux; codecs EYE1..3 OK.
+ - EYE3 material base y formatos antiguos no modificados.
+ - LIMITACIONES: 84% por material NO validado; integración Bones real
+   NO probada; Windows PE NO creado ni auditado; test de casa no caminable.
+
+2026-10-21 / Eye 0.5.0 — tejados por recetas y geometría reutilizable
+- Nuevo include/eye5.h y src/eye5.c: 4 familias (pizarra, cerámica,
+  tablillas, paja), formato EYE5 12B/receta, semilla entera.
+- Generador visual de cubiertas dos aguas/cubierta cuatro aguas, con UV,
+  fascia, aleros, cumbrera y remates; NO altera Bones ni colisionadores.
+- Generación en RAM con caché del llamante (1..16 slots), reconstrucción.
+- Nuevo CLI de embed .eye5 -> header C y prueba de consumo de cabecera.
+- Renderer headless nuevo para casa con 4 estilos y alternativa 4 aguas.
+- Test EYE5 (determinismo, codec, corrupción, materiales, geometría,
+  caché/evicción, inputs inválidos), test Eye5 embed; GCC/Clang/ASan-UBSan.
+- Archivo assets/recetas sigue en memoria de compilación, 4 recetas =60B.
+- Makefile ampliado y recetas MSVC/MinGW compilación EYE5 añadidas
+  SIN validar ejecución Windows en esta entrega.
+- Docs: FORMATO_EYE5, MEDICION_EYE5, RFC_BONES, PETICION_SOUL,
+  ESTADO_EYE v0.5, README. Histórico estado Eye4 preservado.
+- Incremento experimental +4096B ELF mínimo Linux; NO delta PE final.
+- EYE1, EYE2, EYE3, EYE4 y contrato Bones no modificados.
+
+EYE 0.5.1 — 21/10/2026 — Finalizacion de tejados
+- Eye: corregida orientacion de UV; U paralelo a aleros, V de cumbrera hacia alero.
+- Eye: tejado a cuatro aguas pasa de 7 a 13 superficies: 2 aleros y 4 cubiertas de limatesa.
+- Eye: cumbrera comparte material de cubierta; no crea una receta adicional.
+- Eye: pruebas para ambas vertientes y faldones triangulares; visuales regenerados.
+- Eye: intactos src/eye[1-4].c y recetas binarias EYE5 60 bytes.
+- Bones: ningun codigo ni API modificada. Soul: revision pendiente.
+- Validado: make test GCC; test_eye5 Clang; test_eye5 Clang ASan/UBSan.
+- Presupuesto: sonda ELF v0.5.0=22728B, v0.5.1=22728B; .text +4B.
+- Pendiente: PE Windows, FAT12 real, enlazado Bones, similitud >=84%.

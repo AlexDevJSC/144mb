@@ -1,0 +1,22 @@
+PROYECTO 1.44 — VERIFICACION DE EYE 0.3 POR SOUL
+Objetivo: validar EYE3 por separado, y después el coste de integrarlo en Bones.
+
+BATERÍA INDEPENDIENTE
+  - make test integration architecture en Linux; tests eye1/eye2 no regresan.
+  - Clang ASan/UBSan en test_eye3, GCC -Wall -Wextra -Wpedantic -Wconversion.
+  - Misma receta/semilla/version -> misma textura; hashes golden registrados.
+  - EYE3 pack truncado/corrupto/version reetiquetada rechazados.
+  - Cache 2 slots eviction/hits/IDs inválidos; UV negativos y wrap a 1 repetición.
+  - Inspección visual de atlas y techo texturizado en 2 triángulos, diferencias
+    de luminancia entre caras, patrones repetibles y juntas.
+  - La estética Daggerfall no queda probada mediante determinismo cromático.
+
+BATERÍA INTEGRADA — AÚN NO EJECUTADA
+  - Unir fuentes Bones reales y Eye, compilar Windows sin dependencias externas.
+  - Comprobar elección de material desde BonesScene y sincronía de UV.
+  - Medir uso de RAM, tiempo de generación, FPS y binario PE de publicación.
+  - Confirmar límite 1.474.560 B sobre ejecutable COMPLETO, no sobre solo Eye.
+
+PROPIEDAD
+  SOUL no asume el desarrollo de materiales (Eye) ni la integración del
+  esqueleto (Bones); comunica fallos verificables a cada responsable.

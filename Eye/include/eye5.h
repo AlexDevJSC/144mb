@@ -30,7 +30,7 @@ typedef struct {
 typedef struct { Eye5Recipe recipe[EYE5_MAX_RECIPES]; unsigned count; } Eye5Bank;
 typedef struct {
     const Eye5Bank *bank;
-    uint32_t *arena;
+    uint32_t *arena; /* caller-owned: capacity >= 4096*slots uint32_t */
     uint8_t keys[EYE5_CACHE_MAX];
     uint32_t age[EYE5_CACHE_MAX];
     unsigned serial, count, slots, hits, misses;
@@ -39,8 +39,8 @@ typedef struct {
 typedef struct { float x,y,z,u,v; } Eye5Vertex;
 typedef struct {
     Eye5Vertex vertex[4];
-    uint8_t vertex_count;
-    uint8_t role;
+    uint8_t vertex_count; /* 3 or 4. A Bones 0.2 quad can duplicate v[2]. */
+    uint8_t role; /* roof pixels or shared wooden trim */
 } Eye5Surface;
 typedef struct { Eye5Surface surface[EYE5_MAX_SURFACES]; unsigned count; } Eye5RoofMesh;
 typedef struct {
@@ -56,5 +56,8 @@ int eye5_cache_init(Eye5Cache *c, const Eye5Bank *bank, uint32_t *arena,
                     size_t pixel_capacity, unsigned slots);
 const uint32_t *eye5_cache_get(Eye5Cache *c, unsigned material_id);
 void eye5_demo_recipes(Eye5Recipe out[4]);
+
+/* Eye owns visual assembly only. No colliders, world mutations, or scene
+ * publication into Bones. Geometry is returned in simple independent data. */
 int eye5_build_roof(const Eye5RoofSpec *spec, Eye5RoofMesh *out);
 #endif

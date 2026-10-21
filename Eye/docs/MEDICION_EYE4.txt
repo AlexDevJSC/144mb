@@ -1,0 +1,17 @@
+MEDICIONES EYE 0.4.0, GCC Linux 21/10/2026
+- 8 recetas x 16 B + cabecera 12 B = 140 bytes (EYE4 .eyep).
+- Textura opaca RGBX de 64x64 = 16.384 bytes en RAM.
+- 8 texturas vivas = 131.072 bytes RAM; 2 slots = 32.768 bytes RAM.
+- GCC -std=c11 -Os -flto -ffunction-sections -fdata-sections
+  -Wl,--gc-sections -s. Base EYE3 runtime probe 14.464 bytes ELF.
+  EYE4 runtime probe 18.632 bytes ELF (+4.168 bytes).
+- ELF .text EYE3: 954 B; .rodata EYE3: 14 B;
+  ELF .text EYE4: 6.348 B; .rodata EYE4: 888 B.
+- No es coste incremental PE garantizado; los probes llaman A DISTINTOS
+  algoritmos y el linker descarta piezas distintas. No equivale a Bones.
+- Pruebas GCC/Clang, ASan/UBSan: OK; Windows PE no construido en sesión.
+- Los archivos PNG/PPM, CLI y visualizador no se distribuyen con el juego.
+- Límite real FAT12 estándar de volumen vacío: 1.457.664 bytes de datos
+  (ver scripts/verificar_floppy.py). La ejecución en Windows desde medio
+  físico y disco real no ha sido probada.
+- Ninguna similitud SSIM o 84% pudo medirse sin referencias por textura.

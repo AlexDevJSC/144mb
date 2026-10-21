@@ -1,0 +1,59 @@
+PROYECTO 1.44 — ESPECIFICACION BINARIA EYE3 v1
+Fecha: 20/10/2026. Programa: Eye 0.3.
+
+ESTADO
+Formato implementado, testeado con GCC/Clang en Linux. No es un formato de
+imagen comprimida genérico: requiere su sintetizador Eye3 para producir píxeles.
+EYE1 y EYE2 NO se alteran ni se reescriben. El cambio visual se expresa mediante
+magic nuevo EYE3 para impedir redecodificaciones silenciosas del mismo material.
+
+CABECERA: EXACTAMENTE 12 BYTES
+  offset  tamaño  significado
+  0       4       ASCII 'EYE3'
+  4       1       ancho de receta en bytes, siempre 12
+  5       1       N recetas, 1..255
+  6       2       reservado, ambos bytes = 0
+  8       4       FNV-1a32 LE del archivo completo EXCEPTO bytes 8..11
+La cabecera y las recetas están cubiertas por el checksum; checksum NO es firma.
+Longitud total = 12 + N*12. No se aceptan bytes finales sobrantes.
+
+RECETA: 12 BYTES; VALORES IDENTICOS AL ESQUEMA EYE2
+  +0 familia: 0 stone, 1 brick, 2 wood, 3 dirt, 4 metal, 5 cloth,
+               6 foliage, 7 plaster, 8 roof, 9 cobble, 10 carving.
+  +1 paleta 0..3
+  +2 escala 1..4
+  +3 patron 0..7
+  +4 desgaste 0..15
+  +5 crecimiento 0..15
+  +6 contraste 0..15
+  +7 flags reservado (=0)
+  +8 semilla uint32 LE
+La posición dentro del pack es un índice local de material y NO el ID de una
+entidad persistente. Semilla forma parte de los datos canónicos.
+
+PIXEL / ALGORITMO
+  64x64 texeles, 32-bit 0xFFRRGGBB, opaco. Coordenadas x,y se envuelven
+  módulo 64, tanto positivas como negativas. Sin llamadas de SO, float, heap
+  ni PRNG global. Familias 0..7: rasterizador EYE2 con tono envejecido Eye
+  en EYE3. Familias 8..10: generadores nuevos periódicos de cubiertas,
+  empedrado y talla. Los cambios en píxeles canónicos exigen EYE4 u otra
+  revisión versionada. El código de eye3_pixel() define el algoritmo.
+
+UV
+  eye_uv_sample_repeat: UV signed Q16.16; 65536 = una repetición.
+  Calcula texel más próximo anterior (nearest) con floor matemático para
+  negativos, y wrap 64. La interpolación UV de triángulos/cuadriláteros y
+  el rasterizador completo pertenecen al adaptador/renderer acordado con Bones.
+
+BIBLIOTECA ARQUITECTONICA DE PRUEBA
+  16 recetas = 204 bytes (12+16*12). Incluye 3 variantes de techo, 3 de
+  camino, 2 molduras y materiales anteriores. 7 texturas usadas realmente
+  en la vista previa de la casa; el archivo del ejemplo conserva las 16.
+  La biblioteca no contiene nombres, imágenes, ni datos de geometría.
+
+CONTRATO BONES
+  eye_bank_open() y eye_bank_render() admiten EYE1/EYE2/EYE3.
+  eye_bones_legacy_fill() sigue usando 3 slots: permite sustituirlas, NO
+  añadir materiales ilimitados en el Bones real sin adaptar su renderer.
+  No se modifican BonesScene, BONES_API_VERSION, físicas, colisiones ni ticks.
+  Requiere recompilar y validar con el código fuente real de Bones 0.2.

@@ -1,0 +1,33 @@
+ESPECIFICACION EYE4 v1 — 21/10/2026
+Recetas binarias de reconstrucción arquitectónica, NO raster comprimido.
+
+ARCHIVO: bytes 0..3 = ASCII EYE4; byte 4 = 16; byte 5 = N en 1..64;
+bytes 6..7 = 0; bytes 8..11 = FNV-1a32 LE del archivo completo SALTANDO
+bytes 8..11. Total exacto: 12 + 16*N bytes, sin padding ni trailer.
+
+REGISTRO (16 bytes)
+ +00 familia EYE3; +01 paleta EYE3; +02 escala EYE3; +03 patrón EYE3
+ +04 desgaste; +05 crecimiento; +06 contraste; +07 flags=0
+ +08..11 semilla uint32 little endian
+ +12 motif 0..7: panel, refuerzo, ventana, puerta, cubierta, cimiento,
+     camino, frontón
+ +13 style 0..3: variante cromática/constructiva
+ +14 detail 0..15: cantidad de desgaste adicional del compositor
+ +15 method 0 procedural, 1 estático, 2 híbrido
+
+Método 0: pixel EYE3, sin comandos vectoriales. Método 1: instrucciones
+vectoriales precodificadas en ejecutable + color de paleta (sin EYE3 base).
+Método 2: fondo EYE3 y comandos vectoriales con sombreado local determinista.
+Píxel salida: 0xFFRRGGBB (opaco), textura 64x64; las UV de la geometría
+pueden repetirse. La mesa de instrucciones está en src/eye4.c (6 bytes por
+comando en fuente), reutilizada por muchas recetas.
+
+No serializar structs C ni usar srand/rand. Cambios en píxel que afecten al
+contrato requieren EYE5 o revisión explicitamente acordada. EYE1/2/3 siguen
+con sus antiguos decodificadores, NO se reinterpretan a EYE4. Checksum FNV
+solo sirve para integridad accidental, no autenticación.
+
+Pack de muestra: 8 motivos x 16 B + cabecera 12 B = 140 bytes. La lista
+artística y etiquetas externas NO van en este formato. Para embebido usar
+build/eye4_cli embed pack.eyep data.h y compilar el array dentro del EXE.
+La herramienta eye4_cli y las vistas previas solo se distribuyen al autor.

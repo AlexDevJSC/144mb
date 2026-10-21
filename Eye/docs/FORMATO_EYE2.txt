@@ -1,0 +1,54 @@
+PROYECTO 1.44 / EYE 0.2 / FORMATO EYE2
+====================================
+Objetivo: mejorar el acabado artístico sin aumentar el tamaño de la receta.
+Fuente: Plan Maestro v1.0, apartados 6, 7, 13, 14, 17 y 20.
+
+CABECERA 12 BYTES
+  0..3   ASCII EYE2 (versión de píxeles; EYE1 permanece separado)
+  4      tamaño de receta (12)
+  5      cantidad N (1..255)
+  6..7   reservados cero
+  8..11  checksum FNV-1a32 LE de bytes 0..7 seguidos de bytes 12..fin
+          (se excluye el campo del propio checksum). A diferencia de EYE1,
+          EYE2 verifica también la versión y los campos de cabecera.
+
+REGISTROS 12 BYTES CADA UNO
+  Idénticos al esquema de EYE1: familia, paleta, escala, patrón, desgaste,
+  crecimiento, contraste, flags=0, semilla u32 LE. No serializar un struct C.
+  Texto artístico externo y PNG/PPM son artefactos de desarrollo opcionales.
+
+GENERACIÓN
+  - Enteros C11, coordenadas x/y periódicas mod 64; mismo entorno y
+    receta deberían producir iguales texels en 0xFFRRGGBB.
+  - Luz simulada por biseles, juntas de mortero y relieve de placas.
+  - Agrietado de celdas y erosión a partir de un hash local.
+  - Tono de piezas individuales, grano y capas multi-escala periódicas.
+  - Madera con vetas, nudos y desgaste; metal con remaches y óxido;
+    suelo con piedras; tejido con trama; follaje agrupado; yeso descascarado.
+  - El generador no realiza compresión PNG ni copia texturas originales.
+
+VERSIÓN / COMPATIBILIDAD
+  eye_pack_read / eye_generate = EYE1 ORIGINAL SIN CAMBIOS.
+  eye2_pack_read / eye2_generate = algoritmo EYE2.
+  eye_bank_open / eye_bank_render aceptan ambos de forma explícita.
+  Nunca reinterpretar material EYE1 con algoritmo EYE2 por defecto.
+  Si se altera la apariencia de EYE2, deberá hacerse EYE3 y tests de hash.
+
+TAMAÑOS DE DATOS (NO DE EJECUTABLE)
+  1 receta                  12 bytes
+  22 recetas                276 bytes = 12 + 22*12
+  1 imagen RGBA 64x64       16.384 bytes de RAM (sin alineación añadida)
+  22 imágenes RGBA 64x64    360.448 bytes de RAM
+  Generadores C11 y código de render no están incluidos en esas cifras.
+
+NO ALCANZADO
+  - Paridad visual demostrada con Daggerfall: juicio humano pendiente.
+  - Tamaño completo del juego en PE/Windows: no probado.
+  - Integración compilada con el Bones v0.2 real: falta acceso a su fuente.
+
+CORRECCIÓN IMPLEMENTADA EN Eye 0.2.1
+  La versión v0.2.0 inicial computaba por error solo el payload, pese a
+  documentar un hash que incluía cabecera. El código v0.2.1 implementa el
+  contrato especificado aquí. Regenerar los .eyep EYE2 anteriores con el
+  nuevo compilador. El runtime v0.2.1 los rechazará si usan checksum antiguo.
+  No afecta ni a texels ni a EYE1. Cambios requieren tests y documentación.

@@ -1,0 +1,74 @@
+CONTRATO EYE -> MOTOR VISUAL 1.44
+
+FUENTE DE DATOS
+Generar a partir del texto de autor:
+  eye compile materiales.eye.txt materiales.eyep
+  eye embed materiales.eyep materiales_embebidos.h
+Incluir materiales_embebidos.h y enlazar src/eye.c con el juego.
+Las previews .ppm/.png y los .eye.txt permanecen en la estación de desarrollo.
+
+CÓDIGO C MÍNIMO
+  #include "eye.h"
+  #include "materiales_embebidos.h"
+  static EyeRecipe materials[EYE_MAX_RECIPES];
+  static uint32_t pixels[EYE_SIZE * EYE_SIZE];
+  unsigned count = 0;
+  if (!eye_pack_read(eye_pack_embedded, EYE_PACK_EMBEDDED_BYTES,
+                     materials, EYE_MAX_RECIPES, &count)) {
+      /* formato/corrupción/versión incompatible; manejar error */
+  }
+  if (!eye_generate(&materials[0], pixels, EYE_SIZE * EYE_SIZE)) {
+      /* parámetros inválidos o búfer insuficiente */
+  }
+  /* pixels contiene uint32_t 0xFFRRGGBB, top-left origin, 64x64. */
+
+POLÍTICA DE INTEGRACIÓN
+- No regenerar por frame: generar una vez al iniciar o activar región.
+- EYE no decide geometría, UV, render por software/GPU ni cuándo eliminar caché.
+- El motor posee el almacenamiento de los píxeles y la vida de cada textura.
+- La semilla de textura puede derivarse de región/bioma/ID estable antes
+  de invocar eye_generate: no usar el orden de carga de materiales como semilla.
+- Cada material se direcciona por ID local del pack, o por una clave estable
+  definida por la capa mundo cuando se componen packs.
+- En el framebuffer del motor v0.1 se puede copiar o texelar pixels[][];
+  en Direct3D11 se creará el recurso de textura 64x64 en RAM/VRAM.
+- 64x64x4 = 16.384 bytes de memoria por textura generada.
+- 22 texturas generadas al mismo tiempo consumen 360.448 bytes de píxeles,
+  además de memoria de caché/atlas y estructuras del renderizador.
+- EYE1 representa materiales opacos; sprites alpha se estudiarán en EYE0.4.
+- Para cooperativo reproducible, todos los jugadores deben compartir la
+  misma revisión del algoritmo EYE y recetas compatibles.
+
+PRUEBA DE INTEGRACIÓN INCLUIDA
+  make integration
+Compila tests/consumer_embed.c, que consume el .h generado, recupera 22
+recetas y crea una textura sin ninguna lectura de fichero en el runtime.
+
+CRITERIO DE ADOPCIÓN
+No reemplazar de inmediato el generador de texturas del motor existente.
+Antes comparar visuales, rendimiento, bytes adicionales en un ejecutable
+Windows real y consistencia de hashes al enlazar cada módulo.
+
+ACTUALIZACIÓN EYE v0.2
+  El texto anterior sirve sólo para EYE1.
+  Para nuevas recetas EYE2 usar:
+    #include "eye2.h"
+    EyeTextureBank bank;
+    eye_bank_open(&bank, eye_pack_embedded, EYE_PACK_EMBEDDED_BYTES);
+    eye_bank_render(&bank, index, pixels, EYE_SIZE*EYE_SIZE);
+  eye_pack_read() por diseño SOLO acepta EYE1, nunca EYE2.
+  La integración técnica nueva está en docs/INTEGRACION_BONES_0_2.txt
+  y el ejemplo conceptual de carga en examples/README_BONES.txt.
+
+ACTUALIZACIÓN EYE v0.3
+  Generación de biblioteca EYE3 (16 recetas/204B):
+    make architecture
+    ./build/eye embed build/materiales_arquitectura.eyep build/eye3_embed.h
+  Runtime utiliza eye_bank_open()/eye_bank_render() para EYE1/2/3.
+  Nuevas familias de EYE3: roof (8), cobble (9), carving (10).
+  eye_uv_sample_repeat(texels,u_q16,v_q16) para prueba de UV periódicas;
+  Bones debe decidir triangulación real y aportar coordenadas coherentes.
+  EyeMaterialCache acepta memoria de caller y evita regeneración por frame.
+  El puente legacy de Bones tiene SOLAMENTE tres materiales simultáneos;
+  los 16 del atlas requieren extensión del adaptador/escena por Bones.
+  docs/PETICION_BONES_EYE_0_3.txt define los cambios a negociar.

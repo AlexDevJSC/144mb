@@ -1,0 +1,52 @@
+PROYECTO 1.44 — PETICIÓN DE EYE 0.5 A BONES
+=========================================
+Estado: RFC / PROPUESTA / SIN CAMBIO AUTORIZADO DE BONES
+Base: informe de Bones del 21/10/2026 (0.2.1), API 2, subsystem API 1.
+
+1. QUÉ ENTREGA EYE
+- src/eye5.c + include/eye5.h: recetas de cubierta, caché y mallado visual.
+- eye5_build_roof recibe tamaño e inclinación y construye en memoria:
+  2 vertientes + 1 cumbrera + 2 aleros + 4 remates de frontón
+  en tejados a dos aguas (9 quads; no añade colisionadores).
+  Cuatro aguas: 4 faldones, incluidas 2 caras triangulares,
+  + cumbrera, 4 remates de limatesa y 4 aleros = 13 superficies.
+  Las UV de ambos faldones siguen líneas de tejas paralelas a aleros.
+- Cada superficie incluye UV y ROLE: ROOF, TRIM o RIDGE. Eye5 no crea mundo.
+- RIDGE reutiliza el material de cubierta (no necesita ID adicional).
+- Cuatro recetas de 12 bytes, banco 60 bytes, raster 64x64 RGB empaquetado.
+
+2. CÓMO PODRÍA CONSUMIRLO BONES 0.2.1 SIN MODIFICAR SU API
+- Leer Eye5RoofMesh y convertir cada superficie visual a BonesQuad,
+  siguiendo el contrato real BonesVertex.position + u/v.
+- En las superficies triangulares duplicar el último vértice, tal como
+  valida el informe Bones 0.2.1; no es necesario BonesTriangle público.
+- Remitir quads mediante bones_scene_add_quad, comprobar cada bool.
+- Roles: ROOF y RIDGE reutilizan el material de cubierta; TRIM usa madera.
+- NO llamar a BonesWorld.colliders dentro de construcción de escena.
+- 96 quads actuales bastan para una casa de prototipo; no son objetivo
+  para ciudades. El motor debe notificar overflow de escena.
+
+3. BLOQUEO REAL DE INTEGRACIÓN
+- Bones 0.2.1 solo admite 3 índices efectivos: STONE(0), FLOOR(1), WOOD(2).
+- Actualmente NO hay ID propio para cubierta. No falsificar una integración
+  completa ni sustituir silenciosamente el material 0/1/2 sin contrato.
+- Solicito RFC-GFX-01: mantener uint8_t material y aceptar un catálogo
+  versionado de hasta 256 ids; reconciliar con resolvedor/cache Eye.
+- De momento EYE5 NO modifica src/bones, el adaptador ni headers Bones.
+- Backface culling por cara pospuesto; usar doble cara y winding coherente.
+- Si se modifica semántica pública del material, versionar y probar
+  el contrato según decisión de Bones y visto bueno de Soul.
+
+4. CAMINO DE INTEGRACIÓN EN ORDEN
+ A. Bones y Soul aprueban RFC-GFX-01, especifican IDs de material.
+ B. Bones amplía validación efectiva 0..2 y adaptador de escenas.
+ C. Eye ofrece textura 64x64 por ID y asegura pinning de tiles del frame.
+ D. Bones verifica en Linux escena de 1 casa con sus verdaderos headers.
+ E. Soul verifica regresiones, memoria, tamaño ELF/PE y Windows.
+ F. Añadir colisiones y transitabilidad POR EL RESPONSABLE DEL MOTOR,
+    sin convertir Eye5 en motor físico.
+
+5. FUENTE Y LIMITACIÓN
+- Esta entrega se ha elaborado a partir del informe Bones que envió el
+  director y del código Eye4 montado. NO se ha podido enlazar el ZIP real
+  Bones 0.2.1, por tanto no se certifica compatibilidad binaria ni runtime.

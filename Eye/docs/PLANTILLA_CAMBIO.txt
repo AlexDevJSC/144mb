@@ -1,0 +1,11 @@
+PLANTILLA DE CAMBIO EYE (OBLIGATORIA)
+ID, fecha, versión, petición de producto:
+Código y muestras fuente afectadas:
+Formatos/API y compatibilidad impactados:
+Pruebas añadidas/actualizadas:
+Resultados medidos (sistema, compilador, bytes, tiempos):
+Actualización docs/ESTADO_EYE.txt:
+Actualización docs/REGISTRO_CAMBIOS_EYE.txt:
+Actualización de docs/DECISIONES_EYE.txt o 'sin cambio de decisión':
+Actualización de docs/FORMATO_EYE1.txt o 'sin cambio de formato':
+Riesgos conocidos y próximos pasos:

@@ -1,0 +1,16 @@
+MEDICION REPRODUCIBLE EYE 0.5.1
+=================================
+Formato EYE5: 4 recetas x12 + cabecera12 = 60 bytes (sin cambios).
+Resolucion: 64x64 pixels x4 bytes = 16384 bytes RAM por tile.
+Malla gable: 9 quads = representacion visual, no colision.
+Malla hip: 13 superficies (11 quads + 2 triangulos degenerados para Bones).
+Sonda ELF Linux: v0.5.0 22728 bytes; v0.5.1 22728 bytes.
+size ELF Linux texto 10987 -> 10991 (+4 bytes). Datos 704; BSS 16416.
+El ELF incluye biblioteca de arranque/metadata, no tamaño Windows.
+El tamaño de .text no es por si solo el coste completo del componente Eye.
+Comando: make eye5size; size build/size_eye5.
+Si hay cambios en compilador, flags, SO o link la medida variara.
+Disquete FAT12 1.44MB nominal: 1474560 bytes totales de sectores;
+en disquete estandar formateado 2847 sectores de datos x 512 =
+1457664 bytes disponibles al inicio para un unico fichero.
+Esto es un calculo, NO un ensayo de copiar/arrancar en un disquete real.

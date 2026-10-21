@@ -1,0 +1,23 @@
+# NAME           FAMILY   PALETTE SCALE PATTERN WEAR GROWTH CONTRAST SEED
+muro_castillo    stone       0      1     0      4     1     13   0x0abcde01
+pared_catacumba  stone       1      1     2     11     6     14   0x0abcde02
+piedra_caliza    stone       2      2     1      3     0     12   0x0abcde03
+muro_humedo      stone       3      2     3      9    14     13   0x0abcde04
+ladrillo_rojo    brick       0      1     0      6     0     13   0x0abcde05
+ladrillo_ocre    brick       1      1     1      3     0     12   0x0abcde06
+ladrillo_viejo   brick       3      2     2     13     8     15   0x0abcde07
+madera_roble     wood        0      1     0      3     0     14   0x0abcde08
+madera_oscura    wood        1      2     2      9     0     14   0x0abcde09
+madera_clara     wood        2      1     4      2     0     13   0x0abcde0a
+tierra_camino    dirt        0      1     0      5     4     14   0x0abcde0b
+cesped_escaso    dirt        1      1     2      4    13     12   0x0abcde0c
+hierro_fortin    metal       0      1     0      5     4     14   0x0abcde0d
+bronce_porton    metal       1      2     3      8     7     15   0x0abcde0e
+tapiz_purpura    cloth       0      1     0      3     0     12   0x0abcde0f
+tela_carmesí     cloth       1      1     2      7     0     15   0x0abcde10
+hierba_bosque    foliage     0      1     1      4     8     14   0x0abcde11
+hojas_amarillas  foliage     1      1     5      2     4     12   0x0abcde12
+enredadera       foliage     2      2     2      7    11     15   0x0abcde13
+yeso_envejecido  plaster     0      1     0      7     5     14   0x0abcde14
+yeso_deslucido   plaster     1      1     3     14    12     13   0x0abcde15
+yeso_claro       plaster     2      2     1      3     0     12   0x0abcde16

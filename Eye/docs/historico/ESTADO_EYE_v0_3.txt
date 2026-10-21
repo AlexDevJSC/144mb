@@ -1,0 +1,59 @@
+PROYECTO 1.44 — ESTADO REAL EYE 0.3
+20/10/2026 — siguiente a Eye 0.2.2. Fuentes originales EYE1/EYE2 conservadas.
+
+EJECUTADO Y PROBADO CON GCC/CLANG EN LINUX
+  - Familias EYE3 0..7 conservan la geometría EYE2 pero aplican el perfil
+    envejecido como PARTE DEL NUEVO ALGORITMO EYE3 (no cambia EYE2).
+  - Nuevas familias 8 roof, 9 cobble, 10 carving. Cuatro paletas por familia.
+  - EYE3 mantiene 12 bytes por receta, 12 de cabecera, integridad FNV-1a32.
+  - eye_bank_open/render admite EYE1, EYE2, EYE3; codecs antiguos inmutables.
+  - eye_uv_sample_repeat: UV Q16.16, coordenadas negativas, nearest y wrap.
+  - EyeMaterialCache: 1..16 materiales sin heap, LRU en RAM del consumidor.
+  - eye_bones_legacy_fill acepta EYE3 en 3 slots del contrato histórico.
+  - CLI de autoría: compile3, inspect, render, atlas, embed de EYE3.
+  - Demo offline de casa de quads/triángulos con 7 materiales compartidos.
+  - 16 recetas de prueba en 204 bytes. Texturas 64x64 RGBA en RAM (16 KiB).
+  - Tests históricos EYE1/EYE2, EYE3, tone, puente y embed: OK.
+  - Clang ASan/UBSan EYE3: OK en Linux.
+
+TAMAÑO — NO CONFORMIDAD PE VERIFICADA
+  - Librería fuentes .c + .h v0.3: 47.075 bytes (texto de desarrollo).
+  - Paquete 16 recetas arquitectónicas: 204 bytes (datos binarios).
+  - Ejecutable CLI GCC/Linux ELF: 39.952 bytes. NO se publica con el juego.
+  - ELF mínimo EYE2 medido: 14.464 bytes; ELF mínimo EYE3: 18.560 bytes;
+    delta 4.096 bytes de archivo en dos programas de prueba DIFERENTES.
+  - .text de ELF mínimo EYE2: 5.384; .text del ELF EYE3: 7.475 bytes.
+  - No hay medida incremental exacta del PE de Windows real/Bones integrado.
+  - Cache ejemplo 2 texturas: 2 x 16.384 = 32.768 bytes de RAM aportados
+    por el motor + struct EyeMaterialCache. Sin límite universal de RAM cerrado.
+
+BONES 0.2 — PENDIENTE DE ENLACE REAL
+  - Documentación fuente: Bones API 2 y Subsystem API 1, adaptador
+    src/adapters/eye_adapter.[ch] hacia sw_renderer.[ch].
+  - Las pruebas con cabeceras simuladas verifican memoria/tipos de textura,
+    NO conexión con Bones real. No se ha modificado código Bones real.
+  - Tres slots actuales no son una biblioteca arbitraria de 16 materiales:
+    requiere adaptar selección de material/atlas del renderizador central.
+  - No se creó otro BONES_SLOT_EYE, ni físicas ni estado del mundo.
+
+FUNCIONALIDAD DE OTROS RESPONSABLES
+  - La construcción geométrica y colisiones del mundo corresponde a Bones;
+    Skin es menú/HUD/UX; Mouth redes; Ear audio; Soul QA.
+  - Según el protocolo de responsabilidades v1.0 del proyecto, Brain
+    programa IA/NPC; la autoría definitiva de persistencia y economía está
+    pendiente de asignación. Eye no se apropia de ninguno de esos sistemas.
+
+PENDIENTE
+  - Integración material IDs libres de 3 slots en Bones real y escena in-game.
+  - Calibración artística contra referencias autorizadas de Daggerfall.
+  - Sprites, atlas de personajes, animaciones, transparencias, GPU y pe Windows.
+  - Medición de fps/ram/carga en hardware objetivo y regresión con Soul.
+  - Caché/concurrencia: la implementación actual es monohilo; proteger externamente
+    si Bones permite llamadas simultáneas. Contador LRU uint32 puede envolver
+    tras 2^32 accesos; versión futura tratará épocas o edad con wrap seguro.
+
+DOCS Y REPRODUCCIÓN
+  - docs/FORMATO_EYE3.txt (nuevo); docs/PETICION_BONES_EYE_0_3.txt;
+    docs/PETICION_SOUL_EYE_0_3.txt.
+  - make test; make integration; make architecture; sanitizador Clang externo.
+  - Ejemplo build/previews/casa_arquitectura.png, atlas_arquitectura.png.

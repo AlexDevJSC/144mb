@@ -1,0 +1,45 @@
+FORMATO EYE1: PACK COMPACTO DE RECETAS — VERSION 1
+Extension sugerida: .eyep
+Orden de bytes: little-endian en todos los enteros multibyte
+Longitud exacta: 12 + 12*N bytes; 1 <= N <= 255
+No existen estructuras C serializadas directamente. No se guarda padding.
+
+CABECERA (12 bytes)
+  0..3   magic ASCII "EYE1" (el último byte establece versión mayor 1)
+  4      longitud de cada registro = 12
+  5      número de materiales N (1..255)
+  6..7   reservados = 0
+  8..11  checksum FNV-1a32 de todos los registros [12..fin), little-endian
+
+REGISTRO DE MATERIAL (12 bytes, repetido N veces)
+  +0     familia       0=stone, 1=brick, 2=wood, 3=dirt,
+                       4=metal, 5=cloth, 6=foliage, 7=plaster
+  +1     paleta        0..3
+  +2     escala        1..4
+  +3     patron        0..7
+  +4     desgaste      0..15
+  +5     crecimiento   0..15
+  +6     contraste     0..15
+  +7     flags         0 obligatorio en EYE1
+  +8..11 semilla       uint32 LE
+
+La posición del registro es el ID local de material de la biblioteca.
+EYE1 NO almacena nombres: son etiquetas de autor externas al paquete.
+Una receta = 12 bytes; pack con 22 recetas = 12 + 22*12 = 276 bytes.
+El checksum FNV-1a32 detecta errores accidentales, NO autentica datos.
+
+Los algoritmos gráficos están definidos por src/eye.c de la versión del
+formato; cambios que alteren pixels requieren nueva revisión del formato o
+migración explícita. Mismo EYE1 + mismo código C + misma receta produce los
+mismos píxeles RGBA, y no requiere PRNG global.
+
+El archivo no es un formato raster (no es BMP, PNG, DDS, etc.). Solo puede
+interpretarse si el runtime conoce EYE1. El parámetro flags permanece reservado.
+La implementación rechaza longitudes extra, parámetros fuera de rango,
+versiones desconocidas y checksums distintos.
+
+REFERENCIAS DE IMPLEMENTACIÓN
+  include/eye.h: contrato de API
+  src/eye.c: generador y codec binario
+  tools/eye_cli.c: compilador y exportador
+  tests/test_eye.c: pruebas de regresión y serialización
