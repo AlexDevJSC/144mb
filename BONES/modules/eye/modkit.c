@@ -10,9 +10,6 @@
 #include "eye5.h"
 #include "eye_display.h"
 #include <string.h>
-#ifdef EYE_TEST_TRACE_CAMERA
-#include <stdio.h>
-#endif
 
 typedef struct {
     P144_Renderer renderer;
@@ -102,13 +99,7 @@ static void eye_present(void *context,const BonesModFrame *frame) {
        frame->quad_count>BONES_MOD_QUAD_LIMIT||frame->sprite_count>BONES_MOD_SPRITE_LIMIT||
        (frame->quad_count&&!frame->quads)||(frame->sprite_count&&!frame->sprites))return;
     camera.pos=(P144_Vec3){frame->camera_x,frame->camera_y,frame->camera_z};
-    camera.yaw=frame->camera_y;camera.pitch=frame->camera_pitch;
-#ifdef EYE_TEST_TRACE_CAMERA
-    fprintf(stderr,"EYE_PRESENT frame yaw=%.6f pitch=%.6f cam.yaw=%.6f quad_count=%u first=(%.3f,%.3f,%.3f)\\n",frame->camera_yaw,frame->camera_pitch,camera.yaw,(unsigned)frame->quad_count,
-      frame->quad_count?frame->quads[0].vertices[0].x:0.f,
-      frame->quad_count?frame->quads[0].vertices[0].y:0.f,
-      frame->quad_count?frame->quads[0].vertices[0].z:0.f);
-#endif
+    camera.yaw=frame->camera_yaw;camera.pitch=frame->camera_pitch;
     p144_renderer_begin(&s->renderer,UINT32_C(0x15202d));
     for(uint32_t i=0;i<frame->quad_count;++i) {
         const BonesModQuad *src=&frame->quads[i];
@@ -125,9 +116,6 @@ static void eye_present(void *context,const BonesModFrame *frame) {
         p144_renderer_billboard(&s->renderer,&camera,
            (P144_Vec3){sp->x,sp->y,sp->z},sp->width,sp->height,sp->animation_tick);
     }
-#ifdef EYE_TEST_TRACE_CAMERA
-    fprintf(stderr,"EYE_PRESENT triangle_count=%u\\n",(unsigned)s->renderer.triangles);
-#endif
     p144_renderer_crosshair(&s->renderer);
     (void)eye_display_scan(s->renderer.pixels,EYE_DISPLAY_PIXELS,&s->frame_stats);
     ++s->frames_rendered;
