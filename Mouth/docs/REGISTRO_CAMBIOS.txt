@@ -1,0 +1,27 @@
+REGISTRO DE CAMBIOS — MOUTH
+
+[0.3.0] 21/10/2026 — Primer prototipo UDP LAN conectado a Bones 0.4.
+Responsable: Mouth (red/multijugador).
+Archivos:
+ - include/mouth_lan.h: API LAN v1 y estado por sesión.
+ - src/mouth_lan.c: UDP transport, handshake, vínculo endpoint/owner,
+   secuencia de entradas, snapshots de dos actores y adaptador ModKit.
+ - examples/lan_demo.c: anfitrión Bones + cliente de consola.
+ - tests/test_codec.c: formato/longitud/versión/sesión/rangos inválidos.
+ - tests/test_loopback.py: dos procesos con movimiento del actor controlado
+   en Bones (prueba ofrecida, pendiente de ejecutar).
+ - Makefile, scripts/build_windows_msvc.bat, build_windows_mingw.bat.
+ - docs/PROTOCOLO_LAN_V1.txt: wire format y contrato de autoridad.
+ - docs/ESTADO_REAL.txt: límites reales y pruebas pendientes.
+ - README.md: instrucciones de compilación y ejecución.
+
+Corrección dentro de 0.3:
+ - Parser IPv4 explícito de Windows y declaración de GetTickCount64.
+ - Cliente valida snapshot íntegro y actores conocidos antes de publicarlo.
+
+Estado de pruebas: NINGUNA PRUEBA DE COMPILACIÓN/EJECUCIÓN REPRODUCIDA
+por este entorno. Fuentes y scripts publicados; ejecutar y subir logs
+antes de considerar el hito LAN validado.
+
+No se modificaron los fuentes/cabeceras de BONES. Rollback: borrar los
+ficheros v0.3 añadidos bajo Mouth, mantener el resto del repositorio.
