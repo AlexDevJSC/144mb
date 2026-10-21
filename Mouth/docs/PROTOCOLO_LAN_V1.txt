@@ -83,10 +83,15 @@ ANCHO DE BANDA NOMINAL (SOLO BYTES UDP DE APLICACIÓN, SIN IP/UDP)
   SNAP 77 B * 20/s = 1540 B/s host->cliente.
   Total nominal sesión=2860 B/s + HELLO/WELCOME/reintentos/eventos
   y overhead físico (no medido).
-  No se realizaron capturas Wireshark ni pruebas de rendimiento reales.
+  VALIDADO EN CI: dos procesos / loopback 4 segundos con Bones.
+  En Windows se observaron host TX=5.811 B y cliente TX=5.294 B
+  acumulados (UDP payload de aplicación); no se incluyen IP/UDP ni
+  tráfico de otras aplicaciones. No son un benchmark LAN física ni
+  una garantía de rendimiento sostenido. Sin captura Wireshark.
 
 CRITERIOS DE PRÓXIMA VERSIÓN
-  1. Prueba nativa en dos Windows de la misma LAN, cortafuegos, FPS/RTT.
+  1. Prueba en DOS EQUIPOS físicos Windows de la misma LAN, cortafuegos,
+     FPS/RTT (loopback MSVC y GCC ya verificados en CI).
   2. Integración Eye: render local de sprites de dos actores, interpolación.
   3. Autenticación de unión y hash de reglas/generador/materiales.
   4. Envío confirmado de eventos semánticos y snapshot sincronizable.
