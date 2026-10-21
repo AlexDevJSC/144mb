@@ -15,5 +15,6 @@ Repositorio supervisado: `AlexDevJSC/144mb` · rama `main`.
 - [Estado de versiones](ESTADO_VERSIONES.md)
 - [Discrepancias](DISCREPANCIAS.md)
 - [Protocolo de revisión](PROTOCOLO_REVISION.md)
+- [Playtest de Windows — bugs y mejoras 21/10/2026](PLAYTEST_BUGS_2026-10-21.md)
 
 **Regla:** ninguna coincidencia de nombre o versión certifica una compilación, integración, rendimiento, seguridad ni conformidad con 1.474.560 bytes. Las decisiones de diseño y cambios de propiedad pertenecen al director del proyecto.
