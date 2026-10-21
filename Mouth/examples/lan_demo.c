@@ -7,6 +7,8 @@
 #endif
 #include "bones/modkit_host.h"
 #include "../include/mouth_lan.h"
+/* Uses the installed Bones/modules/mouth/modkit.c, not a separate copy. */
+extern int32_t bones_mod_mouth_query(uint32_t, BonesModDescriptor *);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,7 +95,7 @@ int main(int argc,char **argv){
         cfg.remote_actor_id=actor_id;cfg.remote_owner=2;
         if(!mouth_lan_configure_host(lan,&cfg)){ok=0;goto cleanup;}
         host=bones_mod_host_create(foundation);
-        if(!host||bones_mod_host_add(host,mouth_lan_query)!=BONES_MOD_OK||
+        if(!host||bones_mod_host_add(host,bones_mod_mouth_query)!=BONES_MOD_OK||
            bones_mod_host_start(host)!=BONES_MOD_OK){
             fprintf(stderr,"ModKit/Mouth startup failed (UDP port in use?)\n");
             ok=0;goto cleanup;
