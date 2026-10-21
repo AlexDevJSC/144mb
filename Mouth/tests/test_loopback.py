@@ -37,8 +37,8 @@ def main():
         assert any(m[1] == "2" for m in hs), hs  # connected
         assert max(float(m[3]) for m in hs) > -3.0, hs  # Bones moved actor2
         assert max(float(m[2]) for m in cs) > 1.0, cs
-        hlocal = re.findall(r"HOST tick=\\d+.*p1\\(([-\\d.]+) ([-\\d.]+)\\)", hout)
-        clocal = re.findall(r"CLIENT tick=\\d+ p1\\(([-\\d.]+) ([-\\d.]+)\\)", client.stdout)
+        hlocal = re.findall(r"HOST tick=\d+.*p1\(([-\d.]+) ([-\d.]+)\)", hout)
+        clocal = re.findall(r"CLIENT tick=\d+ p1\(([-\d.]+) ([-\d.]+)\)", client.stdout)
         assert hlocal and clocal
         assert all(abs(float(x)) < 0.01 and abs(float(z)+7.0) < 0.01
                    for x,z in hlocal+clocal)
