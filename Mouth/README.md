@@ -2,7 +2,7 @@
 
 **Versión actual publicada:** Mouth LAN v0.3.0 (prototipo para dos jugadores, UDP sobre IPv4).  
 **Núcleo:** Bones Foundation v1 + Bones ModKit ABI 1.  
-**Estado:** código y pruebas publicados; compilación y prueba LAN nativa **pendientes de verificar**.
+**Estado:** código y pruebas publicados; **Linux GCC y Windows MSVC compilados y probados con dos procesos en loopback mediante GitHub Actions**. Prueba entre ordenadores distintos de LAN pendiente. [Resultados CI](https://github.com/AlexDevJSC/144mb/actions/runs/39586493847).
 
 ## Qué hace
 
@@ -10,7 +10,7 @@ Un ordenador abre una sesión como **anfitrión autoritativo**. Su proceso insta
 
 El cliente envía controles y muestra por consola las posiciones de ambos actores confirmadas por el anfitrión. El ejemplo **todavía no dibuja la escena 3D en el cliente**: esta es una prueba vertical de red y física, no una versión jugable completa.
 
-La sesión funciona sin servidor dedicado, sin dependencias del servicio externo ni intercambio de texturas. El límite de 1,44 MB deberá medirse con el ejecutable final del juego; el ejemplo todavía no cumple esa validación.
+La sesión funciona sin servidor dedicado, sin servicios externos ni intercambio de texturas. En GitHub Actions el EXE Windows de la demo con Bones midió **188.928 bytes**. El límite global de 1,44 MB deberá medirse con el ejecutable final de todo el juego; **este dato no certifica su cumplimiento**.
 
 ## Ejecutar en Windows
 
@@ -44,7 +44,7 @@ Desde la raíz del repositorio completo:
 
 La prueba loopback ejecuta anfitrión y cliente como dos procesos independientes sobre 127.0.0.1, comprueba la recepción de posiciones y verifica movimiento del actor remoto mediante las físicas reales de Bones. El cliente POSIX de demostración mueve al actor automáticamente para facilitar la prueba headless.
 
-Estas órdenes son **instrucciones reproducibles**, no evidencia de una ejecución ya realizada.
+Estas órdenes se han ejecutado correctamente en GitHub Actions para Linux y Windows (codec y dos procesos por loopback). No equivalen a una prueba en dos máquinas físicas de la misma LAN.
 
 ## Rutas del código
 
@@ -66,4 +66,4 @@ No se modifica BONES/include/bones/modkit.h ni la semántica de guardados de Ski
 
 Los paquetes originales Mouth v0.1 (red) y v0.2 (referencias visuales) se elaboraron previamente en ChatGPT, pero **sus fuentes completas aún no se han sincronizado con GitHub**. El antiguo importar_fuentes.ps1 permite importarlos como material histórico local si se descargan los ZIP. Mouth LAN v0.3 es un protocolo nuevo M144/1; **no es compatible en el cable** con los paquetes anteriores.
 
-La validación de Windows, la medición real de bytes y la aprobación de Soul están pendientes.
+Validación Windows de consola/loopback y tamaño de la demo: realizados en CI. Pendiente probar dos PC reales, calidad de conexión sostenida, juego completo y revisión de Soul.
