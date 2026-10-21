@@ -1,98 +1,40 @@
-PROYECTO 1.44 / MOUTH LAN v0.3.0 - UDP CON BONES MODKIT ABI 1
-Fecha: 21/10/2026
+MOUTH LAN 0.4.0 / WIRE M144/1 — 21-10-2026
+Todos los campos multi-byte little endian. Datagramas UDP IPv4.
 
-FUENTES DE CONTRATO:
-  BONES/include/bones/modkit.h (ABI 1)
-  BONES/include/bones/foundation.h (Foundation v1)
-  BONES/docs/MODKIT_V0_4_0_CONTRATO.txt
-  PROYECTO_144_Plan_Maestro_v1.md
+HEADER 12 B:
+ magic ASCII M144 [4] + wire_version u8=1 + type u8 +
+ length u16 + session u32.
+TYPE 1 HELLO 36 B (session=0):
+ world_id u64, seed u64, generator_version u32, nonce u32.
+TYPE 2 WELCOME 36 B:
+ remote_actor_id u64, remote_owner u32, echoed_nonce u32, tick u64.
+TYPE 3 INPUT 22 B:
+ seq u32, forward i8, strafe i8, yaw_mrad i16, sprint u8, jump u8.
+ No issuer, actor_id or damage fields from client.
+TYPE 4 SNAPSHOT 77 B (dos actores):
+ tick u64, actor_count u8=2; por actor:
+ actor_id u64, owner u32, x_mm/y_mm/z_mm/yaw_mrad i32.
+TYPE 5 REJECT 13 B:
+ code u8 1 (mundo/semilla/generador incompatible),
+ code u8 2 (versión de wire HELLO incompatible).
+TYPE 6 LEAVE 12 B:
+ header con session válida, mejor esfuerzo, sin confirmación.
 
-ALCANCE
-  Prototipo LAN 2 jugadores: host autoritativo + cliente remoto, IPv4 UDP,
-  puerto configurable (14444 por defecto). Sin servidores dedicados ni NAT.
-  Host ejecuta Bones Foundation/ModKit; cliente transmite controles y recibe
-  instantáneas compactas. No transmite texturas, mapas ni archivos de escena.
-  La modalidad host autoritativo es P2P en sentido host->amigo; no es un
-  sistema de consenso entre autoridades iguales.
+Trafico nominal aplicación:
+ cliente INPUT 22*60=1320 B/s; host SNAP 77*20=1540 B/s.
+ Total aprox 2860 B/s (sin header IP/UDP ni negociación).
+ Client HELLO cada 500 ms, timeout 5000 ms sin bienvenida.
+ Host filtra endpoint/session/seq crecientes y sólo envía al actor
+ owner/ID validado de Bones. Cliente rechaza snapshots no crecientes
+ o incompletos. LEAVE remoto termina sesión; corte abrupto produce
+ reconexión temporal y estado LOST si falla dentro de la ventana.
+ No hay autenticación fuerte: sólo LAN privada de confianza.
 
-CONTRATO CON BONES
-  Host llama bones_foundation_spawn(BONES_KIND_PLAYER, owner=2).
-  Host registra mouth_lan_query a través de bones_mod_host_add.
-  mouth_lan_query implementa BonesModDescriptor ABI1, role MOUTH,
-  permissions READ_ACTORS | READ_TIME | SEND_COMMANDS.
-  start valida actor_id/owner reales de Bones; before_tick recibe paquetes,
-  valida orden/owner y usa submit_move(issuer=owner, tick=actual+1).
-  after_tick lee actor_get de los jugadores y transmite snapshots.
-  Bones decide colisiones, movimiento, salto y velocidad.
-  No hay modificaciones en BONES ni accesos directos a BonesEngine desde
-  el módulo Mouth. Para registrar Mouth en el host integrado del juego en
-  lugar del demo, sustituir el placeholder de Bones con coordinación con
-  Bones/Soul. NO enlazar simultáneamente ambos proveedores del rol MOUTH.
-  El cliente guarda transformaciones confirmadas; NO restaura Bones en
-  caliente ni modifica la física local del anfitrión.
+World_id, seed, generator_version deben coincidir en ambos extremos
+ANTES del HELLO. No hay descubrimiento automático por IP, ni hashes de
+biblioteca Eye/recetas, ni checkpoint de partida Skin/Brain.
+No transmitir texturas, PNG ni píxeles continuamente.
+No NAT/WAN, migración host, eventos persistentes fiables ni 4 jugadores.
 
-WIRE FORMAT 1 (TODOS LOS MULTIBYTE LITTLE-ENDIAN, SIN PADDING)
-  Cabecera común: magic 'M144'[4], version=1 u8, type u8,
-  length u16, session u32 -> 12 bytes.
-  Tipo 1 HELLO, length 36: world_id u64, seed u64,
-      generator_version u32, client_nonce u32. session=0.
-  Tipo 2 WELCOME, length 36: actor_id u64, owner u32,
-      echoed_client_nonce u32, host_tick u64; session!=0.
-  Tipo 3 INPUT, length 22: sequence u32, forward i8 (-1..1),
-      strafe i8 (-1..1), yaw_milliradians i16 (-300..300),
-      sprint u8 (0..1), jump u8 (0..1). session!=0.
-  Tipo 4 SNAPSHOT, length 21+28*N, N=2:
-      host_tick u64, count u8, luego N actores:
-      actor_id u64, owner u32, x_mm i32, y_mm i32, z_mm i32,
-      yaw_milliradians i32. Para N=2: 77 bytes de aplicación.
-  Tipo 5 REJECT, length 13: reason u8 (1=mundo/generador/semilla
-      incompatibles). session=0.
-  Las longitudes se validan ANTES de leer payload. Coordenadas
-  cuantizadas a milímetros. Limitadas provisionalmente al rango
-  +/-200000 metros, que requiere extensión por sector del mundo infinito.
-  La transformación del anfitrión es la fuente de verdad.
-
-PROTOCOLO DE SESIÓN
-  Client HELLO cada 500 ms hasta WELCOME que confirme nonce y actor.
-  Host se fija al primer endpoint válido y rechaza otro mientras activo.
-  Un segundo HELLO idéntico permite recuperar WELCOME perdido.
-  Client envía INPUT a 60 Hz desde su instancia. Host filtra secuencias
-  repetidas o anteriores y somete una orden por tick a Bones; retiene
-  el último input <=250ms, luego aplica input neutro.
-  Host emite snapshots 20 Hz (cada tercer tick de Bones).
-  Client acepta solo snapshots de session válida, tick creciente y
-  actores conocidos; paquetes incompletos no actualizan estado.
-  5 segundos sin mensajes -> desconexión; reconexión básica por HELLO.
-  El anfitrión no migra, no existe rollback ni predicción ni suavizado.
-
-SEGURIDAD Y COMPATIBILIDAD: AVISOS
-  No existe autenticación criptográfica. nonce/session son marcadores
-  anti-confusión, no secretos. Comprobar IP/puerto+session no protege contra
-  suplantación dentro de la LAN. Uso exclusivamente en LAN de confianza.
-  El anfitrión enlaza owner=2 al actor creado localmente antes de usar
-  submit_move; NO acepta issuer ni actor arbitrarios del paquete INPUT.
-  Versiones wire distintas se descartan. Semilla/generador/world_id distintos
-  producen rechazo. FALTAN: hash de reglas y huella de bibliotecas Eye,
-  negociación de módulos, comprobación de ancestro/checkpoint de guardado,
-  control de congestión, retransmisión de transacciones fiables y cifrado.
-  No conectar a una partida persistente real sin desarrollar esos controles.
-  Los hechos importantes no se envían aún por este protocolo.
-
-ANCHO DE BANDA NOMINAL (SOLO BYTES UDP DE APLICACIÓN, SIN IP/UDP)
-  INPUT 22 B * 60/s = 1320 B/s cliente->host.
-  SNAP 77 B * 20/s = 1540 B/s host->cliente.
-  Total nominal sesión=2860 B/s + HELLO/WELCOME/reintentos/eventos
-  y overhead físico (no medido).
-  VALIDADO EN CI: dos procesos / loopback 4 segundos con Bones.
-  En Windows se observaron host TX=5.811 B y cliente TX=5.294 B
-  acumulados (UDP payload de aplicación); no se incluyen IP/UDP ni
-  tráfico de otras aplicaciones. No son un benchmark LAN física ni
-  una garantía de rendimiento sostenido. Sin captura Wireshark.
-
-CRITERIOS DE PRÓXIMA VERSIÓN
-  1. Prueba en DOS EQUIPOS físicos Windows de la misma LAN, cortafuegos,
-     FPS/RTT (loopback MSVC y GCC ya verificados en CI).
-  2. Integración Eye: render local de sprites de dos actores, interpolación.
-  3. Autenticación de unión y hash de reglas/generador/materiales.
-  4. Envío confirmado de eventos semánticos y snapshot sincronizable.
-  5. Clientes múltiples 2-4, desconexión y reconexión contra BSF1+Skin.
+Pruebas CI: https://github.com/AlexDevJSC/144mb/actions/runs/39606820015
+Más detalles para la UI: CONTRATO_SESIONES_BONES_SKIN_v1.md.
