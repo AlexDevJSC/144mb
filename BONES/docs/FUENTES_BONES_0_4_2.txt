@@ -1,0 +1,6 @@
+FUENTES — Bones 0.4.2, fase 2 experimental
+
+AÑADIR como propuesta: HANDOFF_PLAYTEST_FASE2_2026-10-21.md y CHANGELOG_BONES_0_4_2.md.
+CONSERVAR: Bones 0.4.1 fase 1, plan maestro, protocolos, contrato ABI 1 e informes Soul.
+NO SUSTITUIR versión activa hasta aprobación de Soul y merge de la fase 1.
+Después de aprobación, usar el PR de fase 2 sobre la base de la fase 1 aprobada.
