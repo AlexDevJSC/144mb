@@ -11,6 +11,6 @@ ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror \
     -I"$ROOT/Eye/include" -I"$ROOT/Brain/include" \
     "$ROOT/Brain/tests/test_eye1_eye2_boundary.c" \
     "$ROOT/Brain/src/brain_visual.c" \
-    "$ROOT/Eye/src/eye.c" "$ROOT/Eye/src/eye2.c" "$ROOT/Eye/src/eye3.c" \
+    "$ROOT/Eye/src/eye.c" "$ROOT/Eye/src/eye2.c" "$ROOT/Eye/src/eye3.c" "$ROOT/Eye/src/eye_tone.c" \
     -o "$ROOT/Brain/build/test_eye1_eye2_boundary" -lm
 "$ROOT/Brain/build/test_eye1_eye2_boundary"
