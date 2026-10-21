@@ -28,7 +28,7 @@ int main(void) {
     BonesModDescriptor d={0};BonesModServices svc={0};
     BonesModFrame f={0};BonesModQuad q={0};EyeFrameStats stats;
     uint32_t *out=malloc(EYE_DISPLAY_PIXELS*sizeof(uint32_t));
-    uint64_t serial;float x0,y0,x1,y1,x2,y2,x3,y3;
+    uint64_t serial, hash0, hashYaw;float x0,y0,x1,y1,x2,y2,x3,y3;
     assert(out);d.size=sizeof(d);
     assert(bones_mod_eye_query(BONES_MOD_ABI,&d)==BONES_MOD_OK);
     assert(d.role==BONES_ROLE_EYE && d.present && d.start && d.stop);
@@ -49,10 +49,13 @@ int main(void) {
     f.quads=&q;f.quad_count=1;
     d.present(d.user_context,&f);
     assert(bones_eye_mod_frame_stats(&stats,&serial));
-    assert(stats.other_rgb>16);
+    assert(stats.other_rgb>16); hash0=stats.hash;
     assert(measure(bones_eye_mod_pixels(),&x0,&y0)>100);
     f.camera_yaw=.12f;
     d.present(d.user_context,&f);
+    assert(bones_eye_mod_frame_stats(&stats,&serial)); hashYaw=stats.hash;
+    fprintf(stderr,"FRAME yaw=%f serial=%llu hashBefore=%llx hashAfter=%llx\n",
+        f.camera_yaw,(unsigned long long)serial,(unsigned long long)hash0,(unsigned long long)hashYaw);
     assert(measure(bones_eye_mod_pixels(),&x1,&y1)>100);
     fprintf(stderr,"Yaw probe: x0=%.3f y0=%.3f x1=%.3f y1=%.3f (delta=%.3f)\
 ", x0,y0,x1,y1,x1-x0);
