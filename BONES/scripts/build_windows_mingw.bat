@@ -7,7 +7,7 @@ if errorlevel 1 (echo ERROR: Python (py -3) necesario SOLO para generar el regis
 py -3 scripts\gen_modkit_registry.py
 if errorlevel 1 exit /b 1
 set MODULE_FILES=
-for /R modules %%F in (modkit.c) do set MODULE_FILES=!MODULE_FILES! "%%F"
+for /R modules %%F in (*modkit.c) do set MODULE_FILES=!MODULE_FILES! "%%F"
 where gcc >nul 2>nul
 if errorlevel 1 (echo ERROR: Instala MinGW-w64 con gcc en PATH. & exit /b 1)
 gcc -std=c11 -Os -flto -DBONES_MODKIT_NO_DYNLIB -Wall -Wextra -Wpedantic -s -mwindows ^
