@@ -1,66 +1,57 @@
-REGISTRO DE CAMBIOS — MOUTH
-21/10/2026
+REGISTRO DE CAMBIOS MOUTH — 21-10-2026
 
-[0.3.1] Validación posterior (GitHub Actions 39595310238)
- - Linux y Windows: SUCCESS con compilación de Bones oficial, codec,
-   integración ModKit y dos procesos UDP de demostración.
- - ZIP de fuentes generado y publicado como artifact:
-   Mouth_Bones_ModKit_0_4_Source (9.381 bytes en esa ejecución).
- - PE oficial de prueba en run más reciente: 192.512 bytes.
-   Una ejecución anterior midió 190.976 bytes; el tamaño no es fijo
-   entre todas las builds y NO certifica el RPG completo.
+[0.4.0] Nueva API de sesión para Skin y Bones (M144/1, ModKit ABI 1)
+Code/test SHA: 7c0506eacc969692eb76ab34893a5aa3fe177e32
+Contrato documentado commit: 1d1a732032f828c6df748cfed8a32b44db1de794
+CI Linux+Windows PASS: https://github.com/AlexDevJSC/144mb/actions/runs/39606820015
 
-[0.3.1] — Compatibilidad real con Bones 0.4.0 / instalación por fuentes
-Responsable: Mouth (red, integración de módulo).
+CÓDIGO
+ Mouth/include/mouth_lan.h:
+  MOUTH_SESSION_API_VERSION=1, MouthSessionResult y MouthSessionPhase,
+  MouthSessionInfo, create/join/disconnect/get_status/poll/copy_snapshot.
+ Mouth/src/mouth_lan.c:
+  apertura IPv4 validada, timeout de join, estados de reconexión,
+  rechazo explícito de protocolo y mundo, cierre LEAVE de 12 bytes,
+  snapshot copiado con tick confirmado.
+ BONES/modules/mouth/mouth_lan.h y mouth_lan.c:
+  mismos archivos sincronizados con transformación de rutas de include.
+ BONES/modules/mouth/modkit.c, Mouth/adapter/modkit.c:
+  implementation_version=4, ABI Bones conservada (1).
+ Mouth/examples/lan_demo.c:
+  usa API tipada, notifica errores de conexión y copia snapshots.
+ Mouth/tests/test_session_api.c:
+  offline, create, join, estado, invalid IP, idempotent disconnect.
+ Mouth/tests/test_session_network.py:
+  no host timeout, error mundo, desconexión LEAVE.
+ Mouth/tests/test_protocol_security.py:
+  rechazo versión wire incorrecta y paquetes de control no autorizados.
+ Mouth/tests/test_loopback.py:
+  test anfitrión vive más que cliente, verificación actor local independiente.
+ Mouth/Makefile, scripts/build_windows_msvc.bat,
+ scripts/build_windows_mingw.bat, .github/workflows/mouth-lan.yml:
+  pruebas de regresión Linux/Windows extendidas.
 
-Código fuente:
- - BONES/modules/mouth/modkit.c: bones_mod_mouth_query, modo offline seguro
-   y puente ABI 1 al transporte existente de Mouth.
- - BONES/modules/mouth/mouth_lan.c/.h: fuentes autocontenidas para el árbol
-   Bones; incluye C fuente en modkit.c porque el registro solo compila ese.
- - Mouth/adapter/modkit.c: original reproducible del adaptador para Bones.
- - Mouth/scripts/sync_bones_module.py: --check, --apply y --pack; sincroniza
-   únicamente fuentes de Mouth y produce ZIP fuentes extraíble en Bones.
- - Mouth/examples/lan_demo.c y Makefile: compilan el proveedor instalado real
-   en Bones/modules/mouth en vez de una variante desconectada.
- - Mouth/tests/test_modkit_provider.c: prueba de contrato ABI1 y uso offline.
- - Mouth/scripts/build_windows_msvc.bat y mingw: compilación y pruebas
-   contra adaptador instalado; MSVC evita colisiones de modkit.obj.
- - BONES/scripts/build_windows_msvc.bat: corrige colisión entre nombres
-   modkit.c, compila con /Fo único y enumera SOLO archivos existentes.
- - BONES/scripts/build_windows_mingw.bat: añade -lws2_32.
- - Ambos scripts de Windows enlazan Winsock2 (ws2_32.lib/-lws2_32).
- - .github/workflows/mouth-lan.yml: añade regresión completa BONES
-   ModKit en Linux y ejecutable estándar Windows al pipeline.
- - Mouth/scripts/ci_windows_msvc.bat: MSVC+Mouth+Bones en misma consola.
+DOCUMENTACIÓN PUBLICADA
+ Mouth/docs/CONTRATO_SESIONES_BONES_SKIN_v1.md;
+ Mouth/README.md, Mouth/docs/ESTADO_REAL.txt,
+ Mouth/docs/PROTOCOLO_LAN_V1.txt, este registro,
+ BONES/modules/mouth/README.txt.
 
-Documentación actualizada EN EL MISMO CAMBIO:
- - BONES/modules/mouth/README.txt
- - Mouth/README.md
- - Mouth/docs/INTEGRACION_BONES_0_4.txt (nuevo)
- - Mouth/docs/ESTADO_REAL.txt
- - Mouth/docs/REGISTRO_CAMBIOS.txt (este registro)
+CI VALIDADO
+ Linux GCC: codec, contrato, loopback UDP real Bones, negativos,
+ registro Bones ModKit y paquete fuente.
+ Windows MSVC: build Bones y demo, codec, contrato, loopback,
+ errores y protocolo negativo. Todos PASS.
+ No se han probado todavía dos PCs reales ni la UI Skin/Bones.
 
-RESULTADOS REALES (GitHub Actions 39594728594)
- - Linux GCC test codec y provider PASS; dos procesos UDP PASS;
-   BONES modkit_test PASS con 5 proveedores y .so de desarrollo.
- - Windows MSVC test codec/provider PASS; dos procesos UDP PASS;
-   BONES scripts/build_windows_msvc.bat PASS, 5 proveedores.
- - Fuente del módulo comparada con referencia: PASS.
- - PE BONES prueba oficial: 190.976 bytes / 1.474.560 techo futuro.
- - PE Mouth demo: 189.440 bytes.
+DEUDAS ABI Y BLOQUEANTES
+ Skin debe implementar pantallas de modo/join/status.
+ Bones debe integrar creación de actor y host antes de registrar ModKit.
+ Cliente debe conocer world_id,seed,generator_version: falta
+ descubrimiento de mundo en una sesión IP-only desde menú inicial.
+ Eye debe consumir estado confirmado de snapshots.
+ Soul debe validar integración conjunta y tamaño final después.
+ No se han cambiado fuentes de menú ni cámara.
 
-LIMITACIONES A REVISAR POR SOUL
- - Script Bones Windows alterado en build (sin cambio de ABI ni física).
- - ModKit ABI 1 experimental: dependencia del contrato de Bones 0.4.
- - Modo SINGLE PLAYER registra Mouth offline sin abrir un socket.
- - No se ha integrado una UI multijugador en BONES ni se ha probado
-   una sesión entre dos PCs Windows físicos.
- - No se ofrece una DLL instalable ni autoload; solo modo fuentes estático.
- - No se certifica el presupuesto de bytes ni estabilidad del RPG final.
-
-[0.3.0] — Primera LAN UDP (anterior)
- - Mouth/src/mouth_lan.c, include/mouth_lan.h, examples/lan_demo.c.
- - Conexión 2 procesos IPv4 UDP, host ejecuta Bones physics via submit_move.
- - Pruebas codec + loopback confirmadas. M144/1, sin autenticación fuerte.
- - Fuente de eventos visuales v0.2 todavía pendiente de integración.
+[0.3.1] Módulo fuente integrable por registro Bones 0.4;
+demo previa sin API de sesión tipada. Ver historial Git.
