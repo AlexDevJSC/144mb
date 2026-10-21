@@ -1,6 +1,15 @@
 REGISTRO DE CAMBIOS — MOUTH
 21/10/2026
 
+[0.3.1] Validación posterior (GitHub Actions 39595310238)
+ - Linux y Windows: SUCCESS con compilación de Bones oficial, codec,
+   integración ModKit y dos procesos UDP de demostración.
+ - ZIP de fuentes generado y publicado como artifact:
+   Mouth_Bones_ModKit_0_4_Source (9.381 bytes en esa ejecución).
+ - PE oficial de prueba en run más reciente: 192.512 bytes.
+   Una ejecución anterior midió 190.976 bytes; el tamaño no es fijo
+   entre todas las builds y NO certifica el RPG completo.
+
 [0.3.1] — Compatibilidad real con Bones 0.4.0 / instalación por fuentes
 Responsable: Mouth (red, integración de módulo).
 
