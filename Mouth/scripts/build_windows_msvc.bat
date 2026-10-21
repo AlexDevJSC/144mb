@@ -11,7 +11,7 @@ if errorlevel 1 (
 )
 cl /nologo /std:c11 /TC /O2 /W4 /MT /DBONES_MODKIT_NO_DYNLIB ^
   /IBONES\include /IMouth\include ^
-  Mouth\examples\lan_demo.c Mouth\src\mouth_lan.c ^
+  Mouth\examples\lan_demo.c BONES\modules\mouth\modkit.c ^
   BONES\src\modkit\modkit.c BONES\src\foundation\foundation.c ^
   BONES\src\bones\core.c BONES\src\bones\world.c ^
   BONES\src\bones\physics.c BONES\src\bones\scene.c ^
