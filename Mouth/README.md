@@ -1,69 +1,67 @@
-# Mouth — multijugador P2P para Proyecto 1.44
+# Mouth — red LAN para Bones ModKit 0.4.0
 
-**Versión actual publicada:** Mouth LAN v0.3.0 (prototipo para dos jugadores, UDP sobre IPv4).  
-**Núcleo:** Bones Foundation v1 + Bones ModKit ABI 1.  
-**Estado:** código y pruebas publicados; **Linux GCC y Windows MSVC compilados y probados con dos procesos en loopback mediante GitHub Actions**. Prueba entre ordenadores distintos de LAN pendiente. [Resultados CI](https://github.com/AlexDevJSC/144mb/actions/runs/39586493847).
+**Versión de integración:** Mouth 0.3.1. **Instalado en BONES/modules/mouth** como proveedor fuente enlazado de Bones ModKit ABI 1.  
+**Pruebas verificadas:** [GitHub Actions Windows + Linux](https://github.com/AlexDevJSC/144mb/actions/runs/39594728594).  
+**Estado:** compilación del juego de prueba oficial y de demo LAN confirmada; **aún no hay menú ni render de un segundo cliente en el ejecutable gráfico normal**.
 
-## Qué hace
+## Instalar Mouth como módulo de Bones
 
-Un ordenador abre una sesión como **anfitrión autoritativo**. Su proceso instancia dos entidades de jugador mediante Bones Foundation; el jugador local controla la entidad 1, y el cliente remoto controla la entidad con owner=2. Mouth recibe controles UDP, elimina secuencias antiguas y utiliza BonesModServices.submit_move en el tick correcto; **las físicas se calculan en Bones**, no en Mouth.
+El directorio ya está disponible en [BONES/modules/mouth](https://github.com/AlexDevJSC/144mb/tree/main/BONES/modules/mouth) y contiene los cuatro archivos que necesita el paquete fuente.
 
-El cliente envía controles y muestra por consola las posiciones de ambos actores confirmadas por el anfitrión. El ejemplo **todavía no dibuja la escena 3D en el cliente**: esta es una prueba vertical de red y física, no una versión jugable completa.
+Con una copia de Bones 0.4.0 donde se mantienen las carpetas include, src, modules y scripts:
 
-La sesión funciona sin servidor dedicado, sin servicios externos ni intercambio de texturas. En GitHub Actions el EXE Windows de la demo con Bones midió **188.928 bytes**. El límite global de 1,44 MB deberá medirse con el ejecutable final de todo el juego; **este dato no certifica su cumplimiento**.
+1. Extraer los archivos de Mouth dentro de modules/mouth, reemplazando exclusivamente su conector de prueba.
+2. Abrir consola x64 Developer Command Prompt de Visual Studio.
+3. Desde la carpeta BONES ejecutar scripts\build_windows_msvc.bat.
+4. Obtener build\Proyecto144_Bones_ModKit.exe con Mouth enlazado.
 
-## Ejecutar en Windows
+El build oficial genera automáticamente el registro de módulos. Se ha corregido para compilar cada modkit.c con nombre de objeto distinto y enlazar ws2_32.lib, que necesita Mouth.
 
-Descarga/clona el **repositorio completo** (necesita la carpeta hermana BONES/). Abre la consola x64 Developer Command Prompt para Visual Studio y ejecuta desde la raíz:
+El paquete instalable se puede crear sin editar archivos fuente manualmente:
+
+    python Mouth/scripts/sync_bones_module.py --check
+    python Mouth/scripts/sync_bones_module.py --pack
+
+La segunda orden genera Mouth/build/MOUTH_Bones_ModKit_0_4.zip (extraerlo DENTRO de BONES). Para reconstruir el módulo fuente desde Mouth: usar --apply y revisar cambios con Git.
+
+## Multijugador LAN experimental
+
+El host real de Mouth recibe entradas desde un cliente, las valida y llama BonesModServices.submit_move. Bones Foundation calcula la física. El cliente recibe posiciones confirmadas en paquetes UDP. Sin configuración LAN, el módulo queda registrado pero inactivo; por tanto no rompe la ejecución individual.
+
+**El ejecutable normal de Bones no abre ninguna sesión por sí solo.** Para habilitar el modo host, la aplicación debe crear un segundo actor owner=2 y llamar a mouth_lan_configure_host ANTES de registrar los proveedores. La integración del menú «Crear/Unirse» con Skin es futura.
+
+Demo LAN ya comprobada (loopback en Windows y Linux):
 
     Mouth\scripts\build_windows_msvc.bat
-
-O, con MinGW-w64 GCC instalado en PATH:
-
-    Mouth\scripts\build_windows_mingw.bat
-
-En el PC anfitrión:
-
     Mouth\build\mouth_lan_demo.exe host 14444
 
-Obtén su IPv4 LAN con ipconfig. En el PC cliente:
+En la consola del segundo PC:
 
     Mouth\build\mouth_lan_demo.exe join 192.168.1.10 14444
 
-Sustituye la IP de ejemplo por la IP real del PC anfitrión. Ambos ordenadores deben poder comunicarse por UDP puerto 14444; si Windows solicita permiso de cortafuegos, permitirlo **solo en red privada de confianza**. No publiques el puerto en Internet durante esta fase.
+Usar la IP LAN real del host y permitir UDP 14444 únicamente en red privada. Controles: WASD, flechas izquierda/derecha, Shift y Espacio. Demo cliente: **consola**, sin segunda cámara 3D todavía. Ctrl+C cierra ambos procesos.
 
-Con la consola de cada programa enfocada: **WASD** movimiento, flechas izquierda/derecha rotación, **Shift** sprint, **Espacio** salto. Se imprimen las posiciones del servidor. Ctrl+C cierra la consola.
-
-## Compilar y probar en Linux
-
-Desde la raíz del repositorio completo:
+En Linux:
 
     make -C Mouth test
     make -C Mouth loopback
-    make -C Mouth sanitize
+    make -C BONES modkit_test
 
-La prueba loopback ejecuta anfitrión y cliente como dos procesos independientes sobre 127.0.0.1, comprueba la recepción de posiciones y verifica movimiento del actor remoto mediante las físicas reales de Bones. El cliente POSIX de demostración mueve al actor automáticamente para facilitar la prueba headless.
+## Archivos
 
-Estas órdenes se han ejecutado correctamente en GitHub Actions para Linux y Windows (codec y dos procesos por loopback). No equivalen a una prueba en dos máquinas físicas de la misma LAN.
+- Mouth/include/mouth_lan.h y Mouth/src/mouth_lan.c: fuente original portable.
+- Mouth/adapter/modkit.c: punto de entrada Bones, mantenido como fuente de referencia.
+- BONES/modules/mouth/{modkit.c,mouth_lan.c,mouth_lan.h,README.txt}: paquete instalado.
+- Mouth/scripts/sync_bones_module.py: sincronizar y empaquetar fuentes.
+- Mouth/docs/INTEGRACION_BONES_0_4.txt: explicación exhaustiva de instalación, compatibilidad y pruebas.
+- Mouth/tests/test_modkit_provider.c: descriptor ABI y modo offline/online.
+- Mouth/tests/test_codec.c y test_loopback.py: wire format y dos procesos conectados.
+- Mouth/docs/ESTADO_REAL.txt y REGISTRO_CAMBIOS.txt: estado actual y modificaciones.
 
-## Rutas del código
+## Medición real y limitaciones
 
-- include/mouth_lan.h — contrato público LAN y codec.
-- src/mouth_lan.c — socket UDP + protocolo + puente del host al ModKit.
-- examples/lan_demo.c — ejecutables de consola para host y cliente.
-- tests/test_codec.c, tests/test_loopback.py — regresión binaria y LAN.
-- scripts/ y Makefile — compilación y tests.
-- docs/PROTOCOLO_LAN_V1.txt — formatos y límites.
-- docs/ESTADO_REAL.txt, docs/REGISTRO_CAMBIOS.txt — implementación real y cambios.
+GitHub Actions Windows/MSVC compiló el ejecutable oficial de pruebas Bones ModKit con Mouth de **190.976 bytes**, y la demo LAN de **189.440 bytes**. Eso **no valida el límite de 1,44 MB del juego terminado**.
 
-## Integración posterior con la aplicación Bones
+No implementado: terceros/cuarto jugador, partida multijugador 3D final, lista de servidores, NAT, cifrado, autenticación criptográfica, interoperabilidad de bibliotecas Eye, persistencia concurrente, autoinstalación de mods/DLL o reconexión larga certificada. Las pruebas de red se han realizado entre dos procesos del mismo equipo (loopback), no entre ordenadores físicos.
 
-El demo agrega el proveedor Mouth a ModKit con bones_mod_host_add(host, mouth_lan_query), conservando intactos los archivos del núcleo. En la aplicación principal Bones **ya existe un placeholder** llamado BONES/modules/mouth/modkit.c. Antes de incorporarlo en el registro generado oficial, Bones y Soul deberán reemplazar/delegar ese placeholder; no registrar dos proveedores del rol Mouth.
-
-No se modifica BONES/include/bones/modkit.h ni la semántica de guardados de Skin. No existen todavía entrada de un tercer/cuarto usuario, estado persistente en red, cambios de inventario, reglas hash, sincronización visual avanzada, NAT traversal, cifrado, rollback ni migración de anfitrión. El session_id y el origen IP/puerto no son autenticación criptográfica.
-
-## Versiones anteriores
-
-Los paquetes originales Mouth v0.1 (red) y v0.2 (referencias visuales) se elaboraron previamente en ChatGPT, pero **sus fuentes completas aún no se han sincronizado con GitHub**. El antiguo importar_fuentes.ps1 permite importarlos como material histórico local si se descargan los ZIP. Mouth LAN v0.3 es un protocolo nuevo M144/1; **no es compatible en el cable** con los paquetes anteriores.
-
-Validación Windows de consola/loopback y tamaño de la demo: realizados en CI. Pendiente probar dos PC reales, calidad de conexión sostenida, juego completo y revisión de Soul.
+Mouth 0.3.1 utiliza M144/1 para la demo LAN. Los ZIP históricos Mouth v0.1/v0.2 no están aún íntegramente publicados en GitHub. No se deben presentar como versiones wire compatibles.
