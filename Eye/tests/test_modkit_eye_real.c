@@ -52,6 +52,8 @@ int main(void) {
     f.camera_yaw=.12f;
     d.present(d.user_context,&f);
     assert(measure(bones_eye_mod_pixels(),&x1,&y1)>100);
+    fprintf(stderr,"Yaw probe: x0=%.3f y0=%.3f x1=%.3f y1=%.3f (delta=%.3f)\
+", x0,y0,x1,y1,x1-x0);
     assert(x1 < x0-5.f); /* View moves right, fixed wall shifts left. */
     f.camera_yaw=0;f.camera_pitch=.12f;
     d.present(d.user_context,&f);
