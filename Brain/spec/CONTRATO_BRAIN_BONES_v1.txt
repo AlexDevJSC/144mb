@@ -1,0 +1,70 @@
+BRAIN -> BONES: CONTRATO DE INTEGRACIÓN v1 (BORRADOR FUNCIONAL)
+Fecha: 20/10/2026. Contrato independiente de implementación de Bones.
+
+ENTRADA DEL MOTOR EN BONES
+  include/brain/brain.h
+  src/brain_*.c o biblioteca libbrain.a de desarrollo.
+  ABI de fuente BRAIN_API_VERSION=1. No es un ABI binario final ni red.
+  El simulador no depende de Win32 ni de la biblioteca de gráficos.
+
+IDENTIDADES REQUERIDAS
+  BrainWorldId {hi,lo} distinto de seed; versión del generador y reglas.
+  BrainId uint64 estable por NPC/asentamiento/facción; 0 no identifica entidad.
+  BrainEventId {branch,serial}; ambos valores positivos (no cero).
+  Los IDs deben asignarse por la autoridad de mundo, NO por render/animación.
+
+SECUENCIA DE INTEGRACIÓN PROPUESTA EN UN TICK DEL HOST
+  1. Bones/Host verifica y ordena las acciones lógicas de la sesión.
+  2. Host llama brain_world_advance(world, fixed_ticks, is_host=1).
+  3. Bones determina NPC cercanos y calcula BrainPerception por ID.
+  4. Llama brain_bones_collect_intents(world, ids, perceptions, n,
+                                      intents, capacity, &written).
+  5. Bones interpreta cada BrainIntent:
+       BRAIN_ACT_SLEEP  -> descanso / animación / permanecer en HOME
+       BRAIN_ACT_WORK   -> ir a WORK; interactuar con su empleo
+       BRAIN_ACT_TRADE  -> usar MARKET; habilitar diálogo comercial
+       BRAIN_ACT_PATROL -> seguir ruta en PATROL
+       BRAIN_ACT_REST   -> actividad no laboral en HOME
+       BRAIN_ACT_FLEE   -> huir del peligro según NAV/colisiones de Bones
+       BRAIN_ACT_DEFEND -> alertar/atacar con combate de Bones
+  6. Bones no debe interpretar un intent como impacto, propiedad ni pago.
+     Todas esas mutaciones requieren autorización de su dueño lógico.
+  7. Cliente no autoritativo recibe vistas/snapshots confirmados por host;
+     no ejecuta operaciones brain_world_* que mutan estado compartido.
+
+COMERCIO PROVISIONAL
+  El prototipo expone BrainWallet y brain_world_buy() con mutación atómica
+  en memoria (oro, holdings, stock) y BrainEvent de compra.
+  Antes de conectarlo a Bones real, se debe diseñar una única transacción
+  host + journal + inventario Bones + economía Brain. El ejemplo NO garantiza
+  crash safety, recarga ni seguridad de red. BRAIN_DUPLICATE indica NO-OP.
+
+CÁLCULO DE TIEMPO
+  brain_world_advance recibe ticks enteros, NO tiempo wall clock.
+  ticks_per_minute es parámetro del mundo. El ejemplo fija 60 ticks/minuto
+  (si Bones genera 60 ticks/s, eso equivale a 1 minuto de juego por segundo).
+  NO ES UNA ESCALA DE TIEMPO CANÓNICA: decisión del plan maestro abierta.
+
+SIMULACIÓN DE ZONAS
+  La economía diaria puede ponerse al día saltando miles de días en O(towns).
+  El comportamiento de NPC se evalúa al solicitar una intención, no cada
+  fotograma para todos los habitantes. NPCs lejanos no generan rutas físicas.
+
+LÍMITES / BACKPRESSURE
+  BRAIN_MAX_TOWNS=16, BRAIN_MAX_NPCS=128, BRAIN_MAX_FACTIONS=16,
+  BRAIN_MAX_RELATIONS=48, BRAIN_MAX_EVENTS=256, mercancías=3.
+  BrainWorld ronda 23 KiB en la plataforma de pruebas; no es el tamaño EXE.
+  Si falta capacidad, devuelve BRAIN_ERR_CAPACITY sin mutación económica.
+  El ledger NO debe borrarse sin checkpoint duradero y mecanismo de dedup.
+
+PERSISTENCIA Y RED
+  brain_world_hash es sólo hash del estado lógico INTERNO de BrainWorld.
+  NO incluye BrainWallet externos, geometría Bones, inventarios RPG ni saves.
+  Tampoco es checksum criptográfico ni formato de guardado portable.
+  Para PBW usar formato canónico de SAVE según documento maestro y
+  reconciliar evento/ramas/ancestro, no copiar structs C al socket/disco.
+
+EXTENSIÓN FUTURA DEL CONTRATO
+  Incluir enlaces de anclas a coordenadas, notificación de acciones terminadas,
+  obstáculos imprevistos, memoria de NPC y objetivos; versionar ABI.
+  Los cambios de UI/render no deben obligar a alterar el módulo de decisiones.

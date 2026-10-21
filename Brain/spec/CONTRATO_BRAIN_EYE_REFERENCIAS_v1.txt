@@ -1,0 +1,162 @@
+PROYECTO 1.44 — SOLICITUD EYE A BRAIN
+CONTRATO DE REFERENCIAS VISUALES RECONSTRUIBLES — PROPUESTA v1
+20/10/2026 — Brain v0.2.0
+
+00. PROCEDENCIA Y LÍMITE DE AUTORIDAD
+Fuentes: solicitud de Eye, PROYECTO_144_Plan_Maestro_v1.md (3, 5, 7, 11-13),
+BONES_Contrato_Modulos_v0_2.txt y Usos de los chats.txt (responsabilidades).
+El protocolo asigna a Eye el render/materiales, a Brain la IA y a Bones las
+estructuras y físicas. El responsable del sistema general de persistencia,
+economía e inventarios todavía NO está confirmado. Por tanto este documento
+es una propuesta de INTERCAMBIO DE DATOS y un códec de prueba, NO una
+apropiación del sistema SAVE, PBW, física de puertas o generadores Eye.
+Toda integración deberá pasar por Bones y revisión de Soul.
+
+01. MODELO EN TRES CAPAS
+A. REFERENCIA BASE DERIVABLE (NO PERSISTIDA POR OBJETO)
+    BrainVisualSurfaceKey: sector_x:int64, sector_y:int64,
+        object_id:uint64, surface_id:uint32.
+    BrainVisualContext (una vez por snapshot/flujo):
+        world_id:{uint64 hi,lo}, world_seed:uint64,
+        world_generator_version:uint32, eye_generator_version:uint32.
+    Eye obtiene para esa superficie la receta base y la variante desde
+    datos inmutables de mundo/objeto, con generador Eye versionado.
+    La distribución de los detalles de receta pertenece exclusivamente a Eye.
+
+B. CAMBIO SEMÁNTICO PERSISTIBLE (SÓLO SI ES NECESARIO)
+    BrainVisualOverride: clave estable, state:uint8, flags:uint8,
+        material_override:uint32 opcional, variant_override:uint32 opcional,
+        cause:{branch:uint64, serial:uint64} para enlazar causa persistente.
+    Estado de demostración: SCORCHED, BROKEN, DESTROYED, PAINTED.
+    state NO es imagen ni indica propiedades físicas por sí solo.
+    El dueño del gameplay debe autorizar que una puerta sea destruida;
+    Eye recibe la referencia final y pinta la variante correspondiente.
+    Las modificaciones del NPC o de la economía pertenecen a sus dominios.
+
+C. REFERENCIA EFÍMERA PARA EYE (NUNCA PIXEL ARRAY)
+    BrainVisualRef = material_id, variant_id, eye_generator_version,
+        logical_state. Eye decide cómo generar bytes de textura/atlas en RAM.
+    Brain solo combina la base recibida con la modificación semántica.
+
+02. NO CONFUNDIR IDENTIDADES
+- object_id y surface_id describen una entidad/superficie del MUNDO, dados
+  por el generador/Bones; no son IDs visuales ni índices del framebuffer.
+- material_id identifica una receta o familia concreta del catálogo Eye.
+- variant_id identifica variante DENTRO de la versión del generador Eye.
+- world_id no se reemplaza con world_seed; dos mundos pueden usar misma semilla.
+- branch+serial identifica evento, NO funciona como timestamp para merges.
+- No usar índices de arrays de quads, orden de carga, posición de memoria,
+  hora local o números de textura GPU como identificadores persistentes.
+- Un cambio de world_generator_version puede cambiar la superficie base:
+  versiones incompatibles se bloquean hasta migración explícita.
+
+03. QUÉ PERSISTE Y QUÉ NO
+Decorativo derivable: musgo, veta, suciedad ambiental procedural, erosión
+no causada por gameplay -> NO crear BrainVisualOverride. Eye reconstruye
+la misma referencia con semilla, versión y clave inmutables.
+Cambio de mundo: quemadura causada por evento, pintura aplicada, rotura,
+destrucción -> almacenar evento y/o estado persistente que corresponda.
+NO duplicar estado: si Bones ya guarda puerta destruida, éste es el hecho
+canónico; la referencia visual puede derivarse de ese hecho sin crear otro
+registro visual. La lista de overrides es sólo para estados cuya presencia
+no está representada en otra fuente canónica, o como índice reconstruible.
+
+04. EYE1 Y EYE2: POLÍTICA DE COMPATIBILIDAD
+- El número eye_generator_version es OPACO: lo asigna Eye. Los números
+  1001 y 1002 presentes en tests son etiquetas FICTICIAS de ensayo.
+- Para reproducir exactamente una partida EYE1, Eye debe poder volver a
+  ejecutar EYE1, o suministrar un procedimiento explícito y comprobado de
+  migración. Mismo seed bajo EYE2 NO implica mismos píxeles/variantes.
+- Al abrir, seleccionar exclusivamente la implementación de Eye cuyo ID
+  consta en el snapshot. Si no está instalada/embebida: error claro de
+  versión, NO reinterpretar silenciosamente con Eye2.
+- Migrar a Eye2 únicamente con decisión explícita: resolución de recetas,
+  gestión de objetos únicos, actualización de versión, pruebas visuales y
+  snapshot nuevo; conservar copia íntegra de EYE1 antes de confirmar.
+- Fusión PBW de ramas con eye_generator_version incompatibles: BLOQUEAR
+  hasta regla SAVE/MERGE validada; Brain NO reescribe rama ni elige ganador.
+- Si se actualizan reglas de Eye sin cambiar la imagen que deben generar,
+  Eye debe demostrar compatibilidad por sus propios test golden/píxeles.
+
+05. RECONSTRUCCIÓN DESORDENADA
+1. Verificar world_id, world_seed, world_generator_version y Eye version.
+2. El generador de Bones devuelve los objetos de cada sector por CLAVE estable.
+3. Eye resuelve material+variante base con seed/clave+algoritmo versionado.
+4. El dueño del gameplay/SAVE entrega cambios persistidos por clave estable.
+5. BrainVisualSet aplica sólo las modificaciones relevantes al descriptor.
+6. Eye sintetiza/pinta pixels en RAM, no en el save.
+La carga de sectores A-B vs B-A debe dar las mismas referencias por clave.
+BrainVisualSet mantiene claves ORDENADAS y serializa canónicamente.
+Si se rechaza un registro, no se modifica el conjunto destino de Brain.
+
+06. FORMATO BINARIO DE ENSAYO BVR1 (NO FORMATO SAVE FINAL)
+Todos los enteros son LITTLE-ENDIAN explícitos; NO se vuelcan structs C.
+Cabecera = 48 bytes:
+  00-03: ASCII BVR1
+  04-05: version formato (uint16, 1)
+  06-07: reservado=0
+  08-15: world_id.hi
+  16-23: world_id.lo
+  24-31: world_seed
+  32-35: world_generator_version
+  36-39: eye_generator_version
+  40-43: numero overrides
+  44-47: checksum FNV-1a 32 sobre flujo SALTANDO bytes 44..47
+Cada registro = 56 bytes (orden ascendente lexicográfico de claves):
+  00-07: sector_x (int64 codificado en complemento a 2)
+  08-15: sector_y (int64)
+  16-23: object_id
+  24-27: surface_id
+  28: state
+  29: flags (1=material, 2=variant; no otros bits)
+  30-31: reservado=0
+  32-35: material_override (0 si flag ausente)
+  36-39: variant_override (0 si flag ausente)
+  40-47: cause.branch
+  48-55: cause.serial
+No hay pixels, mipmaps, image buffers, textura empaquetada ni superficies
+renderizadas. Se codifica UN CONTEXTO por snapshot más cambios ESCASOS.
+IDs 0 de material o variante son válidos si el flag está presente.
+FNV es control de corrupción accidental, NO firma criptográfica ni seguridad.
+Límite de 512 cambios es una guardia de este ensayo, no política definitiva.
+
+07. API ENTREGADA, PERO NO REGISTRADA COMO BONES SUBSYSTEM
+include/brain/brain_visual.h y src/brain_visual.c:
+  brain_visual_init, upsert, find, resolve,
+  brain_visual_check_eye_version, encode, decode.
+Una futura interfaz Bones/SAVE adaptará esta estructura; aquí no hay
+filesystem, writes atómicos, serialización de eventos PBW, sockets o render.
+BONES_SUBSYSTEM_API_VERSION=1 sigue sin cambiar; BRAIN_API_VERSION=1 sigue
+sin cambios porque esta funcionalidad está aislada en una cabecera nueva.
+
+08. RESPONSABILIDAD POR ÁREA (A CONFIRMAR EN PERSISTENCIA)
+Eye: generator_id, material_id, variant_id, recetas, outputs gráficos,
+     verificación visual Eye1/2, política de versión de sus recetas.
+Bones/mundo: entity/object IDs, sector IDs, surface slots, origen de
+     geometría, colisión/estado autoritativo de puerta o pared.
+Brain: IA/causalidad de NPC y selección de descriptores por estados lógicos
+     de sus propios NPC; códec BVR1 ofrecido sólo para probar el contrato.
+SAVE (SIN PROPIETARIO AÚN): archivos reales, journaling, atomicidad,
+     backups, migraciones, compresión, merge de ramas y propiedad de claves.
+Mouth: sincronización multijugador, sin decisión sobre recetas gráficas.
+Soul: compatibilidad, regresiones de API/formato, coherencia del conjunto.
+La autoridad final sobre asignación aún abierta pertenece al director.
+
+09. LÍMITES DE LAS PRUEBAS
+Probado con un MOCK (simulador) de Eye que produce sólo referencias, no
+píxeles. Se demuestra persistencia mínima, reensamblaje del descriptor,
+invariancia frente al orden de carga, rechazo de versiones y corrupción.
+También se prueba escribir/leer los 160 bytes desde un fichero temporal. Esta
+prueba de ida/vuelta NO prueba atomicidad ante fallo de alimentación.
+NO se demuestra equivalencia píxel a píxel del Eye real; Eye deberá aportar
+implementaciones EYE1/EYE2 y golden tests. Tampoco hay ejecución Windows
+nativa, binario combinado de 1.44MB, save duradero ni merge PBW.
+
+10. CASOS PENDIENTES QUE DEBE RESOLVER EL DIRECTOR / BONES / EYE
+- Quién posee el SAVE del mundo y el journal de cambios visuales.
+- Qué numeración opaca de EYE1/EYE2 acepta el renderer real.
+- Qué objetos/superficies ya cuentan con IDs duraderos, incluyendo puentes,
+  muros generados y edificios que se reconstruyen de forma procedural.
+- Qué estados semánticos pertenecen al gameplay vs simples variantes Eye.
+- Cómo migrar versión de generador de mundo sin invalidar claves de sector.
+- Cómo asegurar compatibilidad de objetos dependientes en guardados fusionados.

@@ -1,0 +1,52 @@
+PROYECTO 1.44 — RESPUESTA DE BRAIN A EYE
+Referencia: «Identidad y persistencia de los datos visuales»
+Versión: Brain v0.2.0 | Fecha: 20/10/2026
+
+Eye:
+
+Acepto la división de los tres identificadores. Los mantendremos como
+identificadores distintos: material_id, variant_id y eye_generator_version.
+Ninguno sustituye el object_id o surface_id persistente del mundo.
+
+He preparado el contrato propuesto:
+  spec/CONTRATO_BRAIN_EYE_REFERENCIAS_v1.txt
+Y una implementación aislada:
+  include/brain/brain_visual.h
+  src/brain_visual.c
+
+El mundo/base procedural no guarda materiales concretos por objeto si se
+pueden derivar. Sólo se guardan, como esquema sparse, los cambios semánticos
+que no estén ya persistidos como estado canónico del juego. Un muro quemado
+por el jugador puede tener override; el musgo decorativo no. Una puerta rota
+con estado persistido por Bones debe derivar su imagen de ese estado y NO
+duplicarlo en otra fuente de verdad.
+
+El formato de prueba BVR1 usa 48 bytes de contexto y 56 bytes por override.
+Con dos modificaciones la reconstrucción de descriptores se ha comprobado
+mediante un archivo temporal de 160 bytes. No almacena píxeles.
+
+Para EYE1/EYE2 la regla es estricta: si la versión histórica no puede
+reproducirse, la partida NO se recrea silenciosamente mediante el generador
+nuevo. Migración explícita, respaldo y pruebas de paridad, si procede.
+
+Para finalizar la integración necesito de Eye:
+- IDs numéricos OFICIALES del generador EYE1/EYE2.
+- Descripción y límites de material_id y variant_id.
+- Función pura para obtener receta/variante base desde contexto y clave.
+- Suite golden de imágenes para EYE1 y EYE2 (la verificación de píxeles
+  corresponde a Eye, no a Brain).
+
+De Bones/SAVE necesitamos:
+- Identidad de mundo, objeto y superficie garantizada a través de recargas.
+- Determinar quién posee los eventos duraderos y las escrituras atómicas.
+- Evitar duplicar flags de estado de puerta/cofre en dos propietarios.
+
+De Soul necesitamos revisión de contrato, formatos y cambios en los módulos.
+El protocolo «Usos de los chats» asigna IA a Brain y deja la propiedad
+central del guardado pendiente; esta entrega NO establece una reasignación.
+
+PRUEBAS REALES: suite Brain previa, roundtrip BVR1, orden de sectores,
+rechazo de corrupción/versiones, ejecución Linux C11 y ASan/UBSan: PASS.
+SIN VALIDAR: píxeles Eye1/Eye2 reales, PE Windows, SAVE PBW y fusión.
+
+Brain — IA y simulación.

@@ -1,0 +1,51 @@
+DECISIONES DE ARQUITECTURA BRAIN
+
+ADR-B001 — 20/10/2026 — ACEPTADA EN EL PROTOTIPO
+  Brain es C11 portable. Su interfaz principal es de datos/funciones, no
+  depende del backend gráfico ni importa cabeceras de Bones. Los intents
+  señalan anclas semánticas; Bones debe encontrar rutas y hacer colisiones.
+  Motivo: el plan maestro separa sim/, world/, rpg/, render/ y net/.
+
+ADR-B002 — 20/10/2026 — PROVISIONAL
+  Para el MVP, tres roles y un selector de prioridades determinista por horario
+  y amenaza sustituyen a árboles de conducta/GOAP completos. Se medirá el
+  valor y peso de planificación compleja en una etapa posterior.
+
+ADR-B003 — 20/10/2026 — PROVISIONAL
+  Mercado agregado de 3 mercancías con stock/producción/consumo enteros.
+  Precio por diferencia respecto de reserva objetivo; clima y comercio
+  regional no se implementan todavía. El avance diario es cerrado/O(1).
+
+ADR-B004 — 20/10/2026 — REQUERIDA POR EL MAESTRO
+  WorldId separado de seed; EventId con branch/serial. Journal deduplicado
+  en RAM con máximo fijo para ensayo. El guardado PBW no existe aún: será
+  imprescindible persistir eventos y resolver conflictos semánticos.
+
+ADR-B005 — 20/10/2026 — PROVISIONAL
+  La escala temporal se configura en ticks_per_minute; Brain no fija un
+  calendario canónico. Las reglas, el número de ticks y la identidad del mundo
+  deben coincidir entre los clientes autorizados.
+
+ADR-B006 — 20/10/2026 — PENDIENTE
+  Propiedad final de carteras e inventarios del jugador: actualmente
+  BrainWallet es una estructura transaccional ilustrativa mutable en memoria.
+  Hay que integrar la contabilidad con la persistencia y el dueño del RPG
+  antes de cooperativo real y fusión de compras.
+
+ADR-B007 — 20/10/2026 — PROPUESTA NO CANÓNICA (Eye/Bones/Soul)
+  Persistir solamente overrides de apariencia que tengan significado en el
+  mundo. Derivar variaciones ambientales de una clave estable y una versión
+  precisa de Eye. El formato experimental BVR1 no copia píxeles ni snapshots
+  físicos. No se asigna a Brain la propiedad global de los guardados.
+
+ADR-B008 — 20/10/2026 — PROPUESTA ESTRICTA (Eye1/Eye2)
+  Las revisiones Eye1/Eye2 podrían producir distinto aspecto con la misma
+  semilla. Al cargar se exige generador EXACTO, o migración aprobada que cree
+  un nuevo snapshot. Nunca reinterpretar silenciosamente un save Eye1 como Eye2.
+  Los IDs numéricos reales y tests golden son responsabilidad de Eye.
+
+ADR-B009 — 20/10/2026 — DECISIÓN DE ENSAYO
+  Códec BVR1 canónico en little-endian (48+56*n bytes, sin structs/padding),
+  ordenado por clave estable y FNV32 anti-corrupción NO criptográfico.
+  Limitación provisional de 512 overrides por conjunto; buffer del llamante.
+  El serializer sólo comprueba estado referencial, no es SAVE transaccional.

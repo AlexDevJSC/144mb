@@ -1,0 +1,103 @@
+PROYECTO 1.44 — BRAIN | OBJETIVOS Y NORMAS
+Versión: 1.0 | Fecha: 20/10/2026
+Fuente: docs/PROYECTO_144_Plan_Maestro_v1.md (v1.0, conservado sin cambios).
+Nombre del módulo: BRAIN
+Consumidor previsto: BONES (motor externo aún sin API definitiva aportada).
+
+1. REPARTO DE RESPONSABILIDADES
+BRAIN decide QUÉ y POR QUÉ ocurre:
+  - reloj y calendario lógico; necesidades y rutinas de NPC;
+  - comportamiento, percepción abstracta y decisiones de entidades;
+  - reservas, producción, consumo y precios agregados;
+  - facciones, relaciones, reputación y consecuencias causales;
+  - objetivos y necesidades que generen misiones emergentes;
+  - simulación con tres niveles: cercano, asentamiento, región latente.
+BONES decide CÓMO se ejecuta físicamente:
+  - mundo, posición, navegación, colisiones, físicas, combate y animaciones;
+  - escenas, streaming de sectores, objetos representables y rendering;
+  - devolverá a Brain percepciones (visión, amenazas, estados físicos).
+El anfitrión autoritativo valida acciones y confirma eventos persistentes.
+Persistencia, fusión PBW y sincronización son módulos compartidos/integradores:
+BRAIN define los eventos semánticos y no implementará por su cuenta UDP o saves.
+
+2. HORIZONTAL: CONTRATO BRAIN -> BONES
+  BRAIN produce BrainIntent {npc_id, activity, destination, at_minute}.
+  La destination es un ANCLA SIMBÓLICA (HOME/WORK/MARKET/PATROL/THREAT).
+  BONES resuelve su posición, rutas, locomoción, hitbox y animación.
+  La percepción para cada NPC es enviada desde BONES a BRAIN como
+  BrainPerception {npc_id, threat_percent, sees_threat}.
+  No existe acoplamiento a tipos gráficos Win32, D3D o estructuras Bones.
+  Ver: include/brain/brain.h y spec/CONTRATO_BRAIN_BONES_v1.txt.
+
+3. HORIZONTE DE DESARROLLO — RUEDA/TRICICLO/MOTO/COCHE
+  RUEDA (v0.1): reloj lógico entero, semilla por dominio, API C11,
+       rutinas de tres roles, precio y stock, evento de compra idempotente,
+       relación entre facciones, adaptador de intenciones y tests.
+  TRICICLO: zonas activas/inactivas, hambre/cansancio/necesidades NPC,
+       percepción con memoria básica, hábitos variables y desplazamientos
+       entre anclas; economía con inventario mínimo por comerciante.
+  MOTO: motor de objetivos/acciones y reglas de utilidad o GOAP compactas,
+       incidentes locales, cadenas causales, reputación, empleo y contratos
+       procedurales validados; integración real con Bones y con guardados.
+  COCHE: simulación regional latente, consecuencias históricas persistentes,
+       interacciones de facciones, resolución de divergencias PBW y pruebas
+       a escala, con seguimiento de costes de CPU y bytes del juego total.
+  Los nombres representan madurez de implementación, NO vehículos jugables.
+
+4. CONDICIONES DE DISEÑO DEL MAESTRO
+  - C11, datos pequeños, sin dependencias ajenas al sistema operativo elegido.
+  - Ejecutable FINAL completo <= 1.474.560 bytes (no confundir con libbrain.a).
+  - Misma semilla, reglas, estado inicial y eventos -> estado reproducible.
+  - No usar rand() global ni orden de carga para generar resultados.
+  - Identidad de mundo ≠ semilla; IDs de eventos incluyen rama + secuencia.
+  - Solo anfitrión cambia el estado autoritativo compartido.
+  - No simular individualmente todos los NPC del mundo ilimitado.
+  - No generar narrativas aleatorias incoherentes o eventos de propiedad doble.
+  - Lo generado no es automáticamente persistente; guardar eventos relevantes.
+  - Datos binarios: NO serializar structs C tal cual (padding/endian/punteros).
+  - Rendimiento, ahorros de bytes y compatibilidad Windows se miden, no suponen.
+
+5. CONTRATOS DE CALIDAD POR CADA COMMIT/ENTREGA
+  A. Implementación separada por módulo con cabeceras públicas comentadas.
+  B. Tests C reproducibles: entradas, salidas, hash e invariantes.
+  C. Registro actualizado: docs/REGISTRO_CAMBIOS_BRAIN.txt.
+  D. Estado actualizado: docs/ESTADO_BRAIN.txt.
+  E. ADR revisado si cambia una decisión: docs/DECISIONES_BRAIN.txt.
+  F. Contrato Bones actualizado si cambia el ABI o semántica pública.
+  G. Medición real de binario SOLO cuando exista build Windows integrable.
+
+6. REGLAS DE EVENTOS / PBW
+  Los eventos de estado único DEBEN identificar actor, destino y acción;
+  las compras transfieren dinero y existencias de manera todo-o-nada.
+  Duplicados se detectan por EventId {branch,serial}, y conflicto si cambia
+  el contenido. La estructura de evento actual es DE PROTOTIPO.
+  Una fusión PBW completa requiere ancestro común, orden causal, journal
+  durable, reconciliación de calendarios y resolución por anfitrión; ni un
+  hash ni el libro de eventos en RAM equivalen a una fusión implementada.
+
+7. RIESGOS ACTUALES Y POLÍTICAS ABIERTAS
+  - Escala temporal no fijada por el diseñador: ticks_per_minute se configura.
+  - No existe contrato de Bones recibido; el adaptador es independiente.
+  - Las carteras del ejemplo viven fuera de BrainWorld; integrar el wallet
+    persistente con Bones y SAVE exige protocolo transaccional.
+  - El ledger es de 256 eventos y bloquea más cambios al llenarse; requiere
+    compactación duradera sin pérdida de protección frente a duplicados.
+  - La IA de rutina es determinista pero elemental; no conoce rutas físicas.
+  - El paso regional agregado sólo soporta producción/consumo constantes;
+    choques climáticos y sucesos intermedios requieren eventos discretos.
+
+8. SIGUIENTE TRABAJO TÉCNICO
+  1. Bones comunica entidades visibles, percepciones y catálogo de anclas.
+  2. Adaptar BrainIntent a la navegación de Bones (sin cambios a la IA base).
+  3. Integrar evento validado en journal duradero y snapshots.
+  4. Añadir memoria y necesidades de NPC; probar interrupciones causales.
+  5. Comparar simulación activa vs latente en varios calendarios; medir CPU.
+
+9. PROPUESTA BVR1 PARA EYE (v0.2)
+  La regeneración gráfica corresponde a Eye. Brain proporciona un contrato
+  mínimo de referencias versionadas sin almacenar texturas completas.
+  Los estados visuales con significado se derivan primero de los sistemas
+  que los poseen; si no hay fuente canónica, se registra override por clave.
+  Persistencia global NO asignada todavía; consultar Usos de los chats.txt.
+  Revisar el spec/CONTRATO_BRAIN_EYE_REFERENCIAS_v1.txt antes de integrar.
+  Cada modificación sigue requiriendo código, tests, changelog y estado.

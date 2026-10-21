@@ -1,0 +1,78 @@
+ESTADO TÉCNICO DE BRAIN v0.2.0 — 20/10/2026
+
+IMPLEMENTADO Y PROBADO LOCALMENTE (GCC, LINUX)
+  include/brain/brain.h — cabecera C11 pública, BRAIN_API_VERSION=1.
+  brain_clock.c   — reloj minuto/tick, avance con detección de overflow.
+  brain_random.c  — claves deterministas por semilla, dominio, identificador.
+  brain_economy.c — reservas, tasas, avance agregado O(1), precios acotados.
+  brain_npc.c     — rol comerciante/aldeano/guardia, horarios, amenaza.
+  brain_world.c   — registro ordenado, host-only, mercado de compra,
+                    cambios de relación, ledger idempotente y hash canónico.
+  brain_bones.c   — adaptador de intenciones para NPC cercanos y percepciones.
+  demo/brain_demo.c — ejemplo funcional de reloj, NPC, compra y replay.
+  demo/bones_stub_integration.c — consumidor Bones SIMULADO, no Bones real.
+  tests/test_brain.c — pruebas ejecutables de determinismo e invariantes.
+
+PROBADO EN ESTA SESIÓN
+  GCC C11 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow: PASS.
+  ASan+UBSan en la parte portable: PASS.
+  make test; make demo; make bones-demo: PASS.
+  Comprobadas inserciones en distinto orden -> mismo hash lógico.
+  Comprobadas compras duplicadas, rechazo por fondos y stock, sin mutación.
+  Confirmado evento distinto con mismo serial pero rama diferente.
+  Comprobado avance de 730 días en una llamada vs dos de 365 días.
+  Comprobadas amenazas, rutinas, límite de ledger y host no autorizado.
+  sizeof(BrainWorld)=23488 bytes en el entorno de pruebas.
+  Registro de hash local tras prueba=62cd298edfd0d634.
+  Demo: 08:00, comerciante en MARKET, compra 3 alimentos por 30 monedas,
+        saldo 170, replay de compra no aplicado dos veces.
+
+NUEVA EXTENSIÓN v0.2 — CONTRATO VISUAL PARA EYE
+  include/brain/brain_visual.h: tipo de referencia + estado semántico + IDs.
+  src/brain_visual.c: conjunto sparse ordenado de overrides, resolución de
+    descriptores, chequeo de versión y códec canónico BVR1 (48+56*n bytes).
+  tests/test_visual_refs.c: round-trip, rechazo de Eye incompatible,
+    detección de corrupción y conflicto, resultado independiente del orden.
+  La prueba usa una función Eye SIMULADA, sin imágenes ni recetas Eye reales.
+  La persistencia general sigue sin responsable confirmado en el protocolo;
+    el códec sólo es un experimento de intercambio para el futuro dueño SAVE.
+  La nueva API es aditiva e independiente de brain.h (BRAIN_API_VERSION=1).
+  Contrato completo: spec/CONTRATO_BRAIN_EYE_REFERENCIAS_v1.txt.
+
+AÚN NO IMPLEMENTADO NI VERIFICADO
+  - Integración con el código real de Bones (contrato no proporcionado).
+  - Ejecutables y rendimiento nativos de Windows; script MSVC sin ejecutar.
+  - Serialización y recuperación de guardados completos, crash-safe,
+    snapshot PBW, merge de eventos o P2P (BVR1 es un códec auxiliar de ensayo).
+  - Objetivos avanzados, memoria de NPC y rutas de navegación.
+  - Necesidades biológicas, vínculos sociales y grupos de comportamiento.
+  - Variación climática, conflicto regional y transportes comerciales.
+  - Misiones procedurales y causalidad histórica compleja.
+  - Wallet/stock con transacción persistente y resistente a caída.
+  - Tamaño de Brain integrado con Bones y el juego final en 1,44 MB.
+
+LIMITACIONES PROVISIONALES CONOCIDAS
+  - Límites fijos: 16 pueblos, 128 NPC, 16 facciones, 48 relaciones,
+    256 eventos idempotentes. No se compacta ledger en esta entrega.
+  - El NPC devuelve una intención, no una ruta ni una acción terminada.
+  - El método de simulación agregada asume tasas constantes entre saltos.
+  - La escala temporal está pendiente de decisión; el ejemplo usa 60 ticks/min.
+  - Hash del estado BrainWorld no incluye carteras externas ni estado Bones.
+  - Las reglas son para prototipo y deben versionarse al cambiar.
+
+CRITERIO DE INTEGRACIÓN
+  Bones debe proporcionar IDs estables, NPCs cercanos, percepciones y anclas.
+  La autoridad compartida corre en host. Los eventos persistibles deben
+  pasar por módulo SAVE transaccional, y después por la red si corresponde.
+  No declarar PBW soportado hasta la prueba de ancestro común y merge.
+
+PRUEBAS v0.2 (20/10/2026)
+  - GCC C11: `make test` incluye tests originales sin regresión y nuevo test.
+  - `make sanitize`: ejecuta ASan/UBSan sobre contratos visuales.
+  - Snapshot BVR1 de 2 overrides: 160 bytes (48+2*56).
+  - Archivo temporal BVR1: escritura/lectura exacta con stdio en tests.
+    No sustituye escritura segura/crash-safe de guardado real.
+  - Mismo conjunto en orden diferente -> bytes idénticos.
+  - Corromper bytes, cambiar mundo, versión Eye o acortar stream -> rechazo.
+  - Material/variante de Eye reconstruidos por mock (NO pixel-identidad real).
+  - Windows MSVC: script actualizado; todavía NO ejecutado.

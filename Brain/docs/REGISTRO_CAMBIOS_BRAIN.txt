@@ -1,0 +1,58 @@
+BRAIN — REGISTRO DE CAMBIOS
+
+v0.1.0 — 20/10/2026 — Primera implementación modular de IA/simulación
+
+NUEVO CÓDIGO
+  - API pública de Brain v1 en include/brain/brain.h.
+  - Módulos C11 clock/random/economy/npc/world/bones.
+  - Reloj paramétrico, NPC de horarios y amenazas, precio por stock.
+  - Avance agregado de asentamientos con coste constante por mercancía.
+  - Registro de entidades con IDs estables, listas canónicas ordenadas.
+  - WorldId separado de semilla, generator/rules version distintos.
+  - Eventos semánticos compra/cambio de facciones con BranchId+Serial.
+  - Libro acotado de deduplicación; compra atómica en memoria del prototipo.
+  - Hash canónico por campos, independiente de padding/endian de structs.
+  - Adaptador Brain->Bones de intenciones y consumidor Bones simulado.
+  - Tests unitarios y demo, Makefile, script de compilación MSVC.
+
+CORRECCIONES ANTES DE CERRAR LA ENTREGA
+  - Compra repetida no vuelve a descontar oro ni entregar artículos.
+  - Distinta solicitud con mismo ID se rechaza como conflicto.
+  - Funciones no autorizadas retornan BRAIN_ERR_NOT_HOST.
+  - Registrar pueblo/NPC/facción es orden-independiente para hash lógico.
+  - Comprobaciones de desbordamiento de reloj, stock, cartera y ledger.
+  - Test explícito de igual serial en ramas PBW distintas (son eventos diferentes).
+  - Corrigidos dos supuestos erróneos en los tests: overflow del reloj y
+    fondos insuficientes; las pruebas finales pasan en modo normal y ASan.
+  - No usar comparaciones relacionales de punteros entre objetos ajenos.
+
+DOCUMENTOS EN ESTA MISMA ENTREGA
+  - BRAIN_OBJETIVOS_Y_NORMAS.txt (objetivos y fases).
+  - spec/CONTRATO_BRAIN_BONES_v1.txt (interoperabilidad futura).
+  - docs/DECISIONES_BRAIN.txt (seis ADR).
+  - docs/ESTADO_BRAIN.txt (estado real, pruebas y límites).
+  - docs/REGISTRO_CAMBIOS_BRAIN.txt (este archivo).
+  - docs/ANEXO_BRAIN_PLAN_MAESTRO.md (apéndice de estado sin alterar v1.0).
+  - README.txt (uso y comandos).
+
+EVIDENCIAS
+  - GCC C11 + avisos, ASan/UBSan: PASS.
+  - make test, make demo, make bones-demo: PASS.
+  - BrainWorld = 23.488 bytes en Linux x86_64 (memoria de trabajo, no EXE).
+  - NO se ha verificado Windows, tamaño final ni integración Bones real.
+
+[0.2.0] 20/10/2026 — Solicitud Eye a Brain: referencias visuales
+  Responsable: Brain (prototipo de contrato; SAVE pendiente de asignación).
+  Añadido include/brain/brain_visual.h y src/brain_visual.c.
+  Añadido spec/CONTRATO_BRAIN_EYE_REFERENCIAS_v1.txt con esquema de claves,
+  distinción decorativo/persistente, política EYE1/EYE2 y reparto de funciones.
+  Añadido tests/test_visual_refs.c: referencias efímeras y cambios semánticos,
+  roundtrip canónico BVR1 en RAM y archivo temporal, checksum, versión Eye,
+  mundo, orden de sectores y eventos.
+  Actualizado Makefile: test y libbrain incluyen nuevo módulo; target sanitize.
+  Actualizado scripts/build_windows_msvc.bat (pendiente de validación Windows).
+  Actualizados docs/ESTADO_BRAIN.txt, docs/DECISIONES_BRAIN.txt y README.txt.
+  Preparada respuesta para Eye: RESPUESTA_BRAIN_A_EYE.txt.
+  Sin modificación de contratos antiguos brain.h ni BonesSubsystem.
+  Limitaciones: Eye1/Eye2 reales NO disponibles, sin validación pixel-exacta,
+  ni asignación oficial de SAVE, ni transacciones persistentes/crash-safe.
