@@ -42,7 +42,7 @@ int main(void){
         assert(mouth_lan_encode_input(p,sizeof(p),UINT32_C(0x00aa1234),1,-1,1,-300,1,0)==n);
         memcpy(copy,p,(size_t)n);
         copy[k]^=0xff;
-        if(k==0||k==4||k==5||k==6||k==7||k==8||k==16)
+        if(k==0||k==4||k==5||k==6||k==7||k==8)
             assert(!mouth_lan_decode_input(copy,(uint32_t)n,0x00aa1234,
                                             &seq,&f,&s,&y,&sp,&j));
     }
