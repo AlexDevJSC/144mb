@@ -23,6 +23,8 @@ jobs:
         run: make -C Mouth test
       - name: Two-process Bones UDP loopback
         run: make -C Mouth loopback
+      - name: Bones official ModKit regression
+        run: make -C BONES modkit_test
   windows-msvc-lan:
     runs-on: windows-latest
     timeout-minutes: 15
