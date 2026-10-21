@@ -15,13 +15,11 @@ static int32_t add_quad_stub(void *ctx,const BonesModQuad *q) {
     (void)ctx;return (q&&q->size==sizeof(*q))?BONES_MOD_OK:BONES_MOD_EINVAL;
 }
 static int measure(const uint32_t *pixels,float *cx,float *cy) {
-    double sx=0,sy=0;int n=0; int left=320,right=-1,top=200,bottom=-1;
+    double sx=0,sy=0;int n=0;
     for(unsigned y=0;y<200u;++y)for(unsigned x=0;x<320u;++x) {
         uint32_t c=pixels[y*320u+x]&0xffffffu;
-        if(c!=0x15202du && c!=0xe5dabeu){ sx+=x;sy+=y;++n; if((int)x<left)left=(int)x; if((int)x>right)right=(int)x; if((int)y<top)top=(int)y; if((int)y>bottom)bottom=(int)y;}
+        if(c!=0x15202du && c!=0xe5dabeu){sx+=x;sy+=y;++n;}
     }
-    fprintf(stderr,"MEASURE n=%d bbox=[%d,%d,%d,%d] centroid=%.2f,%.2f\
-",n,left,top,right,bottom,n?sx/n:0.0,n?sy/n:0.0);
     if(n){*cx=(float)(sx/n);*cy=(float)(sy/n);}
     return n;
 }
@@ -58,9 +56,8 @@ int main(void) {
     fprintf(stderr,"FRAME yaw=%f serial=%llu hashBefore=%llx hashAfter=%llx\n",
         f.camera_yaw,(unsigned long long)serial,(unsigned long long)hash0,(unsigned long long)hashYaw);
     assert(measure(bones_eye_mod_pixels(),&x1,&y1)>100);
-    fprintf(stderr,"Yaw probe: x0=%.3f y0=%.3f x1=%.3f y1=%.3f (delta=%.3f)\
-", x0,y0,x1,y1,x1-x0);
-    /* Narrow the failure down to adapter vs. rasterizer. */
+    assert(hash0!=hashYaw); /* Camera change must affect image pixels. */
+    /* Direct rasterizer baseline prevents false positives caused by the adapter. */
     {
         P144_Renderer *direct=(P144_Renderer*)malloc(sizeof(P144_Renderer));
         P144_Camera cam={0};
@@ -81,7 +78,7 @@ int main(void) {
         p144_renderer_quad(direct,&cam,&probe,P144_MAT_STONE);
         p144_renderer_crosshair(direct);
         assert(measure(direct->pixels,&dx1,&dy1)>100);
-        fprintf(stderr,"DIRECT yaw test x0=%.3f x1=%.3f delta=%.3f\\n",dx0,dx1,dx1-dx0);
+        assert(dx1 < dx0-5.f);
         free(direct);
     }
     assert(x1 < x0-5.f); /* View moves right, fixed wall shifts left. */
