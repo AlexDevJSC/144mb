@@ -35,3 +35,18 @@ NO VERIFICADO / PENDIENTE
  - Eventos fiables durables y conciliación de partidas guardadas.
  - Cumplimiento límite de 1.44 MB del juego definitivo.
  - Validación conjunta de Bones+Skin+Eye y revisión final de Soul.
+
+
+== Actualización de verificación conjunta, 21/10/2026 ==
+  [PASS] GitHub Actions main 39614541148: Linux GCC y Windows MSVC.
+  [PASS] Test pérdida 15% + blackout 1,2s (loopback): run 39614303198;
+         sesiones y controles del actor2 funcionan después de corte.
+  [PUBLICADO] PLAN_PRUEBAS_LAN_CONJUNTAS_v1.md.
+  [DISEÑO PENDIENTE] PROPUESTA_DESCUBRIMIENTO_MUNDOS_LAN_v0.md,
+                     decisión Bones/Soul en issue #23.
+  [ABI/WIRE SIN CAMBIOS] Mouth 0.4.0, ModKit ABI 1, M144/1.
+  [PENDIENTE] Bones host gráfico y Skin menu: #20 y #19 aún abiertos.
+  [PENDIENTE] Eye cliente gráfico, 2 PCs físicos, carga sostenida horas,
+              snapshots persistentes, medida PE juego completo, QA Soul.
+  [RIESGO BRANCH] PR #21 Bones experimental ha tenido fallos temporales
+                  de loopback; no se han reproducido en main.
