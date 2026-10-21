@@ -50,4 +50,7 @@ jobs:
       - name: Windows session errors and disconnect
         shell: pwsh
         run: python Mouth/tests/test_session_network.py Mouth/build/mouth_lan_demo.exe
+      - name: Windows protocol version and unauthorized input
+        shell: pwsh
+        run: python Mouth/tests/test_protocol_security.py Mouth/build/mouth_lan_demo.exe
 
