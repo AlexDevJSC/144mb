@@ -1,5 +1,5 @@
 /*
- * Mouth for Bones ModKit 0.4.0, ABI 1.
+ * Mouth for Bones ModKit 0.4.0, ABI 1; Mouth session API v1.
  *
  * Bones' standard source registry compiles ONLY modules/<name>/modkit.c.
  * This intentionally includes the transport implementation in the same
@@ -34,7 +34,7 @@ int32_t bones_mod_mouth_query(uint32_t abi, BonesModDescriptor *out) {
     out->abi = BONES_MOD_ABI;
     memcpy(out->id, "mouth", sizeof("mouth"));
     out->role = BONES_ROLE_MOUTH;
-    out->implementation_version = 3u;
+    out->implementation_version = 4u;
     out->state_schema_version = 0u;
     return BONES_MOD_OK;
 }
