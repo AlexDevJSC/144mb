@@ -18,7 +18,14 @@ build/mouth_lan_demo: examples/lan_demo.c include/mouth_lan.h $(CORE) $(HOST) $(
 build/test_codec: tests/test_codec.c src/mouth_lan.c include/mouth_lan.h
 	mkdir -p build
 	$(CC) $(CFLAGS) $(INC) tests/test_codec.c src/mouth_lan.c -o $@ $(LIBS)
-test: build/test_codec
+build/test_modkit_provider: tests/test_modkit_provider.c $(DROPIN)
+	mkdir -p build
+	$(CC) $(CFLAGS) $(INC) tests/test_modkit_provider.c $(B)/modules/mouth/modkit.c -o $@ $(LIBS)
+.PHONY: integration
+integration: build/test_modkit_provider
+	./build/test_modkit_provider
+	python3 scripts/sync_bones_module.py --check
+test: build/test_codec integration
 	./build/test_codec
 loopback: all test
 	python3 tests/test_loopback.py ./build/mouth_lan_demo
@@ -29,4 +36,4 @@ sanitize:
 		-o build/test_codec_sanitize $(LIBS)
 	./build/test_codec_sanitize
 clean:
-	rm -f build/test_codec build/test_codec_sanitize build/mouth_lan_demo
+	rm -f build/test_codec build/test_modkit_provider build/test_codec_sanitize build/mouth_lan_demo
