@@ -123,7 +123,7 @@ static void eye_present(void *context,const BonesModFrame *frame) {
 int32_t bones_mod_eye_query(uint32_t abi,BonesModDescriptor *out) {
     if(abi!=BONES_MOD_ABI||!out||out->size!=sizeof(*out))return BONES_MOD_EINVAL;
     memset(out,0,sizeof(*out));out->size=sizeof(*out);out->abi=abi;
-    memcpy(out->id,"eye",4);out->implementation_version=501u;
+    memcpy(out->id,"eye",4);out->implementation_version=502u;
     out->state_schema_version=0u;out->role=BONES_ROLE_EYE;
     out->requested_permissions=BONES_PERMISSION_WRITE_SCENE;
     out->user_context=&eye_state;out->start=eye_start;out->stop=eye_stop;
