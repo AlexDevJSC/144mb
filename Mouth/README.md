@@ -1,67 +1,48 @@
-# Mouth — red LAN para Bones ModKit 0.4.0
+# MOUTH 0.4.0 — Network / Session API (Bones ModKit ABI 1)
 
-**Versión de integración:** Mouth 0.3.1. **Instalado en BONES/modules/mouth** como proveedor fuente enlazado de Bones ModKit ABI 1.  
-**Pruebas verificadas:** [GitHub Actions Windows + Linux](https://github.com/AlexDevJSC/144mb/actions/runs/39594728594).  
-**Estado:** compilación del juego de prueba oficial y de demo LAN confirmada; **aún no hay menú ni render de un segundo cliente en el ejecutable gráfico normal**.
+**Code tested (SHA):** 7c0506eacc969692eb76ab34893a5aa3fe177e32
+**CI:** https://github.com/AlexDevJSC/144mb/actions/runs/39606820015
+**Full API handoff:** [CONTRATO_SESIONES_BONES_SKIN_v1.md](docs/CONTRATO_SESIONES_BONES_SKIN_v1.md).
 
-## Instalar Mouth como módulo de Bones
+Source resides in Mouth/include/mouth_lan.h and Mouth/src/mouth_lan.c.
+The installed, statically linked Bones module resides in
+BONES/modules/mouth/{modkit.c,mouth_lan.h,mouth_lan.c}.
+ModKit ABI remains 1, implementation_version=4, wire protocol M144/1.
+Run python Mouth/scripts/sync_bones_module.py --check for source sync.
 
-El directorio ya está disponible en [BONES/modules/mouth](https://github.com/AlexDevJSC/144mb/tree/main/BONES/modules/mouth) y contiene los cuatro archivos que necesita el paquete fuente.
+Public C API: mouth_session_create, mouth_session_join,
+mouth_session_disconnect, mouth_session_get_status, mouth_session_poll,
+mouth_session_copy_snapshot and mouth_lan_client_controls.
+MouthSessionInfo provides UI-agnostic statuses for Skin:
+offline, prepared, waiting, joining, connected, reconnecting,
+incompatible, timeout and lost, plus typed failure causes.
 
-Con una copia de Bones 0.4.0 donde se mantienen las carpetas include, src, modules y scripts:
+Singleplayer does not open a socket. Bones owns actor IDs, owners,
+movement and physical authority. Host must create remote player owner=2,
+then call mouth_session_create BEFORE registering/starting ModKit.
+Join takes IPv4/port and Bones-supplied world_id/seed/generator_version.
+A client cannot discover an unknown procedural world by IP yet.
+Client snapshots are for representation (Bones/Eye), not for restoring
+host-authoritative physics.
 
-1. Extraer los archivos de Mouth dentro de modules/mouth, reemplazando exclusivamente su conector de prueba.
-2. Abrir consola x64 Developer Command Prompt de Visual Studio.
-3. Desde la carpeta BONES ejecutar scripts\build_windows_msvc.bat.
-4. Obtener build\Proyecto144_Bones_ModKit.exe con Mouth enlazado.
-
-El build oficial genera automáticamente el registro de módulos. Se ha corregido para compilar cada modkit.c con nombre de objeto distinto y enlazar ws2_32.lib, que necesita Mouth.
-
-El paquete instalable se puede crear sin editar archivos fuente manualmente:
-
-    python Mouth/scripts/sync_bones_module.py --check
-    python Mouth/scripts/sync_bones_module.py --pack
-
-La segunda orden genera Mouth/build/MOUTH_Bones_ModKit_0_4.zip (extraerlo DENTRO de BONES). Para reconstruir el módulo fuente desde Mouth: usar --apply y revisar cambios con Git.
-
-## Multijugador LAN experimental
-
-El host real de Mouth recibe entradas desde un cliente, las valida y llama BonesModServices.submit_move. Bones Foundation calcula la física. El cliente recibe posiciones confirmadas en paquetes UDP. Sin configuración LAN, el módulo queda registrado pero inactivo; por tanto no rompe la ejecución individual.
-
-**El ejecutable normal de Bones no abre ninguna sesión por sí solo.** Para habilitar el modo host, la aplicación debe crear un segundo actor owner=2 y llamar a mouth_lan_configure_host ANTES de registrar los proveedores. La integración del menú «Crear/Unirse» con Skin es futura.
-
-Demo LAN ya comprobada (loopback en Windows y Linux):
-
+Compile from repo root with Visual Studio x64 developer console:
     Mouth\scripts\build_windows_msvc.bat
-    Mouth\build\mouth_lan_demo.exe host 14444
-
-En la consola del segundo PC:
-
+    BONES\scripts\build_windows_msvc.bat
+Test in LAN: run Mouth\build\mouth_lan_demo.exe host 14444
+and on a second process:
     Mouth\build\mouth_lan_demo.exe join 192.168.1.10 14444
+Use the real host LAN IPv4; permit UDP 14444 only in trusted private LAN.
+The current client demonstration is CONSOLE, not 3D.
 
-Usar la IP LAN real del host y permitir UDP 14444 únicamente en red privada. Controles: WASD, flechas izquierda/derecha, Shift y Espacio. Demo cliente: **consola**, sin segunda cámara 3D todavía. Ctrl+C cierra ambos procesos.
-
-En Linux:
-
+Linux tests:
     make -C Mouth test
     make -C Mouth loopback
     make -C BONES modkit_test
+Negative tests include incompatible version/world, no host timeout,
+invalid IP, graceful exit and forged control packet without session.
 
-## Archivos
-
-- Mouth/include/mouth_lan.h y Mouth/src/mouth_lan.c: fuente original portable.
-- Mouth/adapter/modkit.c: punto de entrada Bones, mantenido como fuente de referencia.
-- BONES/modules/mouth/{modkit.c,mouth_lan.c,mouth_lan.h,README.txt}: paquete instalado.
-- Mouth/scripts/sync_bones_module.py: sincronizar y empaquetar fuentes.
-- Mouth/docs/INTEGRACION_BONES_0_4.txt: explicación exhaustiva de instalación, compatibilidad y pruebas.
-- Mouth/tests/test_modkit_provider.c: descriptor ABI y modo offline/online.
-- Mouth/tests/test_codec.c y test_loopback.py: wire format y dos procesos conectados.
-- Mouth/docs/ESTADO_REAL.txt y REGISTRO_CAMBIOS.txt: estado actual y modificaciones.
-
-## Medición real y limitaciones
-
-GitHub Actions Windows/MSVC compiló el ejecutable oficial de pruebas Bones ModKit con Mouth de **192.512 bytes (último CI; antes 190.976)**, y la demo LAN de **189.440 bytes**. Eso **no valida el límite de 1,44 MB del juego terminado**.
-
-No implementado: terceros/cuarto jugador, partida multijugador 3D final, lista de servidores, NAT, cifrado, autenticación criptográfica, interoperabilidad de bibliotecas Eye, persistencia concurrente, autoinstalación de mods/DLL o reconexión larga certificada. Las pruebas de red se han realizado entre dos procesos del mismo equipo (loopback), no entre ordenadores físicos.
-
-Mouth 0.3.1 utiliza M144/1 para la demo LAN. Los ZIP históricos Mouth v0.1/v0.2 no están aún íntegramente publicados en GitHub. No se deben presentar como versiones wire compatibles.
+Limitations: one host and one remote client; UDP IPv4, no encryption,
+NAT traversal, internet auth, full persistence or multiplayer save merge.
+No physical two-PC network validation or complete game-graphics playtest.
+The 1.44 MB constraint is for the entire final game, not this demo.
+Skin/Bones integration and Soul verification are still outstanding.
