@@ -18,4 +18,6 @@ if not exist "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" (
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
 if errorlevel 1 exit /b 1
 call "%~dp0build_windows_msvc.bat"
+if errorlevel 1 exit /b 1
+call "%~dp0..\..\BONES\scripts\build_windows_msvc.bat"
 exit /b %errorlevel%
