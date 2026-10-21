@@ -38,7 +38,7 @@ for %%F in (
   if errorlevel 1 goto :build_error
   set OBJ_FILES=!OBJ_FILES! "build\obj_modkit\unit!NUM!.obj"
 )
-for /R modules %%F in (modkit.c) do (
+for /R modules %%F in (*modkit.c) do (
   set /a NUM+=1
   cl /nologo /std:c11 /TC /O2 /GL /MT /W4 /DBONES_MODKIT_NO_DYNLIB /D_CRT_SECURE_NO_WARNINGS ^
     /c "%%F" /Fo"build\obj_modkit\unit!NUM!.obj"
