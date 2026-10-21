@@ -9,7 +9,7 @@ HOST = $(B)/src/modkit/modkit.c
 DROPIN = $(B)/modules/mouth/modkit.c $(B)/modules/mouth/mouth_lan.c $(B)/modules/mouth/mouth_lan.h
 INC = -I$(B)/include -Iinclude
 LIBS = -lm
-.PHONY: all test loopback sanitize clean
+.PHONY: all test loopback loss sanitize clean
 all: build/mouth_lan_demo
 build/mouth_lan_demo: examples/lan_demo.c include/mouth_lan.h $(CORE) $(HOST) $(DROPIN)
 	mkdir -p build
@@ -35,6 +35,8 @@ loopback: all test
 	python3 tests/test_loopback.py ./build/mouth_lan_demo
 	python3 tests/test_session_network.py ./build/mouth_lan_demo
 	python3 tests/test_protocol_security.py ./build/mouth_lan_demo
+loss: all
+	python3 tests/test_lan_loss_proxy.py ./build/mouth_lan_demo
 sanitize:
 	mkdir -p build
 	$(CC) -std=c11 -g -O1 -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
