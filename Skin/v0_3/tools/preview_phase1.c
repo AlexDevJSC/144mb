@@ -37,6 +37,14 @@ int main(void){
     if(!image("build/skin_inventory.ppm"))return 7;
     bones_skin_ui_enter_main();bones_skin_ui_input(SKIN2_DOWN);bones_skin_ui_input(SKIN2_DOWN);bones_skin_ui_input(SKIN2_ACCEPT);
     if(!image("build/skin_lan.ppm"))return 8;
+    bones_skin_ui_lan_status(0,0,0,0);
+    bones_skin_ui_input(SKIN2_DOWN);bones_skin_ui_input(SKIN2_ACCEPT);
+    for(const char *p="192.168.1.25";*p;++p)bones_skin_ui_lan_text((uint32_t)(unsigned char)*p);
+    if(!image("build/skin_lan_join.ppm"))return 9;
+    bones_skin_ui_input(SKIN2_BACK);
+    bones_skin_ui_input(SKIN2_DOWN);bones_skin_ui_input(SKIN2_DOWN);bones_skin_ui_input(SKIN2_ACCEPT);
+    bones_skin_ui_lan_status(4,0,14444,1);
+    if(!image("build/skin_lan_status.ppm"))return 10;
     d.stop(d.user_context);
     return 0;
 }

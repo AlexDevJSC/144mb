@@ -11,3 +11,10 @@ Código instalable en `BONES/modules/skin/`; el punto de entrada `modkit.c` es u
 Documentación: `docs/FASE1_MENUS_HUD_20261021.md`, `docs/TRASPASO_A_BONES_SOUL_FASE1.md` y `docs/REGISTRO_CAMBIOS.md`.
 
 Acciones: SKIN2_START/SINGLE son solicitudes que el host confirma mediante `bones_skin_ui_enter_game()`. Durante los menús `bones_skin_ui_blocks_gameplay()` indica que Bones debe mandar input neutro. Skin recibe objetivo/rango validados de Bones con `bones_skin_ui_target` y devuelve `SKIN2_INTERACT_REQUEST` sin ejecutar acciones. Presentación pendiente de Eye con un destino host-owned, nunca tocando el Z-buffer. Audio y LAN tienen panel pendiente a la espera de Ear y Mouth.
+
+
+## Actualización incremental Eye / Mouth (21/10/2026)
+- Contrato de composición Eye PR #12 validado en prueba funcional portátil (`make test`, `make sanitize`), sin declarar integración Win32 completa. Véase `docs/VALIDACION_EYE_052_PR12.md`.
+- Interfaz LAN v0.4: crear/unirse IP:puerto, estados/errores y desconexión como intenciones; exige identidad mundial conocida; no contiene sockets. Véase `docs/FASE3_LAN_MOUTH_04.md`.
+- Ear PR #13 sigue bajo revisión Soul; opciones musicales todavía no habilitadas. Selector Bones PR #21 todavía sin contrato de UI aprobado.
+- Changelog: `docs/CHANGELOG_INCREMENTAL_20261021.md`; traspaso general: `docs/TRASPASO_EYE_BONES_MOUTH_20261021.md`.

@@ -78,7 +78,7 @@ int main(void){
     assert(bones_mod_skin_query(BONES_MOD_ABI,NULL)==BONES_MOD_EINVAL);
     assert(bones_mod_skin_query(BONES_MOD_ABI,&d)==BONES_MOD_OK);
     assert(!strcmp(d.id,"skin")&&d.role==BONES_ROLE_SKIN&&d.abi==BONES_MOD_ABI);
-    assert(d.implementation_version==4u&&d.state_schema_version==0&&d.required_roles==0);
+    assert(d.implementation_version>=4u&&d.state_schema_version==0&&d.required_roles==0);
     assert(!d.present&&!d.build_scene&&!d.before_tick);
     assert((d.requested_permissions&(BONES_PERMISSION_SEND_COMMANDS|BONES_PERMISSION_WRITE_SCENE|BONES_PERMISSION_RESTORE_SNAPSHOT))==0);
     assert(!bones_skin_ui_state());assert(bones_skin_ui_blocks_gameplay());

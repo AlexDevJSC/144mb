@@ -60,7 +60,7 @@ int32_t bones_mod_skin_query(uint32_t abi,BonesModDescriptor *out) {
     out->abi=BONES_MOD_ABI;
     memcpy(out->id,"skin",sizeof("skin"));
     out->role=BONES_ROLE_SKIN;
-    out->implementation_version=4u;  /* Skin v0.3; version of implementation */
+    out->implementation_version=5u;  /* Skin v0.3; version of implementation */
     out->state_schema_version=0u;    /* UI has no private persistent format */
     out->required_roles=0u;         /* Headless/offline compatible; Eye optional */
     out->requested_permissions=BONES_PERMISSION_READ_TIME|BONES_PERMISSION_READ_ACTORS;
@@ -114,4 +114,19 @@ int32_t bones_skin_ui_target(uint64_t id,int host_valid,const char *label){
 int32_t bones_skin_ui_enter_main(void){
     if(!skin_mod_state.started)return BONES_MOD_BAD_STATE;
     skin2_enter_main(&skin_mod_state.ui);return BONES_MOD_OK;
+}
+
+int32_t bones_skin_ui_lan_status(unsigned phase,unsigned error,unsigned port,int known){
+    if(!skin_mod_state.started)return BONES_MOD_BAD_STATE;
+    if(phase>8u||error>9u||port>65535u)return BONES_MOD_EINVAL;
+    skin2_lan_status(&skin_mod_state.ui,phase,error,port,known);
+    return BONES_MOD_OK;
+}
+int32_t bones_skin_ui_lan_text(uint32_t ascii){
+    if(!skin_mod_state.started)return BONES_MOD_BAD_STATE;
+    return skin2_lan_character(&skin_mod_state.ui,ascii)?BONES_MOD_OK:BONES_MOD_EINVAL;
+}
+int32_t bones_skin_ui_lan_request(char ipv4[16],uint16_t *port){
+    if(!skin_mod_state.started)return BONES_MOD_BAD_STATE;
+    return skin2_lan_request(&skin_mod_state.ui,ipv4,port)?BONES_MOD_OK:BONES_MOD_EINVAL;
 }

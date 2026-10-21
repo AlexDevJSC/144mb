@@ -89,6 +89,7 @@ static void bar(Skin2Canvas *c,const Skin2Theme *t,int x,int y,int w,uint32_t v,
 void skin2_init(Skin2Ui *ui){
     if(!ui)return;
     memset(ui,0,sizeof(*ui));ui->screen=SKIN2_MAIN;
+    memcpy(ui->lan_port,"14444",6);
     /* Provisional proposed palette, NOT colors already supplied by Eye. */
     ui->theme=(Skin2Theme){0xc8000000u,0xf026211du,0xff332d24u,0xff48382bu,
         0xff9b8558u,0xffefe5ca,0xffb3a88e,0xffd2ab65,0xff51412au,
@@ -110,13 +111,62 @@ void skin2_set_target(Skin2Ui *ui,uint64_t id,int host_valid,const char *label){
     ui->target_id=ui->target_valid?id:0;
     (void)snprintf(ui->target_label,sizeof(ui->target_label),"%.31s",ui->target_valid&&label?label:"");
 }
+/* Only UI validation. Bones/Mouth must still authenticate world and connection. */
+static int lan_form_valid(const Skin2Ui *ui,unsigned *port_out){
+    const char *p=ui->lan_ipv4; unsigned parts=0,port=0; const char *q=ui->lan_port;
+    while(parts<4){
+        unsigned val=0,digits=0;
+        while(*p>='0'&&*p<='9'&&digits<3){val=10u*val+(unsigned)(*p++-'0');digits++;}
+        if(!digits||val>255 || (*p>='0'&&*p<='9'))return 0;
+        parts++;
+        if(parts==4){if(*p)return 0;}else if(*p++!='.')return 0;
+    }
+    if(!*q)return 0;
+    while(*q){if(*q<'0'||*q>'9')return 0;port=port*10u+(unsigned)(*q++-'0');if(port>65535u)return 0;}
+    if(!port)return 0;
+    if(port_out)*port_out=port;
+    return 1;
+}
+void skin2_lan_status(Skin2Ui *ui,unsigned phase,unsigned error,unsigned port,int identity_ready){
+    if(!ui)return;
+    ui->lan_phase=(uint8_t)(phase<=8u?phase:0u);
+    ui->lan_error=(uint8_t)(error<=9u?error:1u);
+    ui->lan_current_port=(uint16_t)(port<=65535u?port:0u);
+    ui->lan_identity_ready=(uint8_t)(identity_ready!=0);
+}
+int skin2_lan_character(Skin2Ui *ui,uint32_t ascii){
+    char *p;size_t len,cap;int is_ip;
+    if(!ui||ui->screen!=SKIN2_LAN_JOIN||ui->selection>1)return 0;
+    is_ip=ui->selection==0;
+    p=is_ip?ui->lan_ipv4:ui->lan_port;
+    cap=is_ip?sizeof(ui->lan_ipv4):sizeof(ui->lan_port);
+    len=strlen(p);
+    if(ascii==8u){if(len){p[len-1]=0;return 1;}return 0;}
+    if((ascii<'0'||ascii>'9')&&!(is_ip&&ascii=='.'))return 0;
+    if(len+1>=cap)return 0;
+    p[len]=(char)ascii;p[len+1]=0;return 1;
+}
+int skin2_lan_request(const Skin2Ui *ui,char ipv4[16],uint16_t *port){
+    unsigned n;
+    if(!ui||!ipv4||!port||ui->screen!=SKIN2_LAN_JOIN||!ui->lan_identity_ready||!lan_form_valid(ui,&n))return 0;
+    memcpy(ipv4,ui->lan_ipv4,16);*port=(uint16_t)n;return 1;
+}
+static const char *lan_phase_text(unsigned p){
+    static const char * const names[]={"SIN SESION","HOST PREPARADO","ESPERANDO CLIENTE","CONECTANDO", "CONECTADO","RECONECTANDO","INCOMPATIBLE","TIEMPO AGOTADO","CONEXION PERDIDA"};
+    return p<=8u?names[p]:"ESTADO DESCONOCIDO";
+}
+static const char *lan_error_text(unsigned p){
+    static const char * const names[]={"SIN ERROR","ARGUMENTO INVALIDO","IP INVALIDA","ERROR SOCKET", "OCUPADO","NO PREPARADO","MUNDO INCOMPATIBLE","PROTOCOLO INCOMPAT.","TIEMPO AGOTADO","CONEXION PERDIDA"};
+    return p<=9u?names[p]:"ERROR DESCONOCIDO";
+}
 int skin2_blocks_gameplay(const Skin2Ui *ui){return !ui||ui->screen!=SKIN2_GAME;}
 static int menu_count(Skin2Screen s){return s==SKIN2_MAIN?5:s==SKIN2_PAUSE?4:s==SKIN2_SETTINGS?3:0;}
 Skin2Action skin2_input(Skin2Ui *ui,Skin2Key key){
     int count;
     if(!ui)return SKIN2_NO_ACTION;
     if(key==SKIN2_BACK){
-        if(ui->screen==SKIN2_INVENTORY||ui->screen==SKIN2_SETTINGS||ui->screen==SKIN2_LAN||ui->screen==SKIN2_CONTEXT){
+        if(ui->screen==SKIN2_LAN_JOIN||ui->screen==SKIN2_LAN_STATUS){ui->screen=SKIN2_LAN;ui->selection=0;}
+        else if(ui->screen==SKIN2_INVENTORY||ui->screen==SKIN2_SETTINGS||ui->screen==SKIN2_LAN||ui->screen==SKIN2_CONTEXT){
             ui->screen=ui->previous;ui->selection=0;
         }else if(ui->screen==SKIN2_PAUSE){skin2_enter_game(ui);return SKIN2_RESUME;}
         else if(ui->screen==SKIN2_GAME){ui->screen=SKIN2_PAUSE;ui->selection=0;}
@@ -129,7 +179,41 @@ Skin2Action skin2_input(Skin2Ui *ui,Skin2Key key){
         ui->previous=SKIN2_GAME;ui->screen=SKIN2_CONTEXT;ui->selection=0;
         return SKIN2_INTERACT_REQUEST; /* Never change gameplay or transactions here. */
     }
-    if(ui->screen==SKIN2_GAME||ui->screen==SKIN2_LAN||ui->screen==SKIN2_CONTEXT)return SKIN2_NO_ACTION;
+    if(ui->screen==SKIN2_LAN){
+        if(key==SKIN2_UP)ui->selection=(uint8_t)((ui->selection+3u)%4u);
+        else if(key==SKIN2_DOWN)ui->selection=(uint8_t)((ui->selection+1u)%4u);
+        else if(key==SKIN2_ACCEPT){
+            if(ui->selection==0){
+                if(!ui->lan_identity_ready){skin2_notice(ui,"MUNDO CONOCIDO REQUERIDO");return SKIN2_NO_ACTION;}
+                return SKIN2_LAN_CREATE_REQUEST;
+            }
+            if(ui->selection==1){ui->screen=SKIN2_LAN_JOIN;ui->selection=0;}
+            if(ui->selection==2){ui->screen=SKIN2_LAN_STATUS;ui->selection=0;}
+            if(ui->selection==3){ui->screen=ui->previous;ui->selection=0;}
+        }
+        return SKIN2_NO_ACTION;
+    }
+    if(ui->screen==SKIN2_LAN_JOIN){
+        if(key==SKIN2_UP)ui->selection=(uint8_t)((ui->selection+3u)%4u);
+        else if(key==SKIN2_DOWN)ui->selection=(uint8_t)((ui->selection+1u)%4u);
+        else if(key==SKIN2_ACCEPT){
+            if(ui->selection==3){ui->screen=SKIN2_LAN;ui->selection=0;}
+            else if(ui->selection==2){
+                if(!ui->lan_identity_ready)skin2_notice(ui,"FALTAN MUNDO Y SEMILLA");
+                else if(!lan_form_valid(ui,NULL))skin2_notice(ui,"IP O PUERTO INVALIDO");
+                else return SKIN2_LAN_JOIN_REQUEST;
+            }
+        }
+        return SKIN2_NO_ACTION;
+    }
+    if(ui->screen==SKIN2_LAN_STATUS){
+        if(key==SKIN2_ACCEPT){
+            if(ui->lan_phase==0u){skin2_notice(ui,"SIN SESION ACTIVA");return SKIN2_NO_ACTION;}
+            return SKIN2_LAN_DISCONNECT_REQUEST;
+        }
+        return SKIN2_NO_ACTION;
+    }
+    if(ui->screen==SKIN2_GAME||ui->screen==SKIN2_CONTEXT)return SKIN2_NO_ACTION;
     if(ui->screen==SKIN2_INVENTORY){
         if(key==SKIN2_LEFT&&ui->selection%5)ui->selection--;
         else if(key==SKIN2_RIGHT&&ui->selection%5<4)ui->selection++;
@@ -188,8 +272,8 @@ static void hud(Skin2Canvas *c,const Skin2Theme *t,const Skin2Ui *ui,const Skin2
         skin2_fill(c,97,150,126,15,0xdd171716u);
         text(c,"E - INTERACTUAR",108,154,1,t->text);
     }
-    skin2_fill(c,3,185,314,12,0xc91d1c1au);
-    text(c,ui->ui_scale_setting?"I / ESC":"I: INVENTARIO  ESC: PAUSA",8,ui->ui_scale_setting?186:188,ui->ui_scale_setting?2:1,t->text);
+    skin2_fill(c,3,ui->ui_scale_setting?183:185,314,ui->ui_scale_setting?17:12,0xc91d1c1au);
+    text(c,ui->ui_scale_setting?"I / ESC":"I: INVENTARIO  ESC: PAUSA",8,ui->ui_scale_setting?184:188,ui->ui_scale_setting?2:1,t->text);
 }
 static void simple_menu(Skin2Canvas *c,const Skin2Theme *t,const Skin2Ui *ui){
     static const char *main_items[]={"NUEVA PARTIDA","UN JUGADOR","LAN EXPERIMENTAL","OPCIONES","SALIR"};
@@ -246,17 +330,38 @@ static void settings(Skin2Canvas *c,const Skin2Theme *t,const Skin2Ui *ui){
     button(c,t,70,114,180,18,"VOLVER",ui->selection==2);
     text(c,"ESC PARA VOLVER",103,150,1,t->muted);
 }
+static void lan_panel(Skin2Canvas *c,const Skin2Theme *t,const Skin2Ui *ui){
+    static const char *options[]={"CREAR PARTIDA LAN","UNIRSE POR IP","ESTADO DE SESION","VOLVER"};
+    unsigned i;
+    char line[48];
+    panel(c,t,29,15,262,170);
+    text(c,"LAN EXPERIMENTAL",103,28,1,t->accent);
+    if(ui->screen==SKIN2_LAN){
+        for(i=0;i<4;i++)button(c,t,56,50+(int)i*23,208,19,options[i],ui->selection==i);
+        text(c,ui->lan_identity_ready?"MUNDO CONOCIDO":"REQUIERE MUNDO PREVIO",58,153,1,ui->lan_identity_ready?t->success:t->danger);
+    }else if(ui->screen==SKIN2_LAN_JOIN){
+        text(c,"IPV4",54,47,1,t->muted);
+        button(c,t,53,57,216,18,ui->lan_ipv4[0]?ui->lan_ipv4:"INTRODUCE IPV4",ui->selection==0);
+        text(c,"PUERTO",54,80,1,t->muted);
+        button(c,t,53,89,216,18,ui->lan_port,ui->selection==1);
+        button(c,t,53,115,105,17,"CONECTAR",ui->selection==2);
+        button(c,t,166,115,103,17,"VOLVER",ui->selection==3);
+        text(c,"MUNDO Y SEMILLA REQUERIDOS",57,146,1,t->danger);
+        text(c,"TECLEA IP / PUERTO",76,161,1,t->muted);
+    }else{
+        text(c,lan_phase_text(ui->lan_phase),65,56,1,t->text);
+        text(c,lan_error_text(ui->lan_error),65,78,1,ui->lan_error?t->danger:t->success);
+        (void)snprintf(line,sizeof(line),"PUERTO %u",(unsigned)ui->lan_current_port);
+        text(c,line,65,102,1,t->muted);
+        button(c,t,65,129,190,20,"DESCONECTAR",ui->lan_phase!=0u);
+        text(c,"ESC: VOLVER",112,164,1,t->muted);
+    }
+}
 static void pending_panel(Skin2Canvas *c,const Skin2Theme *t,const Skin2Ui *ui){
     panel(c,t,27,35,266,130);
-    if(ui->screen==SKIN2_LAN){
-        text(c,"LAN EXPERIMENTAL",104,53,1,t->accent);
-        text(c,"CONEXION PENDIENTE",91,81,1,t->text);
-        text(c,"ESPERANDO API DE MOUTH",84,104,1,t->muted);
-    }else{
-        text(c,"INTERACCION",118,53,1,t->accent);
-        text(c,ui->target_label[0]?ui->target_label:"OBJETO",80,81,1,t->text);
-        text(c,"ESPERANDO A BONES",97,104,1,t->muted);
-    }
+    text(c,"INTERACCION",118,53,1,t->accent);
+    text(c,ui->target_label[0]?ui->target_label:"OBJETO",80,81,1,t->text);
+    text(c,"ESPERANDO A BONES",97,104,1,t->muted);
     text(c,"ESC: VOLVER",122,141,1,t->muted);
 }
 void skin2_draw(const Skin2Ui *ui,const Skin2View *view,Skin2Canvas *c){
@@ -267,7 +372,8 @@ void skin2_draw(const Skin2Ui *ui,const Skin2View *view,Skin2Canvas *c){
     skin2_fill(c,0,0,SKIN_UI2_W,SKIN_UI2_H,t->shadow);
     if(ui->screen==SKIN2_INVENTORY)inventory(c,t,ui,view);
     else if(ui->screen==SKIN2_SETTINGS)settings(c,t,ui);
-    else if(ui->screen==SKIN2_LAN||ui->screen==SKIN2_CONTEXT)pending_panel(c,t,ui);
+    else if(ui->screen==SKIN2_LAN||ui->screen==SKIN2_LAN_JOIN||ui->screen==SKIN2_LAN_STATUS)lan_panel(c,t,ui);
+    else if(ui->screen==SKIN2_CONTEXT)pending_panel(c,t,ui);
     else simple_menu(c,t,ui);
     if(ui->notice[0]&&ui->screen!=SKIN2_INVENTORY){
         skin2_fill(c,50,181,220,12,0xee221d16u);

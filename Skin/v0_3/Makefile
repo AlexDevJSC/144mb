@@ -6,15 +6,21 @@ all: test
 build/test_modkit_ui: tests/test_modkit_ui.c $(MOD)
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ $^
-test: build/test_modkit_ui build/test_eye_skin
+test: build/test_modkit_ui build/test_eye_skin build/test_lan_ui build/test_mouth_bridge
 	./build/test_modkit_ui
 	./build/test_eye_skin
+	./build/test_lan_ui
+	./build/test_mouth_bridge
 sanitize:
 	mkdir -p build
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_modkit_ui_san tests/test_modkit_ui.c $(MOD)
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./build/test_modkit_ui_san
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_eye_skin_san tests/test_eye_skin_integration.c $(MOD) tests/eye_052_fixture/eye_display.c
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./build/test_eye_skin_san
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_lan_ui_san tests/test_lan_ui.c $(MOD)
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./build/test_lan_ui_san
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_mouth_bridge_san tests/test_mouth_bridge.c $(MOD)
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./build/test_mouth_bridge_san
 clean:
 	rm -rf build
 
@@ -32,3 +38,10 @@ build/test_eye_skin: tests/test_eye_skin_integration.c $(MOD) tests/eye_052_fixt
 eye_test: build/test_eye_skin
 	./build/test_eye_skin
 
+build/test_lan_ui: tests/test_lan_ui.c $(MOD)
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $^
+
+build/test_mouth_bridge: tests/test_mouth_bridge.c $(MOD)
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $^
