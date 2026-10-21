@@ -358,17 +358,24 @@ static void client_receive(MouthLan *l,const uint8_t *p,uint32_t n,uint64_t now)
     tick=r64(p+12);
     if(!tick||tick<=l->last_snapshot_tick||p[20]!=MOUTH_LAN_MAX_ACTORS||
        n!=WIRE_SNAP_BASE+WIRE_ACTOR*(uint32_t)p[20])return;
-    for(i=0;i<p[20];i++){
-        uint32_t off=WIRE_SNAP_BASE+WIRE_ACTOR*i;
-        MouthLanActor *a=&l->actors[i];
-        a->actor_id=r64(p+off);a->owner=r32(p+off+8);
-        if(!a->actor_id||!a->owner)return;
-        a->x=(float)from_s32(r32(p+off+12))/1000.0f;
-        a->y=(float)from_s32(r32(p+off+16))/1000.0f;
-        a->z=(float)from_s32(r32(p+off+20))/1000.0f;
-        a->yaw=(float)from_s32(r32(p+off+24))/1000.0f;
+    {
+        MouthLanActor decoded[MOUTH_LAN_MAX_ACTORS];
+        for(i=0;i<p[20];i++){
+            uint32_t off=WIRE_SNAP_BASE+WIRE_ACTOR*i;
+            MouthLanActor *a=&decoded[i];
+            a->actor_id=r64(p+off);a->owner=r32(p+off+8);
+            if(!a->actor_id||!a->owner)return;
+            a->x=(float)from_s32(r32(p+off+12))/1000.0f;
+            a->y=(float)from_s32(r32(p+off+16))/1000.0f;
+            a->z=(float)from_s32(r32(p+off+20))/1000.0f;
+            a->yaw=(float)from_s32(r32(p+off+24))/1000.0f;
+        }
+        if(decoded[0].actor_id==decoded[1].actor_id ||
+           decoded[0].actor_id!=1u ||
+           decoded[1].actor_id!=l->config.remote_actor_id ||
+           decoded[1].owner!=l->config.remote_owner)return;
+        memcpy(l->actors,decoded,sizeof(decoded));
     }
-    if(l->actors[0].actor_id==l->actors[1].actor_id)return;
     l->actor_count=p[20];l->last_snapshot_tick=tick;l->last_rx_ms=now;
 }
 void mouth_lan_client_poll(MouthLan *l){
