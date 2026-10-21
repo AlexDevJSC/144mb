@@ -38,6 +38,12 @@ cl /nologo /std:c11 /TC /O2 /W4 /MT /D_CRT_SECURE_NO_WARNINGS /IBONES\include ^
 if errorlevel 1 goto :build_error
 Mouth\build\mouth_test_codec.exe
 if errorlevel 1 goto :build_error
+cl /nologo /std:c11 /TC /O2 /W4 /MT /D_CRT_SECURE_NO_WARNINGS /IBONES\include /IMouth\include ^
+  Mouth\tests\test_modkit_provider.c BONES\modules\mouth\modkit.c ^
+  /link /OUT:Mouth\build\mouth_test_provider.exe ws2_32.lib
+if errorlevel 1 goto :build_error
+Mouth\build\mouth_test_provider.exe
+if errorlevel 1 goto :build_error
 for %%F in (Mouth\build\mouth_lan_demo.exe) do echo Mouth demo PE bytes: %%~zF
 echo No se ha validado el limite de 1.44 MB del juego completo.
 popd
