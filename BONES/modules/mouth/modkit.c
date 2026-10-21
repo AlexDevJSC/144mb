@@ -1,7 +1,7 @@
 /*
  * Mouth for Bones ModKit 0.4.0, ABI 1.
  *
- * Bones' standard source registry compiles ONLY modules/*/modkit.c.
+ * Bones' standard source registry compiles ONLY modules/<name>/modkit.c.
  * This intentionally includes the transport implementation in the same
  * translation unit: do not add mouth_lan.c separately to the link.
  * The original, independently tested transport lives in Mouth/src/.
