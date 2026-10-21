@@ -13,3 +13,12 @@
 7. Revisar buffer transitorio adicional de 256KB si es necesario y la accesibilidad de menús escalados.
 
 **Estado del cambio:** listo para revisión, no certificado para producción Windows.
+
+## Nueva revisión solicitada: fase1 de menús 2026-10-21
+
+- Verificar que el host consulta `bones_skin_ui_blocks_gameplay` antes del paso de física y desactiva mouse-capture de FPS.
+- Comprobar que `SKIN2_START`/`SKIN2_SINGLE` solo inician tras confirmación de host y que target E se revalida antes de mutar estados.
+- El render de Skin dibuja solo sobre memoria del compositor; Eye proveerá contrato con transparencia/escala/única presentación (#3).
+- Comprobar que no se muestran guardar/cargar, economía o HUD inventado.
+- Ear (#4) y Mouth (#5) deben entregar APIs runtime antes de habilitar opciones reales.
+- Verificar Windows/PE y coste adicional de 1.44 MB; pruebas locales son Linux aisladas.

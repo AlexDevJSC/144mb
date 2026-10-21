@@ -1,13 +1,18 @@
-# Registro de cambios — Skin
+# Skin — Registro de cambios
 
-## 0.3.0 (21-10-2026)
+## 0.4.0-fase1 (2026-10-21)
 
-- Nuevo adaptador para **Bones ModKit 0.4.0 ABI1**: `bones_mod_skin_query`, rol `BONES_ROLE_SKIN`, versión interna 3 y privilegios mínimos.
-- Integración de los renderizadores UI2 existentes de v0.2 mediante módulo *unity build* autocontenido, sin alterar el núcleo de Bones.
-- Nuevo puente explícito de entrada (`bones_skin_ui_input`), datos de solo presentación (`bones_skin_ui_update`) y composición a buffer ajeno (`bones_skin_ui_compose`).
-- Datos observables: tick / número de actores / avisos JUMP/LAND. Sin manipular físicas, transacciones ni P2P.
-- Nuevas pruebas ABI/ciclo/permisos/UI/alpha/resoluciones. GCC, Clang y sanitizadores verificados sobre interfaz simulada.
-- Documentada la dependencia pendiente del anfitrión para presentar UI en Windows y la necesidad de revisión por Soul/Eye.
-- Retenidas v0.1 y v0.2 sin reescritura ni cambio retrospectivo; v0.3 no implementa guardados.
+- Menú principal dividido en Nueva partida, Un jugador, LAN experimental, Opciones y Salir; intenciones sin asumir inicio de sesión.
+- Pausa (Continuar, Inventario, Opciones, Menú principal); guardar/cargar ocultos hasta disponer de implementación autorizada.
+- HUD sin estadísticas inventadas: tick y actores ModKit; flags explícitos para RPG validado.
+- E contextual condicionado por objetivo de Bones; panel sin alterar física, acciones ni inventario.
+- Esc/I/flechas/Enter; API `bones_skin_ui_blocks_gameplay()` y entrada aislada para Bones.
+- Panel LAN de estado pendiente Mouth; ajuste de audio «pendiente Ear».
+- Pruebas de ABI, menú, pausa, inventario, objetivo contextual, dibujo, escalado, buffer, límites, sanitizadores.
+- Demo headless PPM, documentación de aceptación y traspaso a Bones/Soul; sin modificar el núcleo.
+- Peticiones abiertas: Eye #3, Ear #4, Mouth #5.
+- Pendiente presentación Eye #3, validación real Windows, API objetivos/acciones Bones, revisión Soul y fase 2.
 
-**Reversión:** restaurar el antiguo `BONES/modules/skin/modkit.c` placeholder desde historial Git y borrar los auxiliares de ese subdirectorio; los módulos restantes y la ABI no cambian.
+## 0.3.0 (anterior)
+
+- Adaptación ModKit ABI1 y pantalla UI2 independiente de Eye. Ver historial original del repositorio.

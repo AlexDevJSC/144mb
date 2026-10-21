@@ -62,3 +62,7 @@ La capa UI2 utiliza marcos/áreas y fuente bitmap reutilizables, sin imágenes c
 - Enrutamiento de teclado de forma que menú/pausa no muevan el personaje y que el salto siga funcionando en juego.
 - Paleta final de Eye, tamaño de viewport, reglas para UI sobre resoluciones modernas y estrategia de evitar framebuffer duplicado.
 - Decisión explícita sobre el futuro propietario de guardados y transacciones; no introducirla en este módulo por defecto.
+
+## Apéndice Skin 0.4 fase1 (2026-10-21)
+
+La pantalla predeterminada ahora es SKIN2_MAIN (5 opciones), las acciones SKIN2_START y SKIN2_SINGLE son intenciones sin cambio especulativo de sesión. El host confirma con `bones_skin_ui_enter_game` y vuelve a menú con `bones_skin_ui_enter_main`. La pausa se detecta por `bones_skin_ui_blocks_gameplay` y exige input neutral a Bones. Se añade `SKIN2_INTERACT` que emite `SKIN2_INTERACT_REQUEST` solo para objetivo verificado por Bones mediante `bones_skin_ui_target`; el panel no confirma ninguna acción de juego. HUD únicamente tick/actor_count y campos RPG con máscara explícita `SKIN2_AVAIL_*`. El formato final Eye host-owned continúa PENDIENTE del issue #3. Ver contrato detallado `TRASPASO_A_BONES_SOUL_FASE1.md`.

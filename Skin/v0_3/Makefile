@@ -14,3 +14,10 @@ sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./build/test_modkit_ui_san
 clean:
 	rm -rf build
+
+.PHONY: preview
+preview: build/preview_phase1
+	./build/preview_phase1
+build/preview_phase1: tools/preview_phase1.c $(MOD)
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $^

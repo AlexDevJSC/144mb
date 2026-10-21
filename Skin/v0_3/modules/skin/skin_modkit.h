@@ -10,6 +10,13 @@
 int32_t bones_mod_skin_query(uint32_t abi, BonesModDescriptor *out);
 /* Inputs are UI intents, not gameplay commands. Caller handles actions. */
 Skin2Action bones_skin_ui_input(Skin2Key key);
+/* Return nonzero while any menu overlays gameplay; host must zero BonesInput. */
+int bones_skin_ui_blocks_gameplay(void);
+/* Explicit ACK only after host has created/loaded the session. */
+int32_t bones_skin_ui_enter_game(void);
+int32_t bones_skin_ui_enter_main(void);
+/* Bones decides target/range/validity; Skin does not raycast or collide. */
+int32_t bones_skin_ui_target(uint64_t target_id,int host_valid,const char *label);
 /* Host-supplied (read-only) RPG display facts; not inferred from position. */
 int32_t bones_skin_ui_update(const Skin2View *view);
 /* Called by the app AFTER Eye has rendered into an APP-OWNED copy of frame.
