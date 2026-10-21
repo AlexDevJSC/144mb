@@ -1,0 +1,8 @@
+
+EAR 0.3.0 / BONES 0.4.0 — 21/10/2026
+Fuentes compatibles con contrato ModKit ABI1 comprobado. Proveedor estático
+en BONES/modules/ear/modkit.c; copia instalable Ear/modkit_bones04/.
+Síntesis y score, audio genérico JUMP/LAND, salida WinMM opcional codificados.
+Versiones: implementación 3, ABI1, schema privado 0.
+NO PROBADO con host Bones real ni dispositivo Windows. Sin material acústico
+en BonesModEvent; pendientes contratos de superficie, audio espacial, P2P.

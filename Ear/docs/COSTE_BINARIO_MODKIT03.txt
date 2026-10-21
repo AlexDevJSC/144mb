@@ -1,0 +1,9 @@
+EAR — Medición preliminar Linux del proveedor Bones ABI1
+cc -std=c11 -Os -ffunction-sections -fdata-sections -Wl,--gc-sections -s
+query placeholder original y query Ear nuevo en mismo main mínimo:
+archivo ELF: baseline 14.464 B; nuevo 14.464 B; delta 0 B por alineación.
+Suma de secciones ELF: baseline 2.094 B; nuevo 11.163 B; delta 9.069 B,
+incluye BSS (+5.584 B, memoria, NO fichero).
+Por eliminación de secciones sin salida Windows, es una cota inapropiada
+para el coste final: NO medido delta PE con winmm.dll ni juego completo.
+No declarar límite de 1.474.560 B como validado.

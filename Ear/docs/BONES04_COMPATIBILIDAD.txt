@@ -1,0 +1,40 @@
+EAR v0.3.0 — AUDITORÍA BONES MODKIT 0.4.0 — 21/10/2026
+Procedencia directa: BONES/include/bones/{modkit.h,modkit_host.h},
+BONES/src/modkit/modkit.c, BONES/scripts/{gen_modkit_registry.py,
+build_windows_msvc.bat,build_windows_mingw.bat}, BONES/modules/ear/modkit.c,
+BONES/Makefile, BONES/docs/MODKIT_V0_4_0_CONTRATO.txt.
+
+API: BonesModDescriptor ABI 1, role BONES_ROLE_EAR=1;
+id="ear", implementation_version=3, state_schema_version=0,
+required_roles=0, permissions READ_ACTORS|READ_TIME.
+ModKit version ABI=1, no cambio de ABI, sin dependencia de Eye.
+La rama normal de Bones enlaza solo modules/ear/modkit.c;
+esta unidad incluye C auxiliares de ear_core y ear_output.
+No modificar BONES/include, src, registry generator ni build scripts.
+WinMM se carga por LoadLibraryA("winmm.dll") y GetProcAddress;
+el modo headless/no audio queda operativo.
+after_tick bombea buffer; on_event SOLO procesa JUMP=1 y LAND=2.
+source_id debe existir en actor_get y el evento tener size correcto.
+La categoría acústica/intensidad de suelo NO está disponible en el
+evento BonesModEvent de ABI1. No inventar material desde IDs de Eye.
+Ear v0.2 mantiene seis familias acústicas en sus fuentes; para conectarlas
+se requiere contrato de Bones y revisión de Soul.
+Música actual: mazmorra A-A'-B-A, semilla de demostración 0x01442026,
+mono 22050Hz y salida PCM16 con buffers 4x512 frames (~93ms).
+Sin síntesis espacial ni identificación canónica del oyente.
+Sin hot reload y sin autodetección de DLL en el EXE estándar.
+La exportación bones_mod_query_v1 solo se habilita con EAR_MODKIT_DLL.
+Ningún WAV ni OGG se incluye como recurso obligatorio.
+
+VALIDADO LOCALMENTE (fixture que replica cabecera ModKit ABI1):
+  GCC C11 -O2 -Werror: PASS; Clang C11 -O2 -Werror: PASS
+  ASan + UBSan: PASS
+  descriptor/permissions/start/stop/eventos/PCM reproducible: PASS
+  biblioteca .so Linux con símbolo bones_mod_query_v1: PASS
+  regresiones Ear v0.2 (3 tests): PASS.
+PENDIENTE: build/link real del host Bones 0.4, Windows MSVC/MinGW,
+salida WinMM en dispositivo real, delta PE y tamaño <= 1.474.560 bytes.
+La medición local ELF no sustituye el tamaño PE del juego.
+Esta integración no cambia ningún contrato del resto de especialistas.
+Reversión: restaurar placeholder BONES/modules/ear/modkit.c original;
+el module.c histórico y el núcleo Bones permanecen sin cambios.

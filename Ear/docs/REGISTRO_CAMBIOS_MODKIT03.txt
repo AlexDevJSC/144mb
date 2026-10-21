@@ -1,0 +1,11 @@
+
+[EAR 0.3.0 | 21/10/2026] Compatible en fuentes con BONES ModKit 0.4
+- Nuevo descriptor bones_mod_ear_query ABI1; permisos actores/tiempo; rol Ear.
+- Síntesis PCM y música reutilizados de Ear v0.2; sin assets en runtime.
+- Windows WinMM opcional por resolución dinámica sin modificar scripts Bones.
+- on_event JUMP/LAND solo si actor válido; after_tick bombeo, stop limpia.
+- Compilación de fuente mediante único modkit.c; .so opt-in (EAR_MODKIT_DLL).
+- Actualizadas documentación, arquitectura y guía de integración.
+- Sin cambios a BONES/include o BONES/src; module.c legado permanece.
+- Pruebas locales GCC/Clang/ASan/UBSan y .so: correctas con fixture ABI1;
+  pendiente validar host real y salida Windows.

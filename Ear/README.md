@@ -23,3 +23,13 @@ No alterar `BONES/` ni los contratos de otros subsistemas sin revisión y acuerd
 ## Licencias
 
 No se ha establecido todavía una licencia de redistribución. No se presume licencia open source por el mero hecho de publicar estos archivos en GitHub.
+
+
+## Ear v0.3: conector real para Bones 0.4
+
+Los fuentes implementados están en [BONES/modules/ear](../BONES/modules/ear)
+y su copia instalable en [modkit_bones04](modkit_bones04). Contienen ModKit
+ABI 1, síntesis procedural y eventos JUMP/LAND, sin modificar Bones core.
+La compilación enlaza únicamente modkit.c, que incluye sus .c auxiliares.
+Ver [auditoría y límites](docs/BONES04_COMPATIBILIDAD.txt). Windows y el
+host completo aún requieren pruebas de integración de Soul.
