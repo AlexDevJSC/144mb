@@ -99,7 +99,7 @@ static void eye_present(void *context,const BonesModFrame *frame) {
        frame->quad_count>BONES_MOD_QUAD_LIMIT||frame->sprite_count>BONES_MOD_SPRITE_LIMIT||
        (frame->quad_count&&!frame->quads)||(frame->sprite_count&&!frame->sprites))return;
     camera.pos=(P144_Vec3){frame->camera_x,frame->camera_y,frame->camera_z};
-    camera.yaw=frame->camera_y;camera.pitch=frame->camera_pitch;
+    camera.yaw=frame->camera_yaw;camera.pitch=frame->camera_pitch;
     p144_renderer_begin(&s->renderer,UINT32_C(0x15202d));
     for(uint32_t i=0;i<frame->quad_count;++i) {
         const BonesModQuad *src=&frame->quads[i];
