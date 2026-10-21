@@ -22,8 +22,10 @@ build/ui2_preview: tools/ui2_preview.c src/ui2.c src/ui_font.c include/skin/ui2.
 	mkdir -p build
 	$(CC) $(CFLAGS) -Iinclude -o $@ tools/ui2_preview.c src/ui2.c src/ui_font.c
 build/bench_base: tools/bench_ui2.c
+	mkdir -p build
 	$(CC) -std=c11 -Os -ffunction-sections -fdata-sections -Wl,--gc-sections -DSKIN_BENCH_NO_UI -o $@ tools/bench_ui2.c
 build/bench_ui2: tools/bench_ui2.c src/ui2.c src/ui_font.c include/skin/ui2.h
+	mkdir -p build
 	$(CC) -std=c11 -Os -ffunction-sections -fdata-sections -Wl,--gc-sections -Iinclude -o $@ tools/bench_ui2.c src/ui2.c src/ui_font.c
 bench: build/bench_base build/bench_ui2
 	@wc -c build/bench_base build/bench_ui2
