@@ -13,6 +13,9 @@
  *
  * No Bones core sources or ABI are modified.
  */
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "mouth_lan.h"
 #include <string.h>
 #include "mouth_lan.c"
