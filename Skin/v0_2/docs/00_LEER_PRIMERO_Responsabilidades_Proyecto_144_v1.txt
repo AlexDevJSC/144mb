@@ -1,0 +1,174 @@
+PROYECTO 1.44
+PROTOCOLO DE ASIGNACIÓN DE RESPONSABILIDADES Y COMPROBACIÓN DE PETICIONES
+Versión 1.0 — 20/10/2026
+Estado: reparto funcional confirmado en conversación por el director del proyecto.
+Aplicación: TODOS los desarrolladores del proyecto (Bones, Eye, Brain, Ear,
+Skin, Mouth, Soul y futuros responsables).
+
+REGLA FUNDAMENTAL
+ANTES de aceptar, implementar, modificar o derivar una petición, consultar
+PRIMERO este documento para determinar a quién corresponde.
+El nombre de un desarrollador es un ROL DE CONSTRUCCIÓN, no un módulo ejecutándose
+ni un personaje del juego. Cada desarrollador construye su sistema especializado;
+ninguno debe asumir responsabilidades ajenas porque técnicamente pueda hacerlo.
+
+1. JERARQUÍA DE REFERENCIAS
+1) Este documento fija el ENCAMINAMIENTO de las tareas entre responsables.
+2) El plan maestro fija requisitos y alcance generales del videojuego.
+3) Los contratos técnicos de los módulos definen cómo se conectan, pero sus
+   propuestas antiguas de reparto NO prevalecen frente a decisiones expresas
+   posteriores del director del proyecto.
+4) Si una petición del director modifica expresamente el reparto, documentar la
+   nueva decisión y actualizar este archivo antes de darla por consolidada.
+5) Cuando no exista responsable confirmado, decir «sin asignar» y preguntar.
+   Está prohibido inventar un propietario basándose en similitudes de nombres.
+
+2. DIFERENCIA ENTRE DESARROLLADOR Y SISTEMA
+- DESARROLLADOR: persona/agente encargado de DISEÑAR, CODIFICAR, PROBAR y
+  DOCUMENTAR una parte concreta de la arquitectura.
+- MÓDULO: el código que el desarrollador produce y que opera dentro del juego.
+- Bones, Eye, Skin, etc., designan desarrolladores ESPECIALIZADOS, no procesos
+  que estén moviendo, dibujando o guardando automáticamente el juego.
+- Construir un puente de integración no implica convertirse en propietario
+  de la funcionalidad que cruza ese puente.
+
+3. PROPIETARIOS CONFIRMADOS
+
+BONES — NÚCLEO, MOTOR BASE, FÍSICAS Y HABILITACIÓN DE MÓDULOS
+  Propietario de la estructura general del motor, sus componentes centrales,
+  las físicas, las colisiones y la construcción o habilitación de puntos de
+  conexión para nuevos módulos. Es interlocutor cuando una funcionalidad
+  exige modificar la base o incorporar un nuevo subsistema al motor.
+  No desarrolla por defecto las funciones especializadas de otros responsables.
+  Ejemplo confirmado: definir una mecánica de hacha con daño en área.
+
+EYE — GRÁFICOS Y REPRESENTACIÓN VISUAL
+  Propietario de la construcción de motores y módulos de gráficos,
+  generación/representación visual de NPC, materiales, texturas y quads en
+  cuanto elementos gráficos. Entrega recursos visuales reutilizables a Skin.
+  No es propietario de decisiones de IA, físicas o UX.
+  Ejemplo confirmado: crear el motor visual/gráfico de los NPC.
+  NOTA: los límites exactos de la producción procedural de materiales deberán
+  acordarse con Eye; no asignarlos a Bones por simple proximidad técnica.
+
+BRAIN — INTELIGENCIA ARTIFICIAL
+  Propietario de comportamientos y decisiones de NPC, soldados, enemigos y
+  otros sistemas de IA. Los gráficos de esos NPC siguen perteneciendo a Eye.
+  Ejemplo confirmado: modificar el comportamiento inteligente de un NPC.
+
+EAR — AUDIO
+  Propietario de sistemas de sonido, efectos, reproducción, volumen y mezcla.
+  Ejemplo confirmado: arreglar un sonido demasiado fuerte y otro demasiado bajo.
+  La pantalla de ajustes de volumen, si se pide, la construye Skin; los
+  parámetros y su aplicación de audio corresponden a Ear.
+
+SKIN — INTERFAZ DE USUARIO Y EXPERIENCIA DE USO
+  Propietario de los menús, HUD, navegación, ventanas, interacción visual,
+  presentación de opciones y conexión de las pantallas con funciones de los
+  otros módulos. Usa elementos gráficos facilitados por Eye.
+  NO es propietario de gráficos generales, IA, audio, red, física ni de las
+  reglas de negocio por mostrar botones para ellas.
+  Ejemplo confirmado: hacer que un clic derecho sobre un NPC abra la tienda.
+  Cuando el NPC deba decidir si vende, se consulta también a Brain.
+
+MOUTH — SISTEMAS ONLINE Y MULTIJUGADOR
+  Propietario de módulos online, red y ampliación del número de jugadores.
+  Ejemplo confirmado: cambiar el soporte de 2–4 a 2–6 jugadores.
+  Skin desarrolla las pantallas de conexión/sesión si existen; Bones adapta
+  la base solamente cuando la integración lo requiera.
+
+SOUL — VERIFICACIÓN GENERAL Y CONTROL DE IMPACTO
+  Responsable de revisar el proyecto completo, comprobar compatibilidad entre
+  sistemas, localizar regresiones y evaluar cómo un cambio afecta al código
+  ya existente. Se consulta especialmente ante cambios transversales, nuevas
+  dependencias y ampliación de módulos.
+  No sustituye al desarrollador especializado ni ejecuta por él los cambios.
+  Ejemplo confirmado: examinar el impacto de incorporar un nuevo módulo.
+
+4. PROTOCOLO OBLIGATORIO PARA DICTAMINAR UNA PETICIÓN
+A. Extraer la ACCIÓN REAL solicitada, sin adjudicarla por palabras aisladas.
+   Preguntar qué resultado final desea el director del proyecto.
+B. Identificar la RESPONSABILIDAD PRINCIPAL del resultado: física/núcleo,
+   gráfico, IA, audio, UI/UX, online o revisión de impacto.
+C. Nombrar UN RESPONSABLE PRINCIPAL, siempre que exista una asignación clara.
+D. Separar las DEPENDENCIAS de la tarea principal: otros desarrolladores
+   colaboran en sus partes, pero no se les traslada la propiedad del conjunto.
+E. Consultar a BONES cuando haya que crear una ranura/puente o modificar el
+   núcleo para integrar el módulo; no involucrarlo automáticamente en todo.
+F. Consultar a SOUL para verificar conflictos con sistemas ya existentes,
+   integraciones, regresiones y consecuencias del cambio.
+G. Si la petición abarca DOS funciones diferentes, dividirla explícitamente
+   por entregables y propietarios; no asignar arbitrariamente todo a uno.
+H. Si aún NO hay dueño fijado, reconocerlo y solicitar decisión. No interpretar
+   una propuesta de documento como una asignación confirmada.
+I. Antes de CODIFICAR: comprobar interfaces necesarias y fuentes de verdad;
+   no inventar comportamientos de módulos o recursos que aún no existen.
+J. Al ENTREGAR: documentar archivos cambiados, pruebas, compatibilidad,
+   límites y qué parte corresponde a cada desarrollador.
+
+5. CASOS DE REFERENCIA ACEPTADOS POR EL DIRECTOR
+
+PETICIÓN: «Quiero un motor que genere los gráficos de los NPC».
+PRINCIPAL: EYE. Si pide la conducta o las decisiones del NPC, BRAIN.
+
+PETICIÓN: «Quiero modificar cómo funciona la IA de un NPC».
+PRINCIPAL: BRAIN.
+
+PETICIÓN: «Este efecto suena muy fuerte y otro muy flojo».
+PRINCIPAL: EAR. Si exige menú de regulación, ese menú es SKIN.
+
+PETICIÓN: «Un hacha debe golpear en área».
+PRINCIPAL: BONES, por mecánica de combate/físicas según el ejemplo aprobado.
+EYE solo si hay nuevos efectos visuales; EAR si hay sonido; SOUL verifica.
+
+PETICIÓN: «Pasar del multijugador de 2–4 a 2–6».
+PRINCIPAL: MOUTH. BONES solo si hay que ampliar contratos/capacidad del motor;
+SKIN si hay que adaptar menús; SOUL verifica la regresión.
+
+PETICIÓN: «Agregar un nuevo módulo al proyecto».
+BONES habilita la incorporación al núcleo, el ESPECIALISTA construye el módulo,
+y SOUL revisa todas las interconexiones y el impacto de la modificación.
+
+PETICIÓN: «Al hacer clic derecho en un NPC, abrir su tienda».
+PRINCIPAL: SKIN, por la interacción y la ventana de tienda.
+BRAIN participa si hay decisiones o conducta del vendedor.
+BONES participa solo si hace falta un enlace del núcleo; SOUL revisa impacto.
+La lógica de transacciones, precios, inventario y persistencia de la compra
+NO queda asignada automáticamente a Skin por existir una pantalla de tienda.
+
+6. COSAS QUE NO DEBEN DEDUCIRSE
+- Que Bones construya todos los módulos porque integra el motor central.
+- Que Skin programe gráficos, texturas o NPC porque presenta interfaces.
+- Que Eye programe IA porque visualiza NPC.
+- Que Mouth construya UI porque muestra datos de red.
+- Que abrir un panel de tienda signifique implementar comercio completo.
+- Que Soul implemente un cambio por ser quien audita el conjunto.
+- Que las asignaciones propuestas en un contrato anterior prevalezcan sobre
+  las decisiones confirmadas posteriormente en conversación.
+
+7. RESPONSABILIDADES AÚN SIN ASIGNACIÓN FINAL
+En la conversación se delimitó finalmente Skin a menús e integración de UX.
+No se ha confirmado definitivamente quién IMPLEMENTA la persistencia, el
+journal, la fusión de guardados, economía y comercio, ni la totalidad de las
+reglas RPG que no son físicas. Aunque el plan maestro define estas funciones,
+NO atribuye su autoría a uno de estos nombres con carácter definitivo.
+Cuando aparezcan, preguntar al director o aprobar formalmente un responsable.
+La anterior asignación tentativa de guardados a Skin NO debe asumirse vigente
+sin confirmación expresa tras la redefinición del rol.
+
+8. FORMATO DE RESPUESTA PARA FUTURAS PETICIONES
+  PETICIÓN: [acción solicitada]
+  PRINCIPAL: [un responsable confirmado, o «por decidir»]
+  MOTIVO: [función propia del responsable, no coincidencia de palabras]
+  COLABORADORES: [otros responsables solo si son necesarios]
+  BONES: [si necesita ampliación de núcleo/puentes, o «no necesario»]
+  SOUL: [impactos que debe comprobar]
+  ANTES DE PROGRAMAR: [contratos/archivos que hay que revisar]
+
+9. NORMA DE ACTUALIZACIÓN
+Cualquier cambio de competencias lo decide el director del proyecto y debe
+actualizar ESTE documento, seguido de los contratos de Bones y documentación
+de los módulos afectados. Mantener histórico de revisión. Si hay discrepancia,
+parar la asignación, señalarla y solicitar aclaración; no corregirla en silencio.
+
+FIN DEL PROTOCOLO v1.0

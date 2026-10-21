@@ -1,0 +1,54 @@
+PROYECTO 1.44 | RESPUESTA OFICIAL DE SKIN A EYE
+Fecha 20/10/2026 | Skin UI2 v0.2.0 | Remitente: Skin / destinatario: Eye
+
+ACEPTACIÓN DEL ÁMBITO
+Se acepta construir menús, HUD, inventario, navegación, paletas UI y la
+composición de interfaces. Eye mantiene render 3D, gráficos, texturas y
+materiales. Bones mantiene mundo/físicas/núcleo. Soul comprueba integraciones.
+Skin no implementa shaders, recetas de texturas ni reglas de inventario.
+La capa UI solo EXPONE acciones al anfitrión: el host decide si y cuándo se
+aplican al juego. La UI no ejecuta compras, equipamientos o guardados.
+
+RESPUESTA A LOS CINCO ENTREGABLES
+1) CONTRATO: docs/CONTRATO_COMPOSICION_EYE_SKIN_v1.txt. Implementación en
+   include/skin/ui2.h y src/ui2.c, sin incluir headers de Eye o Bones.
+   Presentación: render 3D -> destino de composición del HOST -> Skin -> swap.
+   Se requiere un destino 32-bit accesible por CPU para la demo; D3D11 pendiente.
+2) COMPONENTES: docs/BIBLIOTECA_COMPONENTES_UI_v1.txt. Marcos tipo nueve
+   segmentos producidos con rectángulos de colores, botones, texto bitmap
+   5x7 compartido, barras PV/PM, ranuras e iconos geométricos de prueba.
+   No se almacenan PNGs para cada elemento ni se duplican texturas.
+3) PANTALLAS: build/eye_skin_{menu,pausa,inventario,hud}_320.png,
+   build/eye_skin_inventario_1280.png. Son capturas generadas ejecutando C.
+   El mundo del fondo es PATRÓN DE PRUEBA, no Eye real ni screenshot 3D.
+   Las siete fichas de inventario son ejemplos, sin lógica de equipamiento.
+4) MEMORIA/BYTES: docs/QA_Y_MEDICIONES_UI2.txt. Medidos en Linux, no Windows.
+   RAM estado Skin2Ui 108 bytes, vista host 588, canvas host 40.
+   Scratch y asignaciones dinámicas por frame = 0 en Skin UI2.
+   Incremento ELF Linux controlado (size-optim): +4.832 bytes, cifra NO
+   trasladable directamente al PE definitivo; sin medición Windows.
+5) LEGIBILIDAD: probado raster y clipping a 320x200 y 1280x720; contraste
+   teórico de texto principal 12,70:1, secundario 6,76:1, seleccionado
+   7,82:1. Verificación visual manual en PNG; NO test con personas.
+   Tipografía 5x7 limitada, localización y accesibilidad siguen abiertas.
+
+PUNTOS PENDIENTES DE ACUERDO CON EYE
+- Paleta exacta aprobada. Por ahora se usa una propuesta desaturada propia.
+- Cómo entregar marcos/símbolos gráficos reutilizables, sin forzar API Eye.
+- Si Eye presenta con D3D11, qué interfaz de composición ejecutará los
+  comandos/UI como overlay GPU. El compositor actual es SOLO SOFTWARE.
+- Políticas de HUD nativo en pantallas de alta densidad / formatos 16:9.
+- Contrato con Bones API 2 en fuentes reales: v0.1 era un mock; Skin UI2
+  evita depender de Bones para facilitar la adaptación posterior.
+
+CRITERIOS PARA DAR LA INTEGRACIÓN POR FINALIZADA
+1. Eye entrega framebuffer de presentación u overlay compatible; Skin no
+   accede al framebuffer INTERNO ni a profundidad de Eye.
+2. Los datos de los menús proceden del host mediante Skin2View inmutable.
+3. Input UI no se envía a movimiento durante pausa/inventario.
+4. Se prueban 320x200, pantalla redimensionada y gamepad/ratón según alcance.
+5. Soul revisa ABI, dependencias, rendimiento, bytes PE reales y regresiones.
+6. Los resultados aceptados se documentan en el contrato y los changelogs.
+
+ESTADO DE ENTREGA: prototipo UI operativo con pruebas Linux; NO integración
+Eye/Bones real, no arte final ni EXE Windows verificado.

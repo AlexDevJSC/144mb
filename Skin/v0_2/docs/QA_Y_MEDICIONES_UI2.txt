@@ -1,0 +1,46 @@
+PROYECTO 1.44 — MEDICIONES DE UI2 / 20-10-2026
+PLATAFORMA: Linux x86_64 (GCC C11/Clang C11); NO medida de Windows/PE.
+
+1. MEMORIA DOCUMENTADA (sizeof en compilador C11 de esta sesión)
+  Skin2Ui                            = 108 bytes (estado persistente UI)
+  Skin2View                          = 588 bytes (copia de datos por el HOST)
+  Skin2Canvas                        =  40 bytes (descriptor al framebuffer)
+  Skin2Theme                         =  52 bytes (incluido en Skin2Ui)
+  Skin2Item                          =  28 bytes por elemento x20
+  Buffers de pantalla extra UI2      = 0 bytes (compone en buffer del HOST)
+  Asignaciones malloc en skin2_draw  = 0 (no se invoca malloc)
+  Si el host usa framebuffer BGRA32 320x200: 256.000 bytes propios del host.
+  Para 1280x720: 3.686.400 bytes propios del host. NO son memoria de Skin.
+  Tamaños de estructuras pueden variar según ABI/plataforma.
+
+2. TAMAÑO CODIGO ELÉGIDO POR COMPILADOR (GCC Linux, -Os, gc-sections)
+  build/bench_base  = 15.848 bytes ELF
+  build/bench_ui2   = 20.680 bytes ELF
+  DIFERENCIA        = +4.832 bytes ELF (mismo harness con/sin UI2).
+  Librería estática combinada legacy+UI2: 46.062 bytes (Linux, incluye
+  objetos y símbolos NO necesariamente enlazados en el juego final).
+  Incremento de código UI2 + fuente compartida en PE/Windows: NO MEDIDO.
+  Son estimaciones de ELF/compilador concreto, NO cifras del juego 1,44MB.
+
+3. LEGIBILIDAD
+  Tamaños renderizados: 320x200 (escala lógica 1), 1280x720 (viewport
+  1152x720 con barras de 64px a cada lado).
+  Relación de contraste WCAG matemática para colores opacos propuestos:
+  #EFE5CA sobre #26211D texto principal = 12,70:1
+  #B3A88E sobre #26211D secundario     =  6,76:1
+  #D2AB65 sobre #26211D acento         =  7,40:1
+  #EFE5CA sobre #51412A selección      =  7,82:1
+  Para fondos semitransparentes o foto variable se requiere medición real
+  sobre imágenes concretas; el contraste anterior no garantiza todo el HUD.
+  Glifos 5x7: legibles en capturas inspeccionadas, sin test humano formal.
+  NO se certifica accesibilidad completa ni localización.
+
+4. TESTS REALES
+  make test: regresiones UI legacy y guardado legacy, y UI2 (GCC Linux) OK.
+  make sanitize: AddressSanitizer + UndefinedBehaviorSanitizer OK.
+  Clang C11 (legacy y UI2): OK.
+  GCC -Wconversion -Werror para UI2: OK.
+  Testeo: alpha source-over, clipping, ausencia de cambios en la escena
+  fuera de HUD, viewport letterbox, inventario solo lectura y teclado.
+  Windows MSVC/MinGW: scripts disponibles, NO PROBADOS EN WINDOWS.
+  Eye rasterizador real no montado: integración no verificada.
