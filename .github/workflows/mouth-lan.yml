@@ -25,6 +25,14 @@ jobs:
         run: make -C Mouth loopback
       - name: Bones official ModKit regression
         run: make -C BONES modkit_test
+      - name: Build installable source ZIP
+        run: python3 Mouth/scripts/sync_bones_module.py --pack
+      - name: Upload Mouth ModKit source package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mouth_Bones_ModKit_0_4_Source
+          path: Mouth/build/MOUTH_Bones_ModKit_0_4.zip
+          if-no-files-found: error
   windows-msvc-lan:
     runs-on: windows-latest
     timeout-minutes: 15
