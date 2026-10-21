@@ -41,6 +41,13 @@ gcc -std=c11 -O2 -Wall -Wextra -Wpedantic ^
 if errorlevel 1 (popd & exit /b 1)
 Mouth\build\mouth_test_provider.exe
 if errorlevel 1 (popd & exit /b 1)
+gcc -std=c11 -O2 -Wall -Wextra -Wpedantic ^
+  -IBONES\include -IMouth\include ^
+  Mouth\tests\test_session_api.c Mouth\src\mouth_lan.c ^
+  -o Mouth\build\mouth_test_session_api.exe -lws2_32 -lm
+if errorlevel 1 (popd & exit /b 1)
+Mouth\build\mouth_test_session_api.exe
+if errorlevel 1 (popd & exit /b 1)
 for %%F in (Mouth\build\mouth_lan_demo.exe) do echo Mouth demo PE bytes: %%~zF
 echo NOT a full-game 1.44 MB certification; test with two Windows computers.
 popd
