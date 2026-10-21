@@ -60,7 +60,7 @@ En Linux:
 
 ## Medición real y limitaciones
 
-GitHub Actions Windows/MSVC compiló el ejecutable oficial de pruebas Bones ModKit con Mouth de **190.976 bytes**, y la demo LAN de **189.440 bytes**. Eso **no valida el límite de 1,44 MB del juego terminado**.
+GitHub Actions Windows/MSVC compiló el ejecutable oficial de pruebas Bones ModKit con Mouth de **192.512 bytes (último CI; antes 190.976)**, y la demo LAN de **189.440 bytes**. Eso **no valida el límite de 1,44 MB del juego terminado**.
 
 No implementado: terceros/cuarto jugador, partida multijugador 3D final, lista de servidores, NAT, cifrado, autenticación criptográfica, interoperabilidad de bibliotecas Eye, persistencia concurrente, autoinstalación de mods/DLL o reconexión larga certificada. Las pruebas de red se han realizado entre dos procesos del mismo equipo (loopback), no entre ordenadores físicos.
 
