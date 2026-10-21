@@ -48,3 +48,7 @@ Windows build/PE CI: `.github/workflows/ear-winmm-ci.yml`; CI sin salida no prue
 
 
 Windows CI MSVC: [ejecución 39608044774](https://github.com/AlexDevJSC/144mb/actions/runs/39608044774), PE 206848 → 222720 bytes (+15872). El runner no tiene dispositivo de audio; audibilidad pendiente.
+
+Validación manual hardware Windows: [`Ear/docs/ACTA_PLAYTEST_WINDOWS_REAL_v1.md`](docs/ACTA_PLAYTEST_WINDOWS_REAL_v1.md).
+La herramienta exige respuesta del probador si existe salida; el CI nunca
+la requiere y no se confunde con evidencia audible.
