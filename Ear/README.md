@@ -43,3 +43,5 @@ Guía Bones: `Ear/docs/NOTAS_INTEGRACION_BONES_WINDOWS_v1.txt`.
 Tests Linux: `cd Ear/tests && make -f Makefile_audio_modkit04 test`.
 Prueba audio Windows: `Ear\\scripts\\test_windows_audio.bat`.
 Medida Windows PE (aún pendiente): `Ear/scripts/measure_pe_ear.ps1`.
+
+Windows build/PE CI: `.github/workflows/ear-winmm-ci.yml`; CI sin salida no prueba audibilidad.

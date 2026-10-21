@@ -59,3 +59,9 @@ hard-real-time sin medir el equipo Windows.
 SOLICITUD A SOUL
 Revisar contrato Ear-Skin, permisos de rol Ear, documentación de errores,
 regresiones con Bones 0.4 y pruebas Windows + delta PE antes de integrar.
+
+CI WINDOWS (NO PRUEBA DE ESCUCHA)
+.github/workflows/ear-winmm-ci.yml valida compilación Windows con Visual
+Studio, smoke de WinMM (con excepción explícita si no hay dispositivo) y delta
+PE del juego en el runner. La confirmación humana de música audible se hace
+manualmente con Ear/scripts/test_windows_audio.bat SIN argumentos extra.

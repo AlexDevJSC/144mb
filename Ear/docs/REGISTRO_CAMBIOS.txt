@@ -1,3 +1,4 @@
+21/10/2026 (CI Windows): añadido ear-winmm-ci.yml para compilación Windows/MSVC, prueba sin dispositivo y medida PE en runner. Prueba de escucha física aún pendiente.
 [0.4.0] 21/10/2026: Música DUNGEON, control sin UI para Skin, diagnóstico WinMM.
 Fuente: Bones ModKit ABI 1; proveedor versión funcional 4.
 Audio: 4 buffers PCM, waveOutOpen/Write/Pause/Restart/Reset/Close y retry manual.

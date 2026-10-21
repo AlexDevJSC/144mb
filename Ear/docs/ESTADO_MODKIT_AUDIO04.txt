@@ -43,3 +43,10 @@ CAMBIO RESPECTO v0.3
 
 DOCUMENTOS: CONTRATO_CONTROL_AUDIO_SKIN_v1.txt,
 NOTAS_INTEGRACION_BONES_WINDOWS_v1.txt y este fichero.
+
+CI ADICIONAL
+Existe workflow .github/workflows/ear-winmm-ci.yml para compilar/prueba
+smoke en Windows 2022 y medir delta PE. Su prueba no requiere salida física:
+si el runner no tiene dispositivo registra no-device recuperable. El resultado
+verde de esta CI NO significa música audible. No se han ejecutado aún esos jobs
+al crear estos archivos.

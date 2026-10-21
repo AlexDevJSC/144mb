@@ -13,5 +13,9 @@ cl /nologo /std:c11 /TC /O2 /MT /W4 /D_CRT_SECURE_NO_WARNINGS ^
  Ear\tools\ear_windows_playtest.c BONES\modules\ear\modkit.c ^
  /link /SUBSYSTEM:CONSOLE kernel32.lib /OUT:Ear\build\EarWinMMPlaytest.exe
 if errorlevel 1 exit /b 1
-Ear\build\EarWinMMPlaytest.exe --require-device
+if "%~1"=="--allow-no-device" (
+  Ear\build\EarWinMMPlaytest.exe
+) else (
+  Ear\build\EarWinMMPlaytest.exe --require-device
+)
 exit /b %errorlevel%
