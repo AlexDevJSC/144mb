@@ -13,14 +13,25 @@ IMPLEMENTADO EN EL REPOSITORIO:
               con físicas de Bones en localhost.
  [CODIFICADO] Mouth/Makefile y Mouth/scripts/build_windows_*.bat.
 
+VERIFICADO EN GITHUB ACTIONS (21/10/2026):
+ [PASS] Linux Ubuntu 24.04 GCC C11: make -C Mouth test.
+ [PASS] Linux: make -C Mouth loopback (dos procesos UDP localhost, Bones).
+ [PASS] Windows Server 2025 Visual Studio 2026 / MSVC C11:
+        compilación de Mouth y Bones, Mouth/tests/test_codec.c.
+ [PASS] Windows: python Mouth/tests/test_loopback.py
+        Mouth/build/mouth_lan_demo.exe, dos procesos UDP localhost,
+        host 240 ticks, actor 2 pasa de Z=-4 a Z≈6.95.
+ [MEDIDO] Mouth/build/mouth_lan_demo.exe Windows/MSVC = 188.928 bytes
+          (solo DEMO con código de Bones; NO certifica juego completo).
+ EVIDENCIA: GitHub Actions run 39586493847 (Linux y Windows: SUCCESS).
+
 NO VALIDADO EN ESTA ENTREGA:
- [PENDIENTE] Compilación y ejecución del código recién publicado en Linux,
-             sanitizadores, MinGW-w64 y MSVC: no hay resultado observado aquí.
- [PENDIENTE] Test real de dos procesos por loopback (script disponible).
- [PENDIENTE] Prueba LAN entre 2 PCs Windows, latencia y estabilidad sostenida.
+ [PENDIENTE] Sanitizadores, MinGW-w64.
+ [PENDIENTE] LAN entre 2 PCs físicos Windows, latencia y estabilidad sostenida.
  [PENDIENTE] Test de pérdida/reordenación/duplicación de datagramas del
              transporte real; test del codec no implica fiabilidad online.
- [PENDIENTE] Tamaño PE Windows real y compatibilidad con límite total 1,44MB.
+ [PARCIAL] Tamaño PE de DEMO medido (188.928 bytes). El PE del juego
+           integrado y el presupuesto global <=1.474.560 B siguen pendientes.
  [PENDIENTE] Renderer cliente, interpolación, predicción, NAT, cifrado.
  [PENDIENTE] Operaciones importantes, inventario, combate, guardados,
              fusión y sincronización Eye EYE1/EYE2.
@@ -34,9 +45,11 @@ INTEGRACIÓN Y LÍMITES
  - Network owner/session no es autenticación fuerte (LAN de confianza).
  - El ejemplo es de CONSOLA; no se debe anunciar 3D multijugador jugable.
  - El esquema no sincroniza checkpoints del guardado ni hechos semánticos.
- - Test de red puede realizarse con: make -C Mouth loopback.
+ - Test de red reproducido en Linux y Windows CI.
+   Linux: make -C Mouth loopback.
  - Windows con: Mouth\scripts\build_windows_msvc.bat.
- - No existen resultados de esas órdenes hasta ejecutarlas de verdad.
+ - Resultado ya observado en runner GitHub Windows Server: build y
+   test_loopback superados; aún NO probado en dos PC domésticos.
 
 CAMBIO RESPECTO A MOUTH 0.2
  - Nuevo prototipo mínimo independiente adaptado al ModKit vigente.
