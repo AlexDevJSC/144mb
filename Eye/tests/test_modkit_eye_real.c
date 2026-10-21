@@ -30,7 +30,7 @@ int main(void) {
     uint64_t serial, hash0, hashYaw;float x0,y0,x1,y1,x2,y2,x3,y3;
     assert(out);d.size=sizeof(d);
     assert(bones_mod_eye_query(BONES_MOD_ABI,&d)==BONES_MOD_OK);
-    assert(d.role==BONES_ROLE_EYE && d.present && d.start && d.stop);
+    assert(d.role==BONES_ROLE_EYE && d.implementation_version==502u && d.present && d.start && d.stop);
     svc.size=sizeof(svc);svc.abi=BONES_MOD_ABI;
     svc.permissions=BONES_PERMISSION_WRITE_SCENE;svc.scene_add_quad=add_quad_stub;
     assert(d.start(d.user_context,&svc)==BONES_MOD_OK);
