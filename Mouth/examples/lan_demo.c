@@ -84,6 +84,8 @@ int main(int argc,char **argv){
     memset(&cfg,0,sizeof(cfg));
     cfg.world_id=DEMO_WORLD_ID;cfg.seed=DEMO_SEED;
     cfg.generator_version=BONES_GENERATOR_VERSION;cfg.port=port;
+    if(!is_host&&getenv("MOUTH_DEMO_BAD_GENERATOR"))
+        cfg.generator_version++; /* Test-only mismatched-world handshake. */
     if(is_host){
         uint64_t actor_id=0;
         foundation=(BonesFoundation*)calloc(1,sizeof(*foundation));
@@ -93,7 +95,7 @@ int main(int argc,char **argv){
             fprintf(stderr,"Bones init/spawn failed\n");ok=0;goto cleanup;
         }
         cfg.remote_actor_id=actor_id;cfg.remote_owner=2;
-        if(!mouth_lan_configure_host(lan,&cfg)){ok=0;goto cleanup;}
+        if(mouth_session_create(lan,&cfg)!=MOUTH_SESSION_OK){ok=0;goto cleanup;}
         host=bones_mod_host_create(foundation);
         if(!host||bones_mod_host_add(host,bones_mod_mouth_query)!=BONES_MOD_OK||
            bones_mod_host_start(host)!=BONES_MOD_OK){
@@ -103,9 +105,12 @@ int main(int argc,char **argv){
         printf("Bones LAN host on UDP %u. Remote actor=%llu. Ctrl+C exits.\n",
                (unsigned)port,(unsigned long long)actor_id);
     }else{
-        if(!mouth_lan_client_open(lan,&cfg,argv[2])){
-            fprintf(stderr,"Cannot open UDP link to %s:%u\n",argv[2],(unsigned)port);
-            ok=0;goto cleanup;
+        {
+            MouthSessionResult rc=mouth_session_join(lan,&cfg,argv[2]);
+            if(rc!=MOUTH_SESSION_OK){
+                fprintf(stderr,"CLIENT ERROR: connection setup result=%u\n",(unsigned)rc);
+                ok=0;goto cleanup;
+            }
         }
         printf("Mouth LAN client -> %s:%u. Ctrl+C exits.\n",argv[2],(unsigned)port);
     }
@@ -123,7 +128,8 @@ int main(int argc,char **argv){
                 BonesInput input;local_controls(&input);
                 if(bones_mod_host_step(host,&input)!=BONES_MOD_OK){ok=0;done=1;break;}
             }else{
-                remote_controls(lan);mouth_lan_client_poll(lan);
+                remote_controls(lan);
+                (void)mouth_session_poll(lan);
             }
         }
         if(tick_acc>=1000u)tick_acc=0; /* Avoid the spiral of death. */
@@ -136,18 +142,28 @@ int main(int argc,char **argv){
                     (unsigned long long)foundation->engine.tick,(int)lan->status,
                     a->body.feet.x,a->body.feet.z,b->body.feet.x,b->body.feet.z,
                     (unsigned long long)lan->bytes_sent,(unsigned long long)lan->bytes_received);
-            }else if(lan->status==MOUTH_LAN_REJECTED){
-                fprintf(stderr,"Host rejected incompatible world/seed/generator.\n");
-                ok=0;done=1;
-            }else if(lan->actor_count==2){
-                printf("CLIENT tick=%llu p1(%.2f %.2f) p2(%.2f %.2f) bytes(tx/rx)=%llu/%llu\n",
-                    (unsigned long long)lan->last_snapshot_tick,
-                    lan->actors[0].x,lan->actors[0].z,
-                    lan->actors[1].x,lan->actors[1].z,
-                    (unsigned long long)lan->bytes_sent,(unsigned long long)lan->bytes_received);
             }else{
-                printf("CLIENT waiting status=%d UDP sent=%llu\n",(int)lan->status,
-                    (unsigned long long)lan->bytes_sent);
+                MouthSessionInfo info;
+                MouthLanActor snapshot[MOUTH_LAN_MAX_ACTORS];
+                uint64_t tick=0;
+                memset(&info,0,sizeof(info));info.size=sizeof(info);
+                (void)mouth_session_get_status(lan,&info);
+                if(info.phase==MOUTH_SESSION_TIMED_OUT ||
+                   info.phase==MOUTH_SESSION_LOST ||
+                   info.phase==MOUTH_SESSION_INCOMPATIBLE){
+                    fprintf(stderr,"CLIENT ERROR phase=%u cause=%u\n",
+                            (unsigned)info.phase,(unsigned)info.error);
+                    ok=0;done=1;
+                }else if(mouth_session_copy_snapshot(lan,snapshot,&tick)==MOUTH_SESSION_OK){
+                    printf("CLIENT tick=%llu p1(%.2f %.2f) p2(%.2f %.2f) bytes(tx/rx)=%llu/%llu\n",
+                        (unsigned long long)tick,
+                        snapshot[0].x,snapshot[0].z,snapshot[1].x,snapshot[1].z,
+                        (unsigned long long)info.bytes_sent,(unsigned long long)info.bytes_received);
+                }else{
+                    printf("CLIENT waiting phase=%u error=%u UDP sent=%llu\n",
+                           (unsigned)info.phase,(unsigned)info.error,
+                           (unsigned long long)info.bytes_sent);
+                }
             }
             fflush(stdout);
         }
@@ -156,7 +172,7 @@ int main(int argc,char **argv){
     }
 cleanup:
     if(host)bones_mod_host_destroy(host);
-    mouth_lan_close(lan);
+    (void)mouth_session_disconnect(lan);
     free(foundation);free(lan);
     return ok?0:1;
 }
