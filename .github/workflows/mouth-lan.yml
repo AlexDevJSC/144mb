@@ -1,0 +1,25 @@
+name: Mouth LAN (Bones ModKit)
+on:
+  push:
+    paths:
+      - "Mouth/**"
+      - "BONES/**"
+      - ".github/workflows/mouth-lan.yml"
+  pull_request:
+    paths:
+      - "Mouth/**"
+      - "BONES/**"
+      - ".github/workflows/mouth-lan.yml"
+  workflow_dispatch:
+jobs:
+  linux-gcc-lan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check codec
+        run: make -C Mouth test
+      - name: Two-process Bones UDP loopback
+        run: make -C Mouth loopback
