@@ -14,7 +14,7 @@ def main():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         probe.bind(("127.0.0.1", 0))
         port = str(probe.getsockname()[1])
-    env = dict(os.environ, MOUTH_DEMO_SECONDS="4")
+    env = dict(os.environ, MOUTH_DEMO_SECONDS="4", MOUTH_DEMO_AUTOMOVE="1")
     host = subprocess.Popen([binary, "host", port],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, env=env)
