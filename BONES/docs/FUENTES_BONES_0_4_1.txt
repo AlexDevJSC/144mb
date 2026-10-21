@@ -1,0 +1,16 @@
+QUÉ PONER EN FUENTES — BONES 0.4.1 / PLAYTEST FASE 1
+
+AÑADIR:
+- docs/HANDOFF_PLAYTEST_FASE1_2026-10-21.md
+- docs/CHANGELOG_BONES_0_4_1.md
+- ZIP de cambios Bones 0.4.1 o enlace al PR, tras revisión Soul.
+
+CONSERVAR:
+- Plan maestro v1, Usos de los chats.txt, informes Soul del playtest.
+- Contratos Bones API 2 y ModKit ABI 1.
+- Bones 0.4.0 como referencia anterior y respaldo.
+
+SUSTITUIR TRAS APROBACIÓN:
+- Referencia de código activo Bones 0.4.0 por la rama aprobada 0.4.1.
+
+NO presentar el ejecutable Windows como funcional ni afirmar límite PE cumplido hasta compilar y ejecutar en Windows.
