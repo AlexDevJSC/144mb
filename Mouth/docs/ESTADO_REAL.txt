@@ -1,0 +1,45 @@
+MOUTH 0.3.0 - ESTADO REAL - 21/10/2026
+
+IMPLEMENTADO EN EL REPOSITORIO:
+ [CODIFICADO] Mouth/include/mouth_lan.h: API pública de red y codec.
+ [CODIFICADO] Mouth/src/mouth_lan.c: UDP IPv4 no bloqueante WinSock2/POSIX,
+              handshake, bind de endpoint, versión, world/seed/gen,
+              entradas con secuencias, comandos ModKit, snapshots,
+              heartbeats implícitos, timeout y reconexión básica.
+ [CODIFICADO] Mouth/examples/lan_demo.c: programa de consola anfitrión
+              con Bones Foundation/ModKit y cliente de teclado.
+ [CODIFICADO] Mouth/tests/test_codec.c: pruebas del formato de paquetes.
+ [CODIFICADO] Mouth/tests/test_loopback.py: prueba automática de 2 procesos,
+              con físicas de Bones en localhost.
+ [CODIFICADO] Mouth/Makefile y Mouth/scripts/build_windows_*.bat.
+
+NO VALIDADO EN ESTA ENTREGA:
+ [PENDIENTE] Compilación y ejecución del código recién publicado en Linux,
+             sanitizadores, MinGW-w64 y MSVC: no hay resultado observado aquí.
+ [PENDIENTE] Test real de dos procesos por loopback (script disponible).
+ [PENDIENTE] Prueba LAN entre 2 PCs Windows, latencia y estabilidad sostenida.
+ [PENDIENTE] Test de pérdida/reordenación/duplicación de datagramas del
+             transporte real; test del codec no implica fiabilidad online.
+ [PENDIENTE] Tamaño PE Windows real y compatibilidad con límite total 1,44MB.
+ [PENDIENTE] Renderer cliente, interpolación, predicción, NAT, cifrado.
+ [PENDIENTE] Operaciones importantes, inventario, combate, guardados,
+             fusión y sincronización Eye EYE1/EYE2.
+
+INTEGRACIÓN Y LÍMITES
+ - Bones sigue siendo autoridad física del anfitrión.
+ - El ejemplo crea un único actor remoto owner=2; solo 2 jugadores.
+ - ModKit ABI 1; no se modifica el código de Bones.
+ - En el proyecto integrado hay un placeholder del rol Mouth. No registrar
+   los dos roles Mouth al mismo tiempo; coordinar con Bones/Soul.
+ - Network owner/session no es autenticación fuerte (LAN de confianza).
+ - El ejemplo es de CONSOLA; no se debe anunciar 3D multijugador jugable.
+ - El esquema no sincroniza checkpoints del guardado ni hechos semánticos.
+ - Test de red puede realizarse con: make -C Mouth loopback.
+ - Windows con: Mouth\scripts\build_windows_msvc.bat.
+ - No existen resultados de esas órdenes hasta ejecutarlas de verdad.
+
+CAMBIO RESPECTO A MOUTH 0.2
+ - Nuevo prototipo mínimo independiente adaptado al ModKit vigente.
+ - Mantiene una carpeta nueva v0.3 en git; las fuentes históricas de v0.1 y
+   v0.2 todavía no se han sincronizado íntegramente con GitHub.
+ - No afirmar compatibilidad de wire con MOUTH/2; v0.3 LAN usa M144/1.
