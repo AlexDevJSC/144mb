@@ -1,19 +1,24 @@
-# Estado de subida de Eye a GitHub
+# Estado de subida — Eye 0.5.1
 
-Fecha: 2026-10-21.
+**Estado: COMPLETA** · 21 de octubre de 2026.
 
-## Subido al repositorio
-- `Eye/README.md`: descripción del trabajo gráfico.
-- `Eye/include/eye5.h`: API local de las recetas y constructor de tejados EYE5.
-- `Eye/src/eye5.c`: generador EYE5, caché RAM y constructor de cubiertas; contenido funcional de Eye 0.5.1.
-- `Eye/docs/CORRECCION_EYE5_1.txt`: cambios, pruebas y tareas pendientes.
-- Este inventario.
+Origen: paquete `Eye_0_5_1_Tejados_Corregidos.zip` del proyecto.
 
-## Falta por subir
-**No considerar esta carpeta una distribución completa ni compilable.** La entrega local de Eye 0.5.1 consta de 84 archivos de fuentes/datos/documentación (sin las vistas compiladas). Continúan pendientes las cabeceras y fuentes EYE1–EYE4, pruebas, herramientas, scripts, Makefile, recetas y el resto de documentos.
+## Resultado en GitHub
 
-El paquete íntegro permanece como `Eye_0_5_1_Tejados_Corregidos.zip` en los archivos de la conversación de ChatGPT del proyecto. No se han sobrescrito ni editado archivos de Bones. No se ha producido integración funcional ni verificación en Windows.
+- **102/102 archivos de la entrega original** incorporados a `Eye/`.
+- 85 archivos de fuentes, recetas, herramientas, pruebas y documentación (incluye la copia secundaria de recetas).
+- 17 imágenes PNG de ejemplo incluidas tal como se generaron.
+- Las **102 huellas Git SHA-1 (blob)** coinciden con los archivos del ZIP, sin faltantes ni diferencias.
+- Los archivos de `BONES/` y los de otros desarrolladores no han sido modificados.
+- `Eye/README.md` y este estado son documentación adicional propia de GitHub.
 
-El conector de GitHub disponible para esta subida acepta contenidos individuales de texto, no una importación directa de un archivo ZIP local; por este motivo la publicación no está completa.
+## Verificación funcional realizada
 
-**No integrar esta rama/carpeta como si fuera una versión final hasta incorporar las dependencias faltantes y pasar las pruebas.**
+`make test` ejecutado en Linux/GCC C11 sobre la fuente extraída: **9 pruebas superadas** (EYE1–EYE5, tono, adaptador simulado, incrustación de recetas).
+
+## Limitaciones conocidas
+
+La integridad de la subida **no equivale** a la certificación de la integración: no hay compilación conjunta con el código completo Bones real, ni certificación del .exe Windows/FAT12 ni de la semejanza artística del 84 %.
+
+No se publican los ejecutables de las herramientas ni la caché runtime. Se conserva el código fuente para reproducirlos mediante `make test`.
