@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
     paths:
+      - "BONES/**"
+      - "Eye/**"
+      - "Skin/**"
+      - "Brain/**"
+      - "Ear/**"
+      - "Mouth/**"
       - "Installer/**"
       - ".github/workflows/installer-main.yml"
 permissions:
