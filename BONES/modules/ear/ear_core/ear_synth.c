@@ -65,6 +65,17 @@ void ear_set_score(EarEngine *e, const EarScore *score) {
     if (!e->loop_frames) e->music_enabled = 0;
 }
 
+void ear_music_enable(EarEngine *e, int enabled) {
+    unsigned i;
+    if(!e)return;
+    if(!enabled){
+        e->music_enabled=0;
+        for(i=0;i<EAR_MUSIC_VOICES;i++)e->voices[i].active=0;
+    } else if(e->score && e->score->config.bpm>=45 && e->loop_frames) {
+        e->music_enabled=1;
+    }
+}
+
 void ear_set_volumes(EarEngine *e, float music, float sfx) {
     if (!e || !ear_finite(music) || !ear_finite(sfx)) return;
     e->music_volume = clampf(music, 0.0f, 1.0f);

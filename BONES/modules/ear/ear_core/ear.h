@@ -107,6 +107,8 @@ typedef struct {
 int ear_compose(EarScore *out, EarMusicConfig config);
 void ear_init(EarEngine *engine, const EarScore *score);
 void ear_set_score(EarEngine *engine, const EarScore *score);
+/* Disable stops music notes but preserves SFX and score position. */
+void ear_music_enable(EarEngine *engine, int enabled);
 void ear_set_volumes(EarEngine *engine, float music, float sfx);
 void ear_render(EarEngine *engine, int16_t *pcm, size_t frames);
 void ear_trigger(EarEngine *engine, EarSfx effect, uint32_t variation_seed);

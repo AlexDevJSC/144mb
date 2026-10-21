@@ -110,3 +110,11 @@ Síntesis y score, audio genérico JUMP/LAND, salida WinMM opcional codificados.
 Versiones: implementación 3, ABI1, schema privado 0.
 NO PROBADO con host Bones real ni dispositivo Windows. Sin material acústico
 en BonesModEvent; pendientes contratos de superficie, audio espacial, P2P.
+
+[ACTUALIZACION v0.4.0 | 21/10/2026]
+Ear con Bones ModKit ABI 1: modkit.c incluye C auxiliares, no compilar aparte.
+WinMM streams DUNGEON, status/error nativo, opción mute música, niveles separados,
+pausa/reanudar sin cerrar, retry explícito, deduplicación JUMP/LAND.
+PASS Linux GCC/Clang/ASan/UBSan + fake/no-device/headless + test legado v0.3.
+NO VERIFICADO: audibilidad Windows real, PE MSVC, rendimiento Windows.
+Ver docs/ESTADO_MODKIT_AUDIO04.txt y contratos Skin/Bones.

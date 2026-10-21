@@ -1,3 +1,13 @@
+[0.4.0] 21/10/2026: Música DUNGEON, control sin UI para Skin, diagnóstico WinMM.
+Fuente: Bones ModKit ABI 1; proveedor versión funcional 4.
+Audio: 4 buffers PCM, waveOutOpen/Write/Pause/Restart/Reset/Close y retry manual.
+SFX: JUMP/LAND, antirrepetición por tipo/actor/tick (16 entradas).
+Tests: GCC, Clang, ASan/UBSan, backend simulado, sin dispositivo y headless,
+regresión de test Ear v0.3.
+Windows hardware/sonido audible y delta PE: PENDIENTES; scripts entregados.
+Docs actualizados en esta entrega: ESTADO_REAL, DECISIONES_TECNICAS, README,
+CONTRATO_CONTROL_AUDIO_SKIN, NOTAS_INTEGRACION_BONES_WINDOWS, ESTADO_MODKIT_AUDIO04.
+
 EAR — REGISTRO DE CAMBIOS
 
 [0.1.0] 20/10/2026 — Motor procedural y adaptador contractual Bones

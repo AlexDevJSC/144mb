@@ -1,0 +1,19 @@
+CC ?= cc
+CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror
+MODKIT = ../../BONES/modules/ear/modkit.c
+TEST = test_audio_modkit04.c
+.PHONY: test sanitize clean
+build:
+	mkdir -p build
+test: build
+	$(CC) $(CFLAGS) -DEAR_MODKIT_TEST -DEAR_FAKE_OUTPUT $(TEST) $(MODKIT) -lm -o build/test_audio_fake
+	./build/test_audio_fake
+	$(CC) $(CFLAGS) -DEAR_MODKIT_TEST -DEAR_FAKE_OUTPUT -DEAR_FAKE_NO_DEVICE $(TEST) $(MODKIT) -lm -o build/test_audio_no_device
+	./build/test_audio_no_device
+	$(CC) $(CFLAGS) -DEAR_MODKIT_TEST $(TEST) $(MODKIT) -lm -o build/test_audio_headless
+	./build/test_audio_headless
+sanitize: build
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -DEAR_MODKIT_TEST -DEAR_FAKE_OUTPUT $(TEST) $(MODKIT) -lm -o build/test_audio_san
+	./build/test_audio_san
+clean:
+	rm -rf build

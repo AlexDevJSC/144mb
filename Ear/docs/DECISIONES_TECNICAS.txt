@@ -34,3 +34,8 @@ BonesEvent actual carece de acoustic/intensity. Se proponen EarSurfaceEvent y
 EarBonesContactSink como punto de entrada futuro SIN fingir que el núcleo ya
 lo expone. Se prohíbe almacenar un puntero a datos visuales en un evento.
 Los tests de mock no prueban compatibilidad binaria con Bones real.
+
+ADR-004 | 21/10/2026: Preferencias y estado audio son propiedad de Ear;
+Skin consume ear_audio_control.h sin UI dentro de Ear; Bones sigue siendo dueño
+de simulación/eventos. WinMM falla recuperablemente sin bloquear Bones.start.
+No se equipara producción de PCM ni buffers aceptados a audibilidad comprobada.
