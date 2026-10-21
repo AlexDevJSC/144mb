@@ -80,13 +80,13 @@ No confundir nuestro script de SINCRONIZACION DE FUENTES de desarrollo
 con un gestor de instalación automática dentro del videojuego.
 
 6. PRUEBAS Y EVIDENCIA DE COMPATIBILIDAD
-GitHub Actions run 39594728594:
+GitHub Actions runs 39594728594 y 39595310238:
  - GCC Linux make -C Mouth loopback (Bones fisica): PASS.
  - GCC Linux make -C BONES modkit_test (registro 5 módulos y DLL de ejemplo): PASS.
  - MSVC Windows Mouth demo + codec + descriptor: PASS.
  - MSVC Windows BONES/scripts/build_windows_msvc.bat: PASS.
  - MSVC Windows dos procesos UDP loopback: PASS.
- - BONES build\Proyecto144_Bones_ModKit.exe = 190.976 bytes.
+ - BONES build\Proyecto144_Bones_ModKit.exe = 192.512 bytes (último CI; antes 190.976).
  - Mouth demo PE = 189.440 bytes.
 No valida el límite del juego FINAL (aun incompleto), 2 PCs Windows en LAN,
 congestión, reconexión sostenida, autenticación ni guardados simultáneos.
