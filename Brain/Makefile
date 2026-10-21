@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 INCLUDES = -Iinclude
 SRC = src/brain_clock.c src/brain_random.c src/brain_economy.c \
       src/brain_npc.c src/brain_world.c src/brain_bones.c src/brain_visual.c
-.PHONY: all test demo bones-demo clean sanitize
+.PHONY: all test demo bones-demo clean sanitize modkit-test
 all: build/libbrain.a
 build:
 	mkdir -p build
@@ -21,9 +21,14 @@ build/brain_demo: demo/brain_demo.c $(SRC) include/brain/brain.h | build
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ demo/brain_demo.c $(SRC)
 build/test_visual_refs: tests/test_visual_refs.c $(SRC) include/brain/brain_visual.h | build
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ tests/test_visual_refs.c $(SRC)
-test: build/test_brain build/test_visual_refs
+build/test_modkit_bridge: bridge/bones_0_4/tests/test_modkit_bridge.c bridge/bones_0_4/modules/brain/modkit.c bridge/bones_0_4/modules/brain/brain_npc.c bridge/bones_0_4/modules/brain/brain.h bridge/bones_0_4/include/bones/modkit.h | build
+	$(CC) $(CFLAGS) -o $@ bridge/bones_0_4/tests/test_modkit_bridge.c bridge/bones_0_4/modules/brain/modkit.c
+modkit-test: build/test_modkit_bridge
+	./build/test_modkit_bridge
+test: build/test_brain build/test_visual_refs build/test_modkit_bridge
 	./build/test_brain
 	./build/test_visual_refs
+	./build/test_modkit_bridge
 demo: build/brain_demo
 	./build/brain_demo
 clean:

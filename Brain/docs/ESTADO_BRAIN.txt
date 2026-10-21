@@ -76,3 +76,16 @@ PRUEBAS v0.2 (20/10/2026)
   - Corromper bytes, cambiar mundo, versión Eye o acortar stream -> rechazo.
   - Material/variante de Eye reconstruidos por mock (NO pixel-identidad real).
   - Windows MSVC: script actualizado; todavía NO ejecutado.
+
+ACTUALIZACIÓN v0.3 — COMPATIBILIDAD BONES 0.4 / MODKIT ABI 1 (21/10/2026)
+  - Nueva entrega instalable en bridge/bones_0_4/modules/brain/.
+  - Fuente original brain_npc_decide conectada a before_tick de ModKit.
+  - Consulta read-only de actores/tick, comandos issuer=0 a NPC owner=0.
+  - Sin dependencias Eye/Skin/Mouth; source build de Bones recompila modkit.c.
+  - Configuración provisional: NPC sin rol se trata como GUARD, reloj de demo
+    08:00 y 60 ticks/minuto. Esto NO simula economía real en Bones.
+  - state_schema_version=0: no se guarda estado privado Brain desde Bones.
+  - Pruebas modkit-test con servicios simulados, GCC y sanitizadores PASS.
+  - Integración Bones/Windows/bytes PE reales: PENDIENTE de ejecutar.
+  - Instalar en BONES/modules/brain/. No tocar el kernel ni las cabeceras.
+  - Más detalle: docs/CONTRATO_BRAIN_BONES_MODKIT_0_4.txt.

@@ -1,0 +1,71 @@
+BRAIN -> BONES v0.4.0 MODKIT ABI 1
+Integración v0.3.0 | 21 octubre 2026 | Estado: prototipo de integración
+
+FUENTES CONSULTADAS EN GITHUB (AlexDevJSC/144mb, main al 21/10/2026):
+  BONES/include/bones/modkit.h
+  BONES/include/bones/modkit_host.h
+  BONES/include/bones/foundation.h
+  BONES/src/modkit/modkit.c
+  BONES/src/foundation/foundation.c
+  BONES/modules/brain/modkit.c (placeholder anterior)
+  BONES/scripts/gen_modkit_registry.py y build_windows_msvc.bat
+  BONES/docs/MODKIT_V0_4_0_CONTRATO.txt y GUIA_ESPECIALISTAS.txt
+La fuente del repositorio manda frente a cualquier copia de pruebas.
+
+FIRMA DE MÓDULO
+  bones_mod_brain_query(abi, out) -> BONES_MOD_OK/EINVAL
+  Descriptor: id='brain', role=BONES_ROLE_BRAIN,
+  abi=1, implementation_version=3, state_schema_version=0.
+  No declara dependencia de Eye, Skin, Ear ni Mouth; como proveedor exclusivo,
+  Bones solo permitirá uno para ese rol.
+  Permisos mínimos: READ_ACTORS, READ_TIME, SEND_COMMANDS.
+  Funciones: start, stop, before_tick. Los demás callbacks quedan NULL.
+  El header modkit.h se incluye mediante ruta Bones, sin headers internos.
+
+INTEGRACIÓN CON EL HOST
+  Bones crea host y registra builtins -> consulta descriptor -> start.
+  Cada before_tick: lee tick, recorre actores (máximo 32 del ModKit),
+  descarta players / objetos / owner!=0, crea ficha demo BrainNpc,
+  invoca brain_npc_decide, y traduce PATROL a BonesModCommand con
+  actor_id estable, tick=tick_actual+1, sequence=tick_actual+1, issuer=0.
+  Se usan únicamente enteros en órdenes, dentro de rangos permitidos.
+  Solo el host aplica físicas. No se accede a punteros BonesEntity.
+  stop invalida el puntero a los servicios del host.
+
+RESTRICCIONES CONTRACTUALES DE BONES 0.4
+  - Ninguna API para identidad y semilla del mundo, profesión del NPC,
+    destinos de trabajo, navmesh, enemigos visibles o salud del NPC.
+  - BrainWorld y BVR1 siguen módulos propios de Brain SIN enchufar.
+  - No existe persistencia de estado privado por módulo: schema=0.
+  - Events en ModKit son volátiles; no son transacciones de compra ni journal.
+  - En modo normal se enlaza código C; no instalación de DLL en caliente.
+  - El registro solo encuentra modules/brain/modkit.c, y el build Windows
+    no incluye .c auxiliares: el adapter incluye brain_npc.c textualmente
+    para enlazar una sola unidad (solución provisional documentada).
+  - No editar include/bones/*.h ni src/bones/*.c por parte de Brain.
+  - Tests con host ABI simulado no garantizan que funcione en Windows real.
+
+EVALUACIÓN DE DISEÑO
+  Fortaleza: no cambia la ABI, enlaza con la configuración existente,
+  usa realmente la función de decisión del Brain v0.2, respeta autoridad.
+  Debilidad: sin canal de datos de percepción/rutinas no hay IA rica real.
+  Deuda técnica: esquema de estado persistente versionado y ticks por juego.
+
+PRUEBAS Y CRITERIO DE ACEPTACIÓN
+  [x] Descriptor, versión, tamaño, permisos y callback start/stop.
+  [x] Comandos solo para NPC controlados por mundo, sin usuarios.
+  [x] Bounds, secuencia, tick siguiente y orden de enumeración.
+  [x] Interacciones negativas: permisos ausentes, servicio NULL, host rechaza.
+  [x] Horario demo, overflow y reinicio del estado.
+  [x] GCC y sanitizadores en test con servicios simulados.
+  [ ] Compilar BONES completo con adaptador nuevo, ejecutar sus tests.
+  [ ] Probar versión Windows/MSVC real y verificar tamaño PE.
+  [ ] Compatibilidad final aprobada por Soul.
+
+MÓDULOS AJENOS
+  Bones: propiedad del host, físicas, colisiones, actor_id, tick.
+  Eye: visualización; Brain no genera imágenes ni materiales.
+  Skin: guardados y UI; Brain no hace escritura de BSF1.
+  Mouth: red y autenticación; Brain nunca envía órdenes de dueño jugador.
+  Brain: decisiones y traducción autorizada a comandos del host.
+  Soul: revisar ABI, build, regresiones, estado privado, límites.

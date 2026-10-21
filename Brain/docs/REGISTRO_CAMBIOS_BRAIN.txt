@@ -56,3 +56,14 @@ EVIDENCIAS
   Sin modificación de contratos antiguos brain.h ni BonesSubsystem.
   Limitaciones: Eye1/Eye2 reales NO disponibles, sin validación pixel-exacta,
   ni asignación oficial de SAVE, ni transacciones persistentes/crash-safe.
+
+[0.3.0] 21/10/2026 — Compatibilidad Bones v0.4.0 ModKit ABI1
+ Código añadido: bridge/bones_0_4/modules/brain/modkit.c, brain_npc.c,
+ brain.h; export estático bones_mod_brain_query y DLL opcional con macro.
+ Test añadido: bridge/bones_0_4/tests/test_modkit_bridge.c (host fake ABI1).
+ Makefile: nuevo destino modkit-test y regresión incluida en make test.
+ Documentos actualizados: estado técnico, este registro, README puente,
+ docs/CONTRATO_BRAIN_BONES_MODKIT_0_4.txt, README.txt.
+ No se modifican APIs Brain v0.2, contratos Bones ni lógica de render.
+ El adaptador incorpora el algoritmo original brain_npc_decide.
+ Test GCC C11 -Werror, ASan/UBSan: PASS; ejecución BONES completa pendiente.

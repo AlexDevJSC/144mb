@@ -63,3 +63,11 @@ EXTENSIÓN v0.2.0 — SOLICITUD DE EYE
   - El códec produce 48 + 56*n bytes sin texturas ni píxeles.
   - Eye y Bones no están integrados realmente en este ensayo.
   - Ver spec/CONTRATO_BRAIN_EYE_REFERENCIAS_v1.txt para roles y límites.
+
+NUEVO v0.3 — BONES v0.4.0
+  Paquete autocontenido del módulo: bridge/bones_0_4/modules/brain/.
+  Copiar modkit.c, brain.h, brain_npc.c y README.txt a BONES/modules/brain/.
+  Ejecutar make modkit-test para tests del contrato ABI simulado; para
+  verificar integración completa ejecutar make modkit_test desde BONES/.
+  Detalles y límites: docs/CONTRATO_BRAIN_BONES_MODKIT_0_4.txt.
+  Los módulos anteriores de economía/BVR1 permanecen sin integrarse en host.
