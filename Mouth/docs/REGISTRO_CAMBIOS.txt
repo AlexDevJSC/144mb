@@ -84,3 +84,26 @@ demo previa sin API de sesión tipada. Ver historial Git.
  - PR #21 Bones 0.4.2 en rama experimental tiene fallos de loopback
    en su propia CI (cliente phase=8/cause=9). No atribuir causa a
    Mouth main ni integrar cambios sin analizar el orden temporal del host.
+
+[QA-2026-10-22] Corrección de intermitencia en test_loopback / CI
+- Error reportado: assertion client.returncode == 0; CLIENT ERROR phase=8 cause=9.
+- Diagnóstico: phase=8/cause=9 indica pérdida de conexión, que también
+  ocurre cuando el propio DEMO del host alcanza MOUTH_DEMO_SECONDS y
+  envía LEAVE. El test anterior usaba temporizadores independientes
+  (host 6 s, cliente 4 s) y arrancaba el host primero: un retraso en
+  CI podía cerrar la sesión antes de completar el cliente. Los logs
+  por sí solos no permiten excluir otras causas de desconexión.
+- Corrección: Mouth/tests/test_loopback.py deja vivo el host hasta que
+  finaliza el cliente; al acabar, el harness cierra el proceso y
+  verifica que seguía activo. Conserva validaciones de ticks,
+  snapshots, física Bones y actor local/actor remoto separados.
+- Mouth/tests/test_lan_loss_proxy.py aplica el mismo control de vida
+  para que su prueba de 15% de pérdida no compita con un cierre del host.
+- test_loopback acepta MOUTH_TEST_JOIN_DELAY en segundos. CI ejecuta
+  además inicio tardío a los 7 segundos (> antiguo límite host 6 s),
+  tanto con GCC en Linux como con MSVC en Windows.
+- Las pruebas deliberadas de apagado remoto y CONNECTION_LOST siguen
+  en test_session_network.py, separadas de las de conexión correcta.
+- Sin cambios a Mouth/src/mouth_lan.c, BONES/modules/mouth/, ModKit
+  ABI 1, protocolo M144/1 ni API de sesiones v1.
+- Evidencia: GitHub Actions run 39729176758, Linux/Windows.
