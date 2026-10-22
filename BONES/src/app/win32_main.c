@@ -7,10 +7,39 @@
 #include "../../include/bones/modkit_host.h"
 #include "../adapters/eye_adapter.h"
 #include "../demo/test_house.h"
+#include "../../modules/eye/eye_modkit_ext.h"
+#include "../../modules/skin/skin_modkit.h"
 
 static BonesFoundation foundation;
 #define game (foundation.engine)
 static BonesModHost *mod_host;
+/* Application-owned 320x200 compositor. Eye's framebuffer remains const. */
+static uint32_t frame_ui[EYE_DISPLAY_PIXELS];
+static const uint32_t *frame_present=frame_ui;
+static int frame_valid;
+/* Host lifecycle: Skin does not create worlds or own gameplay state. */
+static int init_runtime(void) {
+    BonesModule house;
+    if(mod_host) { bones_mod_host_destroy(mod_host); mod_host=NULL; }
+    if(!bones_foundation_init(&foundation,UINT64_C(0x1440001),UINT64_C(0x01442026),1))
+        return 0;
+    if(!bones_house_register_colliders(&game.world))return 0;
+    house=bones_test_house_module();
+    if(!bones_register_module(&game,&house))return 0;
+    mod_host=bones_mod_host_create(&foundation);
+    if(!mod_host)return 0;
+    if(bones_mod_register_builtins(mod_host)!=BONES_MOD_OK ||
+       bones_mod_host_start(mod_host)!=BONES_MOD_OK) {
+        bones_mod_host_destroy(mod_host);mod_host=NULL;return 0;
+    }
+    frame_valid=0;
+    return 1;
+}
+static int playing(void) {
+    const Skin2Ui *ui=bones_skin_ui_state();
+    return mod_host && ui && ui->screen==SKIN2_GAME &&
+           !bones_skin_ui_blocks_gameplay();
+}
 /* Eye owns the framebuffer, even when invoked through the ModKit ABI. */
 extern const uint32_t *bones_eye_mod_pixels(void);
 extern uint32_t bones_eye_mod_triangles(void);
@@ -79,6 +108,59 @@ static int create_backbuffer(HDC window_dc,int w,int h) {
     back_width=w;back_height=h;
     return 1;
 }
+static void capture_mouse(HWND hwnd, int on);
+static void clear_controls(void) {
+    ZeroMemory(held,sizeof(held));reset_mouse_deltas();
+}
+static void handle_ui_action(HWND hwnd,Skin2Action action) {
+    switch(action) {
+    case SKIN2_START:
+    case SKIN2_SINGLE:
+        /* Acknowledge the UI request only after a fresh runtime starts. */
+        capture_mouse(hwnd,0);
+        clear_controls();
+        if(init_runtime()) (void)bones_skin_ui_enter_game();
+        else { MessageBoxA(hwnd,"No se pudo iniciar el mundo.","Bones",MB_ICONERROR|MB_OK);
+               DestroyWindow(hwnd); }
+        break;
+    case SKIN2_MAIN_REQUEST:
+        capture_mouse(hwnd,0);
+        clear_controls();
+        if(init_runtime())(void)bones_skin_ui_enter_main();
+        else { MessageBoxA(hwnd,"No se pudo reiniciar la sesion.","Bones",MB_ICONERROR|MB_OK);
+               DestroyWindow(hwnd); }
+        break;
+    case SKIN2_QUIT:
+        DestroyWindow(hwnd);break;
+    case SKIN2_RESUME:
+        clear_controls();break;
+    default:
+        /* LAN, gameplay interactions, saving and audio settings are NOT
+           acknowledged until their specialist integrations are present. */
+        break;
+    }
+}
+static void handle_ui_key(HWND hwnd,UINT key) {
+    Skin2Key mapped;
+    Skin2Action action;
+    switch(key) {
+    case VK_ESCAPE: mapped=SKIN2_BACK;break;
+    case 'I':mapped=SKIN2_OPEN_INV;break;
+    case 'E':mapped=SKIN2_INTERACT;break;
+    case VK_UP:mapped=SKIN2_UP;break;
+    case VK_DOWN:mapped=SKIN2_DOWN;break;
+    case VK_LEFT:mapped=SKIN2_LEFT;break;
+    case VK_RIGHT:mapped=SKIN2_RIGHT;break;
+    case VK_RETURN:mapped=SKIN2_ACCEPT;break;
+    default:return;
+    }
+    action=bones_skin_ui_input(mapped);
+    handle_ui_action(hwnd,action);
+    if(bones_skin_ui_blocks_gameplay()) {
+        capture_mouse(hwnd,0);
+        clear_controls();
+    }
+}
 static void copy_backbuffer(HDC dc,const RECT *r) {
     if(back_ready && back_dc)
         BitBlt(dc,0,0,r->right-r->left,r->bottom-r->top,back_dc,0,0,SRCCOPY);
@@ -136,15 +218,26 @@ static LRESULT CALLBACK proc(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
     case WM_CLOSE: DestroyWindow(hwnd); return 0;
     case WM_DESTROY: capture_mouse(hwnd,0); release_backbuffer(); PostQuitMessage(0); return 0;
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
-        if(w<256) held[w]=1;
-        if(w==VK_ESCAPE) capture_mouse(hwnd,0);
-        if(msg==WM_SYSKEYDOWN) return DefWindowProcA(hwnd,msg,w,l);
+        /* A UI intent is a single rising edge, never a typematic repeat. */
+        if((l & (1L<<30))==0 && mod_host)handle_ui_key(hwnd,(UINT)w);
+        if(w<256 && playing())held[w]=1;
+        if(msg==WM_SYSKEYDOWN)return DefWindowProcA(hwnd,msg,w,l);
         return 0;
+    case WM_CHAR: {
+        const Skin2Ui *ui=bones_skin_ui_state();
+        if(ui && ui->screen==SKIN2_LAN_JOIN &&
+           ((w>='0'&&w<='9')||w=='.'||w==8))
+            (void)bones_skin_ui_lan_text((uint32_t)w);
+        return 0;
+    }
     case WM_KEYUP: case WM_SYSKEYUP:
         if(w<256) held[w]=0;
         if(msg==WM_SYSKEYUP) return DefWindowProcA(hwnd,msg,w,l);
         return 0;
-    case WM_LBUTTONDOWN: SetFocus(hwnd); capture_mouse(hwnd,1); return 0;
+    case WM_LBUTTONDOWN:
+        SetFocus(hwnd);
+        if(playing())capture_mouse(hwnd,1);
+        return 0;
     case WM_ENTERSIZEMOVE: capture_mouse(hwnd,0); return 0;
     case WM_ACTIVATEAPP:
         window_active=w!=0;
@@ -183,10 +276,11 @@ static void get_input(BonesInput *out) {
 }
 static void present(HWND hwnd) {
     RECT r; BITMAPINFO bi; HDC dc;
-    const uint32_t *pixels=bones_eye_mod_pixels();
+    const uint32_t *pixels=frame_valid?frame_present:NULL;
     int w,h,s,dw,dh;
     if(!pixels) return;
-    trace_framebuffer(pixels);
+    /* GDI consumes only the completely composed application framebuffer.
+       Eye's framebuffer and Z-buffer are never modified by Skin. */
     GetClientRect(hwnd,&r);
     w=r.right-r.left; h=r.bottom-r.top;
     if(w<=0||h<=0) return;
@@ -246,7 +340,7 @@ int WINAPI WinMain(HINSTANCE inst,HINSTANCE previous,LPSTR command,int show) {
     wc.hCursor=LoadCursor(NULL,IDC_ARROW);
     if(!RegisterClassExA(&wc)) return 1;
     hwnd=CreateWindowExA(0,wc.lpszClassName,
-        "Proyecto 1.44 - Bones + Eye | WASD Space Shift, click para raton",
+        "Proyecto 1.44 - Bones + Eye + Skin",
         WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,960,640,
         NULL,NULL,inst,NULL);
     if(!hwnd) return 2;
@@ -259,15 +353,7 @@ int WINAPI WinMain(HINSTANCE inst,HINSTANCE previous,LPSTR command,int show) {
           DestroyWindow(hwnd);return 7;
       }
     }
-    if(!bones_foundation_init(&foundation,UINT64_C(0x1440001),UINT64_C(0x01442026),1)) return 6;
-    if(!bones_house_register_colliders(&game.world)) return 8;
-    {
-        BonesModule m=bones_test_house_module();
-        if(!bones_register_module(&game,&m)) return 5;
-    }
-    mod_host=bones_mod_host_create(&foundation);
-    if(!mod_host || bones_mod_register_builtins(mod_host)!=BONES_MOD_OK ||
-       bones_mod_host_start(mod_host)!=BONES_MOD_OK)return 4;
+    if(!init_runtime())return 4;
     ShowWindow(hwnd,show); UpdateWindow(hwnd);
     if(!QueryPerformanceFrequency(&frequency)||!QueryPerformanceCounter(&previous_time)) return 3;
     while(running) {
@@ -283,25 +369,51 @@ int WINAPI WinMain(HINSTANCE inst,HINSTANCE previous,LPSTR command,int show) {
             previous_time=now;
             if(elapsed<0.0) elapsed=0.0;
             if(elapsed>.25) elapsed=.25;
-            accumulator+=elapsed; report_clock+=elapsed;
-            while(accumulator >= (double)1.0/60.0 && steps<5) {
-                BonesInput input;
-                BonesPlayer before=game.player;
-                get_input(&input);
-                if(bones_mod_host_step(mod_host,&input)!=BONES_MOD_OK){running=0;break;}
-                record_input(&input,&before,&game.player,game.tick);
-                accumulator-=1.0/60.0;
-                steps++;
+            report_clock+=elapsed;
+            /* Paused/menu: NO simulation ticks and NO catch-up on resume. */
+            if(playing()) {
+                accumulator+=elapsed;
+                while(accumulator >= (double)1.0/60.0 && steps<5) {
+                    BonesInput input;
+                    BonesPlayer before=game.player;
+                    get_input(&input);
+                    if(bones_mod_host_step(mod_host,&input)!=BONES_MOD_OK){running=0;break;}
+                    record_input(&input,&before,&game.player,game.tick);
+                    accumulator-=1.0/60.0;
+                    steps++;
+                }
+                if(steps==5 && accumulator>=1.0/60.0)accumulator=0.0;
+            } else {
+                accumulator=0.0;
+                reset_mouse_deltas();
             }
-            if(steps==5 && accumulator>=1.0/60.0) accumulator=0.0;
         }
-        if(bones_mod_host_frame(mod_host)!=BONES_MOD_OK)break;
+        if(!running)break;
+        {
+            const Skin2Ui *ui=bones_skin_ui_state();
+            Skin2View view={0};
+            EyeDisplayMode mode;
+            if(!ui)break;
+            /* Render Eye only while playing; paused overlays reuse last scene. */
+            if(ui->screen==SKIN2_GAME &&
+               bones_mod_host_frame(mod_host)!=BONES_MOD_OK)break;
+            view.tick=game.tick;
+            view.actor_count=foundation.entity_count;
+            view.available=0; /* Bones has no canonical HP/MP/gold/items. */
+            if(bones_skin_ui_update(&view)!=BONES_MOD_OK)break;
+            mode=ui->screen==SKIN2_MAIN ? EYE_DISPLAY_MENU_GENERATED
+               :ui->screen==SKIN2_GAME ? EYE_DISPLAY_GAME
+               :EYE_DISPLAY_MENU_DIM_SCENE;
+            if(!bones_eye_mod_prepare_base(frame_ui,EYE_DISPLAY_PIXELS,mode,128u))break;
+            if(bones_skin_ui_compose(frame_ui,320,200,320)!=BONES_MOD_OK)break;
+            frame_valid=1;
+        }
         present(hwnd);
         frames++;
         if(report_clock>=1.0) {
             char title[180];
             (void)snprintf(title,sizeof(title),
-                "PROYECTO 1.44 | Bones + Eye | FPS %d | Tri %u | Tick %llu",
+                "PROYECTO 1.44 | Eye + Skin | FPS %d | Tri %u | Tick %llu",
                 frames,(unsigned)bones_eye_mod_triangles(),(unsigned long long)game.tick);
             SetWindowTextA(hwnd,title); frames=0; report_clock=0.0;
         }

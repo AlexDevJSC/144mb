@@ -82,6 +82,13 @@ build/clock_mod.so: samples/plugin/clock_mod.c include/bones/modkit.h
 build/test_modkit_dll: modkit_registry tests/test_modkit_dll.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY)
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/test_modkit_dll.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY) -lm $(MODKIT_LIBS)
+build/test_host_ui: modkit_registry tests/test_host_ui.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY)
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/test_host_ui.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY) -lm $(MODKIT_LIBS)
+.PHONY: host_ui_test
+host_ui_test: build/test_host_ui
+	./build/test_host_ui
+
 modkit_test: build/test_modkit build/test_modkit_dll build/clock_mod.so
 	./build/test_modkit
 	./build/test_modkit_dll ./build/clock_mod.so

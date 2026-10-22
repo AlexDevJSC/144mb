@@ -1,0 +1,44 @@
+name: Bones host Eye and Skin integration
+on:
+  pull_request:
+    paths:
+      - 'BONES/**'
+      - '.github/workflows/bones-host-ui-ci.yml'
+  workflow_dispatch:
+jobs:
+  linux-modkit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native core and Eye-Skin smoke
+        run: |
+          make -C BONES test
+          make -C BONES host_ui_test
+          make -C BONES modkit_test
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: MSVC x64 environment, Windows PE and actual Eye-Skin smoke
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%I in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%I"
+          if not defined VSPATH exit /b 1
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
+          call BONES\scripts\build_windows_msvc.bat
+          if errorlevel 1 exit /b 1
+          call BONES\scripts\test_host_ui_msvc.bat
+          if errorlevel 1 exit /b 1
+      - name: Measure Windows PE and hash
+        shell: pwsh
+        run: |
+          $exe = 'BONES/build/Proyecto144_Bones_ModKit.exe'
+          $size = (Get-Item $exe).Length
+          $sha = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Write-Host "Windows PE bytes: $size / 1474560"
+          Write-Host "Windows PE SHA256: $sha"
+          if ($size -gt 1474560) { throw "PE exceeds 1.44MB limit" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bones-integration-a-windows
+          path: BONES/build/Proyecto144_Bones_ModKit.exe
