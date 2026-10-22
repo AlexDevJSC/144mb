@@ -76,8 +76,8 @@ def main():
 
         thread=threading.Thread(target=relay,daemon=True)
         thread.start()
-        host_env=dict(os.environ,MOUTH_DEMO_SECONDS="17",
-                      MOUTH_DEMO_AUTOMOVE="1")
+        host_env=dict(os.environ,MOUTH_DEMO_AUTOMOVE="1")
+        host_env.pop("MOUTH_DEMO_SECONDS",None)
         client_env=dict(os.environ,MOUTH_DEMO_SECONDS="12",
                         MOUTH_DEMO_AUTOMOVE="1")
         host=subprocess.Popen([binary,"host",str(host_port)],
@@ -88,9 +88,16 @@ def main():
             client=subprocess.run([binary,"join","127.0.0.1",str(proxy_port)],
                                   env=client_env,stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE,text=True,timeout=18)
-            hout,herr=host.communicate(timeout=22)
-            assert host.returncode==0,(hout,herr)
-            assert client.returncode==0,(client.stdout,client.stderr,stats)
+            host_was_alive=host.poll() is None
+            if host_was_alive:
+                host.terminate()
+            try:
+                hout,herr=host.communicate(timeout=6)
+            except subprocess.TimeoutExpired:
+                host.kill()
+                hout,herr=host.communicate(timeout=6)
+            assert host_was_alive, ("Host exited during the link test",hout,herr)
+            assert client.returncode==0,(client.stdout,client.stderr,stats,hout)
             h=re.findall(r"HOST tick=(\d+) status=(\d+).*p1\(([-\d.]+) ([-\d.]+)\) p2\(([-\d.]+) ([-\d.]+)\)",hout)
             c=re.findall(r"CLIENT tick=(\d+) p1\(([-\d.]+) ([-\d.]+)\) p2\(([-\d.]+) ([-\d.]+)\)",client.stdout)
             assert h and c,(hout,client.stdout)
