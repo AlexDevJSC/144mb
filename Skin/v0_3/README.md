@@ -1,41 +1,20 @@
-# Skin 0.3 — compatibilidad Bones ModKit 0.4.0
+# Skin — interfaz C11, Bones 0.4 ModKit ABI1
 
-**Autor:** Skin · **ámbito actual:** menús, HUD, inventario visual, UX y puentes de interfaz con el motor. La política de responsabilidades `00_LEER_PRIMERO` tiene prioridad; no se reivindica la lógica de guardados, economía o gameplay.
+**Estado actual: 0.4.0-fase1, autónoma; integración visual Windows bloqueada por entrega Eye #3.**
 
-## Entrega
+Skin diseña menús, HUD, inventario visual y ventanas contextuales. No implementa Eye (render 3D), Bones (física y mundo), Ear (audio) ni Mouth (red). Skin NO genera estadísticas RPG, guardados ni transacciones económicas.
 
-`modules/skin/` contiene **siete archivos de código**: `modkit.c`, `skin_modkit_impl.c`, `skin_modkit.h`, `skin_ui2.c/.h` y `skin_font.c/.h`. También están instalados en `BONES/modules/skin/` del repositorio para la compilación estática del ModKit.
+Código instalable en `BONES/modules/skin/`; el punto de entrada `modkit.c` es unity build (así Bones detecta automáticamente el módulo). Esta carpeta `Skin/v0_3/modules/skin/` contiene una copia idéntica para distribuir al especialista sin modificar el núcleo. `implementation_version=4`, `state_schema_version=0` y ModKit ABI=1.
 
-No se ha modificado el núcleo, la ABI ni el adaptador de Eye. El `modkit.c` incorpora las unidades auxiliares al mismo fichero de compilación (*unity build*) porque los scripts actuales de Bones solo incluyen los `modules/*/modkit.c` automáticamente.
+`make test` ejecuta tests aislados; `make preview` produce PPM reales 320x200 de menú/HUD/objetivo/inventario/LAN; `make sanitize` ejecuta ASan + UBSan. Usa la cabecera local de prueba ModKit equivalente para tests, **no** la integración total del repositorio Bones.
 
-## Instalación en otro proyecto Bones 0.4.0
+Documentación: `docs/FASE1_MENUS_HUD_20261021.md`, `docs/TRASPASO_A_BONES_SOUL_FASE1.md` y `docs/REGISTRO_CAMBIOS.md`.
 
-1. Copia **todos** los archivos `modules/skin/` de este paquete a `BONES/modules/skin/`, reemplazando el `modkit.c` provisional.
-2. Desde la raíz de Bones, ejecuta `python3 scripts/gen_modkit_registry.py` y `make modkit_test` (Linux); en Windows, utiliza `scripts\build_windows_msvc.bat` o `build_windows_mingw.bat`.
-3. Bones registrará automáticamente la función `bones_mod_skin_query` con ABI 1 y rol Skin. No se necesitan cambios en `src/modkit/`, `include/bones/` ni en el registro generado por parte del especialista.
-4. **Para ver realmente los menús**, la aplicación debe redirigir teclado a `bones_skin_ui_input`, proporcionar los datos de vista a `bones_skin_ui_update` y llamar a `bones_skin_ui_compose` **después** de Eye, sobre una copia de framebuffer de propiedad de la aplicación. Véase `docs/CONTRATO_COMPOSICION_MODKIT.md`.
+Acciones: SKIN2_START/SINGLE son solicitudes que el host confirma mediante `bones_skin_ui_enter_game()`. Durante los menús `bones_skin_ui_blocks_gameplay()` indica que Bones debe mandar input neutro. Skin recibe objetivo/rango validados de Bones con `bones_skin_ui_target` y devuelve `SKIN2_INTERACT_REQUEST` sin ejecutar acciones. Presentación pendiente de Eye con un destino host-owned, nunca tocando el Z-buffer. Audio y LAN tienen panel pendiente a la espera de Ear y Mouth.
 
-**Importante:** el ejecutable estándar de Bones 0.4.0 registra Skin al arrancar, pero actualmente su `win32_main.c` solo presenta los píxeles de Eye y no invoca este compositor ni envía eventos de teclado a Skin. Por tanto, este cambio **no hace visibles los menús automáticamente** en el EXE estándar; requiere que Bones/Integración/Soul aprueben y conecten esos dos puntos en el anfitrión. No se alteran módulos ajenos por cuenta propia.
 
-## Pruebas
-
-En la estructura del repositorio (carpetas hermanas `BONES/` y `Skin/`):
-
-```sh
-cd Skin/v0_3
-make test
-make sanitize
-```
-
-Valida el registro ModKit ABI1, privilegios, callbacks, interacción de menú, visualización de inventario y composición 320×200 / 800×450, además de formato de datos de vista. El test simula servicios que reflejan las firmas de `BONES/include/bones/modkit.h`; **no equivale** a la compilación/prueba de todo Bones en Windows.
-
-## Limitaciones intencionadas
-
-- Ni lectura/escritura de partida, ni snapshot BSF1, ni redes, ni física, ni modificación de mundo.
-- `Skin2View` solo se rellena con datos enviados expresamente por la lógica del juego. La ABI actual de Bones expone actores y ticks, **no puntos de vida, oro ni inventarios**: no se inventan valores.
-- La paleta es temporal hasta recibir recursos definitivos de Eye.
-- Una instancia estática de Skin por proceso en esta versión. Sin hot reload.
-- No se incluye DLL en el paquete de distribución compacto; la variante DLL es un experimento de desarrollo optativo.
-- El límite global de 1,44 MB del ejecutable Windows continúa sin verificarse.
-
-Ver documentos `docs/` para el contrato, pruebas, riesgos y solicitud a Soul.
+## Actualización incremental Eye / Mouth (21/10/2026)
+- Contrato de composición Eye PR #12 validado en prueba funcional portátil (`make test`, `make sanitize`), sin declarar integración Win32 completa. Véase `docs/VALIDACION_EYE_052_PR12.md`.
+- Interfaz LAN v0.4: crear/unirse IP:puerto, estados/errores y desconexión como intenciones; exige identidad mundial conocida; no contiene sockets. Véase `docs/FASE3_LAN_MOUTH_04.md`.
+- Ear PR #13 sigue bajo revisión Soul; opciones musicales todavía no habilitadas. Selector Bones PR #21 todavía sin contrato de UI aprobado.
+- Changelog: `docs/CHANGELOG_INCREMENTAL_20261021.md`; traspaso general: `docs/TRASPASO_EYE_BONES_MOUTH_20261021.md`.

@@ -1,11 +1,13 @@
-SKIN 0.3.0 — Bones ModKit 0.4 ABI1
-===============================
-Este subdirectorio contiene el adaptador especializado de Skin, sincronizado
-con Skin/v0_3/modules/skin/. Su autor es Skin, no el núcleo Bones.
-El registro automático detecta modkit.c y la función bones_mod_skin_query.
-Sus .c auxiliares se incluyen desde modkit.c (unidad de compilación única),
-porque Makefile y scripts Windows de Bones compilan únicamente modkit.c.
-NO añadir estos auxiliares a la lista de compilación por separado.
-El módulo provee lógica de interfaz UI2, no altera físicas ni renderizado 3D.
-El EXE principal de Bones aún no invoca la composición 2D: ver
-Skin/v0_3/docs/CONTRATO_COMPOSICION_MODKIT.md y solicitar a Soul revisión.
+SKIN 0.4.0-fase1 — Bones 0.4 ModKit ABI1
+=======================================
+Proveedor de menús/HUD/inventario/interacción de interfaz, exclusivamente.
+modkit.c incluye la unidad C11 completa para enlazarla con el mecanismo de registro actual.
+Autonomía verificada: make -C Skin/v0_3 test preview sanitize (desde la raíz del repo).
+El módulo arranca en menú principal y bloquea movimiento local hasta que el host confirme la sesión.
+API: skin_modkit.h (bones_skin_ui_input, blocks_gameplay, enter_game, enter_main, target,
+ui_update, ui_compose). Skin solo recibe datos canónicos y compone en memoria del HOST.
+No manipula framebuffer const de Eye, render 3D, física, transacciones, audio, LAN ni guardado.
+OJO: Bones aún debe conectar teclado, entrada neutral y composición DESPUES de Eye.
+NO afirmar integración Windows ni cumplimiento del tamaño 1.44 MB sin pruebas.
+Contrato completo y changelog: Skin/v0_3/docs/TRASPASO_A_BONES_SOUL_FASE1.md.
+Dependencia de Eye: GitHub issue #3. Ear: #4. Mouth: #5.

@@ -20,3 +20,7 @@
 Estas cantidades NO son el incremento final del PE de Windows ni demuestran cumplir el límite de 1,44 MB. Deben repetirse con MSVC y el enlazado real de Bones.
 
 **Riesgo de compatibilidad:** la documentación histórica de Bones atribuye guardados a Skin; la asignación funcional confirmada posteriormente se limita a UI/UX. El código v0.3 no usa `snapshot_export` ni `snapshot_restore_at_start`. Coordinar con Soul cualquier corrección de documentación central sin reinterpretar silenciosamente la decisión del director.
+
+## Actualización 2026-10-21 — Skin 0.4 fase 1
+
+El estado histórico 0.3 más arriba se conserva por trazabilidad. La fase 1 añade menús y HUD sin datos RPG inventados, contratos de pausa/acciones, mensaje LAN experimental y contexto E validado por host. Pruebas `make test`, `make preview`, `make sanitize`: PASS aislado, cabecera local ModKit compatible. GCC `-Os` objeto text=8195 B, data=72 B, bss=792 B, no corresponde al incremento PE Windows. Fuente de verdad: `FASE1_MENUS_HUD_20261021.md`; faltan presentación Eye #3, sistema host de entrada y Soul. **No se afirma fase de playtest integrada**.
