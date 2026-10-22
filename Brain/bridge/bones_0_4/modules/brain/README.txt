@@ -44,3 +44,12 @@ RESTRICCIONES IMPORTANTES
   Para DLL de desarrollo, compilar modkit.c con BRAIN_MOD_BUILD_SHARED:
   exporta bones_mod_query_v1, pero Bones Windows final NO auto-carga DLL.
   Soul debe revisar el cambio antes de declararlo integración estable.
+
+v0.3.1 PREPARACIÓN REGRESIÓN PLAYTEST:
+  - BrainModDiagnostics permite contar órdenes rechazadas y errores del host.
+    Es API auxiliar de Brain, no una alteración de Bones ABI 1.
+  - Detección de avance detenido: 8 ticks aceptados sin desplazamiento
+    -> 14 ticks de giro in situ; no es navegación ni corrige colliders.
+  - NO aplicar como verificación final hasta corrección Bones y revisión Soul.
+  - brain_npc.c está INCLUIDO en modkit.c: NO añadirlo a compilación.
+  - state_schema_version=0, no guardar memoria antiatasco en BSF1.
