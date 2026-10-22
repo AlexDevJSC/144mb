@@ -20,6 +20,7 @@ set "OBJ_FILES="
 set /a NUM=0
 for %%F in (
   tests\test_host_ui.c
+  src\bones\interaction_core.c
   src\bones\core.c
   src\bones\world.c
   src\bones\physics.c

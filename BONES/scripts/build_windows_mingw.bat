@@ -11,7 +11,7 @@ for /R modules %%F in (*modkit.c) do set MODULE_FILES=!MODULE_FILES! "%%F"
 where gcc >nul 2>nul
 if errorlevel 1 (echo ERROR: Instala MinGW-w64 con gcc en PATH. & exit /b 1)
 gcc -std=c11 -Os -flto -DBONES_MODKIT_NO_DYNLIB -Wall -Wextra -Wpedantic -s -mwindows ^
- src\app\win32_main.c src\bones\core.c src\bones\world.c src\bones\physics.c src\bones\scene.c src\bones\subsystems.c src\foundation\foundation.c src\modkit\modkit.c src\generated\modkit_registry.c !MODULE_FILES! ^
+ src\app\win32_main.c src\bones\interaction_core.c src\bones\core.c src\bones\world.c src\bones\physics.c src\bones\scene.c src\bones\subsystems.c src\foundation\foundation.c src\modkit\modkit.c src\generated\modkit_registry.c !MODULE_FILES! ^
  src\demo\test_house.c src\adapters\eye_adapter.c third_party\eye\sw_renderer.c ^
  -o build\Proyecto144_Bones_ModKit.exe -lgdi32 -luser32 -lws2_32 -lm
 if errorlevel 1 exit /b 1
