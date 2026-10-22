@@ -25,6 +25,8 @@ jobs:
         run: make -C Mouth test
       - name: Two-process Bones UDP loopback
         run: make -C Mouth loopback
+      - name: Delayed client join regression (host must stay alive)
+        run: MOUTH_TEST_JOIN_DELAY=7 python3 Mouth/tests/test_loopback.py Mouth/build/mouth_lan_demo
       - name: Deterministic UDP loss and link-interruption smoke test
         run: make -C Mouth loss
       - name: Bones official ModKit regression
@@ -51,6 +53,11 @@ jobs:
       - name: Windows two-process UDP loopback
         shell: pwsh
         run: python Mouth/tests/test_loopback.py Mouth/build/mouth_lan_demo.exe
+      - name: Windows delayed client join regression
+        shell: pwsh
+        run: |
+          $env:MOUTH_TEST_JOIN_DELAY = "7"
+          python Mouth/tests/test_loopback.py Mouth/build/mouth_lan_demo.exe
       - name: Windows UDP loss and link-interruption smoke test
         shell: pwsh
         run: python Mouth/tests/test_lan_loss_proxy.py Mouth/build/mouth_lan_demo.exe
