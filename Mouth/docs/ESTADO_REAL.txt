@@ -50,3 +50,19 @@ NO VERIFICADO / PENDIENTE
               snapshots persistentes, medida PE juego completo, QA Soul.
   [RIESGO BRANCH] PR #21 Bones experimental ha tenido fallos temporales
                   de loopback; no se han reproducido en main.
+
+== Diagnóstico de CI y corrección de tests — 22/10/2026 ==
+  [CORREGIDO] Una prueba de conexión correcta podía recibir LEAVE
+  porque el demo del host terminaba por su propio temporizador.
+  Host ahora permanece vivo hasta que el cliente concluye;
+  la prueba corta sigue comprobando comandos y snapshots reales.
+  [AÑADIDO] Regresión de incorporación tardía: cliente arranca
+  7 segundos después de host, supera el antiguo timeout de 6 s.
+  [AÑADIDO] Mismo control de vida para la prueba de pérdida simulada.
+  [MANTENIDO] test_session_network.py prueba intencionalmente cierre
+  y reporta MOUTH_SESSION_CONNECTION_LOST.
+  [SIN CAMBIOS] Código de producción Mouth 0.4.0, ModKit ABI 1,
+  M144/1 y fuentes instaladas en BONES/modules/mouth.
+  [VERIFICACIÓN] GitHub Actions 39729176758 en Windows/Linux.
+  [LIMITACIONES] Loopback no certifica LAN entre PC físicos, GUI
+  integrada, persistencia ni autenticación criptográfica.
