@@ -16,6 +16,7 @@ jobs:
           make -C BONES host_ui_test
           make -C BONES host_audio_brain_test
           make -C BONES host_lan_test
+          make -C BONES host_interaction_test
           make -C BONES modkit_test
   windows-msvc:
     runs-on: windows-latest
@@ -34,6 +35,8 @@ jobs:
           call BONES\scripts\test_host_audio_brain_msvc.bat
           if errorlevel 1 exit /b 1
           call BONES\scripts\test_host_lan_msvc.bat
+          if errorlevel 1 exit /b 1
+          call BONES\scripts\test_host_interaction_msvc.bat
           if errorlevel 1 exit /b 1
       - name: Measure Windows PE and hash
         shell: pwsh

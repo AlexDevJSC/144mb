@@ -7,6 +7,7 @@
 #include "../../include/bones/modkit_host.h"
 #include "../adapters/eye_adapter.h"
 #include "../demo/test_house.h"
+#include "../bones/interaction_core.h"
 #include "../../modules/eye/eye_modkit_ext.h"
 #include "../../modules/skin/skin_modkit.h"
 #include "../../modules/ear/ear_audio_control.h"
@@ -23,6 +24,38 @@ static uint64_t session_remote_id;
 static int client_snapshot_ready;
 static uint64_t client_snapshot_tick;
 static float client_pitch;
+static BonesInteractionRegistry interactables;
+static BonesCamera current_camera(void) {
+    BonesCamera camera;
+    camera.position=game.player.feet;
+    camera.position.y+=game.player.eye_height;
+    camera.yaw=game.player.yaw;
+    camera.pitch=game.player.pitch;
+    return camera;
+}
+/* Re-evaluate physical reachability on COMMIT, not only when showing a UI hint.
+   No interaction is authorized from a client-only replicated scene. */
+static int try_open_demo_door(void) {
+    BonesInteractionHit hit={0};
+    const BonesCamera camera=current_camera();
+    if(session_mode==BONES_PLAY_LAN_CLIENT)return 0;
+    if(!bones_interaction_select(&game.world,&interactables,
+                                 &camera,3.0f,&hit))return 0;
+    if(hit.id!=bones_house_door_id(game.world.seed))return 0;
+    return bones_house_open_door(&game.world)?1:0;
+}
+static void update_interaction_prompt(void) {
+    BonesInteractionHit hit={0};
+    const BonesCamera camera=current_camera();
+    const Skin2Ui *ui=bones_skin_ui_state();
+    if(!ui || ui->screen!=SKIN2_GAME ||
+       session_mode==BONES_PLAY_LAN_CLIENT ||
+       !bones_interaction_select(&game.world,&interactables,&camera,3.0f,&hit)) {
+        (void)bones_skin_ui_target(0,0,NULL);
+    } else if(hit.id==bones_house_door_id(game.world.seed)) {
+        (void)bones_skin_ui_target(hit.id,1,"PUERTA");
+    } else (void)bones_skin_ui_target(0,0,NULL);
+}
 /* Only used for read-only display of confirmed server snapshot on the
    LAN client. It never submits local physics or edits a server actor. */
 static void lan_client_host_sprite(void *ctx,const BonesEngine *engine,BonesScene *scene) {
@@ -56,6 +89,16 @@ static int init_runtime_mode(int requested,const char *join_ip,uint16_t port) {
     if(!bones_foundation_init(&foundation,UINT64_C(0x1440001),UINT64_C(0x01442026),1))
         return 0;
     if(!bones_house_register_colliders(&game.world))return 0;
+    memset(&interactables,0,sizeof(interactables));
+    {
+        BonesInteractionEntry door={0};
+        door.id=bones_house_door_id(game.world.seed);
+        door.kind=1; /* Demonstration interaction: door only */
+        door.flags=BONES_INTERACTION_REQUIRE_COLLIDER;
+        door.bounds.min=(BonesVec3){-.65f,0.f,1.94f};
+        door.bounds.max=(BonesVec3){ .65f,1.95f,2.04f};
+        if(!bones_interaction_add(&interactables,&door))return 0;
+    }
     if(!bones_foundation_spawn(&foundation,BONES_KIND_NPC,0,npc_start,&npc_id))
         return 0;
     if(requested!=BONES_PLAY_SOLO) {
@@ -250,6 +293,13 @@ static void handle_ui_action(HWND hwnd,Skin2Action action) {
         }
         break;
     }
+    case SKIN2_INTERACT_REQUEST:
+        (void)try_open_demo_door();
+        /* Skin's context screen is presentation-only; return after ACK.
+           No gameplay transaction is performed by Skin. */
+        (void)bones_skin_ui_input(SKIN2_BACK);
+        clear_controls();
+        break;
     case SKIN2_LAN_DISCONNECT_REQUEST:
         capture_mouse(hwnd,0);clear_controls();
         if(init_runtime_mode(BONES_PLAY_SOLO,NULL,0))
@@ -557,6 +607,7 @@ int WINAPI WinMain(HINSTANCE inst,HINSTANCE previous,LPSTR command,int show) {
             /* Render Eye only while playing; paused overlays reuse last scene. */
             if(ui->screen==SKIN2_GAME &&
                bones_mod_host_frame(mod_host)!=BONES_MOD_OK)break;
+            update_interaction_prompt();
             view.tick=game.tick;
             view.actor_count=foundation.entity_count;
             view.available=0; /* Bones has no canonical HP/MP/gold/items. */
