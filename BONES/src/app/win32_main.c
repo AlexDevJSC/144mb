@@ -9,6 +9,8 @@
 #include "../demo/test_house.h"
 #include "../../modules/eye/eye_modkit_ext.h"
 #include "../../modules/skin/skin_modkit.h"
+#include "../../modules/ear/ear_audio_control.h"
+#include "../../modules/brain/brain_mod_diagnostics.h"
 
 static BonesFoundation foundation;
 #define game (foundation.engine)
@@ -24,6 +26,14 @@ static int init_runtime(void) {
     if(!bones_foundation_init(&foundation,UINT64_C(0x1440001),UINT64_C(0x01442026),1))
         return 0;
     if(!bones_house_register_colliders(&game.world))return 0;
+    /* Brain receives a real Foundation NPC, with world physics authority.
+       A local/remote player remains exclusively player owned. */
+    {
+        uint64_t npc_id=0;
+        const BonesVec3 npc_start={1.35f,0.0f,0.0f};
+        if(!bones_foundation_spawn(&foundation,BONES_KIND_NPC,0,
+                                    npc_start,&npc_id) || !npc_id)return 0;
+    }
     house=bones_test_house_module();
     if(!bones_register_module(&game,&house))return 0;
     mod_host=bones_mod_host_create(&foundation);
@@ -408,13 +418,24 @@ int WINAPI WinMain(HINSTANCE inst,HINSTANCE previous,LPSTR command,int show) {
             if(bones_skin_ui_compose(frame_ui,320,200,320)!=BONES_MOD_OK)break;
             frame_valid=1;
         }
+        /* Ear needs its OS audio pump even when UI blocks simulation ticks. */
+        ear_audio_pump();
         present(hwnd);
         frames++;
         if(report_clock>=1.0) {
-            char title[180];
+            char title[220];
+            BrainModDiagnostics diag={0};
+            EarAudioStatus audio={0};
+            diag.size=sizeof(diag);audio.size=sizeof(audio);
+            (void)brain_mod_diagnostics_snapshot(&diag);
+            (void)ear_audio_get_status(&audio);
+            /* Audio failure remains nonfatal; no invented music UI control. */
             (void)snprintf(title,sizeof(title),
-                "PROYECTO 1.44 | Eye + Skin | FPS %d | Tri %u | Tick %llu",
-                frames,(unsigned)bones_eye_mod_triangles(),(unsigned long long)game.tick);
+                "P144 | FPS %d | Tri %u | Tick %llu | Brain OK %llu | Audio %s (%u)",
+                frames,(unsigned)bones_eye_mod_triangles(),
+                (unsigned long long)game.tick,
+                (unsigned long long)diag.commands_accepted,
+                audio.device_ready?"OK":"NO DISP",audio.error);
             SetWindowTextA(hwnd,title); frames=0; report_clock=0.0;
         }
         Sleep(1);
