@@ -108,6 +108,7 @@ static int create_backbuffer(HDC window_dc,int w,int h) {
     back_width=w;back_height=h;
     return 1;
 }
+static void capture_mouse(HWND hwnd, int on);
 static void clear_controls(void) {
     ZeroMemory(held,sizeof(held));reset_mouse_deltas();
 }
