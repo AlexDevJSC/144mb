@@ -1,0 +1,33 @@
+name: Ear WinMM - Windows compilation and PE measurement
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'BONES/modules/ear/**'
+      - 'Ear/**'
+      - '.github/workflows/ear-winmm-ci.yml'
+
+jobs:
+  ear-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Ear on Windows and perform diagnostic smoke test
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vcvars = & $vswhere -latest -products '*' -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
+          if (-not $vcvars) { throw 'vcvars64.bat not found' }
+          # GitHub-hosted Windows runners may have no sound output.
+          # --allow-no-device verifies recoverable no-device status;
+          # do NOT count a green workflow as proven audible playback.
+          cmd.exe /d /c "`"$vcvars`" && Ear\scripts\test_windows_audio.bat --allow-no-device"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile Bones with Ear and measure actual PE increment
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vcvars = & $vswhere -latest -products '*' -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
+          if (-not $vcvars) { throw 'vcvars64.bat not found' }
+          cmd.exe /d /c "`"$vcvars`" && powershell -NoProfile -ExecutionPolicy Bypass -File Ear\scripts\measure_pe_ear.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

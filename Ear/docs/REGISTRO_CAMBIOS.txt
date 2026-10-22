@@ -1,3 +1,14 @@
+21/10/2026 (CI Windows): añadido ear-winmm-ci.yml para compilación Windows/MSVC, prueba sin dispositivo y medida PE en runner. Prueba de escucha física aún pendiente.
+[0.4.0] 21/10/2026: Música DUNGEON, control sin UI para Skin, diagnóstico WinMM.
+Fuente: Bones ModKit ABI 1; proveedor versión funcional 4.
+Audio: 4 buffers PCM, waveOutOpen/Write/Pause/Restart/Reset/Close y retry manual.
+SFX: JUMP/LAND, antirrepetición por tipo/actor/tick (16 entradas).
+Tests: GCC, Clang, ASan/UBSan, backend simulado, sin dispositivo y headless,
+regresión de test Ear v0.3.
+Windows hardware/sonido audible y delta PE: PENDIENTES; scripts entregados.
+Docs actualizados en esta entrega: ESTADO_REAL, DECISIONES_TECNICAS, README,
+CONTRATO_CONTROL_AUDIO_SKIN, NOTAS_INTEGRACION_BONES_WINDOWS, ESTADO_MODKIT_AUDIO04.
+
 EAR — REGISTRO DE CAMBIOS
 
 [0.1.0] 20/10/2026 — Motor procedural y adaptador contractual Bones
@@ -83,3 +94,19 @@ Actualización final de integración/documentación 0.2.0:
 - Sin cambios a BONES/include o BONES/src; module.c legado permanece.
 - Pruebas locales GCC/Clang/ASan/UBSan y .so: correctas con fixture ABI1;
   pendiente validar host real y salida Windows.
+
+21/10/2026: GitHub Actions Windows MSVC PASS, hardware absent (Ear error 4/native 2), PE 206848 -> 222720 (+15872 bytes), audibilidad sigue pendiente. https://github.com/AlexDevJSC/144mb/actions/runs/39608044774
+
+[0.4.1] 21/10/2026 — Playtest hardware y auditoría de audibilidad (SIN modificar API)
+- Ear/tools/ear_windows_playtest.c: test de volúmenes separados, mute,
+  pausa/reanudación, pump sin ticks, dedupe, counters y cleanup WinMM.
+- Añadido --listen-confirm para que solo una persona presente pueda certificar
+  audibilidad; en CI se mantiene --allow-no-device (NO confirma sonido).
+- Añadido --retry-device: prueba manual de fallo y reconexión explicita.
+- Ear/scripts/test_windows_audio.bat: por defecto exige dispositivo y
+  confirmación audible; errores con códigos separados.
+- docs/ACTA_PLAYTEST_WINDOWS_REAL_v1.md: acta de prueba y criterios firmables.
+- NO se han cambiado Ear ModKit API, controles Skin, síntesis, ABI ni Bones.
+- GitHub Actions Windows/MSVC anterior: PASS, 222720 B PE (+15872 B).
+- Playtest Windows con hardware disponible NO ejecutado por Ear: requiere
+  equipo real, operador, log y valoración auditiva. PR sigue como borrador.

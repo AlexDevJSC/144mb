@@ -1,0 +1,73 @@
+EAR 0.4.0 — ESTADO VERIFICADO AL 21/10/2026
+
+[SOPORTADO / CODIFICADO]
+- Proveedor Bones ModKit ABI 1, rol EAR y version funcional 4.
+- Composición DUNGEON en inicio; core sintetiza PCM 22050 Hz mono 16 bits.
+- WinMM runtime via carga dinamica; 4 buffers de 512 frames / ~92.9 ms cola.
+- after_tick bombea los buffers ya completados; API adicional ear_audio_pump
+  lista para invocación de anfitrión por frame si deja de simular ticks.
+- Liberación de buffer headers, waveOutReset/Close y FreeLibrary durante stop.
+- Error codificado, código nativo, status y reintento manual; falla sin audio.
+- Enable music, volúmenes separados, pausa/reanudar waveOut sin reabrir.
+- SFX JUMP y LAND: eventos únicos por actor/tick/tipo (ventana 16 claves).
+- Compilación Windows diseñada para fuente única: modkit.c incluye auxiliares.
+
+[TESTEADO EN LINUX, NO ES AUDIO REAL WINDOWS]
+- GCC -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror.
+- Clang C11 con mismos warnings.
+- ASan/UBSan del motor de audio con salida simulada.
+- Fake playback: apertura, progreso de frames, pause/resume sin nueva apertura.
+- Fake no-device: status error y reintento explícito sin crash.
+- Headless: indicador unsupported, sin falsa confirmación de hardware.
+- Música on/off, SFX independiente, dos eventos únicos + dos duplicados,
+  invalid actor, limitaciones de volumen, preferencias antes de inicio,
+  start/stop y reinicio sin cerrar/abrir continuamente.
+
+[NO VALIDADO / PENDIENTE]
+- Apertura real, audibilidad, device enumeration, pausa/resume y limpieza en
+  hardware Windows; receta Ear/scripts/test_windows_audio.bat incluida.
+- Compilación MSVC/MinGW y ejecución integrados con el árbol entero Bones.
+- Latencia real, artefactos sonoros, FPS bajo carga, suspensión de Windows.
+- Impacto en ejecutable Windows PE: SIN CIFRA REAL. Script para medir incluido.
+- Compatibilidad binaria DLL con distintos compiladores o versiones: NO.
+- Sonido por material de contacto: Bones 0.4 solo JUMP/LAND sin payload de material.
+- Persistencia de preferencia de usuario: solo durante proceso, Skin decidirá
+  dónde guardar opciones; Ear no escribe BSF1 ni archivos.
+
+CAMBIO RESPECTO v0.3
+- Resolución explícita de estados WinMM y diagnósticos; antes fallos mudos.
+- Música/SFX configurables sin UI.
+- waveOutPause/Restart y retry explícito, sin crear un dispositivo por tick.
+- Antirrepetición de colisiones notificadas.
+- Herramienta/guía playtest Windows y medición PE de dos compilaciones.
+
+DOCUMENTOS: CONTRATO_CONTROL_AUDIO_SKIN_v1.txt,
+NOTAS_INTEGRACION_BONES_WINDOWS_v1.txt y este fichero.
+
+CI ADICIONAL
+Existe workflow .github/workflows/ear-winmm-ci.yml para compilar/prueba
+smoke en Windows 2022 y medir delta PE. Su prueba no requiere salida física:
+si el runner no tiene dispositivo registra no-device recuperable. El resultado
+verde de esta CI NO significa música audible. No se han ejecutado aún esos jobs
+al crear estos archivos.
+
+
+VALIDACION WINDOWS REAL (GitHub Actions Windows 2022 / MSVC, 21/10/2026)
+- Job run 39608044774: compilación Ear Win32/MSVC y Bones integrado PASS.
+- Dispositivo NO disponible: waveOutOpen error Ear=4, nativo=2;
+  el smoke test confirmó un diagnóstico recuperable, SIN audibilidad.
+- Real PE baseline (Bones con Ear placeholder): 206848 bytes.
+- Real PE con Ear 0.4 integrado: 222720 bytes. Delta: +15872 bytes.
+- Límite global 1474560 bytes respetado para ESTE build, no futuras versiones.
+- NO VERIFICADO: reproducción audible, bombeo real de dispositivo abierto,
+  waveOutPause/Restart ni limpieza de headers tras apertura válida.
+- Evidencia: https://github.com/AlexDevJSC/144mb/actions/runs/39608044774
+
+[REVISIÓN v0.4.1 — 21/10/2026]
+- El CI Windows/MSVC 39608044774 PASÓ sin dispositivo: err=4 MMRESULT=2.
+- La prueba manual se ha reforzado y su aceptación incluye audio audible por
+  persona presente, no sólo contadores de frames o retornos WinMM.
+- Nuevos checkpoints: MusicVolume, SfxVolume, music on/off, paused duration,
+  buffers completados, dedup de eventos, pump aun sin ticks, cierre sin errores.
+- Ruta explícita reconexión: --retry-device, con acción física de usuario.
+- FALTA ejecutar y aprobar acta física; ver ACTA_PLAYTEST_WINDOWS_REAL_v1.md.

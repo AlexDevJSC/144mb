@@ -1,0 +1,90 @@
+PROYECTO 1.44 — ENTREGA EAR A BONES
+Ear 0.4 / Bones ModKit ABI 1 — 21/10/2026
+
+QUE DEBE HACER BONES AHORA
+1) Utilizar sin cambios BONES/modules/ear/modkit.c y su carpeta ear_core/.
+   El punto de entrada bones_mod_ear_query registra rol EAR, version 4.
+   El registro generado de ModKit lo detecta automáticamente.
+2) Ejecutar builds normales Bones 0.4.0. NO añadir a la línea de compilación
+   ear_output.c, ear_music.c, ear_synth.c ni ear_surface.c: modkit.c YA
+   los incluye por diseño y volver a enlazarlos causaría símbolos duplicados.
+3) NO hace falta modificar src/bones, include/bones/modkit.h, Foundation ni
+   otras ranuras. WinMM se carga dinámicamente con LoadLibraryA("winmm.dll"),
+   no requiere winmm.lib en los scripts de Bones.
+4) RECOMENDADO para Windows: llamar `ear_audio_pump()` una vez por frame en
+   el hilo principal, tras bones_mod_host_frame(), aun cuando no haya tick.
+   Ejemplo conceptual:
+       #include "../../modules/ear/ear_audio_control.h"
+       ... bones_mod_host_frame(mod_host);
+           ear_audio_pump();
+   Actualmente after_tick también lo hace 60 veces/s, por lo que esta llamada
+   no es obligatoria para la demo normal. Evita quedarse sin buffers si se
+   detiene la simulación mientras Win32 sigue presentando frames. Sin entrar
+   en callbacks WinMM, nunca se espera ni duerme en ear_audio_pump.
+5) Cuando Bones cierre el host, Ear.stop libera waveOut, buffers y winmm.dll;
+   no retener punteros al estado Ear tras su cierre.
+
+REPRODUCCION Y DIAGNOSTICO WINDOWS
+Desde la raiz de repo, consola x64 Native Tools VS:
+    Ear\scripts\test_windows_audio.bat
+Esto compila una prueba real de WinMM contra BONES/modules/ear y ejecuta
+cinco segundos de composición DUNGEON, salto, aterrizaje, pausa y reanudación.
+La herramienta imprime flags, causa de error, MMRESULT/GetLastError,
+contador de muestras, buffers enviados/completados y eventos aceptados.
+Si no hay dispositivo, retorna 2 y NO declara reproducción correcta.
+Si hay buffers pero no se escucha, revisar mezclador, salida y driver.
+
+AUDIO SIN DISPOSITIVO
+`Ear.start` devuelve BONES_MOD_OK para no impedir jugar sin sonido.
+Consultar status.device_ready y error. El usuario/host puede reintentar
+con ear_audio_retry_output() tras conectar salida; no hay reintento automático
+continuo. En Linux headless se devuelve EAR_AUDIO_ERROR_UNSUPPORTED.
+
+PRUEBA DE TAMANO WINDOWS PE
+Ear/scripts/measure_pe_ear.ps1 compila dos copias aisladas de Bones:
+  - placeholder EAR de ABI1 (sin síntesis)
+  - proveedor Ear 0.4 integrado
+Con las mismas flags MSVC produce tamaños reales de ambos EXE y diferencia.
+No existe medición de PE en esta entrega porque no se dispone del entorno
+Windows/MSVC aquí. Un objeto ELF/Linux no sirve como sustituto de esa cifra.
+
+NO IMPLEMENTADO
+No hay detección de escucha física, ni música espacial, ni identidad
+acústica de terreno transmitida por Bones 0.4.0. La antirrepetición de eventos
+mantiene 16 claves recientes; no constituye journal ni antireplay de red.
+El PCM y WinMM siguen en el hilo del bucle principal: hay trabajo acotado,
+pero un driver puede bloquear una llamada al sistema; no prometer latencia
+hard-real-time sin medir el equipo Windows.
+
+SOLICITUD A SOUL
+Revisar contrato Ear-Skin, permisos de rol Ear, documentación de errores,
+regresiones con Bones 0.4 y pruebas Windows + delta PE antes de integrar.
+
+CI WINDOWS (NO PRUEBA DE ESCUCHA)
+.github/workflows/ear-winmm-ci.yml valida compilación Windows con Visual
+Studio, smoke de WinMM (con excepción explícita si no hay dispositivo) y delta
+PE del juego en el runner. La confirmación humana de música audible se hace
+manualmente con Ear/scripts/test_windows_audio.bat SIN argumentos extra.
+
+
+VALIDACION WINDOWS REAL (GitHub Actions Windows 2022 / MSVC, 21/10/2026)
+- Job run 39608044774: compilación Ear Win32/MSVC y Bones integrado PASS.
+- Dispositivo NO disponible: waveOutOpen error Ear=4, nativo=2;
+  el smoke test confirmó un diagnóstico recuperable, SIN audibilidad.
+- Real PE baseline (Bones con Ear placeholder): 206848 bytes.
+- Real PE con Ear 0.4 integrado: 222720 bytes. Delta: +15872 bytes.
+- Límite global 1474560 bytes respetado para ESTE build, no futuras versiones.
+- NO VERIFICADO: reproducción audible, bombeo real de dispositivo abierto,
+  waveOutPause/Restart ni limpieza de headers tras apertura válida.
+- Evidencia: https://github.com/AlexDevJSC/144mb/actions/runs/39608044774
+
+[ANEXO HOST BONES 21/10/2026]
+Antes de aceptar PR13 con hardware, usar `Ear/scripts/test_windows_audio.bat`
+(ahora exige confirmación auditiva interactiva). Opcional: `--retry-device`
+tras desconectar la salida antes del arranque. CI usa `--allow-no-device`
+y no confirma sonido.
+En el host principal Bones, añadir si se aprueba por su propietario
+`ear_audio_pump();` cada frame aun si no hay `bones_mod_host_step`.
+La prueba aislada de Ear no sustituye pulsar Space en la demo Bones y
+escuchar eventos físicos reales una sola vez. Contactos por material no se
+incluyen aquí: contrato independiente pendiente de Bones y Soul.

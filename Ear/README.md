@@ -33,3 +33,22 @@ ABI 1, síntesis procedural y eventos JUMP/LAND, sin modificar Bones core.
 La compilación enlaza únicamente modkit.c, que incluye sus .c auxiliares.
 Ver [auditoría y límites](docs/BONES04_COMPATIBILIDAD.txt). Windows y el
 host completo aún requieren pruebas de integración de Soul.
+
+## Ear v0.4.0 — Audio y control (21/10/2026)
+
+Código publicable en `BONES/modules/ear/`, copia en `Ear/modkit_bones04/`.
+**Compilar solo modkit.c**: incluye sus fuentes auxiliares.
+Contrato para Skin: `Ear/docs/CONTRATO_CONTROL_AUDIO_SKIN_v1.txt`.
+Guía Bones: `Ear/docs/NOTAS_INTEGRACION_BONES_WINDOWS_v1.txt`.
+Tests Linux: `cd Ear/tests && make -f Makefile_audio_modkit04 test`.
+Prueba audio Windows: `Ear\\scripts\\test_windows_audio.bat`.
+Medida Windows PE (aún pendiente): `Ear/scripts/measure_pe_ear.ps1`.
+
+Windows build/PE CI: `.github/workflows/ear-winmm-ci.yml`; CI sin salida no prueba audibilidad.
+
+
+Windows CI MSVC: [ejecución 39608044774](https://github.com/AlexDevJSC/144mb/actions/runs/39608044774), PE 206848 → 222720 bytes (+15872). El runner no tiene dispositivo de audio; audibilidad pendiente.
+
+Validación manual hardware Windows: [`Ear/docs/ACTA_PLAYTEST_WINDOWS_REAL_v1.md`](docs/ACTA_PLAYTEST_WINDOWS_REAL_v1.md).
+La herramienta exige respuesta del probador si existe salida; el CI nunca
+la requiere y no se confunde con evidencia audible.

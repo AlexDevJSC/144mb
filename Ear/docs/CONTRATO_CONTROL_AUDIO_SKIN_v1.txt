@@ -1,0 +1,65 @@
+PROYECTO 1.44 — ENTREGA DE EAR A SKIN
+CONTROL DE MUSICA / VOLUMEN — CONTRATO v1, Ear v0.4.0, 21/10/2026
+
+RESPONSABLES
+Ear implementa audio y estado; Skin implementa exclusivamente controles,
+ventanas y UX. Bones es el anfitrión ModKit y los eventos de física.
+No se altera el descriptor BonesModDescriptor, BONES_MOD_ABI ni ninguna API
+pública de Bones. La interfaz es C y enlazado estático; NO es ABI DLL nueva.
+
+HEADER UTILIZABLE POR SKIN:
+  BONES/modules/ear/ear_audio_control.h
+  Copia de distribución: Ear/modkit_bones04/ear_audio_control.h
+
+FUNCIONES (llamar SIEMPRE desde el hilo principal de la aplicación)
+  int ear_audio_enable_music(int enabled);     0/1, sin reiniciar hardware
+  int ear_audio_set_music_volume(float level); [0,1], independiente de SFX
+  int ear_audio_set_sfx_volume(float level);   [0,1], independiente de música
+  int ear_audio_get_status(EarAudioStatus *s); s->size = sizeof(*s) antes de llamar
+  int ear_audio_pause(void);                  pausa audio completo
+  int ear_audio_resume(void);                 reanuda sin cerrar dispositivo
+  int ear_audio_retry_output(void);           reintento EXPLICITO tras error
+  void ear_audio_pump(void);                   llamado desde Bones after_tick;
+                                               el host puede llamar también por frame
+  const char* ear_audio_error_string(uint32_t code); explicación estática
+
+NORMAS DE USO PARA SKIN
+ - Los setters se admiten ANTES de start; las preferencias se retienen durante
+   start/stop dentro de la ejecución. No se persisten en BSF1 automáticamente.
+ - level inválido, NaN o fuera [0,1] devuelve 0 y NO cambia la preferencia.
+ - `enabled=0` detiene nuevas notas musicales y silencia voces actuales;
+   no desactiva SFX. La cola física WinMM puede conservar hasta ~93 ms de audio.
+ - `pause/resume` afectan música y SFX; usan waveOutPause/waveOutRestart,
+   SIN cerrar ni volver a abrir el dispositivo.
+ - `retry_output` no sucede implícitamente en cada frame para no saturar logs;
+   ofrecer al usuario una acción de reintento cuando device_ready=0.
+ - Consultar EarAudioStatus.device_ready para mostrar fallo recuperable;
+   no inferir «sonando» exclusivamente de module_running o music_enabled.
+ - status.error usa EarAudioError; native_error es MMRESULT/GetLastError.
+ - status.frames_generated es PCM entregado a WinMM, NO prueba de escucha.
+ - No usar ninguna función de Ear en un hilo concurrente hasta introducir
+   sincronización de estado y prueba formal.
+ - Skin no implementa síntesis, WinMM ni eventos de audio.
+
+USO RECOMENDADO (solo patrón, no implementación de menú):
+  #include "BONES/modules/ear/ear_audio_control.h"
+  ear_audio_enable_music(1);
+  ear_audio_set_music_volume(0.35f);
+  ear_audio_set_sfx_volume(0.65f);
+  EarAudioStatus st={0};st.size=sizeof(st);
+  if(ear_audio_get_status(&st) && !st.device_ready) {
+      /* mostrar st.error, ear_audio_error_string(st.error), st.native_error */
+      /* acción de usuario -> ear_audio_retry_output() */
+  }
+
+EVENTOS
+JUMP/LAND de Bones ModKit ABI 1 disparan un SFX cada uno por actor/tick,
+con anillo antirrepetición de 16 identificadores. No se asume material acústico
+inexistente ni se simula SFX de pasos sin eventos de contacto de Bones.
+
+ESTADO Y PRUEBAS
+- Linux C11: tests de control, voz/música, eventos, falsa salida y sin dispositivo.
+- Windows WinMM real: requiere ejecutar scripts/test_windows_audio.bat.
+- NO se certifica escucha real desde Linux, ni DLL ni límite Windows de bytes.
+- Puntos que Soul debe revisar: hilo principal, ciclo de vida, interfaz y
+  posible futuro control de música al pausar la simulación de Bones.
