@@ -11,40 +11,123 @@
 #include "../../modules/skin/skin_modkit.h"
 #include "../../modules/ear/ear_audio_control.h"
 #include "../../modules/brain/brain_mod_diagnostics.h"
+#include "../../modules/mouth/mouth_lan.h"
 
 static BonesFoundation foundation;
 #define game (foundation.engine)
 static BonesModHost *mod_host;
+enum { BONES_PLAY_SOLO=0, BONES_PLAY_LAN_HOST=1, BONES_PLAY_LAN_CLIENT=2 };
+static int session_mode;
+static MouthLan session_lan;
+static uint64_t session_remote_id;
+static int client_snapshot_ready;
+static uint64_t client_snapshot_tick;
+static float client_pitch;
+/* Only used for read-only display of confirmed server snapshot on the
+   LAN client. It never submits local physics or edits a server actor. */
+static void lan_client_host_sprite(void *ctx,const BonesEngine *engine,BonesScene *scene) {
+    const BonesFoundation *f=(const BonesFoundation*)ctx;
+    BonesSprite b;
+    (void)engine;
+    if(!client_snapshot_ready || !f || f->entity_count<1)return;
+    b.feet=f->entities[0].body.feet;b.width=1.f;
+    b.height=f->entities[0].body.height;
+    b.animation_tick=(uint32_t)client_snapshot_tick;
+    (void)bones_scene_add_sprite(scene,&b);
+}
 /* Application-owned 320x200 compositor. Eye's framebuffer remains const. */
 static uint32_t frame_ui[EYE_DISPLAY_PIXELS];
 static const uint32_t *frame_present=frame_ui;
 static int frame_valid;
 /* Host lifecycle: Skin does not create worlds or own gameplay state. */
-static int init_runtime(void) {
+static int init_runtime_mode(int requested,const char *join_ip,uint16_t port) {
     BonesModule house;
-    if(mod_host) { bones_mod_host_destroy(mod_host); mod_host=NULL; }
+    MouthLanConfig network={0};
+    uint64_t npc_id=0;
+    const BonesVec3 npc_start={1.35f,0.f,0.f};
+    const BonesVec3 remote_start={-1.25f,0.f,-3.f};
+    int ok=0;
+    /* Teardown of old host must precede network context reset. */
+    if(mod_host) {bones_mod_host_destroy(mod_host);mod_host=NULL;}
+    (void)mouth_session_disconnect(&session_lan);
+    session_mode=BONES_PLAY_SOLO;
+    session_remote_id=0;client_snapshot_ready=0;client_snapshot_tick=0;
+    client_pitch=0;
     if(!bones_foundation_init(&foundation,UINT64_C(0x1440001),UINT64_C(0x01442026),1))
         return 0;
     if(!bones_house_register_colliders(&game.world))return 0;
-    /* Brain receives a real Foundation NPC, with world physics authority.
-       A local/remote player remains exclusively player owned. */
-    {
-        uint64_t npc_id=0;
-        const BonesVec3 npc_start={1.35f,0.0f,0.0f};
-        if(!bones_foundation_spawn(&foundation,BONES_KIND_NPC,0,
-                                    npc_start,&npc_id) || !npc_id)return 0;
+    if(!bones_foundation_spawn(&foundation,BONES_KIND_NPC,0,npc_start,&npc_id))
+        return 0;
+    if(requested!=BONES_PLAY_SOLO) {
+        if(requested!=BONES_PLAY_LAN_HOST && requested!=BONES_PLAY_LAN_CLIENT)return 0;
+        if(!bones_foundation_spawn(&foundation,BONES_KIND_PLAYER,2,
+                                  remote_start,&session_remote_id))return 0;
+        network.world_id=foundation.world_id;
+        network.seed=foundation.engine.world.seed;
+        network.generator_version=BONES_GENERATOR_VERSION;
+        network.port=port?port:MOUTH_LAN_PORT;
+        if(requested==BONES_PLAY_LAN_HOST) {
+            network.remote_actor_id=session_remote_id;network.remote_owner=2;
+            if(mouth_session_create(&session_lan,&network)!=MOUTH_SESSION_OK)return 0;
+        } else {
+            if(!join_ip || mouth_session_join(&session_lan,&network,join_ip)!=MOUTH_SESSION_OK)
+                return 0;
+            /* Client view does not fake an authoritative NPC or its own sprite. */
+            foundation.entities[1].enabled=0;
+            foundation.entities[2].enabled=0;
+        }
     }
     house=bones_test_house_module();
-    if(!bones_register_module(&game,&house))return 0;
-    mod_host=bones_mod_host_create(&foundation);
-    if(!mod_host)return 0;
-    if(bones_mod_register_builtins(mod_host)!=BONES_MOD_OK ||
-       bones_mod_host_start(mod_host)!=BONES_MOD_OK) {
-        bones_mod_host_destroy(mod_host);mod_host=NULL;return 0;
+    if(!bones_register_module(&game,&house))goto fail;
+    if(requested==BONES_PLAY_LAN_CLIENT) {
+        BonesModule ghost={0};
+        ghost.version=BONES_API_VERSION;
+        ghost.user_data=&foundation;
+        ghost.on_scene=lan_client_host_sprite;
+        if(!bones_register_module(&game,&ghost))goto fail;
     }
+    mod_host=bones_mod_host_create(&foundation);
+    if(!mod_host)goto fail;
+    if(bones_mod_register_builtins(mod_host)!=BONES_MOD_OK ||
+       bones_mod_host_start(mod_host)!=BONES_MOD_OK)goto fail;
+    session_mode=requested;
     frame_valid=0;
-    return 1;
+    (void)bones_skin_ui_lan_status(requested==BONES_PLAY_SOLO?
+         MOUTH_SESSION_OFFLINE:requested==BONES_PLAY_LAN_HOST?
+         MOUTH_SESSION_WAITING_FOR_CLIENT:MOUTH_SESSION_JOINING,
+         MOUTH_SESSION_OK,network.port?network.port:MOUTH_LAN_PORT,1);
+    ok=1;
+fail:
+    if(!ok) {
+        if(mod_host){bones_mod_host_destroy(mod_host);mod_host=NULL;}
+        (void)mouth_session_disconnect(&session_lan);
+        session_mode=BONES_PLAY_SOLO;
+    }
+    return ok;
 }
+static void client_accept_snapshot(void) {
+    MouthLanActor snapshot[MOUTH_LAN_MAX_ACTORS];
+    uint64_t tick=0;uint32_t i,j;
+    if(session_mode!=BONES_PLAY_LAN_CLIENT ||
+       mouth_session_copy_snapshot(&session_lan,snapshot,&tick)!=MOUTH_SESSION_OK ||
+       tick<=client_snapshot_tick)return;
+    for(i=0;i<MOUTH_LAN_MAX_ACTORS;i++) {
+        for(j=0;j<foundation.entity_count;j++) {
+            BonesEntity *entity=&foundation.entities[j];
+            if(entity->id!=snapshot[i].actor_id ||
+               entity->owner!=snapshot[i].owner)continue;
+            entity->body.feet=(BonesVec3){snapshot[i].x,snapshot[i].y,snapshot[i].z};
+            entity->body.yaw=snapshot[i].yaw;
+            if(entity->owner==2) {
+                entity->body.pitch=client_pitch;
+                game.player=entity->body; /* render camera only, NEVER physics */
+            }
+        }
+    }
+    game.tick=tick; client_snapshot_tick=tick;
+    client_snapshot_ready=1;
+}
+
 static int playing(void) {
     const Skin2Ui *ui=bones_skin_ui_state();
     return mod_host && ui && ui->screen==SKIN2_GAME &&
@@ -129,16 +212,49 @@ static void handle_ui_action(HWND hwnd,Skin2Action action) {
         /* Acknowledge the UI request only after a fresh runtime starts. */
         capture_mouse(hwnd,0);
         clear_controls();
-        if(init_runtime()) (void)bones_skin_ui_enter_game();
+        if(init_runtime_mode(BONES_PLAY_SOLO,NULL,0)) (void)bones_skin_ui_enter_game();
         else { MessageBoxA(hwnd,"No se pudo iniciar el mundo.","Bones",MB_ICONERROR|MB_OK);
                DestroyWindow(hwnd); }
         break;
     case SKIN2_MAIN_REQUEST:
         capture_mouse(hwnd,0);
         clear_controls();
-        if(init_runtime())(void)bones_skin_ui_enter_main();
+        if(init_runtime_mode(BONES_PLAY_SOLO,NULL,0))(void)bones_skin_ui_enter_main();
         else { MessageBoxA(hwnd,"No se pudo reiniciar la sesion.","Bones",MB_ICONERROR|MB_OK);
                DestroyWindow(hwnd); }
+        break;
+    case SKIN2_LAN_CREATE_REQUEST:
+        capture_mouse(hwnd,0);clear_controls();
+        if(init_runtime_mode(BONES_PLAY_LAN_HOST,NULL,MOUTH_LAN_PORT))
+            (void)bones_skin_ui_enter_game();
+        else {
+            MessageBoxA(hwnd,"No se pudo abrir el host LAN. Comprueba el puerto.",
+                        "Bones/Mouth",MB_OK|MB_ICONWARNING);
+            if(init_runtime_mode(BONES_PLAY_SOLO,NULL,0))
+                (void)bones_skin_ui_enter_main();
+            else DestroyWindow(hwnd);
+        }
+        break;
+    case SKIN2_LAN_JOIN_REQUEST: {
+        char ip[16]={0};uint16_t port=0;
+        if(bones_skin_ui_lan_request(ip,&port)!=BONES_MOD_OK)break;
+        capture_mouse(hwnd,0);clear_controls();
+        if(init_runtime_mode(BONES_PLAY_LAN_CLIENT,ip,port))
+            (void)bones_skin_ui_enter_game(); /* CONNECTING; UI status is factual. */
+        else {
+            MessageBoxA(hwnd,"No se pudo iniciar la conexion LAN.",
+                        "Bones/Mouth",MB_OK|MB_ICONWARNING);
+            if(init_runtime_mode(BONES_PLAY_SOLO,NULL,0))
+                (void)bones_skin_ui_enter_main();
+            else DestroyWindow(hwnd);
+        }
+        break;
+    }
+    case SKIN2_LAN_DISCONNECT_REQUEST:
+        capture_mouse(hwnd,0);clear_controls();
+        if(init_runtime_mode(BONES_PLAY_SOLO,NULL,0))
+            (void)bones_skin_ui_enter_main();
+        else DestroyWindow(hwnd);
         break;
     case SKIN2_QUIT:
         DestroyWindow(hwnd);break;
@@ -363,7 +479,7 @@ int WINAPI WinMain(HINSTANCE inst,HINSTANCE previous,LPSTR command,int show) {
           DestroyWindow(hwnd);return 7;
       }
     }
-    if(!init_runtime())return 4;
+    if(!init_runtime_mode(BONES_PLAY_SOLO,NULL,0))return 4;
     ShowWindow(hwnd,show); UpdateWindow(hwnd);
     if(!QueryPerformanceFrequency(&frequency)||!QueryPerformanceCounter(&previous_time)) return 3;
     while(running) {
@@ -381,24 +497,58 @@ int WINAPI WinMain(HINSTANCE inst,HINSTANCE previous,LPSTR command,int show) {
             if(elapsed>.25) elapsed=.25;
             report_clock+=elapsed;
             /* Paused/menu: NO simulation ticks and NO catch-up on resume. */
-            if(playing()) {
+            if(playing() || session_mode==BONES_PLAY_LAN_HOST ||
+               session_mode==BONES_PLAY_LAN_CLIENT) {
                 accumulator+=elapsed;
                 while(accumulator >= (double)1.0/60.0 && steps<5) {
-                    BonesInput input;
-                    BonesPlayer before=game.player;
-                    get_input(&input);
-                    if(bones_mod_host_step(mod_host,&input)!=BONES_MOD_OK){running=0;break;}
-                    record_input(&input,&before,&game.player,game.tick);
+                    BonesInput input={0};
+                    if(playing())get_input(&input);
+                    else reset_mouse_deltas();
+                    if(session_mode==BONES_PLAY_LAN_CLIENT) {
+                        int direction=(int)input.forward-(int)input.backward;
+                        int strafe=(int)input.right-(int)input.left;
+                        int yaw=(int)(input.mouse_dx*2.3f)+
+                            ((int)input.yaw_right-(int)input.yaw_left)*31;
+                        /* Mouth's wire format supports yaw but not client pitch.
+                           Camera pitch is visual-only until a future protocol. */
+                        if(yaw>300)yaw=300; if(yaw< -300)yaw= -300;
+                        if(playing()) {
+                            client_pitch-=input.mouse_dy*.0023f;
+                            if(client_pitch>1.3f)client_pitch=1.3f;
+                            if(client_pitch< -1.3f)client_pitch= -1.3f;
+                        }
+                        mouth_lan_client_controls(&session_lan,direction,strafe,yaw,
+                                                  input.sprint,input.jump);
+                    } else {
+                        BonesPlayer before=game.player;
+                        /* In LAN the world keeps running behind overlay, but
+                           local controls are zero while Skin blocks gameplay. */
+                        if(bones_mod_host_step(mod_host,&input)!=BONES_MOD_OK){
+                            running=0;break;
+                        }
+                        record_input(&input,&before,&game.player,game.tick);
+                    }
                     accumulator-=1.0/60.0;
                     steps++;
                 }
                 if(steps==5 && accumulator>=1.0/60.0)accumulator=0.0;
             } else {
-                accumulator=0.0;
-                reset_mouse_deltas();
+                accumulator=0.0;reset_mouse_deltas();
             }
         }
         if(!running)break;
+        if(session_mode==BONES_PLAY_LAN_CLIENT) {
+            (void)mouth_session_poll(&session_lan);
+            client_accept_snapshot();
+        }
+        {
+            MouthSessionInfo netinfo={0};
+            netinfo.size=sizeof(netinfo);
+            if(session_mode!=BONES_PLAY_SOLO &&
+               mouth_session_get_status(&session_lan,&netinfo)==MOUTH_SESSION_OK)
+                (void)bones_skin_ui_lan_status((unsigned)netinfo.phase,
+                    (unsigned)netinfo.error,netinfo.port,1);
+        }
         {
             const Skin2Ui *ui=bones_skin_ui_state();
             Skin2View view={0};
@@ -430,18 +580,25 @@ int WINAPI WinMain(HINSTANCE inst,HINSTANCE previous,LPSTR command,int show) {
             (void)brain_mod_diagnostics_snapshot(&diag);
             (void)ear_audio_get_status(&audio);
             /* Audio failure remains nonfatal; no invented music UI control. */
-            (void)snprintf(title,sizeof(title),
-                "P144 | FPS %d | Tri %u | Tick %llu | Brain OK %llu | Audio %s (%u)",
-                frames,(unsigned)bones_eye_mod_triangles(),
-                (unsigned long long)game.tick,
-                (unsigned long long)diag.commands_accepted,
-                audio.device_ready?"OK":"NO DISP",audio.error);
+            {
+                MouthSessionInfo netinfo={0};
+                netinfo.size=sizeof(netinfo);
+                (void)mouth_session_get_status(&session_lan,&netinfo);
+                (void)snprintf(title,sizeof(title),
+                  "P144 | FPS %d | Tri %u | Tick %llu | Brain %llu | Audio %s (%u) | LAN %u RX %llu",
+                  frames,(unsigned)bones_eye_mod_triangles(),
+                  (unsigned long long)game.tick,
+                  (unsigned long long)diag.commands_accepted,
+                  audio.device_ready?"OK":"NO DISP",audio.error,
+                  (unsigned)netinfo.phase,(unsigned long long)netinfo.bytes_received);
+            }
             SetWindowTextA(hwnd,title); frames=0; report_clock=0.0;
         }
         Sleep(1);
     }
     capture_mouse(hwnd,0);
     bones_mod_host_destroy(mod_host);
+    (void)mouth_session_disconnect(&session_lan);
     release_backbuffer();
     if(trace_file)fclose(trace_file);
     if(frame_trace)fclose(frame_trace);
