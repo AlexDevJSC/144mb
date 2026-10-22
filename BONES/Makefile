@@ -82,6 +82,13 @@ build/clock_mod.so: samples/plugin/clock_mod.c include/bones/modkit.h
 build/test_modkit_dll: modkit_registry tests/test_modkit_dll.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY)
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/test_modkit_dll.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY) -lm $(MODKIT_LIBS)
+build/test_host_lan: modkit_registry tests/test_host_lan.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY)
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/test_host_lan.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY) -lm $(MODKIT_LIBS)
+.PHONY: host_lan_test
+host_lan_test: build/test_host_lan
+	./build/test_host_lan
+
 build/test_host_audio_brain: modkit_registry tests/test_host_audio_brain.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY)
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/test_host_audio_brain.c $(CORE) $(EYE) $(DEMO) $(MODKIT) $(MODKIT_MODULES) $(MODKIT_REGISTRY) -lm $(MODKIT_LIBS)
