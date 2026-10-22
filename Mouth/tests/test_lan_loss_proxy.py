@@ -7,8 +7,8 @@ changes or wire-protocol changes. Run from repo root with:
     python Mouth/tests/test_lan_loss_proxy.py Mouth/build/mouth_lan_demo.exe
 
 The proxy simulates 15% loss per direction and one short link interruption
-(1.2 seconds) below Mouth's 5-second timeout. Host outlives client, so a
-graceful LEAVE from host cannot race the successful playtest.
+(1.2 seconds) below Mouth's 5-second timeout. The harness ends the host only after the client finishes; the host's demo
+timer must never send LEAVE during the successful loss/recovery check.
 """
 import os
 import random
