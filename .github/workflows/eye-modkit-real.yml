@@ -1,0 +1,106 @@
+name: Eye 0.5.2 Bones-real validation
+on:
+  push:
+    branches:
+      - eye/diagnostico-y-soporte-skin-052
+    paths:
+      - "Eye/**"
+      - "BONES/**"
+      - ".github/workflows/eye-modkit-real.yml"
+  pull_request:
+    paths:
+      - "Eye/**"
+      - "BONES/**"
+      - ".github/workflows/eye-modkit-real.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-real:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Eye display scan and base modes
+        run: sh Eye/scripts/test_eye_display.sh
+      - name: Eye ABI1 with real Bones software rasterizer
+        run: sh Eye/scripts/test_eye_modkit_real.sh
+      - name: Bones full host and ModKit regressions
+        run: make -C BONES modkit_test
+      - name: Build Eye + Skin against real Bones host
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p Eye/build/qa-skin
+          cc -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror \
+            Eye/tests/test_eye_skin_live.c \
+            BONES/src/bones/core.c BONES/src/bones/world.c \
+            BONES/src/bones/physics.c BONES/src/bones/scene.c \
+            BONES/src/bones/subsystems.c BONES/src/foundation/foundation.c \
+            BONES/src/modkit/modkit.c BONES/src/demo/test_house.c \
+            BONES/modules/eye/modkit.c BONES/modules/skin/modkit.c \
+            BONES/third_party/eye/sw_renderer.c \
+            -lm -ldl -o Eye/build/qa-skin/live
+          Eye/build/qa-skin/live Eye/build/qa-skin 2>&1 | tee Eye/build/qa-skin/qa.log
+      - name: Convert PPM to PNG without image dependencies
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib,struct,zlib
+          def chunk(tag,payload):
+              return struct.pack(">I",len(payload))+tag+payload+struct.pack(">I",zlib.crc32(tag+payload)&0xffffffff)
+          for ppm in pathlib.Path("Eye/build/qa-skin").glob("*.ppm"):
+              data=ppm.read_bytes()
+              head=b"P6\n320 200\n255\n"
+              assert data.startswith(head) and len(data)==len(head)+320*200*3
+              pixels=data[len(head):]
+              raw=b"".join(b"\x00"+pixels[y*960:(y+1)*960] for y in range(200))
+              png=b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",320,200,8,2,0,0,0))+chunk(b"IDAT",zlib.compress(raw,9))+chunk(b"IEND",b"")
+              ppm.with_suffix(".png").write_bytes(png)
+              print(ppm.with_suffix(".png"),len(png))
+          PY
+      - name: Upload captured modes and framebuffer diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eye_052_Bones_Skin_Linux_Real
+          path: |
+            Eye/build/qa-skin/*.png
+            Eye/build/qa-skin/*.ppm
+            Eye/build/qa-skin/qa.log
+          if-no-files-found: warn
+
+  windows-msvc-real:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build real Bones Win32 EXE and check 1.44 MB limit
+        shell: cmd
+        run: |
+          call BONES\scripts\build_windows_msvc.bat
+      - name: Measure PE bytes and SHA256
+        if: always()
+        shell: pwsh
+        run: |
+          $exe="BONES/build/Proyecto144_Bones_ModKit.exe"
+          if (Test-Path $exe) {
+            $info=Get-Item $exe
+            "PE_BYTES=$($info.Length)" | Tee-Object -FilePath eye_windows_report.txt
+            $h=Get-FileHash $exe -Algorithm SHA256
+            "PE_SHA256=$($h.Hash)" | Tee-Object -FilePath eye_windows_report.txt -Append
+          } else {
+            "EXE_NOT_CREATED" | Set-Content eye_windows_report.txt
+          }
+      - name: Upload PE measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eye_052_Bones_Windows_PE_Real
+          path: eye_windows_report.txt
+          if-no-files-found: error

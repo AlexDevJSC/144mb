@@ -8,6 +8,7 @@
 #include "../../third_party/eye/sw_renderer.h"
 #include "eye4.h"
 #include "eye5.h"
+#include "eye_display.h"
 #include <string.h>
 
 typedef struct {
@@ -18,6 +19,8 @@ typedef struct {
     unsigned roof_material;
     unsigned roof_enabled;
     unsigned started;
+    EyeFrameStats frame_stats;
+    uint64_t frames_rendered;
 } EyeModkit;
 static EyeModkit eye_state;
 
@@ -45,6 +48,8 @@ static int32_t eye_start(void *context, const BonesModServices *svc) {
     p144_renderer_init(&s->renderer,UINT32_C(0x01442026));
     if(!prepare_textures(s,0u))return BONES_MOD_BAD_STATE;
     s->services=svc;
+    s->frames_rendered=0u;
+    memset(&s->frame_stats,0,sizeof(s->frame_stats));
     s->started=1u;
     return BONES_MOD_OK;
 }
@@ -94,7 +99,7 @@ static void eye_present(void *context,const BonesModFrame *frame) {
        frame->quad_count>BONES_MOD_QUAD_LIMIT||frame->sprite_count>BONES_MOD_SPRITE_LIMIT||
        (frame->quad_count&&!frame->quads)||(frame->sprite_count&&!frame->sprites))return;
     camera.pos=(P144_Vec3){frame->camera_x,frame->camera_y,frame->camera_z};
-    camera.yaw=frame->camera_y;camera.pitch=frame->camera_pitch;
+    camera.yaw=frame->camera_yaw;camera.pitch=frame->camera_pitch;
     p144_renderer_begin(&s->renderer,UINT32_C(0x15202d));
     for(uint32_t i=0;i<frame->quad_count;++i) {
         const BonesModQuad *src=&frame->quads[i];
@@ -112,11 +117,13 @@ static void eye_present(void *context,const BonesModFrame *frame) {
            (P144_Vec3){sp->x,sp->y,sp->z},sp->width,sp->height,sp->animation_tick);
     }
     p144_renderer_crosshair(&s->renderer);
+    (void)eye_display_scan(s->renderer.pixels,EYE_DISPLAY_PIXELS,&s->frame_stats);
+    ++s->frames_rendered;
 }
 int32_t bones_mod_eye_query(uint32_t abi,BonesModDescriptor *out) {
     if(abi!=BONES_MOD_ABI||!out||out->size!=sizeof(*out))return BONES_MOD_EINVAL;
     memset(out,0,sizeof(*out));out->size=sizeof(*out);out->abi=abi;
-    memcpy(out->id,"eye",4);out->implementation_version=501u;
+    memcpy(out->id,"eye",4);out->implementation_version=502u;
     out->state_schema_version=0u;out->role=BONES_ROLE_EYE;
     out->requested_permissions=BONES_PERMISSION_WRITE_SCENE;
     out->user_context=&eye_state;out->start=eye_start;out->stop=eye_stop;
@@ -128,6 +135,23 @@ const uint32_t *bones_eye_mod_pixels(void) {
 }
 uint32_t bones_eye_mod_triangles(void) {
     return eye_state.started?eye_state.renderer.triangles:0u;
+}
+
+/* The host owns its output buffer; Skin can then call bones_skin_ui_compose()
+ * on that buffer. Eye never draws Skin UI or updates game/menu state. */
+int bones_eye_mod_prepare_base(uint32_t *dst,size_t capacity,
+                               EyeDisplayMode mode,unsigned dim) {
+    const uint32_t *scene=(eye_state.started && eye_state.frames_rendered)?
+                           eye_state.renderer.pixels:NULL;
+    if(!eye_state.started)return 0;
+    return eye_display_prepare(dst,capacity,scene,scene?EYE_DISPLAY_PIXELS:0u,
+                               mode,dim);
+}
+int bones_eye_mod_frame_stats(EyeFrameStats *out,uint64_t *serial) {
+    if(!eye_state.started||!out||!eye_state.frames_rendered)return 0;
+    *out=eye_state.frame_stats;
+    if(serial)*serial=eye_state.frames_rendered;
+    return 1;
 }
 
 /* Unity build: Bones 0.4's built-in module collector includes only modkit.c.
@@ -149,3 +173,5 @@ uint32_t bones_eye_mod_triangles(void) {
 #include "eye5.c"
 #undef get32
 #undef put32
+
+#include "eye_display.c"
