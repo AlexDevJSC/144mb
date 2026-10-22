@@ -1,6 +1,6 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wpedantic
-CORE = src/bones/core.c src/bones/world.c src/bones/physics.c src/bones/scene.c src/bones/subsystems.c src/foundation/foundation.c
+CORE = src/bones/interaction_core.c src/bones/core.c src/bones/world.c src/bones/physics.c src/bones/scene.c src/bones/subsystems.c src/foundation/foundation.c
 EYE = src/adapters/eye_adapter.c third_party/eye/sw_renderer.c
 DEMO = src/demo/test_house.c
 MODULE_SRCS = $(wildcard modules/*/module.c)
@@ -12,13 +12,14 @@ all: build/modkit_headless
 core: build/libbones.a
 build/libbones.a: $(CORE) include/bones/bones.h
 	mkdir -p build
+	$(CC) $(CFLAGS) -c src/bones/interaction_core.c -o build/interaction_core.o
 	$(CC) $(CFLAGS) -c src/bones/core.c -o build/core.o
 	$(CC) $(CFLAGS) -c src/bones/world.c -o build/world.o
 	$(CC) $(CFLAGS) -c src/bones/physics.c -o build/physics.o
 	$(CC) $(CFLAGS) -c src/bones/scene.c -o build/scene.o
 	$(CC) $(CFLAGS) -c src/bones/subsystems.c -o build/subsystems.o
 	$(CC) $(CFLAGS) -c src/foundation/foundation.c -o build/foundation.o
-	ar rcs $@ build/core.o build/world.o build/physics.o build/scene.o build/subsystems.o build/foundation.o
+	ar rcs $@ build/interaction_core.o build/core.o build/world.o build/physics.o build/scene.o build/subsystems.o build/foundation.o
 build/bones_headless: registry tools/headless.c $(SRC) include/bones/bones.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tools/headless.c $(SRC) -lm
@@ -34,15 +35,19 @@ build/test_geometry: registry tests/test_geometry.c $(SRC) include/bones/bones.h
 build/test_foundation: registry tests/test_foundation.c $(SRC) include/bones/foundation.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/test_foundation.c $(SRC) -lm
+build/test_interaction_core: registry tests/test_interaction_core.c $(SRC) include/bones/bones.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/test_interaction_core.c $(SRC) -lm
 build/test_playtest: registry tests/test_playtest.c $(SRC) include/bones/bones.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/test_playtest.c $(SRC) -lm
-test: build/test_bones build/test_subsystems build/test_geometry build/test_foundation build/test_playtest
+test: build/test_bones build/test_subsystems build/test_geometry build/test_foundation build/test_playtest build/test_interaction_core
 	./build/test_bones
 	./build/test_subsystems
 	./build/test_geometry
 	./build/test_foundation
 	./build/test_playtest
+	./build/test_interaction_core
 preview: build/bones_headless
 	./build/bones_headless build/bones_preview.ppm
 sanitize: registry
@@ -58,7 +63,7 @@ sanitize: registry
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_playtest_sanitize tests/test_playtest.c $(SRC) -lm
 	./build/test_playtest_sanitize
 clean:
-	rm -f build/test_bones build/test_subsystems build/test_geometry build/test_foundation build/test_playtest build/test_foundation_sanitize build/foundation.o build/test_sanitize build/test_subsystems_sanitize build/test_geometry_sanitize build/bones_headless build/bones_preview.ppm build/bones_movimiento.ppm build/bones_tejado.ppm build/libbones.a build/core.o build/world.o build/physics.o build/scene.o build/subsystems.o
+	rm -f build/test_bones build/test_subsystems build/test_geometry build/test_foundation build/test_playtest build/test_interaction_core build/test_playtest_sanitize build/interaction_core.o build/test_foundation_sanitize build/foundation.o build/test_sanitize build/test_subsystems_sanitize build/test_geometry_sanitize build/bones_headless build/bones_preview.ppm build/bones_movimiento.ppm build/bones_tejado.ppm build/libbones.a build/core.o build/world.o build/physics.o build/scene.o build/subsystems.o
 
 # BONES ModKit v0.4 — separate, versioned modules. Do not mix registrations with legacy.
 MODKIT = src/modkit/modkit.c
