@@ -1,0 +1,32 @@
+name: Bones playtest Windows MSVC
+on:
+  pull_request:
+    paths:
+      - 'BONES/**'
+      - '.github/workflows/bones-playtest-msvc.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build complete Windows executable and measure PE
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%I in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%I"
+          if not defined VSPATH exit /b 1
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
+          call BONES\scripts\build_windows_msvc.bat
+      - name: Measure PE bytes
+        shell: pwsh
+        run: |
+          $exe = 'BONES/build/Proyecto144_Bones_ModKit.exe'
+          if (!(Test-Path $exe)) { throw "PE not generated" }
+          $size = (Get-Item $exe).Length
+          Write-Host "Windows PE bytes: $size / 1474560"
+          if ($size -gt 1474560) { throw "Exceeds 1.44MB ceiling" }
+      - name: Upload Windows executable for manual playtest
+        uses: actions/upload-artifact@v4
+        with:
+          name: bones-playtest-windows-pe
+          path: BONES/build/Proyecto144_Bones_ModKit.exe

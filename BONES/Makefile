@@ -34,11 +34,15 @@ build/test_geometry: registry tests/test_geometry.c $(SRC) include/bones/bones.h
 build/test_foundation: registry tests/test_foundation.c $(SRC) include/bones/foundation.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/test_foundation.c $(SRC) -lm
-test: build/test_bones build/test_subsystems build/test_geometry build/test_foundation
+build/test_playtest: registry tests/test_playtest.c $(SRC) include/bones/bones.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/test_playtest.c $(SRC) -lm
+test: build/test_bones build/test_subsystems build/test_geometry build/test_foundation build/test_playtest
 	./build/test_bones
 	./build/test_subsystems
 	./build/test_geometry
 	./build/test_foundation
+	./build/test_playtest
 preview: build/bones_headless
 	./build/bones_headless build/bones_preview.ppm
 sanitize: registry
@@ -51,8 +55,10 @@ sanitize: registry
 	./build/test_geometry_sanitize
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_foundation_sanitize tests/test_foundation.c $(SRC) -lm
 	./build/test_foundation_sanitize
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer -o build/test_playtest_sanitize tests/test_playtest.c $(SRC) -lm
+	./build/test_playtest_sanitize
 clean:
-	rm -f build/test_bones build/test_subsystems build/test_geometry build/test_foundation build/test_foundation_sanitize build/foundation.o build/test_sanitize build/test_subsystems_sanitize build/test_geometry_sanitize build/bones_headless build/bones_preview.ppm build/bones_movimiento.ppm build/bones_tejado.ppm build/libbones.a build/core.o build/world.o build/physics.o build/scene.o build/subsystems.o
+	rm -f build/test_bones build/test_subsystems build/test_geometry build/test_foundation build/test_playtest build/test_foundation_sanitize build/foundation.o build/test_sanitize build/test_subsystems_sanitize build/test_geometry_sanitize build/bones_headless build/bones_preview.ppm build/bones_movimiento.ppm build/bones_tejado.ppm build/libbones.a build/core.o build/world.o build/physics.o build/scene.o build/subsystems.o
 
 # BONES ModKit v0.4 — separate, versioned modules. Do not mix registrations with legacy.
 MODKIT = src/modkit/modkit.c

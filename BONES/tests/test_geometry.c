@@ -76,16 +76,16 @@ static void test_house(void) {
         if(q->material==BONES_MAT_WOOD) wood++;
         if(q->material==BONES_MAT_FLOOR) floor_count++;
     }
-    assert(stone==6 && wood==3 && floor_count==1);
-    for(i=38;i<=39;i++) { /* frontons with duplicated final vertex */
+    assert(stone==8 && wood==3 && floor_count==1);
+    for(i=40;i<=41;i++) { /* frontons with duplicated final vertex */
         const BonesQuad *q=&scene.quads[i];
         assert(memcmp(&q->vertices[2],&q->vertices[3],sizeof(BonesVertex))==0);
         assert(fabsf(cross((BonesQuad*)q).z)>0.1f);
     }
-    assert(cross(&scene.quads[40]).y>0);
-    assert(cross(&scene.quads[41]).y>0);
+    assert(cross(&scene.quads[42]).y>0);
+    assert(cross(&scene.quads[43]).y>0);
     assert(cross(&scene.quads[32]).z<0); /* front wall faces outward (-z) */
-    assert(cross(&scene.quads[37]).z<0); /* door likewise */
+    assert(cross(&scene.quads[39]).z<0); /* door likewise */
     with_house=draw(&scene);
     assert(with_house!=without_house);
     assert(eye.renderer.triangles>20);
@@ -94,7 +94,7 @@ static void test_house(void) {
     scene.quad_count=BONES_MAX_QUADS-BONES_HOUSE_QUADS+1;
     assert(!bones_house_append_scene(&scene));
     assert(scene.quad_count==BONES_MAX_QUADS-BONES_HOUSE_QUADS+1);
-    puts("PASS: casa 10 quads, 2 gables triangulares, techo/normales y materiales compartidos");
+    puts("PASS: casa 12 quads, 2 gables triangulares, techo/normales y materiales compartidos");
 }
 static void test_triangle_orientation(void) {
     uint64_t h1,h2,h3;
@@ -182,7 +182,7 @@ static void test_regeneration_and_fallback(void) {
     h2=draw(&scene);
     assert(h1!=h2);
     assert(bones_house_append_scene(&scene));
-    assert(scene.quad_count==11);
+    assert(scene.quad_count==1+BONES_HOUSE_QUADS);
     printf("PASS: material externo, fallback, regeneracion; memoria Eye=%zu, Scene=%zu, quad=%zu\n",
         sizeof(BonesEye),sizeof(BonesScene),sizeof(BonesQuad));
 }
