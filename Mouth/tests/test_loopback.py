@@ -30,8 +30,12 @@ def main():
     )
     client = None
     host_was_running = False
+    # A delayed-join regression reproduces the former six-second host timer
+    # race without changing any of the gameplay transport semantics.
+    join_delay = float(os.environ.get("MOUTH_TEST_JOIN_DELAY", "0.25"))
+    assert 0.0 <= join_delay <= 15.0, join_delay
     try:
-        time.sleep(0.25)
+        time.sleep(join_delay)
         client = subprocess.run(
             [binary, "join", "127.0.0.1", port],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
