@@ -30,7 +30,7 @@
 
 ## S-006 — Renderizador de Bones no soporta biblioteca Eye 0.5.1
 - **Gravedad:** ALTA · **Estado:** ABIERTA.
-- **Evidencia:** `BONES/modules/eye/modkit.c` ignora `material_id>2`; contrato de Bones limita la escena a 3 materiales y 96 quads. Eye 0.5.1 proporciona múltiples materiales y tejados más complejos.
+- **Evidencia actualizada:** `BONES/modules/eye/modkit.c` (descriptor Eye 502) conserva la identidad legacy de materiales 0–2; el contrato ModKit limita la escena a 96 quads y los RFC de Eye sobre materiales/referencias no implementan un catálogo ampliado. Eye 0.5.2 no equivale a que todos sus materiales se representen en la escena de Bones.
 - **Acción:** definir IDs versionados, banco de texturas, UV/triángulos y pruebas que detecten descarte involuntario.
 
 ## S-007 — No existe ensamblado integral del RPG
@@ -38,10 +38,10 @@
 - **Evidencia actualizada:** GitHub Actions run 39730456641 compiló en Windows el EXE de `main` (247.296 bytes registrados) y probó instalación/desinstalación; los módulos reales están en `BONES/modules`. No obstante, `main` no conecta Skin a teclado/render, y las PR #28–#31 con integración funcional siguen abiertas. No hay aceptación humana de juego completo.
 - **Acción:** definir y aprobar una build de integración gradual y pruebas de funcionalidades reales. No llamar al binario actual «juego completo».
 
-## S-008 — MOUTH 0.2 sin código publicado
+## S-008 — MOUTH 0.2 sin código publicado (incidencia histórica)
 - **Gravedad:** ALTA histórica · **Estado:** PUBLICACIÓN RESUELTA, QA LAN REAL PENDIENTE.
 - **Evidencia actualizada:** `Mouth/` y `BONES/modules/mouth/` contienen Mouth 0.4.0 con Session API 1, `implementation_version=4`, pruebas Windows/Linux y loopback. La ausencia de código de S-008 está resuelta para 0.4.0; no se ha probado LAN entre dos PCs físicos.
-- **Acción:** publicar fuentes, compilar módulo y verificar conexión P2P LAN con Bones autoritativo y pruebas de pérdida/repetición.
+- **Acción actualizada:** conservar la evidencia de publicación de Mouth 0.4.0 y completar QA LAN real con dos procesos/equipos y Bones autoritativo. No reabrir la falta histórica de fuentes.
 
 ## S-009 — Documentación de versiones de especialistas desfasada
 - **Gravedad:** MEDIA · **Estado:** ABIERTA (detectada 22/10; persiste 24/10).
