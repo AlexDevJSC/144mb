@@ -1,6 +1,6 @@
 # Discrepancias — Soul
 
-**Última revisión:** 24/10/2026 · `main` SHA `1e794185ec9d5bf77c760adc662c4aa0a08a1d8f` (solo documentación Soul; base funcional auditada `63e294b403f41cc43f667059f1fa417741ff100c`). Se conservan identificadores S-001–S-013 y se añade S-014. Las PR #28–#31 continúan abiertas.
+**Última revisión:** 26/10/2026 · HEAD de `main` observado antes de esta actualización: `6db16bf3a7a6f0f8f1be31cb2906381f05459408` (documentación Soul; base funcional auditada `63e294b403f41cc43f667059f1fa417741ff100c`). Se conservan S-001–S-014 y se documenta S-015. Las PR #28–#31 continúan abiertas. Los commits de esta auditoría cambiarán el HEAD, no la base funcional.
 
 ## S-001 — BONES 0.4.0: estados de sincronización contradictorios
 - **Gravedad:** MEDIA · **Estado:** EN VERIFICACIÓN (sustituye incidencia de subida parcial 0.3).
@@ -72,6 +72,12 @@
 - **Gravedad:** MEDIA/ALTA DE ACEPTACIÓN FUNCIONAL · **Estado:** ABIERTA (detectada por lectura de fuente 24/10).
 - **Evidencia:** en el HEAD `82c8a3a0659c7a1ffd51bdd91ed239186b462811` de [PR #31](https://github.com/AlexDevJSC/144mb/pull/31), `BONES/modules/skin/skin_ui2.c`, función `skin2_input`, responde literalmente `AUDIO: PENDIENTE EAR` al seleccionar Audio en Opciones. `BONES/src/app/win32_main.c` maneja las acciones de menú pero no conecta los controles `ear_audio_enable_music`, `ear_audio_set_music_volume` o `ear_audio_set_sfx_volume` de `BONES/modules/ear/ear_audio_control.h`. En esa misma rama `ear_audio_pump()` sí se invoca cada frame. **La integración del motor Ear no equivale a opciones de audio utilizables.**
 - **Acción:** solicitar a Skin la UI/acciones de control y a Bones el despacho a Ear, sin duplicar código del especialista. Verificar funcionamiento con dispositivo real y sin él; registrar test y SHA antes de cerrar.
+
+## S-015 — HEAD documental de auditoría confundido con base funcional
+- **Gravedad:** BAJA/MEDIA DE TRAZABILIDAD · **Estado:** RESUELTA DOCUMENTALMENTE (detectada 26/10).
+- **Evidencia:** `Soul/ESTADO_VERSIONES.md` del 24/10 decía «HEAD verificado: 63e294b4» y «No hay nuevos commits en main», pero GitHub muestra `main` en `6db16bf3a7a6f0f8f1be31cb2906381f05459408` (24/10), precedido de `b103e7d3` y `1e794185`, todos de documentación Soul. `63e294b4` es el último commit funcional, no el HEAD actual.
+- **Corrección:** `ESTADO_VERSIONES.md` distingue HEAD observado al comienzo de la auditoría y base funcional; fecha y PR revisadas el 26/10. No afecta versiones de los módulos ni implica una nueva compilación. El HEAD cambiará de nuevo con esta publicación.
+- **Acción restante:** en auditorías futuras identificar por separado HEAD del repositorio, último commit funcional, SHA de cada PR y SHA del artefacto efectivamente probado.
 
 ## Política
 Las declaraciones de los propios desarrolladores no sustituyen las pruebas independientes. No se modifica código ajeno por decisión de Soul. Cerrar incidencias exige evidencia reproducible, versión/commit y criterio satisfecho.
