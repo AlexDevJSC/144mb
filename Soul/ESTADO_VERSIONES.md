@@ -1,6 +1,6 @@
 # Estado de versiones — Proyecto 1.44
 
-**Auditoría Soul:** 24/10/2026 (Europe/Madrid). **Rama examinada:** `main`. **HEAD verificado:** `63e294b403f41cc43f667059f1fa417741ff100c` (último commit: 22/10/2026 05:51:49 UTC). No hay nuevos commits en `main` ni nuevas actualizaciones de las PR #28–#31 respecto a la revisión del 23/10.
+**Auditoría Soul:** 26/10/2026 (Europe/Madrid). **Rama examinada:** `main`. **HEAD observado al inicio de esta auditoría:** `6db16bf3a7a6f0f8f1be31cb2906381f05459408` (24/10/2026 06:52:19 UTC; documentación Soul). **Último commit funcional integrado:** `63e294b403f41cc43f667059f1fa417741ff100c` (22/10/2026 05:51:49 UTC). Desde esa base funcional, `main` solo ha incorporado tres commits de documentación Soul el 24/10. Las PR #28–#31 continúan abiertas, sin cambios de HEAD ni actualización de sus PR desde el 22/10. El HEAD del repositorio cambiará al publicar esta auditoría.
 
 ## Versiones: declaración, código y publicación
 
@@ -26,7 +26,7 @@ Los valores `implementation_version` son identificadores del descriptor ModKit y
 | C — Mouth LAN | [#30](https://github.com/AlexDevJSC/144mb/pull/30) | `82bdc512b495` | [39784847994](https://github.com/AlexDevJSC/144mb/actions/runs/39784847994) | 270.336 B |
 | D — interacción E | [#31](https://github.com/AlexDevJSC/144mb/pull/31) | `82c8a3a0659c` | [39786058595](https://github.com/AlexDevJSC/144mb/actions/runs/39786058595) | 273.920 B |
 
-Las cuatro PR tienen `state=open` y `merged_at=null` a 24/10. El árbol `main` no contiene `BONES/src/bones/interaction_core.c`; el archivo **sí** se ha leído en el HEAD de #31. Los registros de CI muestran compilación satisfactoria, pero aquí no se han descargado ni ejecutado sus ejecutables Windows. Los cuatro workflows reutilizan el nombre de artefacto `bones-integration-a-windows`: nombre de ZIP no equivale a versión de fuente ni prueba ejecutada.
+Las cuatro PR tienen `state=open` y `merged_at=null` a 26/10. El árbol `main` no contiene `BONES/src/bones/interaction_core.c`; el archivo **sí** se ha leído en el HEAD de #31. Los registros de CI muestran compilación satisfactoria, pero aquí no se han descargado ni ejecutado sus ejecutables Windows. Los cuatro workflows reutilizan el nombre de artefacto `bones-integration-a-windows`: nombre de ZIP no equivale a versión de fuente ni prueba ejecutada.
 
 **Nuevo hallazgo de inspección 24/10:** en la rama #31, `BONES/modules/skin/skin_ui2.c` aún responde `AUDIO: PENDIENTE EAR` en Opciones y `BONES/src/app/win32_main.c` no despacha controles de volumen/música. Ear sí publica `ear_audio_enable_music`, `ear_audio_set_music_volume` y `ear_audio_set_sfx_volume`. Por tanto, la fase B integra el motor de audio, **no las opciones de audio operativas desde Skin**. Véase S-014.
 
@@ -39,3 +39,11 @@ Las cuatro PR tienen `state=open` y `merged_at=null` a 24/10. El árbol `main` n
 Se buscó en los archivos accesibles de ChatGPT y en el contexto recuperable de otras conversaciones. Se localizó la petición de integración a Bones y documentos históricos de los especialistas, pero **no** una nueva entrega binaria reciente con bytes inspeccionables. Los nombres de ZIP históricos, resúmenes de otros chats y documentación de handoff no son prueba de que el ZIP haya sido abierto, de que los fuentes coincidan byte a byte ni de que se haya ejecutado una compilación. No existe acceso íntegro garantizado a las conversaciones especializadas.
 
 El archivo de discrepancias conserva identificadores S-001 a S-013 y añade S-014 por la nueva verificación de código: [DISCREPANCIAS.md](DISCREPANCIAS.md). No se ha modificado código de los especialistas.
+
+## Seguimiento de Soul — 26/10/2026
+
+- **Cambios funcionales:** ninguno nuevo en `main` desde `63e294b4`; las PR #28–#31 siguen abiertas y sus HEAD no han cambiado desde el seguimiento anterior. No se declara aceptada la integración 0.4.3.
+- **Comprobación directa de fuentes:** descriptores en `BONES/modules/{eye,brain,ear,skin,mouth}/` siguen en 502/4/4/5/4, respectivamente; `BONES/src/app/win32_main.c` sigue sin llamadas a `bones_skin_ui_input` ni `bones_skin_ui_compose`. Se revisaron también los README de cada especialista; las diferencias ya registradas en S-001/S-009 persisten.
+- **Pruebas:** las compilaciones CI referidas son de octubre 22 y de SHA específicos, no una ejecución nueva ni prueba humana de interfaz/audio/LAN. No se descargaron ni ejecutaron sus ZIP o EXE. Los nombres de artefactos no sustituyen hash de contenido.
+- **Fuentes de ChatGPT:** búsqueda limitada a archivos accesibles de conversación y Biblioteca; aparecen documentos históricos (principalmente 20–21/10), pero ninguna entrega nueva de los seis especialistas con binario/ZIP abierto y cotejado byte a byte. No se presume acceso completo a otros chats.
+- **Corrección de trazabilidad:** el encabezado anterior confundía el último commit **funcional** `63e294b4` con el **HEAD** de `main` y decía que no hubo commits desde el 23/10, pese a tres commits de documentación Soul del 24/10. Corregido y registrado como **S-015** (documental, resuelta); los identificadores S-001–S-014 se mantienen.
