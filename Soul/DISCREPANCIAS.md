@@ -81,3 +81,12 @@
 
 ## Política
 Las declaraciones de los propios desarrolladores no sustituyen las pruebas independientes. No se modifica código ajeno por decisión de Soul. Cerrar incidencias exige evidencia reproducible, versión/commit y criterio satisfecho.
+
+## Seguimiento de resolución — 04/11/2026
+
+**Petición del director:** resolver las discrepancias abiertas, sin confundir preparación, publicación y aceptación. Esta sección no declara cierres sin evidencia.
+
+- **Verificación GitHub:** consulta REST de las PR #28–#31: #28 tiene base `main`, y #29, #30 y #31 se basan sucesivamente en las ramas A, B y C. En la consulta REST, las cuatro PR devuelven `mergeable=true` y `mergeable_state=clean`. Una consulta previa del conector devolvió `mergeable=false` para #28; se conserva la contradicción como límite de la consulta, no como conflicto demostrado.
+- **Bloqueo de aceptación:** falta ejecutar y validar la UI, audio en dispositivo real y LAN real; CI y nombre de artefacto no son suficientes. No se fusionan automáticamente las PR porque ello no resolvería S-003, S-007, S-008 ni S-014.
+- **Orden de corrección:** (1) Bones/Skin: S-014 (opciones audio) y conexión de UI; (2) Bones: S-013 (artefactos únicos por fase/SHA y manifiesto), S-011 (instalador Windows); (3) Eye/Bones: S-002/S-006 (contrato de materiales); (4) QA: S-003/S-005/S-007/S-008; (5) responsables: S-001/S-009 documentación y S-004 propiedad de guardados; (6) integrar A→B→C→D con comprobaciones por SHA y actualizar S-010/S-012 tras fusión efectiva.
+- **Criterio de cierre:** SHA y archivos fuente comprobados, CI identificable y prueba funcional específica cuando corresponda. No se modifica código de especialistas en esta actualización de supervisión.
