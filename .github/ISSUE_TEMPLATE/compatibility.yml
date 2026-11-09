@@ -1,0 +1,25 @@
+name: Comportamiento incompatible
+description: Registra una diferencia reproducible entre Windows y un backend.
+title: "[Compat] "
+body:
+  - type: textarea
+    id: case
+    attributes:
+      label: Reproductor mínimo
+      description: Indica código fuente o pasos, interfaz, entradas y salidas. Usa datos sintéticos.
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: Referencia Windows
+      description: Incluye edición y compilación del SO, arquitectura, NTSTATUS y efectos observados.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Resultado del backend
+      description: Incluye commit, distro, kernel, arquitectura y si se usó backend propio, Wine o Proton.
+    validations:
+      required: true

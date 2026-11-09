@@ -1,0 +1,94 @@
+# Validación
+
+## Resultados locales
+
+Entorno del 9 de noviembre de 2026. Ubuntu 24.04.3 LTS x86-64,
+Linux 6.18.57, glibc 2.39, GCC 13.3 y GNU binutils 2.42.
+
+| Comprobación | Resultado observado |
+| --- | --- |
+| `make -j2 BUILD_DIR=build-release check check-pe` | Pasaron 9 comprobaciones Linux, el comando de diagnóstico y 4 casos llamados desde código PE32+ AMD64. |
+| UBSan en el host y la función | Pasaron `check` y `check-pe` sin diagnósticos. |
+| ASan y UBSan en el host y la función | Pasaron `check` y `check-pe` con `ASAN_OPTIONS=detect_leaks=0`. LeakSanitizer no pudo leer `/proc` en este entorno. El PE freestanding queda sin instrumentar. |
+| Revisión del parser | Con ASan y UBSan, se rechazaron 1.024 truncamientos y el solapamiento con cabeceras. Se probaron 262.144 variaciones de un byte sin ejecutar sus contenidos y sin diagnósticos de los sanitizadores. |
+| Repetición y análisis estático | Pasaron 100 ejecuciones consecutivas del anfitrión PE. El build con `-fanalyzer` completó `check` y `check-pe`. |
+| Inspección PE | `file` y `objdump` identificaron PE32+ AMD64. `objdump -r -j .text` confirmó que la función del fixture carece de relocaciones. Los builds de release y UBSan generaron el mismo PE byte por byte. |
+| Instalación sin privilegios | `make install DESTDIR="$PWD/build-stage" PREFIX=/usr` y la ejecución desde ese destino funcionaron. |
+| Definiciones de CI e incidencias | Los YAML se analizaron localmente. Los jobs necesitan una ejecución en GitHub. |
+| `make BUILD_DIR=build-release benchmark` | Completó 7 muestras de 500.000 llamadas por ruta, además del calentamiento. |
+
+En la ejecución de benchmark registrada, la mediana fue de **38,28
+ns/llamada** para el reloj Linux con conversión y **44,39 ns/llamada**
+para la función NT. Los rangos fueron 31,15–48,86 y 34,71–54,91
+ns/llamada. El máximo RSS del proceso conjunto fue 1.280 KiB. Cada
+muestra incluye el bucle de verificación. Estos datos describen esta
+sesión, un reloj y dos rutas dentro del mismo proceso. Para comparar
+huellas de backends hacen falta procesos separados y una carga de
+aplicación representativa.
+
+## Reproducir Linux
+
+```sh
+make -j2 check check-pe
+make -j2 BUILD_DIR=build-ubsan \
+  CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' check check-pe
+make benchmark
+```
+
+La prueba usa el reloj real para verificar el orden y un reemplazo de
+`clock_gettime` mediante `--wrap` para probar truncamiento a 100 ns,
+el límite de 64 bits, desbordamiento y fallo del anfitrión. Los casos PE
+usan el reloj real a través del puente Microsoft x64. Se comprueban
+resultados y efectos sobre salidas cuando los define este prototipo.
+
+## Sonda Windows y comparación opcional con Wine
+
+En un equipo Windows x64 o una VM autorizada, desde el Developer Command
+Prompt de Visual Studio:
+
+```bat
+cl /nologo /std:c17 /W4 /WX /O2 tests\windows\qpc_reference.c /Fe:qpc-reference.exe
+qpc-reference.exe
+```
+
+En Linux con MinGW-w64 x86-64 y Wine disponibles, se puede compilar el
+mismo código y ejecutarlo en un prefijo de prueba separado:
+
+```sh
+mkdir -p build
+x86_64-w64-mingw32-gcc -std=c17 -O2 -Wall -Wextra -Werror \
+  tests/windows/qpc_reference.c -o build/qpc-reference.exe
+WINEPREFIX="$PWD/build/wine-oracle" wine build/qpc-reference.exe
+```
+
+La sonda registra estados, frecuencia estable, contador no decreciente,
+casos nulos y observaciones con páginas no accesibles. Identifica el
+sistema o backend en el registro junto con versión y arquitectura. Compara
+solo los casos compartidos con el prototipo. La frecuencia, la época del
+contador y el orden de escrituras ante un puntero inválido se registran
+por separado. Wine actúa como una referencia adicional y su ejecución
+usa su implementación. Windows real es la referencia de compatibilidad.
+
+Referencias [Contrato NT](https://learn.microsoft.com/en-us/windows/win32/devnotes/ntqueryperformancecounter) ·
+[Casos de referencia en Wine](https://github.com/wine-mirror/wine/blob/master/dlls/ntdll/tests/time.c).
+
+## Cobertura pendiente
+
+- Windows y Wine o Proton. Faltan sus ejecuciones y resultados de referencia.
+- RPM e instalación en VM Fedora KDE. El entorno local carece de `rpmbuild`.
+- Suspensión y reanudación en máquina real. La elección de reloj deriva
+  de su contrato documentado.
+- `ntsync` y gráficos. El entorno local carece de `/dev/ntsync` y no se
+  realizaron pruebas de compositor ni GPU.
+- Compatibilidad con aplicaciones externas y errores con punteros
+  invitados no nulos. El anfitrión de prueba tiene un alcance acotado.
+
+## Próximas mediciones
+
+| Dimensión | Método |
+| --- | --- |
+| Comportamiento | Mantener un corpus de entradas, NTSTATUS, resultados y efectos en Windows y cada backend. Guardar revisión, arquitectura y build del SO. |
+| Estabilidad | Pruebas repetidas y concurrentes, timeout, caída, cierre de handles y recuperación de recursos. Registrar errores, cuelgues y diferencias. |
+| Memoria | Ejecutar cada backend en un proceso y entorno separados. Capturar pico RSS y memoria proporcional de todos los procesos implicados con la misma carga. |
+| Latencia y CPU | Mismo binario, máquina, estado de caché y configuración. Calentar, alternar orden, repetir, registrar p50 y p95, tiempo de CPU y dispersión. Separar trazas diagnósticas de las muestras de rendimiento. |
+| Compatibilidad gráfica | Comparar apertura, render, entrada, cierre y pérdidas de dispositivo con versiones y capacidades Vulkan registradas. |
