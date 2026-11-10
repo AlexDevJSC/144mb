@@ -15,8 +15,9 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Un segundo PE de consola, compilado con MinGW-w64, importa
   `ntdll.dll!NtQueryPerformanceCounter`. Linux resuelve esa importación con
   la implementación propia.
-- El runtime expone 30 equivalentes iniciales de las funciones Win32 y CRT
-  que pide Mines. Un PE de control verifica la llamada Win32 al reloj.
+- El runtime expone equivalentes probados en Linux para 104 de las 197
+  importaciones directas de Mines. Un PE de control verifica la llamada
+  Win32 al reloj.
 - `pe-import-audit` lee las importaciones directas de un PE AMD64 y
   cuenta las que tienen un equivalente registrado.
 - Un microbenchmark y un spec RPM para el comando ELF de diagnóstico.
@@ -49,12 +50,14 @@ Usa el auditor para medir la cobertura de un archivo externo.
 
 ```sh
 make
-build/pe-import-audit /ruta/a/mines.exe
+build/pe-import-audit --unresolved /ruta/a/mines.exe
 ```
 
 El auditor lee una copia del archivo de hasta 128 MiB. Informa sobre
 las importaciones directas y devuelve 0 si todas tienen un equivalente,
 1 si quedan llamadas pendientes y 2 si el formato o la lectura fallan.
+El indicador opcional añade la biblioteca y el símbolo de cada importación
+pendiente.
 
 La prueba Linux y el comando de diagnóstico se compilan por separado del PE.
 Puedes probar el destino del paquete sin privilegios con `make install
@@ -64,12 +67,13 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 
 | Ruta | Contenido |
 | --- | --- |
-| [include/ntnative](include/ntnative) y [src/ntdll](src/ntdll) | ABI interno y código de compatibilidad |
+| [include/ntnative](include/ntnative) y [src/runtime](src/runtime) | ABI interno y código de compatibilidad |
 | [tests](tests) | Contratos, PE controlados y medición en Linux |
 | [Arquitectura](docs/architecture.md) | Límites entre el kernel, el runtime y el escritorio |
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |
 | [Validación](docs/validation.md) | Pruebas realizadas y plan comparativo |
+| [Compatibilidad de Mines](docs/mines-compatibility.md) | Importaciones, errores y límites verificados en Linux |
 | [Backlog](docs/backlog.md) | Tareas ordenadas y definición del siguiente PR |
 | [Fedora](packaging/fedora/README.md) | Compilación RPM y validación en VM |
 | [AGENTS.md](AGENTS.md) | Instrucciones reproducibles para Codex |

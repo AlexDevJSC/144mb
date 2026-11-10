@@ -24,10 +24,10 @@ el contador NT y un conjunto inicial de contratos Win32 y CRT.
 | Módulo | Espacio y responsabilidad | Estado |
 | --- | --- | --- |
 | Reconocimiento y carga | Usuario. Distinguir ELF y PE por cabeceras. Conservar el camino ELF de Linux. Validar arquitectura y rangos PE, mapear secciones, resolver bibliotecas y preparar la entrada. | Perfiles PE32+ AMD64 de laboratorio y lectura de importaciones directas en archivos externos. |
-| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y 30 puntos de entrada Win32 y CRT de Mines. |
+| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y 104 puntos de entrada Win32 y CRT de Mines con perfiles probados. |
 | Objetos y procesos | Usuario. Tablas de handles por proceso con acceso, herencia, duplicación, nombres y vida útil. Un broker por entorno podrá coordinar recursos compartidos si los casos entre procesos lo requieren. | Diseño inicial. |
-| Recursos de Linux | Kernel y UAPI existentes. Memoria con `mmap` y `mprotect`, descriptores para recursos y `ntsync` opcional para primitivas de espera. | `CLOCK_BOOTTIME` y memoria del fixture en uso. |
-| Gráficos | Usuario. USER y win32u gestionan ventanas, eventos, entrada y portapapeles. DXVK y VKD3D-Proton aportan Direct3D sobre Vulkan. RADV usa la UAPI DRM de amdgpu. | Diseño inicial. |
+| Recursos de Linux | Kernel y UAPI existentes. Memoria con `mmap` y `mprotect`, descriptores para recursos y `ntsync` opcional para primitivas de espera. | Relojes Linux, memoria, `openat2` y `timerfd` en uso. |
+| Gráficos | Usuario. USER y win32u gestionan ventanas, eventos, entrada y portapapeles. DXVK y VKD3D-Proton aportan Direct3D sobre Vulkan. RADV usa la UAPI DRM de amdgpu. | Superficies GDI en memoria y menús sin ventana. Presentación de escritorio pendiente. |
 | Escritorio | Usuario. Lanzador KDE, asociación MIME y estado separado por aplicación. El instalador PE usa la misma política y el mismo entorno que el lanzador. | RPM de diagnóstico preparado. |
 | Pruebas | Usuario y CI en Linux. Contratos documentados, PE sintéticos y mediciones. | Linux y PE controlado comprobados. |
 

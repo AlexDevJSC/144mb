@@ -63,24 +63,24 @@ GitHub Actions compila los PE de control con MinGW-w64 y los ejecuta
 con nuestro cargador en Ubuntu. El trabajo de Fedora comprueba el RPM
 y repite las pruebas del runtime.
 
-## Cobertura inicial de Mines
+## Cobertura de Mines
 
-La prueba de los 30 equivalentes se ejecuta con `make check` en Linux.
-Las comprobaciones usan el registro de equivalentes propios y llaman
-a cada función mediante el ABI Microsoft x64.
+Las pruebas de los 30 equivalentes iniciales y las 74 incorporaciones
+se ejecutan con `make check` en Linux. Las comprobaciones verifican
+el registro y llaman a las funciones mediante el ABI Microsoft x64.
 
-La auditoría local de `mines.exe` leyó 197 importaciones directas,
-30 con un equivalente registrado y 167 pendientes. Una entrada
-pendiente identifica su símbolo por ordinal. El resultado mide la
-resolución de importaciones a partir del archivo.
+La auditoría de solo lectura leyó 197 importaciones directas, con 104
+equivalentes registrados y 93 pendientes. Una entrada pendiente
+identifica su símbolo por ordinal. Las pruebas y el inventario están
+en [Compatibilidad de Mines](mines-compatibility.md).
 
 ## Cobertura pendiente
 
 - Instalación y desinstalación del RPM en VM Fedora KDE.
 - Suspensión y reanudación en máquina real. La elección de reloj deriva
   de su contrato documentado.
-- `ntsync` y gráficos. El entorno local carece de `/dev/ntsync` y no se
-  realizaron pruebas de compositor ni GPU.
+- `ntsync`, compositor y GPU. El entorno local carece de `/dev/ntsync`.
+  Las pruebas gráficas de esta etapa usan superficies en memoria.
 - Compatibilidad con aplicaciones externas y errores con punteros
   invitados no nulos. El anfitrión de prueba tiene un alcance acotado.
 

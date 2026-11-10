@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "ntnative/counter.h"
-#include "ntnative/runtime.h"
+#include "compat.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +37,7 @@ static uint32_t NT_MS_ABI win_get_last_error(void)
     return last_error;
 }
 
-static void NT_MS_ABI win_set_last_error(uint32_t error)
+void NT_MS_ABI nt_SetLastError(uint32_t error)
 {
     last_error = error;
 }
@@ -202,18 +203,80 @@ struct runtime_export {
 };
 
 #define EXPORT(name, function) {name, (nt_guest_proc)function}
+#define WIN_EXPORT(name) EXPORT(#name, nt_##name)
 
 static const struct runtime_export ntdll_exports[] = {
     EXPORT("NtQueryPerformanceCounter", nt_counter)
 };
 
 static const struct runtime_export kernel32_exports[] = {
+    WIN_EXPORT(CreateDirectoryA),
+    WIN_EXPORT(DeleteFileA),
+    WIN_EXPORT(FormatMessageA),
+    WIN_EXPORT(FreeLibrary),
+    WIN_EXPORT(GetCurrentProcess),
     EXPORT("GetCurrentProcessId", win_process_id),
     EXPORT("GetCurrentThreadId", win_thread_id),
     EXPORT("GetLastError", win_get_last_error),
+    WIN_EXPORT(GetLocalTime),
+    WIN_EXPORT(GetModuleHandleW),
+    WIN_EXPORT(GetProcAddress),
+    WIN_EXPORT(GetStartupInfoW),
+    WIN_EXPORT(GetSystemTimeAsFileTime),
+    WIN_EXPORT(GetTickCount),
+    WIN_EXPORT(GlobalAlloc),
+    WIN_EXPORT(GlobalFree),
+    WIN_EXPORT(GlobalLock),
+    WIN_EXPORT(GlobalUnlock),
+    WIN_EXPORT(InitializeSListHead),
+    WIN_EXPORT(IsDebuggerPresent),
+    WIN_EXPORT(IsProcessorFeaturePresent),
+    WIN_EXPORT(LoadLibraryA),
+    WIN_EXPORT(LocalFree),
+    WIN_EXPORT(MoveFileExA),
     EXPORT("MulDiv", win_mul_div),
+    WIN_EXPORT(MultiByteToWideChar),
     EXPORT("QueryPerformanceCounter", win_counter),
-    EXPORT("SetLastError", win_set_last_error)
+    WIN_EXPORT(RemoveDirectoryA),
+    WIN_EXPORT(SetLastError)
+};
+
+static const struct runtime_export user32_exports[] = {
+    WIN_EXPORT(AppendMenuA),
+    WIN_EXPORT(CheckMenuItem),
+    WIN_EXPORT(CreateMenu),
+    WIN_EXPORT(DestroyMenu),
+    WIN_EXPORT(DispatchMessageA),
+    WIN_EXPORT(EnableMenuItem),
+    WIN_EXPORT(GetMenuItemCount),
+    WIN_EXPORT(GetMessageA),
+    WIN_EXPORT(IntersectRect),
+    WIN_EXPORT(KillTimer),
+    WIN_EXPORT(OffsetRect),
+    WIN_EXPORT(PostQuitMessage),
+    WIN_EXPORT(SetRect),
+    WIN_EXPORT(SetTimer),
+    WIN_EXPORT(UnionRect)
+};
+
+static const struct runtime_export gdi32_exports[] = {
+    WIN_EXPORT(BitBlt),
+    WIN_EXPORT(CreateCompatibleBitmap),
+    WIN_EXPORT(CreateCompatibleDC),
+    WIN_EXPORT(CreateHatchBrush),
+    WIN_EXPORT(CreatePen),
+    WIN_EXPORT(CreateSolidBrush),
+    WIN_EXPORT(DeleteDC),
+    WIN_EXPORT(DeleteObject),
+    WIN_EXPORT(GetStockObject),
+    WIN_EXPORT(IntersectClipRect),
+    WIN_EXPORT(Rectangle),
+    WIN_EXPORT(SelectClipRgn),
+    WIN_EXPORT(SelectObject),
+    WIN_EXPORT(SetBkMode),
+    WIN_EXPORT(SetMapMode),
+    WIN_EXPORT(SetPixel),
+    WIN_EXPORT(SetTextColor)
 };
 
 static const struct runtime_export vcruntime_exports[] = {
@@ -227,6 +290,7 @@ static const struct runtime_export vcruntime_exports[] = {
 };
 
 static const struct runtime_export heap_exports[] = {
+    EXPORT("_set_new_mode", nt_set_new_mode),
     EXPORT("free", crt_free),
     EXPORT("malloc", crt_malloc),
     EXPORT("realloc", crt_realloc)
@@ -241,6 +305,7 @@ static const struct runtime_export math_exports[] = {
 };
 
 static const struct runtime_export string_exports[] = {
+    EXPORT("isspace", nt_isspace),
     EXPORT("strcat", crt_strcat),
     EXPORT("strcmp", crt_strcmp),
     EXPORT("strcpy", crt_strcpy),
@@ -248,7 +313,39 @@ static const struct runtime_export string_exports[] = {
     EXPORT("strlen", crt_strlen),
     EXPORT("strncpy", crt_strncpy),
     EXPORT("strspn", crt_strspn),
+    EXPORT("tolower", nt_tolower),
+    EXPORT("toupper", nt_toupper),
     EXPORT("wcslen", crt_wcslen)
+};
+
+static const struct runtime_export convert_exports[] = {
+    EXPORT("atof", nt_atof),
+    EXPORT("atoi", nt_atoi)
+};
+
+static const struct runtime_export environment_exports[] = {
+    EXPORT("getenv", nt_getenv)
+};
+
+static const struct runtime_export locale_exports[] = {
+    EXPORT("_configthreadlocale", nt_configthreadlocale)
+};
+
+static const struct runtime_export crt_runtime_exports[] = {
+    EXPORT("_cexit", nt_cexit),
+    EXPORT("_crt_atexit", nt_crt_atexit),
+    EXPORT("_initialize_onexit_table", nt_initialize_onexit_table),
+    EXPORT("_initterm", nt_initterm),
+    EXPORT("_initterm_e", nt_initterm_e),
+    EXPORT("_register_onexit_function", nt_register_onexit_function)
+};
+
+static const struct runtime_export stdio_exports[] = {
+    EXPORT("_set_fmode", nt_set_fmode),
+    EXPORT("fclose", nt_fclose),
+    EXPORT("fopen", nt_fopen),
+    EXPORT("fread", nt_fread),
+    EXPORT("fwrite", nt_fwrite)
 };
 
 static const struct runtime_export utility_exports[] = {
@@ -263,27 +360,136 @@ static const struct {
 #define MODULE(name, exports) {name, exports, sizeof(exports) / sizeof(exports[0])}
     MODULE("ntdll.dll", ntdll_exports),
     MODULE("kernel32.dll", kernel32_exports),
+    MODULE("user32.dll", user32_exports),
+    MODULE("gdi32.dll", gdi32_exports),
     MODULE("vcruntime140.dll", vcruntime_exports),
+    MODULE("api-ms-win-crt-convert-l1-1-0.dll", convert_exports),
+    MODULE("api-ms-win-crt-environment-l1-1-0.dll", environment_exports),
     MODULE("api-ms-win-crt-heap-l1-1-0.dll", heap_exports),
     MODULE("api-ms-win-crt-math-l1-1-0.dll", math_exports),
+    MODULE("api-ms-win-crt-locale-l1-1-0.dll", locale_exports),
+    MODULE("api-ms-win-crt-runtime-l1-1-0.dll", crt_runtime_exports),
+    MODULE("api-ms-win-crt-stdio-l1-1-0.dll", stdio_exports),
     MODULE("api-ms-win-crt-string-l1-1-0.dll", string_exports),
     MODULE("api-ms-win-crt-utility-l1-1-0.dll", utility_exports)
 #undef MODULE
 };
 
+enum { MODULE_COUNT = sizeof(modules) / sizeof(modules[0]), MODULE_BASE = 0x10000000 };
+static uint32_t module_references[MODULE_COUNT];
+static pthread_mutex_t module_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static size_t module_index(const char *name)
+{
+    for (size_t i = 0; i < MODULE_COUNT; ++i) {
+        if (nt_module_name_equal(name, modules[i].name))
+            return i;
+    }
+    return MODULE_COUNT;
+}
+
+static nt_guest_proc find_export(size_t module, const char *name)
+{
+    if (module < MODULE_COUNT) {
+        for (size_t i = 0; i < modules[module].count; ++i) {
+            if (strcmp(name, modules[module].exports[i].name) == 0)
+                return modules[module].exports[i].target;
+        }
+    }
+    return NULL;
+}
+
 nt_guest_proc nt_runtime_resolve(const char *module, const char *name)
 {
     if (module == NULL || name == NULL)
         return NULL;
+    return find_export(module_index(module), name);
+}
 
-    for (size_t i = 0; i < sizeof(modules) / sizeof(modules[0]); ++i) {
-        if (!nt_module_name_equal(module, modules[i].name))
-            continue;
-        for (size_t j = 0; j < modules[i].count; ++j) {
-            if (strcmp(name, modules[i].exports[j].name) == 0)
-                return modules[i].exports[j].target;
-        }
-        break;
+static size_t requested_module(const char *name)
+{
+    if (name == NULL || *name == '\0')
+        return MODULE_COUNT;
+    if (strchr(name, '.') != NULL)
+        return module_index(name);
+    char with_extension[128];
+    const size_t length = strlen(name);
+    if (length >= sizeof(with_extension) - sizeof(".dll") + 1)
+        return MODULE_COUNT;
+    memcpy(with_extension, name, length);
+    memcpy(with_extension + length, ".dll", sizeof(".dll"));
+    return module_index(with_extension);
+}
+
+uintptr_t NT_MS_ABI nt_LoadLibraryA(const char *name)
+{
+    const size_t module = requested_module(name);
+    if (module == MODULE_COUNT) {
+        nt_SetLastError(NT_ERROR_MOD_NOT_FOUND);
+        return 0;
     }
-    return NULL;
+    pthread_mutex_lock(&module_lock);
+    const bool acquired = module_references[module] < UINT32_MAX;
+    if (acquired)
+        ++module_references[module];
+    pthread_mutex_unlock(&module_lock);
+    if (!acquired) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    return MODULE_BASE + module;
+}
+
+uintptr_t NT_MS_ABI nt_GetModuleHandleW(const uint16_t *name)
+{
+    char narrow[128];
+    if (name != NULL) {
+        for (size_t i = 0; i < sizeof(narrow) && name[i] <= 0x7f; ++i) {
+            narrow[i] = (char)name[i];
+            if (name[i] == 0) {
+                const size_t module = requested_module(narrow);
+                if (module != MODULE_COUNT)
+                    return MODULE_BASE + module;
+                break;
+            }
+        }
+    }
+    nt_SetLastError(NT_ERROR_MOD_NOT_FOUND);
+    return 0;
+}
+
+static size_t module_handle_index(uintptr_t handle)
+{
+    return handle >= MODULE_BASE && handle - MODULE_BASE < MODULE_COUNT ?
+           handle - MODULE_BASE : MODULE_COUNT;
+}
+
+int32_t NT_MS_ABI nt_FreeLibrary(uintptr_t handle)
+{
+    const size_t module = module_handle_index(handle);
+    if (module == MODULE_COUNT) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    pthread_mutex_lock(&module_lock);
+    const bool acquired = module_references[module] != 0;
+    if (acquired)
+        --module_references[module];
+    pthread_mutex_unlock(&module_lock);
+    if (!acquired)
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return acquired;
+}
+
+nt_guest_proc NT_MS_ABI nt_GetProcAddress(uintptr_t handle, const char *name)
+{
+    const size_t module = module_handle_index(handle);
+    if (module == MODULE_COUNT) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+    const nt_guest_proc target = (uintptr_t)name > UINT16_MAX ? find_export(module, name) : NULL;
+    if (target == NULL)
+        nt_SetLastError(NT_ERROR_PROC_NOT_FOUND);
+    return target;
 }
