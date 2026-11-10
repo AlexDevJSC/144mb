@@ -189,6 +189,90 @@ static int open_parent(int root, char path[PATH_MAX], const char **leaf)
     return confined_open(root, path, O_PATH | O_DIRECTORY, 0);
 }
 
+static bool copy_dos_path(const char *relative, char *output, size_t capacity)
+{
+    const size_t length = strlen(relative);
+    if (capacity < 4 || length > capacity - 4) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    memcpy(output, "C:\\", 3);
+    for (size_t i = 0; i <= length; ++i)
+        output[3 + i] = relative[i] == '/' ? '\\' : relative[i];
+    return true;
+}
+
+int nt_runtime_open_guest_directory(const char *path, char *output, size_t capacity)
+{
+    char relative[PATH_MAX];
+    if (path == NULL || strcmp(path, ".") == 0 || nt_module_name_equal(path, "C:\\") ||
+        nt_module_name_equal(path, "C:/") || strcmp(path, "\\") == 0 || strcmp(path, "/") == 0)
+        relative[0] = '\0';
+    else if (!guest_path(path, relative))
+        return -1;
+    const int root = duplicate_root();
+    if (root < 0)
+        return -1;
+    int directory = confined_open(root, relative[0] != '\0' ? relative : ".", O_RDONLY | O_DIRECTORY, 0);
+    int error = errno;
+    if (directory >= 0 && !copy_dos_path(relative, output, capacity)) {
+        error = errno;
+        close(directory);
+        directory = -1;
+    }
+    close(root);
+    errno = error;
+    return directory;
+}
+
+bool nt_runtime_guest_directory_entry(int directory, const char *name, bool *is_directory)
+{
+    char relative[PATH_MAX];
+    if (!guest_path(name, relative) || strcmp(name, relative) != 0 || strchr(relative, '/') != NULL)
+        return false;
+    const int fd = confined_open(directory, relative, O_PATH, 0);
+    if (fd < 0)
+        return false;
+    struct stat info;
+    const bool valid = fstat(fd, &info) == 0 && (S_ISDIR(info.st_mode) || S_ISREG(info.st_mode));
+    if (valid)
+        *is_directory = S_ISDIR(info.st_mode);
+    close(fd);
+    return valid;
+}
+
+bool nt_runtime_check_guest_file(const char *path, char *output, size_t capacity, bool *exists)
+{
+    char relative[PATH_MAX];
+    if (!guest_path(path, relative))
+        return false;
+    const int root = duplicate_root();
+    if (root < 0)
+        return false;
+    int fd = confined_open(root, relative, O_PATH, 0);
+    bool valid = false, found = false;
+    if (fd >= 0) {
+        struct stat info;
+        valid = fstat(fd, &info) == 0 && S_ISREG(info.st_mode);
+        found = valid;
+        close(fd);
+    } else if (errno == ENOENT) {
+        char parent[PATH_MAX];
+        strcpy(parent, relative);
+        const char *leaf;
+        fd = open_parent(root, parent, &leaf);
+        if (fd >= 0) {
+            valid = true;
+            close(fd);
+        }
+    }
+    close(root);
+    if (!valid || !copy_dos_path(relative, output, capacity))
+        return false;
+    *exists = found;
+    return true;
+}
+
 static uint32_t path_error(int error, bool parent)
 {
     switch (error) {

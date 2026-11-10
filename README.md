@@ -15,10 +15,10 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Un segundo PE de consola, compilado con MinGW-w64, importa
   `ntdll.dll!NtQueryPerformanceCounter`. Linux resuelve esa importación con
   la implementación propia.
-- El runtime expone equivalentes probados en Linux para 180 de las 197
+- El runtime expone equivalentes con alcance probado en Linux para las 197
   importaciones directas de Mines. Un PE de control verifica la llamada
-  Win32 al reloj. Otro PE de control abre y pinta una ventana con SDL
-  y 13 importaciones de USER32 y GDI.
+  Win32 al reloj. Otro abre y pinta una ventana SDL, crea controles y
+  resuelve 21 importaciones, incluida `COMCTL32.dll #17`.
 - `pe-import-audit` lee las importaciones directas de un PE AMD64 y
   cuenta las que tienen un equivalente registrado.
 - Un microbenchmark y un spec RPM para el comando ELF de diagnóstico.

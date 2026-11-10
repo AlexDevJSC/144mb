@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "desktop.h"
+#include "desktop_resources.h"
+#include "dialogs.h"
 #include "menu_view.h"
 
 #include <SDL.h>
@@ -27,14 +29,15 @@ struct window_class {
 };
 
 struct window {
-    uintptr_t handle, dc, instance;
+    uintptr_t handle, dc, instance, owner;
     uintptr_t menu, popup;
     struct window_class *type;
-    nt_window_proc proc;
+    nt_window_proc proc, dialog;
     SDL_Window *native;
     char *title;
     struct nt_rect dirty;
-    intptr_t userdata;
+    intptr_t userdata, dialog_result, dialog_user;
+    uint16_t default_id;
     uint32_t style, exstyle;
     int width, height;
     int popup_x;
@@ -53,6 +56,7 @@ static bool overflow;
 static uintptr_t next_handle = 0x25000005;
 static unsigned char keyboard[256];
 static SDL_AudioDeviceID beep_device;
+static uintptr_t capture;
 
 bool nt_runtime_open_desktop(void)
 {
@@ -138,7 +142,19 @@ static struct window *find_window(uintptr_t handle)
 
 bool nt_runtime_window_valid(uintptr_t handle)
 {
-    return find_window(handle) != NULL;
+    return find_window(handle) != NULL || nt_runtime_control_valid(handle);
+}
+
+bool nt_runtime_window_enabled(uintptr_t handle)
+{
+    const struct window *window = find_window(handle);
+    return window != NULL && window->enabled && !window->destroying;
+}
+
+bool nt_runtime_dialog_window(uintptr_t handle)
+{
+    const struct window *window = find_window(handle);
+    return window != NULL && window->type->definition.window_extra >= NT_DLGWINDOWEXTRA;
 }
 
 static struct window *require_window(uintptr_t handle)
@@ -191,8 +207,11 @@ uint16_t NT_MS_ABI nt_RegisterClassA(const struct nt_window_class *definition)
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    if (definition->class_extra != 0 || definition->window_extra != 0 ||
-        definition->menu != NULL || definition->cursor != 0 || definition->icon != 0) {
+    if (definition->class_extra != 0 ||
+        (definition->window_extra != 0 && definition->window_extra != NT_DLGWINDOWEXTRA) ||
+        definition->menu != NULL ||
+        (definition->cursor != 0 && nt_runtime_cursor(definition->cursor) == NULL) ||
+        (definition->icon != 0 && nt_runtime_icon(definition->icon) == NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
@@ -234,6 +253,11 @@ static void invalidate(struct window *window, const struct nt_rect *rect, bool e
 
 static void release_window(struct window *window)
 {
+    if (capture == window->handle) {
+        capture = 0;
+        SDL_CaptureMouse(SDL_FALSE);
+    }
+    nt_runtime_remove_controls(window->handle);
     nt_runtime_remove_window_timers(window->handle);
     nt_runtime_clipboard_window_closed(window->handle);
     nt_runtime_detach_menu(window->menu, window->handle, true);
@@ -261,6 +285,9 @@ void nt_runtime_close_desktop(void)
             release_window(&windows[i]);
     }
     class_count = message_count = 0;
+    nt_runtime_close_dialogs();
+    nt_runtime_close_controls();
+    nt_runtime_close_desktop_resources();
     overflow = false;
     memset(keyboard, 0, sizeof(keyboard));
     pthread_mutex_lock(&desktop_lock);
@@ -339,6 +366,7 @@ static bool present(struct window *window)
         return false;
     struct present_target target = {surface, offset};
     const bool copied = nt_runtime_read_surface(window->dc, copy_to_native, &target) &&
+                        nt_runtime_draw_controls(surface, window->handle, offset) &&
                         (window->menu == 0 || nt_runtime_draw_menu(surface, window->menu,
                                                                   window->popup, window->popup_x));
     SDL_UnlockSurface(surface);
@@ -369,8 +397,23 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
                                        int32_t height, uintptr_t parent, uintptr_t menu,
                                        uintptr_t instance, void *parameter)
 {
-    if (!desktop_thread || parent != 0 || menu != 0 ||
-        (style & UINT32_C(0x40000000)) != 0 ||
+    if (!desktop_thread) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    const struct window *owner = find_window(parent);
+    if (parent != 0 && (owner == NULL || owner->destroying)) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if ((style & NT_WS_CHILD) != 0) {
+        if (owner != NULL)
+            return nt_runtime_create_control(class_name, title, style, exstyle, x, y, width, height,
+                                             parent, menu);
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if (menu != 0 ||
         (exstyle & ~(WS_EX_TOPMOST | WS_EX_APPWINDOW)) != 0) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
@@ -430,10 +473,13 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
         return 0;
     }
     SDL_SetWindowMaximumSize(native, MAX_SIZE, MAX_SIZE);
+    SDL_Surface *icon = nt_runtime_icon(type->definition.icon);
+    if (icon != NULL)
+        SDL_SetWindowIcon(native, icon);
     const uintptr_t handle = next_handle;
     next_handle += 16;
     *window = (struct window){
-        .handle = handle, .dc = dc, .instance = instance, .type = type,
+        .handle = handle, .dc = dc, .instance = instance, .type = type, .owner = parent,
         .proc = type->definition.proc, .native = native, .title = copy,
         .style = style & ~WS_VISIBLE, .exstyle = exstyle, .width = width, .height = height,
         .enabled = (style & WS_DISABLED) == 0
@@ -462,11 +508,20 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
 
 int32_t NT_MS_ABI nt_DestroyWindow(uintptr_t handle)
 {
+    if (nt_runtime_destroy_control(handle))
+        return 1;
     struct window *window = require_window(handle);
     if (window == NULL || window->destroying)
         return 0;
     window->destroying = true;
+    if (capture == handle)
+        nt_ReleaseCapture();
     window->proc(handle, NT_WM_DESTROY, 0, 0);
+    for (size_t i = 0; i < MAX_WINDOWS; ++i) {
+        if (windows[i].owner == handle && windows[i].handle != 0)
+            nt_DestroyWindow(windows[i].handle);
+    }
+    nt_runtime_remove_controls(handle);
     window->proc(handle, NT_WM_NCDESTROY, 0, 0);
     release_window(window);
     return 1;
@@ -474,6 +529,8 @@ int32_t NT_MS_ABI nt_DestroyWindow(uintptr_t handle)
 
 intptr_t NT_MS_ABI nt_SendMessageA(uintptr_t handle, uint32_t message, uintptr_t wparam, intptr_t lparam)
 {
+    if (nt_runtime_control_valid(handle))
+        return nt_runtime_control_message(handle, message, wparam, lparam);
     struct window *window = require_window(handle);
     return window != NULL ? window->proc(handle, message, wparam, lparam) : 0;
 }
@@ -556,8 +613,49 @@ intptr_t NT_MS_ABI nt_DefWindowProcA(uintptr_t handle, uint32_t message,
     }
 }
 
+intptr_t NT_MS_ABI nt_DefDlgProcA(uintptr_t handle, uint32_t message, uintptr_t wparam, intptr_t lparam)
+{
+    struct window *window = require_window(handle);
+    if (window == NULL)
+        return 0;
+    if (window->dialog != NULL) {
+        window->dialog_result = 0;
+        const intptr_t handled = window->dialog(handle, message, wparam, lparam);
+        if (message == NT_WM_INITDIALOG || message == 0x39 ||
+            message == 0x2e || message == 0x2f || (message >= 0x132 && message <= 0x138))
+            return handled;
+        if (window->handle != handle)
+            return 0;
+        if (handled != 0)
+            return window->dialog_result;
+    }
+    switch (message) {
+    case NT_WM_CLOSE:
+        if (window->dialog != NULL)
+            nt_SendMessageA(handle, NT_WM_COMMAND, NT_IDCANCEL, 0);
+        else
+            nt_DestroyWindow(handle);
+        return 0;
+    case NT_WM_NEXTDLGCTL:
+        nt_runtime_focus_control(handle, lparam != 0 ? wparam : 0, lparam == 0 && wparam != 0);
+        return 0;
+    case 0x400: { /* DM_GETDEFID */
+        const uint16_t id = window->default_id != 0 ? window->default_id :
+                            nt_runtime_dialog_default_id(handle);
+        return id != 0 ? (intptr_t)(0x534b0000u | id) : 0;
+    }
+    case 0x401: /* DM_SETDEFID */
+        window->default_id = (uint16_t)wparam;
+        return 1;
+    default:
+        return nt_DefWindowProcA(handle, message, wparam, lparam);
+    }
+}
+
 int32_t NT_MS_ABI nt_GetClientRect(uintptr_t handle, struct nt_rect *rect)
 {
+    if (nt_runtime_control_valid(handle))
+        return nt_runtime_control_rect(handle, rect, false);
     const struct window *window = require_window(handle);
     if (window == NULL || rect == NULL)
         return 0;
@@ -567,6 +665,8 @@ int32_t NT_MS_ABI nt_GetClientRect(uintptr_t handle, struct nt_rect *rect)
 
 int32_t NT_MS_ABI nt_GetWindowRect(uintptr_t handle, struct nt_rect *rect)
 {
+    if (nt_runtime_control_valid(handle))
+        return nt_runtime_control_rect(handle, rect, true);
     const struct window *window = require_window(handle);
     if (window == NULL || rect == NULL)
         return 0;
@@ -746,6 +846,8 @@ int32_t NT_MS_ABI nt_ReleaseDC(uintptr_t handle, uintptr_t dc)
 
 int32_t NT_MS_ABI nt_ShowWindow(uintptr_t handle, int32_t show)
 {
+    if (nt_runtime_control_valid(handle))
+        return nt_runtime_control_show(handle, show != 0);
     struct window *window = require_window(handle);
     if (window == NULL)
         return 0;
@@ -758,6 +860,10 @@ int32_t NT_MS_ABI nt_ShowWindow(uintptr_t handle, int32_t show)
     if (window->visible) {
         window->style |= WS_VISIBLE;
         SDL_ShowWindow(window->native);
+        if (SDL_GetMouseFocus() == window->native) {
+            SDL_Cursor *cursor = nt_runtime_cursor(window->type->definition.cursor);
+            SDL_SetCursor(cursor != NULL ? cursor : SDL_GetDefaultCursor());
+        }
         if (show == 2 || show == 6 || show == 7)
             SDL_MinimizeWindow(window->native);
         else if (show == 3)
@@ -768,14 +874,18 @@ int32_t NT_MS_ABI nt_ShowWindow(uintptr_t handle, int32_t show)
     } else {
         window->style &= ~WS_VISIBLE;
         SDL_HideWindow(window->native);
+        if (capture == handle)
+            nt_ReleaseCapture();
     }
-    if (was_visible != window->visible)
+    if (window->handle == handle && was_visible != window->visible)
         window->proc(handle, NT_WM_SHOWWINDOW, window->visible, 0);
     return was_visible;
 }
 
 int32_t NT_MS_ABI nt_EnableWindow(uintptr_t handle, int32_t enable)
 {
+    if (nt_runtime_control_valid(handle))
+        return nt_runtime_control_enable(handle, enable != 0);
     struct window *window = require_window(handle);
     if (window == NULL)
         return 0;
@@ -788,10 +898,70 @@ int32_t NT_MS_ABI nt_EnableWindow(uintptr_t handle, int32_t enable)
     if (was_disabled == window->enabled) {
         if (!window->enabled)
             window->proc(handle, NT_WM_CANCELMODE, 0, 0);
+        if (window->handle == handle && !window->enabled && capture == handle)
+            nt_ReleaseCapture();
         if (window->handle == handle)
             window->proc(handle, NT_WM_ENABLE, window->enabled, 0);
     }
     return was_disabled;
+}
+
+bool nt_runtime_set_modal_owner(uintptr_t handle, uintptr_t owner)
+{
+    const struct window *dialog = find_window(handle), *parent = find_window(owner);
+    if (dialog == NULL || parent == NULL || dialog->owner != owner)
+        return false;
+    SDL_SetWindowModalFor(dialog->native, parent->native);
+    return true;
+}
+
+uintptr_t NT_MS_ABI nt_SetCapture(uintptr_t handle)
+{
+    struct window *window = require_window(handle);
+    if (window == NULL || window->destroying || !window->enabled || !window->visible) {
+        if (window != NULL)
+            nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    const uintptr_t previous = capture;
+    if (previous != handle) {
+        capture = handle;
+        SDL_CaptureMouse(SDL_GetKeyboardFocus() == window->native ? SDL_TRUE : SDL_FALSE);
+        if (previous != 0)
+            nt_SendMessageA(previous, NT_WM_CAPTURECHANGED, 0, (intptr_t)handle);
+    }
+    return previous;
+}
+
+int32_t NT_MS_ABI nt_ReleaseCapture(void)
+{
+    if (!desktop_thread) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (capture != 0) {
+        const uintptr_t previous = capture;
+        capture = 0;
+        SDL_CaptureMouse(SDL_FALSE);
+        nt_SendMessageA(previous, NT_WM_CAPTURECHANGED, 0, 0);
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_SetForegroundWindow(uintptr_t handle)
+{
+    const struct window *window = require_window(handle);
+    if (window == NULL)
+        return 0;
+    if (!window->visible || !window->enabled || window->destroying) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
+    SDL_RaiseWindow(window->native);
+    if (SDL_GetKeyboardFocus() == window->native || SDL_SetWindowInputFocus(window->native) == 0)
+        return 1;
+    nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+    return 0;
 }
 
 int32_t NT_MS_ABI nt_SetWindowTextA(uintptr_t handle, const char *title)
@@ -807,13 +977,18 @@ intptr_t NT_MS_ABI nt_GetWindowLongPtrA(uintptr_t handle, int32_t index)
     switch (index) {
     case -4: return (intptr_t)window->proc;
     case -6: return (intptr_t)window->instance;
+    case -8: return (intptr_t)window->owner;
     case -16: return (int32_t)window->style;
     case -20: return (int32_t)window->exstyle;
     case -21: return window->userdata;
+    case NT_DWLP_MSGRESULT: if (nt_runtime_dialog_window(handle)) return window->dialog_result; break;
+    case NT_DWLP_DLGPROC: if (nt_runtime_dialog_window(handle)) return (intptr_t)window->dialog; break;
+    case NT_DWLP_USER: if (nt_runtime_dialog_window(handle)) return window->dialog_user; break;
     default:
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
+        break;
     }
+    nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    return 0;
 }
 
 intptr_t NT_MS_ABI nt_SetWindowLongPtrA(uintptr_t handle, int32_t index, intptr_t value)
@@ -830,6 +1005,19 @@ intptr_t NT_MS_ABI nt_SetWindowLongPtrA(uintptr_t handle, int32_t index, intptr_
         const intptr_t previous = (intptr_t)window->proc;
         window->proc = (nt_window_proc)value;
         return previous;
+    }
+    if (nt_runtime_dialog_window(handle)) {
+        if (index == NT_DWLP_DLGPROC) {
+            const intptr_t previous = (intptr_t)window->dialog;
+            window->dialog = (nt_window_proc)value;
+            return previous;
+        }
+        if (index == NT_DWLP_USER || index == NT_DWLP_MSGRESULT) {
+            intptr_t *slot = index == NT_DWLP_USER ? &window->dialog_user : &window->dialog_result;
+            const intptr_t previous = *slot;
+            *slot = value;
+            return previous;
+        }
     }
     nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
     return 0;
@@ -913,6 +1101,17 @@ static unsigned int virtual_key(SDL_Keycode key)
     case SDLK_LALT: return 0xa4;
     case SDLK_RALT: return 0xa5;
     case SDLK_CAPSLOCK: return 0x14;
+    case SDLK_SEMICOLON: return 0xba;
+    case SDLK_EQUALS: return 0xbb;
+    case SDLK_COMMA: return 0xbc;
+    case SDLK_MINUS: return 0xbd;
+    case SDLK_PERIOD: return 0xbe;
+    case SDLK_SLASH: return 0xbf;
+    case SDLK_BACKQUOTE: return 0xc0;
+    case SDLK_LEFTBRACKET: return 0xdb;
+    case SDLK_BACKSLASH: return 0xdc;
+    case SDLK_RIGHTBRACKET: return 0xdd;
+    case SDLK_QUOTE: return 0xde;
     default: return 0;
     }
 }
@@ -927,6 +1126,13 @@ static uint32_t key_character(SDL_Keycode key, uint16_t mods)
     }
     if (key >= SDLK_0 && key <= SDLK_9 && (mods & KMOD_SHIFT) != 0)
         return (unsigned char)")!@#$%^&*("[key - SDLK_0];
+    if (key >= 33 && key <= 126 && (mods & KMOD_SHIFT) != 0) {
+        static const char normal[] = ";=,-./`[\\]'";
+        static const char shifted[] = ":+<_>?~{|}\"";
+        const char *symbol = strchr(normal, (int)key);
+        if (symbol != NULL)
+            return (unsigned char)shifted[symbol - normal];
+    }
     if ((key >= SDLK_SPACE && key <= SDLK_z) || key == SDLK_RETURN ||
         key == SDLK_TAB || key == SDLK_BACKSPACE || key == SDLK_ESCAPE)
         return (uint32_t)key;
@@ -991,6 +1197,23 @@ static bool menu_pointer(struct window *window, int x, int y, bool released)
     return false;
 }
 
+static struct window *pointer_window(uint32_t native_id, int *x, int *y)
+{
+    struct window *source = window_from_id(native_id);
+    struct window *target = find_window(capture);
+    int64_t px = *x, py = *y;
+    if (target != NULL && source != NULL && source != target) {
+        int source_x, source_y, target_x, target_y;
+        SDL_GetWindowPosition(source->native, &source_x, &source_y);
+        SDL_GetWindowPosition(target->native, &target_x, &target_y);
+        px += (int64_t)source_x - target_x;
+        py += (int64_t)source_y - target_y;
+    }
+    *x = px < INT16_MIN ? INT16_MIN : px > INT16_MAX ? INT16_MAX : (int)px;
+    *y = py < INT16_MIN ? INT16_MIN : py > INT16_MAX ? INT16_MAX : (int)py;
+    return target != NULL ? target : source;
+}
+
 static void translate_event(const SDL_Event *event)
 {
     struct window *window;
@@ -1014,6 +1237,9 @@ static void translate_event(const SDL_Event *event)
                 enqueue(window, NT_WM_SIZE, 0, pair(width, height), 0, 0, 0);
         } else if (event->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
             memset(keyboard, 0, sizeof(keyboard));
+        } else if (event->window.event == SDL_WINDOWEVENT_ENTER) {
+            SDL_Cursor *cursor = nt_runtime_cursor(window->type->definition.cursor);
+            SDL_SetCursor(cursor != NULL ? cursor : SDL_GetDefaultCursor());
         }
         break;
     case SDL_KEYDOWN: case SDL_KEYUP:
@@ -1033,26 +1259,30 @@ static void translate_event(const SDL_Event *event)
                          0, 0, down ? key_character(event->key.keysym.sym, event->key.keysym.mod) : 0);
         }
         break;
-    case SDL_MOUSEMOTION:
-        window = window_from_id(event->motion.windowID);
-        if (window != NULL && window->enabled && event->motion.y >= menu_height(window) && window->popup == 0) {
-            const int y = event->motion.y - menu_height(window);
+    case SDL_MOUSEMOTION: {
+        int x = event->motion.x, y = event->motion.y;
+        window = pointer_window(event->motion.windowID, &x, &y);
+        if (window != NULL && window->enabled &&
+            (capture != 0 || (y >= menu_height(window) && window->popup == 0))) {
+            y -= menu_height(window);
             enqueue(window, NT_WM_MOUSEMOVE, mouse_keys(event->motion.state),
-                     pair(event->motion.x, y), event->motion.x, y, 0);
+                     pair(x, y), x, y, 0);
         }
         break;
-    case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
-        window = window_from_id(event->button.windowID);
+    }
+    case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: {
+        int x = event->button.x, y = event->button.y;
+        window = pointer_window(event->button.windowID, &x, &y);
         if (window != NULL && window->enabled && event->button.button >= SDL_BUTTON_LEFT &&
             event->button.button <= SDL_BUTTON_RIGHT) {
             const uint32_t base = event->button.button == SDL_BUTTON_LEFT ? NT_WM_LBUTTONDOWN :
                                   (event->button.button == SDL_BUTTON_RIGHT ? NT_WM_RBUTTONDOWN : NT_WM_MBUTTONDOWN);
             const bool down = event->type == SDL_MOUSEBUTTONDOWN;
-            if (event->button.button == SDL_BUTTON_LEFT &&
-                menu_pointer(window, event->button.x, event->button.y, !down))
+            if (capture == 0 && event->button.button == SDL_BUTTON_LEFT &&
+                menu_pointer(window, x, y, !down))
                 break;
-            const int y = event->button.y - menu_height(window);
-            if (y < 0 || window->popup != 0)
+            y -= menu_height(window);
+            if (capture == 0 && (y < 0 || window->popup != 0))
                 break;
             const uint32_t mask = SDL_BUTTON(event->button.button);
             const uint32_t current = SDL_GetMouseState(NULL, NULL);
@@ -1060,9 +1290,10 @@ static void translate_event(const SDL_Event *event)
                                (window->type->definition.style & CS_DBLCLKS) != 0;
             enqueue(window, base + (down ? (twice ? 2u : 0u) : 1u),
                      mouse_keys(down ? current | mask : current & ~mask),
-                     pair(event->button.x, y), event->button.x, y, 0);
+                     pair(x, y), x, y, 0);
         }
         break;
+    }
     default:
         break;
     }

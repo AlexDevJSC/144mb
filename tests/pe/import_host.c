@@ -17,15 +17,21 @@ extern const unsigned char nt_pe_fixture_bytes[];
 extern const size_t nt_pe_fixture_size;
 
 #ifdef TEST_DESKTOP
+#define NAMED(module, name) {module ".dll", name, 0}
 static const struct pe_fixture_symbol symbols[] = {
-    {"user32.dll", "BeginPaint"}, {"user32.dll", "CreateWindowExA"},
-    {"user32.dll", "DefWindowProcA"}, {"user32.dll", "DispatchMessageA"},
-    {"user32.dll", "EndPaint"}, {"user32.dll", "GetMessageA"},
-    {"user32.dll", "KillTimer"}, {"user32.dll", "PostQuitMessage"},
-    {"user32.dll", "RegisterClassA"}, {"user32.dll", "SendMessageA"},
-    {"user32.dll", "SetTimer"}, {"user32.dll", "ShowWindow"},
-    {"gdi32.dll", "SetPixel"}
+    {"comctl32.dll", NULL, 17},
+    NAMED("user32", "BeginPaint"), NAMED("user32", "CreateWindowExA"),
+    NAMED("user32", "DefWindowProcA"), NAMED("user32", "DispatchMessageA"),
+    NAMED("user32", "EndPaint"), NAMED("user32", "GetMessageA"),
+    NAMED("user32", "KillTimer"), NAMED("user32", "PostQuitMessage"),
+    NAMED("user32", "RegisterClassA"), NAMED("user32", "SendMessageA"),
+    NAMED("user32", "SetTimer"), NAMED("user32", "ShowWindow"),
+    NAMED("user32", "CheckDlgButton"), NAMED("user32", "IsDlgButtonChecked"),
+    NAMED("user32", "GetDlgItemTextA"), NAMED("user32", "SendDlgItemMessageA"),
+    NAMED("user32", "LoadIconA"), NAMED("gdi32", "SetPixel"),
+    NAMED("comdlg32", "GetOpenFileNameA"), NAMED("comdlg32", "CommDlgExtendedError")
 };
+#undef NAMED
 enum { import_count = sizeof(symbols) / sizeof(symbols[0]) };
 #elif defined(TEST_WIN32_COUNTER)
 static const char fixture_dll[] = "kernel32.dll";
@@ -38,7 +44,7 @@ enum { fixture_cases = 3 };
 #endif
 
 #ifndef TEST_DESKTOP
-static const struct pe_fixture_symbol symbols[] = {{fixture_dll, fixture_symbol}};
+static const struct pe_fixture_symbol symbols[] = {{fixture_dll, fixture_symbol, 0}};
 enum { import_count = 1 };
 
 static bool check_invalid_imports(const struct pe_import_image *image)
@@ -110,12 +116,28 @@ static bool check_invalid_imports(const struct pe_import_image *image)
     if (copy == NULL)
         return false;
     memcpy(copy, nt_pe_fixture_bytes, nt_pe_fixture_size);
-    const size_t offset = (size_t)(image->idata.bytes - nt_pe_fixture_bytes) +
-                          image->slots[0] - image->idata.rva;
-    memset(copy + offset, 0, 8);
+    const size_t idata = (size_t)(image->idata.bytes - nt_pe_fixture_bytes);
+    const size_t offset = idata + image->slots[0] - image->idata.rva;
+    const size_t directories = read_u32(copy + 0x3c) + 4 + 20 + 112;
+    size_t descriptor = idata + read_u32(copy + directories + 8) - image->idata.rva;
+    while (read_u32(copy + descriptor + 16) != image->slots[0])
+        descriptor += 20;
+    const size_t lookup = idata + read_u32(copy + descriptor) - image->idata.rva;
     struct pe_import_image rejected;
-    const bool valid = pe_parse_import_fixture_many(copy, nt_pe_fixture_size,
-                                                    symbols, import_count, &rejected);
+    bool valid = false;
+    const struct { size_t byte; unsigned char value; } cases[] = {
+        {0, 18}, /* another ordinal */
+        {2, 1}   /* nonzero reserved bits */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        const size_t byte = cases[i].byte;
+        copy[offset + byte] = copy[lookup + byte] = cases[i].value;
+        valid |= pe_parse_import_fixture_many(copy, nt_pe_fixture_size, symbols, import_count, &rejected);
+        copy[offset + byte] = nt_pe_fixture_bytes[offset + byte];
+        copy[lookup + byte] = nt_pe_fixture_bytes[lookup + byte];
+    }
+    copy[offset] = 0; /* IAT and lookup disagree */
+    valid |= pe_parse_import_fixture_many(copy, nt_pe_fixture_size, symbols, import_count, &rejected);
     free(copy);
     return !valid;
 }
@@ -125,9 +147,14 @@ static bool run_fixture(const struct pe_import_image *image)
 {
     nt_guest_proc targets[import_count];
     for (size_t i = 0; i < import_count; ++i) {
-        targets[i] = nt_runtime_resolve(symbols[i].module, symbols[i].name);
+        targets[i] = symbols[i].name != NULL ? nt_runtime_resolve(symbols[i].module, symbols[i].name) :
+                     nt_runtime_resolve_ordinal(symbols[i].module, symbols[i].ordinal);
         if (targets[i] == NULL) {
-            fprintf(stderr, "Missing fixture import %s!%s\n", symbols[i].module, symbols[i].name);
+            if (symbols[i].name != NULL)
+                fprintf(stderr, "Missing fixture import %s!%s\n", symbols[i].module, symbols[i].name);
+            else
+                fprintf(stderr, "Missing fixture import %s!#%u\n", symbols[i].module,
+                        (unsigned int)symbols[i].ordinal);
             return false;
         }
     }
@@ -187,7 +214,7 @@ static bool run_fixture(const struct pe_import_image *image)
         return false;
     }
 #ifdef TEST_DESKTOP
-    printf("PASS PE32+ paints and closes a Linux window through %d USER32 and GDI imports\n",
+    printf("PASS PE32+ window, controls and file dialog ABI through %d imports including COMCTL32 #17\n",
            import_count);
 #else
     printf("PASS PE32+ imports %s!%s through the IAT (%d cases)\n",

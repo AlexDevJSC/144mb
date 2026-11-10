@@ -14,7 +14,7 @@ enum {
     NT_WM_COMMAND = 0x111,
     NT_WM_MOUSEMOVE = 0x200, NT_WM_LBUTTONDOWN = 0x201, NT_WM_LBUTTONUP = 0x202,
     NT_WM_LBUTTONDBLCLK = 0x203, NT_WM_RBUTTONDOWN = 0x204,
-    NT_WM_MBUTTONDOWN = 0x207
+    NT_WM_MBUTTONDOWN = 0x207, NT_WM_CAPTURECHANGED = 0x215
 };
 
 typedef intptr_t (NT_MS_ABI *nt_window_proc)(uintptr_t window, uint32_t message,
@@ -77,6 +77,9 @@ uintptr_t NT_MS_ABI nt_GetDC(uintptr_t window);
 int32_t NT_MS_ABI nt_ReleaseDC(uintptr_t window, uintptr_t dc);
 int32_t NT_MS_ABI nt_ShowWindow(uintptr_t window, int32_t show);
 int32_t NT_MS_ABI nt_EnableWindow(uintptr_t window, int32_t enable);
+uintptr_t NT_MS_ABI nt_SetCapture(uintptr_t window);
+int32_t NT_MS_ABI nt_ReleaseCapture(void);
+int32_t NT_MS_ABI nt_SetForegroundWindow(uintptr_t window);
 int32_t NT_MS_ABI nt_SetWindowTextA(uintptr_t window, const char *title);
 intptr_t NT_MS_ABI nt_GetWindowLongPtrA(uintptr_t window, int32_t index);
 intptr_t NT_MS_ABI nt_SetWindowLongPtrA(uintptr_t window, int32_t index, intptr_t value);

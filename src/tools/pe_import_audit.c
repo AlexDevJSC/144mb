@@ -18,20 +18,26 @@ struct audit_counts {
     size_t ordinals;
 };
 
+static bool resolved(const struct pe_import *import)
+{
+    return import->name != NULL ? nt_runtime_resolve(import->module, import->name) != NULL :
+           nt_runtime_resolve_ordinal(import->module, import->ordinal) != NULL;
+}
+
 static void count_import(const struct pe_import *import, void *context)
 {
     struct audit_counts *counts = context;
     ++counts->total;
-    if (import->name == NULL)
-        ++counts->ordinals;
-    if (nt_runtime_resolve(import->module, import->name) != NULL)
+    if (resolved(import))
         ++counts->native;
+    else if (import->name == NULL)
+        ++counts->ordinals;
 }
 
 static void print_unresolved(const struct pe_import *import, void *context)
 {
     (void)context;
-    if (nt_runtime_resolve(import->module, import->name) != NULL)
+    if (resolved(import))
         return;
     if (import->name != NULL)
         printf("unresolved\t%s\t%s\n", import->module, import->name);

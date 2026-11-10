@@ -77,7 +77,13 @@ static void check_win32(void)
           "export names are case sensitive");
     check(nt_runtime_resolve("user32.dll", "QueryPerformanceCounter") == NULL,
           "export lookup is scoped to its module");
-    check(nt_runtime_resolve("comctl32.dll", NULL) == NULL, "ordinal remains unresolved");
+    check(nt_runtime_resolve("comctl32.dll", NULL) == NULL &&
+          nt_runtime_resolve_ordinal("COMCTL32.DLL", 17) != NULL &&
+          nt_runtime_resolve_ordinal("comctl32.dll", 17) ==
+              nt_runtime_resolve("comctl32.dll", "InitCommonControls") &&
+          nt_runtime_resolve_ordinal("comctl32.dll", 18) == NULL &&
+          nt_runtime_resolve_ordinal("user32.dll", 17) == NULL,
+          "ordinal 17 resolves only in COMCTL32");
     int64_t first = -1;
     int64_t second = -1;
     check(counter(&first) != 0 && first >= 0, "Win32 counter writes a valid value");

@@ -169,6 +169,34 @@ struct nt_exception_pointers {
     struct nt_context64 *context;
 };
 
+struct nt_exception_record {
+    uint32_t code, flags;
+    struct nt_exception_record *nested;
+    void *address;
+    uint32_t count;
+    uintptr_t information[15];
+};
+
+struct nt_dispatcher_context {
+    uint64_t pc, base;
+    const struct nt_runtime_function *function;
+    uint64_t frame, target;
+    struct nt_context64 *context;
+    void *handler;
+    const void *handler_data;
+    void *history;
+    uint32_t scope_index;
+};
+
+/* The trusted dispatcher provides the executable range and owns the
+ * non-returning transfer after a filter selects a handler. */
+typedef void (*nt_seh_transfer)(struct nt_exception_record *, uint64_t frame,
+                                uint64_t target, const struct nt_dispatcher_context *);
+bool nt_runtime_set_seh_dispatch(uint32_t code_begin, uint32_t code_end, nt_seh_transfer transfer);
+int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint64_t frame,
+                                       struct nt_context64 *context,
+                                       struct nt_dispatcher_context *dispatch);
+
 typedef int32_t (NT_MS_ABI *nt_exception_filter)(struct nt_exception_pointers *);
 void NT_MS_ABI nt_RtlCaptureContext(struct nt_context64 *context);
 bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
@@ -191,6 +219,9 @@ int32_t NT_MS_ABI nt_seh_filter_exe(uint32_t code, struct nt_exception_pointers 
 
 /* The launcher supplies the host directory for the guest C: drive. */
 bool nt_runtime_set_file_root(const char *directory);
+int nt_runtime_open_guest_directory(const char *path, char *dos_path, size_t capacity);
+bool nt_runtime_check_guest_file(const char *path, char *dos_path, size_t capacity, bool *exists);
+bool nt_runtime_guest_directory_entry(int fd, const char *name, bool *directory);
 int32_t NT_MS_ABI nt_CreateDirectoryA(const char *path, const void *security);
 uintptr_t NT_MS_ABI nt_CreateFileA(const char *path, uint32_t access, uint32_t share,
                                   const void *security, uint32_t disposition, uint32_t flags,
@@ -224,6 +255,8 @@ uint32_t nt_runtime_read_pixel(uintptr_t dc, int32_t x, int32_t y);
 typedef bool (*nt_surface_reader)(const uint32_t *pixels, int32_t width, int32_t height,
                                   void *context);
 bool nt_runtime_read_surface(uintptr_t dc, nt_surface_reader reader, void *context);
+struct _cairo;
+bool nt_runtime_apply_font(uintptr_t font, struct _cairo *target);
 char *nt_runtime_ansi_to_utf8(const char *text, size_t length);
 char *nt_runtime_utf16_to_utf8(const uint16_t *text, size_t length);
 uintptr_t NT_MS_ABI nt_CreateCompatibleDC(uintptr_t dc);

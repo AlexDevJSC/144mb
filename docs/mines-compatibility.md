@@ -1,13 +1,13 @@
 # Compatibilidad de Mines en Linux
 
 El auditor leyó **197 importaciones directas** en 15 bibliotecas de
-`mines.exe`. La primera etapa agregó **74 equivalentes** y la segunda agregó **76**.
-Quedan **17 importaciones sin resolver**, incluida una por ordinal.
+`mines.exe`. Las tres etapas agregaron **74**, **76** y **17** equivalentes.
+El auditor resuelve las **197 importaciones directas**, incluida la entrada por ordinal.
 
-| Estado | Base | Primera etapa | Segunda etapa |
-| --- | ---: | ---: | ---: |
-| Importaciones con un equivalente registrado | 30 | 104 | 180 |
-| Importaciones sin resolver | 167 | 93 | 17 |
+| Estado | Base | Primera etapa | Segunda etapa | Tercera etapa |
+| --- | ---: | ---: | ---: | ---: |
+| Importaciones con un equivalente registrado | 30 | 104 | 180 | 197 |
+| Importaciones sin resolver | 167 | 93 | 17 | 0 |
 
 El recuento describe los puntos de entrada disponibles y sus perfiles
 probados. Las búsquedas que el programa haga en tiempo de ejecución
@@ -173,16 +173,74 @@ El audio se probó en la cola SDL del backend de audio de prueba.
 | Lectura CRT con anchura de texto cero o ausente | `EINVAL` antes de llamar a glibc. |
 | Código de aviso sin tono asignado | `ERROR_INVALID_PARAMETER`. |
 
-El ordinal 17 de COMCTL32 corresponde a `InitCommonControls` en la
-tabla de referencia de Wine 11.0. Sigue pendiente la implementación
-de los controles y la resolución del ordinal en el runtime.
-[Tabla de COMCTL32 en Wine 11.0](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/comctl32/comctl32.spec).
+## Tercera etapa
 
-## Inventario pendiente
-
-| Biblioteca | Pendientes | Símbolos |
+| Biblioteca | Nuevas | Símbolos y contrato probado |
 | --- | ---: | --- |
-| `USER32.dll` | 13 | `CheckDlgButton`, `DefDlgProcA`, `GetDlgItemTextA`, `IsDialogMessageA`, `IsDlgButtonChecked`, `LoadCursorA`, `LoadIconA`, `MessageBoxA`, `ReleaseCapture`, `SendDlgItemMessageA`, `SetCapture`, `SetForegroundWindow`, `WinHelpA` |
-| `COMDLG32.dll` | 2 | `GetOpenFileNameA`, `GetSaveFileNameA` |
-| `COMCTL32.dll` | 1 | `#17` |
-| `VCRUNTIME140.dll` | 1 | `__C_specific_handler` |
+| `USER32.dll` | 6 | `CheckDlgButton`, `DefDlgProcA`, `GetDlgItemTextA`, `IsDialogMessageA`, `IsDlgButtonChecked`, `SendDlgItemMessageA`. El diálogo llama a su procedimiento con ABI x64 y devuelve `DWLP_MSGRESULT`. Los IDs alcanzan controles hijos con texto ANSI, estados de botón, listas de opciones y notificaciones `WM_COMMAND`. Tabulador, Intro, Escape, teclado de edición y clic actúan sobre los controles dibujados con Cairo. |
+| `USER32.dll` | 2 | `LoadCursorA` carga cursores de sistema SDL y `LoadIconA` crea superficies RGBA de iconos de sistema y recursos numéricos `RT_GROUP_ICON`/`RT_ICON` DIB. La clase aplica ambos objetos a su ventana SDL. |
+| `USER32.dll` | 3 | `SetCapture`, `ReleaseCapture`, `SetForegroundWindow`. La captura entrega el handle anterior, enruta eventos entre ventanas de la aplicación y envía `WM_CAPTURECHANGED`. La activación depende del backend. |
+| `USER32.dll` | 2 | `MessageBoxA` crea una ventana modal SDL, devuelve el ID elegido y restaura al propietario. `WinHelpA` muestra el documento de texto provisto por el lanzador y cierra su ventana con `HELP_QUIT`. |
+| `COMDLG32.dll` | 2 | `GetOpenFileNameA`, `GetSaveFileNameA`. Selector de un archivo, navegación, filtros, extensión predeterminada, confirmación de sobrescritura, cancelación y salida con offsets y título. Admite `OPENFILENAMEA` AMD64 de 136 y 152 bytes. |
+| `COMCTL32.dll` | 1 | `#17` resuelve `InitCommonControls` y habilita la clase `msctls_statusbar32`. La prueba verifica su registro, texto y representación en la ventana. |
+| `VCRUNTIME140.dll` | 1 | `__C_specific_handler` interpreta tablas C SEH AMD64 con alcance acotado. Distingue continuación, búsqueda y selección de handler. Durante unwind invoca finalizadores y conserva el índice de la tabla. El despachador aporta el intervalo de código, la pila y la transferencia. |
+
+El perfil de controles admite `BUTTON`, `EDIT`, `STATIC`, `COMBOBOX`,
+`LISTBOX` y la barra de estado. El selector lista hasta 256 entradas de
+un máximo de 4096 examinadas por directorio y mantiene los nombres del
+perfil ASCII del disco C:. Valida directorios y archivos con `openat2`
+confinado. Los hooks, plantillas y la selección múltiple quedan pendientes.
+El resultado de Guardar selecciona una ruta y el programa invitado decide
+cuándo crear o reemplazar el archivo.
+
+El cargador de iconos acepta hasta 4 MiB de recursos de un módulo, con
+iconos DIB sin compresión. Los recursos de cursor privados quedan pendientes.
+La captura fuera de la aplicación depende del compositor. El visor de ayuda
+cubre `HELP_CONTENTS`, `HELP_FINDER` y `HELP_QUIT` con texto preparado.
+Quedan pendientes la lectura de los formatos binarios HLP y CHM, el despacho
+general de excepciones y la carga de ejecutables externos.
+
+### Verificación en Linux
+
+El entorno local usó Linux 6.18.57 x86-64 en Debian 13, glibc 2.41,
+GCC 14.2.0, binutils 2.44, MinGW GCC 14.2 con cabeceras MinGW-w64 12.0.0,
+SDL 2.32.4 y Cairo 1.18.4. Se usó el backend SDL `offscreen`.
+La suite local pasó también con ASan y UBSan, con la detección de fugas
+desactivada. La prueba de GitHub con Weston verificó la carga nativa del
+cursor de sistema.
+
+```sh
+make -j2 all check check-pe check-pe-import
+SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-desktop
+SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 \
+  BUILD_DIR=build-ubsan CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
+  all check check-pe check-pe-import check-desktop
+build/pe-import-audit --unresolved /ruta/a/mines.exe
+objdump -p build/win32-desktop.exe
+```
+
+El archivo auditado tiene SHA-256
+`3ba695d8bccac02cb9e6d63e630b50be15b729a952769814bbb684f9c9f096f3`.
+El auditor devolvió 197 importaciones, 197 equivalentes y 0 pendientes.
+`objdump -p` confirmó el ordinal 17 en el PE de escritorio generado.
+Se extrajo la sección `.rsrc` de Mines con `objcopy -O binary
+--only-section=.rsrc` y se verificó que el icono 200 se decodifica
+en 32 × 32 píxeles RGBA. La inspección y la decodificación leyeron datos del
+archivo. Las pruebas que ejecutaron código PE usaron los fixtures del build.
+
+| Caso probado | Resultado observado |
+| --- | --- |
+| ID de control ausente | `ERROR_CONTROL_ID_NOT_FOUND`. La prueba de texto también comprueba el NUL final y el límite de copia. |
+| Recurso DIB truncado | La carga falla y los handles ya entregados siguen válidos. |
+| Cursor en SDL `offscreen` | El backend carece de dispositivo de puntero. `LoadCursorA` informa `ERROR_GEN_FAILURE`. |
+| Intento de seleccionar un enlace simbólico | La validación lo rechaza y el usuario puede cancelar sin cambiar la ruta del llamador. |
+| Estructura de selector inválida y búfer pequeño | `CDERR_STRUCTSIZE` y `FNERR_BUFFERTOOSMALL`. Se escribe el tamaño requerido como WORD si hay espacio. |
+| Ayuda sin documento provisto | `ERROR_FILE_NOT_FOUND`. |
+| Tabla SEH inválida o destino fuera del código autorizado | `ExceptionContinueSearch` con `ERROR_INVALID_PARAMETER`, sin invocar el callback. |
+| Ordinal ajeno al perfil, bits reservados activos o IAT inconsistente | El parser del fixture rechaza los bytes antes de ejecutarlos. |
+
+Los contratos se contrastaron con las declaraciones públicas de MinGW-w64
+12.0.0 en `winuser.h`, `commdlg.h`, `commctrl.h`, `cderr.h`, `winnt.h`
+y `excpt.h`. El ordinal coincide con la tabla de Wine 11.0. El código
+propio mantiene la licencia MIT y reutiliza las dependencias SDL y Cairo del
+proyecto. [Tabla de COMCTL32 en Wine 11.0](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/comctl32/comctl32.spec).

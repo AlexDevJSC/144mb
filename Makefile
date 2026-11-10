@@ -7,6 +7,7 @@ WARN_CFLAGS = -std=c17 -Wall -Wextra -Wpedantic -Werror
 INCLUDES = -Iinclude
 PE_INCLUDES = $(INCLUDES) -Isrc/pe
 MINGW_CC ?= x86_64-w64-mingw32-gcc
+MINGW_DLLTOOL ?= x86_64-w64-mingw32-dlltool
 PKG_CONFIG ?= pkg-config
 DESKTOP_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags sdl2)
 DESKTOP_LIBS ?= $(shell $(PKG_CONFIG) --libs sdl2)
@@ -14,7 +15,9 @@ GDI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags cairo)
 GDI_LIBS ?= $(shell $(PKG_CONFIG) --libs cairo)
 FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
 FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files process exceptions gdi_memory printer menus menu_view messages desktop clipboard
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files process exceptions \
+                gdi_memory printer menus menu_view messages desktop desktop_resources controls \
+                dialogs file_dialogs clipboard
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
@@ -40,6 +43,13 @@ $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-clipboard.o: override CPPFLA
 $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-menus.o $(BUILD_DIR)/runtime-menu_view.o: src/runtime/menu_view.h
 $(BUILD_DIR)/runtime-menus.o $(BUILD_DIR)/runtime-menu_view.o: override CPPFLAGS += $(DESKTOP_CFLAGS)
 $(BUILD_DIR)/runtime-menu_view.o: override CPPFLAGS += $(GDI_CFLAGS)
+$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-desktop_resources.o $(BUILD_DIR)/runtime-controls.o \
+    $(BUILD_DIR)/runtime-dialogs.o $(BUILD_DIR)/runtime-exports.o: src/runtime/desktop_resources.h
+$(BUILD_DIR)/runtime-desktop_resources.o: src/pe/pe_bytes.h
+$(BUILD_DIR)/runtime-desktop_resources.o $(BUILD_DIR)/runtime-controls.o: override CPPFLAGS += $(DESKTOP_CFLAGS)
+$(BUILD_DIR)/runtime-controls.o: override CPPFLAGS += $(GDI_CFLAGS)
+$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-controls.o $(BUILD_DIR)/runtime-dialogs.o \
+    $(BUILD_DIR)/runtime-file_dialogs.o $(BUILD_DIR)/runtime-messages.o $(BUILD_DIR)/runtime-exports.o: src/runtime/dialogs.h
 $(BUILD_DIR)/runtime-gdi_memory.o: override CPPFLAGS += $(GDI_CFLAGS)
 $(BUILD_DIR)/runtime-crt_stdio.o: override CPPFLAGS += $(FFI_CFLAGS)
 
@@ -74,8 +84,14 @@ $(BUILD_DIR)/desktop-test: tests/desktop_test.c $(RUNTIME_OBJECTS) src/runtime/d
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(DESKTOP_CFLAGS) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
-check-desktop: $(BUILD_DIR)/desktop-test $(BUILD_DIR)/pe-desktop-host
+$(BUILD_DIR)/dialog-test: tests/dialog_test.c $(RUNTIME_OBJECTS) src/runtime/dialogs.h \
+    src/runtime/desktop_resources.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(DESKTOP_CFLAGS) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+check-desktop: $(BUILD_DIR)/desktop-test $(BUILD_DIR)/dialog-test $(BUILD_DIR)/pe-desktop-host
 	timeout 20s $(BUILD_DIR)/desktop-test
+	timeout 20s $(BUILD_DIR)/dialog-test
 	timeout 20s $(BUILD_DIR)/pe-desktop-host
 
 $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
@@ -129,9 +145,12 @@ $(BUILD_DIR)/win32-counter-import.exe: tests/pe/win32_counter_fixture.c | $(BUIL
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
 	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
 
-$(BUILD_DIR)/win32-desktop.exe: tests/pe/desktop_fixture.c | $(BUILD_DIR)
+$(BUILD_DIR)/fixture-comctl32.a: tests/pe/comctl32.def | $(BUILD_DIR)
+	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/win32-desktop.exe: tests/pe/desktop_fixture.c $(BUILD_DIR)/fixture-comctl32.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
-	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -luser32 -lgdi32
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -luser32 -lgdi32 -lcomdlg32
 
 $(BUILD_DIR)/import-embedded.o: tests/pe/embed.S $(BUILD_DIR)/nt-counter-import.exe
 	$(CC) -DNT_PE_FIXTURE_PATH='"$(BUILD_DIR)/nt-counter-import.exe"' -c "$<" -o "$@"

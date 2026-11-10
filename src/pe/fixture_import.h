@@ -11,6 +11,7 @@ enum { PE_IMPORT_PAGE_SIZE = 4096, PE_FIXTURE_IMPORT_LIMIT = 32 };
 struct pe_fixture_symbol {
     const char *module;
     const char *name;
+    uint16_t ordinal; /* Used when name is NULL. */
 };
 
 struct pe_import_section {
