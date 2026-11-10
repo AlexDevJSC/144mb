@@ -15,6 +15,7 @@ enum {
     NT_ERROR_INVALID_HANDLE = 6,
     NT_ERROR_NOT_ENOUGH_MEMORY = 8,
     NT_ERROR_GEN_FAILURE = 31,
+    NT_ERROR_SHARING_VIOLATION = 32,
     NT_ERROR_NOT_SUPPORTED = 50,
     NT_ERROR_FILE_EXISTS = 80,
     NT_ERROR_INVALID_PARAMETER = 87,
@@ -86,6 +87,7 @@ uint32_t NT_MS_ABI nt_FormatMessageA(uint32_t flags, const void *source,
                                     char *buffer, uint32_t size, void *arguments);
 
 uintptr_t NT_MS_ABI nt_GetModuleHandleW(const uint16_t *name);
+uint32_t NT_MS_ABI nt_GetModuleFileNameA(uintptr_t module, char *buffer, uint32_t size);
 uintptr_t NT_MS_ABI nt_LoadLibraryA(const char *name);
 int32_t NT_MS_ABI nt_FreeLibrary(uintptr_t module);
 nt_guest_proc NT_MS_ABI nt_GetProcAddress(uintptr_t module, const char *name);
@@ -116,14 +118,36 @@ void NT_MS_ABI nt_cexit(void);
 /* The launcher owns this immutable environment for the guest lifetime. */
 void nt_runtime_set_guest_environment(const char *const *environment);
 void nt_runtime_release_onexit_table(struct nt_onexit_table *table);
+int NT_MS_ABI nt_initialize_narrow_environment(void);
+
+/* The single-threaded launcher sets these borrowed strings before entry. */
+bool nt_runtime_set_guest_image(uintptr_t module, const char *path, const char *command_line);
+uintptr_t nt_runtime_guest_module(void);
+const char *const *nt_runtime_guest_argv(int *count);
+int NT_MS_ABI nt_configure_narrow_argv(int mode);
+char *NT_MS_ABI nt_get_narrow_winmain_command_line(void);
+
+/* Call from a single-threaded test host. The child runs only an embedded fixture. */
+bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code);
+int32_t NT_MS_ABI nt_TerminateProcess(uintptr_t process, uint32_t exit_code);
+void NT_MS_ABI nt_exit(int code);
+void NT_MS_ABI nt_quick_exit(int code);
+void NT_MS_ABI nt_terminate(void);
 
 /* The launcher supplies the host directory for the guest C: drive. */
 bool nt_runtime_set_file_root(const char *directory);
 int32_t NT_MS_ABI nt_CreateDirectoryA(const char *path, const void *security);
+uintptr_t NT_MS_ABI nt_CreateFileA(const char *path, uint32_t access, uint32_t share,
+                                  const void *security, uint32_t disposition, uint32_t flags,
+                                  uintptr_t template_file);
+int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle);
 int32_t NT_MS_ABI nt_DeleteFileA(const char *path);
 int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path);
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags);
 void *NT_MS_ABI nt_fopen(const char *path, const char *mode);
+int NT_MS_ABI nt_open_osfhandle(intptr_t handle, int flags);
+void *NT_MS_ABI nt_fdopen(int descriptor, const char *mode);
+int NT_MS_ABI nt_close(int descriptor);
 int NT_MS_ABI nt_fclose(void *stream);
 size_t NT_MS_ABI nt_fread(void *buffer, size_t size, size_t count, void *stream);
 size_t NT_MS_ABI nt_fwrite(const void *buffer, size_t size, size_t count, void *stream);
@@ -133,6 +157,11 @@ void nt_runtime_flush_streams(void);
 /* A host surface owns its bitmap and can be used as the reference for memory DCs. */
 uintptr_t nt_runtime_create_surface(int32_t width, int32_t height);
 uint32_t nt_runtime_read_pixel(uintptr_t dc, int32_t x, int32_t y);
+typedef bool (*nt_surface_reader)(const uint32_t *pixels, int32_t width, int32_t height,
+                                  void *context);
+bool nt_runtime_read_surface(uintptr_t dc, nt_surface_reader reader, void *context);
+char *nt_runtime_ansi_to_utf8(const char *text, size_t length);
+char *nt_runtime_utf16_to_utf8(const uint16_t *text, size_t length);
 uintptr_t NT_MS_ABI nt_CreateCompatibleDC(uintptr_t dc);
 uintptr_t NT_MS_ABI nt_CreateCompatibleBitmap(uintptr_t dc, int32_t width, int32_t height);
 uintptr_t NT_MS_ABI nt_CreatePen(int32_t style, int32_t width, uint32_t color);

@@ -448,6 +448,19 @@ uint32_t nt_runtime_read_pixel(uintptr_t handle, int32_t x, int32_t y)
     return color;
 }
 
+bool nt_runtime_read_surface(uintptr_t handle, nt_surface_reader reader, void *context)
+{
+    pthread_mutex_lock(&gdi_lock);
+    const struct context *dc = find_context(handle);
+    bool result = false;
+    if (dc != NULL) {
+        const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
+        result = reader(bitmap->pixels, bitmap->width, bitmap->height, context);
+    }
+    pthread_mutex_unlock(&gdi_lock);
+    return result;
+}
+
 static uint32_t display_color(const struct bitmap *bitmap, uint32_t color)
 {
     if (!bitmap->mono)

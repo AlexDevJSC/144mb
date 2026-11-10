@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "ntnative/counter.h"
 #include "compat.h"
+#include "desktop.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -210,7 +211,9 @@ static const struct runtime_export ntdll_exports[] = {
 };
 
 static const struct runtime_export kernel32_exports[] = {
+    WIN_EXPORT(CloseHandle),
     WIN_EXPORT(CreateDirectoryA),
+    WIN_EXPORT(CreateFileA),
     WIN_EXPORT(DeleteFileA),
     WIN_EXPORT(FormatMessageA),
     WIN_EXPORT(FreeLibrary),
@@ -219,6 +222,7 @@ static const struct runtime_export kernel32_exports[] = {
     EXPORT("GetCurrentThreadId", win_thread_id),
     EXPORT("GetLastError", win_get_last_error),
     WIN_EXPORT(GetLocalTime),
+    WIN_EXPORT(GetModuleFileNameA),
     WIN_EXPORT(GetModuleHandleW),
     WIN_EXPORT(GetProcAddress),
     WIN_EXPORT(GetStartupInfoW),
@@ -238,24 +242,46 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(MultiByteToWideChar),
     EXPORT("QueryPerformanceCounter", win_counter),
     WIN_EXPORT(RemoveDirectoryA),
-    WIN_EXPORT(SetLastError)
+    WIN_EXPORT(SetLastError),
+    WIN_EXPORT(TerminateProcess)
 };
 
 static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(AppendMenuA),
+    WIN_EXPORT(BeginPaint),
     WIN_EXPORT(CheckMenuItem),
     WIN_EXPORT(CreateMenu),
+    WIN_EXPORT(CreateWindowExA),
+    WIN_EXPORT(DefWindowProcA),
     WIN_EXPORT(DestroyMenu),
+    WIN_EXPORT(DestroyWindow),
     WIN_EXPORT(DispatchMessageA),
     WIN_EXPORT(EnableMenuItem),
+    WIN_EXPORT(EnableWindow),
+    WIN_EXPORT(EndPaint),
+    WIN_EXPORT(GetClientRect),
+    WIN_EXPORT(GetDC),
+    WIN_EXPORT(GetKeyboardState),
     WIN_EXPORT(GetMenuItemCount),
     WIN_EXPORT(GetMessageA),
+    WIN_EXPORT(GetWindowLongPtrA),
+    WIN_EXPORT(GetWindowRect),
     WIN_EXPORT(IntersectRect),
+    WIN_EXPORT(InvalidateRect),
     WIN_EXPORT(KillTimer),
     WIN_EXPORT(OffsetRect),
     WIN_EXPORT(PostQuitMessage),
+    WIN_EXPORT(RegisterClassA),
+    WIN_EXPORT(ReleaseDC),
+    WIN_EXPORT(SendMessageA),
     WIN_EXPORT(SetRect),
     WIN_EXPORT(SetTimer),
+    WIN_EXPORT(SetWindowLongPtrA),
+    WIN_EXPORT(SetWindowPos),
+    WIN_EXPORT(SetWindowTextA),
+    WIN_EXPORT(ShowWindow),
+    WIN_EXPORT(SystemParametersInfoA),
+    WIN_EXPORT(TranslateMessage),
     WIN_EXPORT(UnionRect)
 };
 
@@ -297,6 +323,7 @@ static const struct runtime_export heap_exports[] = {
 };
 
 static const struct runtime_export math_exports[] = {
+    EXPORT("_fdopen", nt_fdopen),
     EXPORT("ceil", crt_ceil),
     EXPORT("floor", crt_floor),
     EXPORT("roundf", crt_roundf),
@@ -333,14 +360,23 @@ static const struct runtime_export locale_exports[] = {
 
 static const struct runtime_export crt_runtime_exports[] = {
     EXPORT("_cexit", nt_cexit),
+    EXPORT("_configure_narrow_argv", nt_configure_narrow_argv),
     EXPORT("_crt_atexit", nt_crt_atexit),
+    EXPORT("_exit", nt_quick_exit),
+    EXPORT("_get_narrow_winmain_command_line", nt_get_narrow_winmain_command_line),
+    EXPORT("_initialize_narrow_environment", nt_initialize_narrow_environment),
     EXPORT("_initialize_onexit_table", nt_initialize_onexit_table),
     EXPORT("_initterm", nt_initterm),
     EXPORT("_initterm_e", nt_initterm_e),
-    EXPORT("_register_onexit_function", nt_register_onexit_function)
+    EXPORT("_register_onexit_function", nt_register_onexit_function),
+    EXPORT("exit", nt_exit),
+    EXPORT("terminate", nt_terminate)
 };
 
 static const struct runtime_export stdio_exports[] = {
+    EXPORT("_close", nt_close),
+    EXPORT("_fdopen", nt_fdopen),
+    EXPORT("_open_osfhandle", nt_open_osfhandle),
     EXPORT("_set_fmode", nt_set_fmode),
     EXPORT("fclose", nt_fclose),
     EXPORT("fopen", nt_fopen),
@@ -443,7 +479,11 @@ uintptr_t NT_MS_ABI nt_LoadLibraryA(const char *name)
 uintptr_t NT_MS_ABI nt_GetModuleHandleW(const uint16_t *name)
 {
     char narrow[128];
-    if (name != NULL) {
+    if (name == NULL) {
+        const uintptr_t module = nt_runtime_guest_module();
+        if (module != 0)
+            return module;
+    } else {
         for (size_t i = 0; i < sizeof(narrow) && name[i] <= 0x7f; ++i) {
             narrow[i] = (char)name[i];
             if (name[i] == 0) {

@@ -9,6 +9,7 @@ ExclusiveArch:  x86_64
 BuildRequires:  binutils
 BuildRequires:  gcc
 BuildRequires:  make
+BuildRequires:  pkgconfig(sdl2)
 
 %description
 An experimental implementation of the NtQueryPerformanceCounter timing

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
-#include "compat.h"
+#include "desktop.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -16,7 +16,7 @@ _Static_assert(offsetof(struct nt_message, wparam) == 16, "MSG wParam offset");
 _Static_assert(offsetof(struct nt_message, lparam) == 24, "MSG lParam offset");
 
 struct timer {
-    uintptr_t id;
+    uintptr_t id, window;
     int fd;
     nt_timer_callback callback;
 };
@@ -65,11 +65,11 @@ static struct timer_queue *get_queue(bool create)
     return queue;
 }
 
-static struct timer *find_timer(struct timer_queue *queue, uintptr_t id)
+static struct timer *find_timer(struct timer_queue *queue, uintptr_t window, uintptr_t id)
 {
     if (queue != NULL) {
         for (size_t i = 0; i < MAX_TIMERS; ++i) {
-            if (queue->timers[i].id == id)
+            if (queue->timers[i].id == id && (id == 0 || queue->timers[i].window == window))
                 return &queue->timers[i];
         }
     }
@@ -79,16 +79,17 @@ static struct timer *find_timer(struct timer_queue *queue, uintptr_t id)
 uintptr_t NT_MS_ABI nt_SetTimer(uintptr_t window, uintptr_t id, uint32_t milliseconds,
                                nt_timer_callback callback)
 {
-    if (window != 0) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    if (window != 0 && (!nt_runtime_window_valid(window) || id == 0)) {
+        nt_SetLastError(!nt_runtime_desktop_active() ? NT_ERROR_NOT_SUPPORTED :
+                       (id == 0 ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_INVALID_HANDLE));
         return 0;
     }
     struct timer_queue *queue = get_queue(true);
-    struct timer *timer = id != 0 ? find_timer(queue, id) : NULL;
+    struct timer *timer = id != 0 ? find_timer(queue, window, id) : NULL;
     const bool create = timer == NULL;
     if (create)
-        timer = find_timer(queue, 0);
-    if (timer == NULL || (create && queue->next_id == UINTPTR_MAX)) {
+        timer = find_timer(queue, 0, 0);
+    if (timer == NULL || (create && window == 0 && queue->next_id == UINTPTR_MAX)) {
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
@@ -109,18 +110,18 @@ uintptr_t NT_MS_ABI nt_SetTimer(uintptr_t window, uintptr_t id, uint32_t millise
         nt_SetLastError(NT_ERROR_GEN_FAILURE);
         return 0;
     }
-    const uintptr_t result = create ? queue->next_id++ : timer->id;
-    *timer = (struct timer){result, fd, callback};
+    const uintptr_t result = window != 0 ? id : (create ? queue->next_id++ : timer->id);
+    *timer = (struct timer){result, window, fd, callback};
     return result;
 }
 
 int32_t NT_MS_ABI nt_KillTimer(uintptr_t window, uintptr_t id)
 {
-    if (window != 0 || id == 0) {
-        nt_SetLastError(window != 0 ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+    if (id == 0 || (window != 0 && !nt_runtime_window_valid(window))) {
+        nt_SetLastError(id == 0 ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_INVALID_HANDLE);
         return 0;
     }
-    struct timer *timer = find_timer(get_queue(false), id);
+    struct timer *timer = find_timer(get_queue(false), window, id);
     if (timer == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
         return 0;
@@ -130,13 +131,28 @@ int32_t NT_MS_ABI nt_KillTimer(uintptr_t window, uintptr_t id)
     return 1;
 }
 
+void nt_runtime_remove_window_timers(uintptr_t window)
+{
+    struct timer_queue *queue = get_queue(false);
+    if (queue != NULL) {
+        for (size_t i = 0; i < MAX_TIMERS; ++i) {
+            struct timer *timer = &queue->timers[i];
+            if (timer->id != 0 && timer->window == window) {
+                close(timer->fd);
+                timer->id = 0;
+            }
+        }
+    }
+}
+
 void NT_MS_ABI nt_PostQuitMessage(int32_t code)
 {
     quit_code = code;
     quit_pending = true;
 }
 
-static bool wait_timer(struct timer_queue *queue, struct nt_message *message)
+static int wait_timer(struct timer_queue *queue, struct nt_message *message,
+                      uintptr_t filter, int timeout)
 {
     struct pollfd fds[MAX_TIMERS];
     const struct timer *timers[MAX_TIMERS];
@@ -144,20 +160,21 @@ static bool wait_timer(struct timer_queue *queue, struct nt_message *message)
     if (queue != NULL) {
         for (size_t i = 0; i < MAX_TIMERS; ++i) {
             const struct timer *timer = &queue->timers[(i + queue->next_poll) % MAX_TIMERS];
-            if (timer->id != 0) {
+            if (timer->id != 0 && (filter == 0 || timer->window ==
+                                                (filter == UINTPTR_MAX ? 0 : filter))) {
                 fds[count] = (struct pollfd){.fd = timer->fd, .events = POLLIN};
                 timers[count++] = timer;
             }
         }
     }
-    if (count == 0) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return false;
-    }
+    if (count == 0)
+        return 0;
     int status;
     do {
-        status = poll(fds, count, -1);
+        status = poll(fds, count, timeout);
     } while (status < 0 && errno == EINTR);
+    if (status == 0)
+        return 0;
     if (status > 0) {
         for (nfds_t i = 0; i < count; ++i) {
             if ((fds[i].revents & POLLIN) == 0)
@@ -168,15 +185,16 @@ static bool wait_timer(struct timer_queue *queue, struct nt_message *message)
                 received = read(fds[i].fd, &expirations, sizeof(expirations));
             } while (received < 0 && errno == EINTR);
             if (received == sizeof(expirations)) {
-                *message = (struct nt_message){.message = WM_TIMER, .wparam = timers[i]->id,
-                    .lparam = (intptr_t)timers[i]->callback, .time = nt_GetTickCount()};
+                *message = (struct nt_message){.window = timers[i]->window, .message = WM_TIMER,
+                    .wparam = timers[i]->id, .lparam = (intptr_t)timers[i]->callback,
+                    .time = nt_GetTickCount()};
                 queue->next_poll = ((size_t)(timers[i] - queue->timers) + 1) % MAX_TIMERS;
-                return true;
+                return 1;
             }
         }
     }
     nt_SetLastError(NT_ERROR_GEN_FAILURE);
-    return false;
+    return -1;
 }
 
 int32_t NT_MS_ABI nt_GetMessageA(struct nt_message *message, uintptr_t window,
@@ -186,21 +204,37 @@ int32_t NT_MS_ABI nt_GetMessageA(struct nt_message *message, uintptr_t window,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return -1;
     }
-    if (window != 0 && window != UINTPTR_MAX) {
+    if (window != 0 && window != UINTPTR_MAX && !nt_runtime_window_valid(window)) {
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
         return -1;
     }
-    if (quit_pending) {
-        *message = (struct nt_message){.message = WM_QUIT, .wparam = (uintptr_t)(intptr_t)quit_code,
-                                       .time = nt_GetTickCount()};
-        quit_pending = false;
-        return 0;
+    const bool desktop = nt_runtime_desktop_active();
+    const bool timer_allowed = (first == 0 && last == 0) || (first <= WM_TIMER && last >= WM_TIMER);
+    for (;;) {
+        if (quit_pending) {
+            *message = (struct nt_message){.message = WM_QUIT, .wparam = (uintptr_t)(intptr_t)quit_code,
+                                           .time = nt_GetTickCount()};
+            quit_pending = false;
+            return 0;
+        }
+        if (desktop) {
+            const int received = nt_runtime_take_window_message(message, window, first, last);
+            if (received != 0)
+                return received;
+            if (quit_pending)
+                continue;
+        }
+        if (timer_allowed) {
+            const int received = wait_timer(get_queue(false), message, window, desktop ? 0 : -1);
+            if (received != 0)
+                return received;
+        }
+        if (!desktop) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return -1;
+        }
+        nt_runtime_desktop_wait(16);
     }
-    if ((first != 0 || last != 0) && (first > WM_TIMER || last < WM_TIMER)) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return -1;
-    }
-    return wait_timer(get_queue(false), message) ? 1 : -1;
 }
 
 intptr_t NT_MS_ABI nt_DispatchMessageA(const struct nt_message *message)
@@ -209,13 +243,12 @@ intptr_t NT_MS_ABI nt_DispatchMessageA(const struct nt_message *message)
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    if (message->window != 0) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
-    }
     if (message->message == WM_TIMER && message->lparam != 0) {
         const nt_timer_callback callback = (nt_timer_callback)message->lparam;
-        callback(0, WM_TIMER, message->wparam, nt_GetTickCount());
+        if (message->window == 0 || nt_runtime_window_valid(message->window))
+            callback(message->window, WM_TIMER, message->wparam, nt_GetTickCount());
+        return 0;
     }
-    return 0;
+    return message->window != 0 ?
+           nt_SendMessageA(message->window, message->message, message->wparam, message->lparam) : 0;
 }

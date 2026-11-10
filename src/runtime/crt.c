@@ -15,6 +15,9 @@ static locale_t c_locale;
 static _Thread_local int thread_locale_mode = 2;
 static _Atomic int new_mode;
 static _Atomic(const char *const *) guest_environment;
+static pthread_mutex_t environment_lock = PTHREAD_MUTEX_INITIALIZER;
+static const char *const *environment_source;
+static char **environment_copy;
 
 static void create_c_locale(void)
 {
@@ -89,7 +92,57 @@ int NT_MS_ABI nt_set_new_mode(int mode)
 
 void nt_runtime_set_guest_environment(const char *const *environment)
 {
+    pthread_mutex_lock(&environment_lock);
+    if (environment_copy != NULL) {
+        for (size_t i = 0; environment_copy[i] != NULL; ++i)
+            free(environment_copy[i]);
+        free(environment_copy);
+        environment_copy = NULL;
+    }
+    environment_source = environment;
     atomic_store(&guest_environment, environment);
+    pthread_mutex_unlock(&environment_lock);
+}
+
+int NT_MS_ABI nt_initialize_narrow_environment(void)
+{
+    enum { MAX_ENTRIES = 4096, MAX_ENV_BYTES = 128 * 1024 };
+    pthread_mutex_lock(&environment_lock);
+    if (environment_copy != NULL) {
+        pthread_mutex_unlock(&environment_lock);
+        return 0;
+    }
+    size_t count = 0, bytes = 0;
+    while (environment_source != NULL && environment_source[count] != NULL) {
+        const size_t length = strnlen(environment_source[count], MAX_ENV_BYTES);
+        if (count == MAX_ENTRIES || length >= MAX_ENV_BYTES - bytes) {
+            pthread_mutex_unlock(&environment_lock);
+            errno = ENOMEM;
+            return -1;
+        }
+        bytes += length + 1;
+        ++count;
+    }
+    char **copy = calloc(count + 1, sizeof(*copy));
+    if (copy == NULL) {
+        pthread_mutex_unlock(&environment_lock);
+        return -1;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        copy[i] = strdup(environment_source[i]);
+        if (copy[i] == NULL) {
+            while (i != 0)
+                free(copy[--i]);
+            free(copy);
+            pthread_mutex_unlock(&environment_lock);
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    environment_copy = copy;
+    atomic_store(&guest_environment, (const char *const *)copy);
+    pthread_mutex_unlock(&environment_lock);
+    return 0;
 }
 
 char *NT_MS_ABI nt_getenv(const char *name)

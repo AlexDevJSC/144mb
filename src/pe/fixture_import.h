@@ -6,7 +6,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum { PE_IMPORT_PAGE_SIZE = 4096 };
+enum { PE_IMPORT_PAGE_SIZE = 4096, PE_FIXTURE_IMPORT_LIMIT = 32 };
+
+struct pe_fixture_symbol {
+    const char *module;
+    const char *name;
+};
 
 struct pe_import_section {
     const unsigned char *bytes;
@@ -21,6 +26,7 @@ struct pe_import_image {
     uint32_t image_size;
     uint32_t entry_rva;
     uint32_t iat_rva;
+    uint32_t slots[PE_FIXTURE_IMPORT_LIMIT];
 };
 
 /* Validate the generated fixture profile. On success section views borrow
@@ -29,5 +35,8 @@ struct pe_import_image {
 bool pe_parse_import_fixture(const unsigned char *file, size_t length,
                              const char *module, const char *symbol,
                              struct pe_import_image *result);
+bool pe_parse_import_fixture_many(const unsigned char *file, size_t length,
+                                  const struct pe_fixture_symbol *symbols, size_t count,
+                                  struct pe_import_image *result);
 
 #endif

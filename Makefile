@@ -7,16 +7,19 @@ WARN_CFLAGS = -std=c17 -Wall -Wextra -Wpedantic -Werror
 INCLUDES = -Iinclude
 PE_INCLUDES = $(INCLUDES) -Isrc/pe
 MINGW_CC ?= x86_64-w64-mingw32-gcc
-RUNTIME_PARTS = exports system global_memory unicode crt guest_files gdi_memory menus messages
+PKG_CONFIG ?= pkg-config
+DESKTOP_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags sdl2)
+DESKTOP_LIBS ?= $(shell $(PKG_CONFIG) --libs sdl2)
+RUNTIME_PARTS = exports system global_memory unicode crt guest_files process gdi_memory menus messages desktop
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/counter.o
-RUNTIME_LIBS = -lm -pthread
+RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
 PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-insert-timestamp \
                      -Wl,--disable-reloc-section,--disable-dynamicbase,--strip-all
 PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector \
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-.PHONY: all check check-pe check-pe-import benchmark install
+.PHONY: all check check-pe check-pe-import check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit
 
 $(BUILD_DIR):
@@ -27,6 +30,9 @@ $(BUILD_DIR)/counter.o: src/ntdll/counter.c include/ntnative/counter.h | $(BUILD
 
 $(BUILD_DIR)/runtime-%.o: src/runtime/%.c src/runtime/compat.h include/ntnative/runtime.h include/ntnative/counter.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -pthread -c "$<" -o "$@"
+
+$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-messages.o $(BUILD_DIR)/runtime-exports.o: src/runtime/desktop.h
+$(BUILD_DIR)/runtime-desktop.o: CPPFLAGS += $(DESKTOP_CFLAGS)
 
 $(BUILD_DIR)/pe-import-audit: src/tools/pe_import_audit.c src/pe/imports.c $(RUNTIME_OBJECTS) \
     src/pe/imports.h src/pe/pe_bytes.h include/ntnative/runtime.h | $(BUILD_DIR)
@@ -48,17 +54,30 @@ $(BUILD_DIR)/compat-batch-test: tests/compat_batch_test.c $(RUNTIME_OBJECTS) src
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=clock_gettime $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
+$(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+$(BUILD_DIR)/desktop-test: tests/desktop_test.c $(RUNTIME_OBJECTS) src/runtime/desktop.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(DESKTOP_CFLAGS) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+check-desktop: $(BUILD_DIR)/desktop-test $(BUILD_DIR)/pe-desktop-host
+	timeout 20s $(BUILD_DIR)/desktop-test
+	timeout 20s $(BUILD_DIR)/pe-desktop-host
+
 $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
     src/pe/imports.h src/pe/pe_bytes.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test \
-       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/import-scan-test
+       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test
 	$(BUILD_DIR)/counter-test
 	$(BUILD_DIR)/nt-native-probe
 	$(BUILD_DIR)/runtime-test
 	$(BUILD_DIR)/compat-batch-test
+	$(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test
 
 # These explicit flags keep the fixture freestanding, position independent
@@ -98,11 +117,18 @@ $(BUILD_DIR)/win32-counter-import.exe: tests/pe/win32_counter_fixture.c | $(BUIL
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
 	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
 
+$(BUILD_DIR)/win32-desktop.exe: tests/pe/desktop_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -luser32 -lgdi32
+
 $(BUILD_DIR)/import-embedded.o: tests/pe/embed.S $(BUILD_DIR)/nt-counter-import.exe
 	$(CC) -DNT_PE_FIXTURE_PATH='"$(BUILD_DIR)/nt-counter-import.exe"' -c "$<" -o "$@"
 
 $(BUILD_DIR)/win32-import-embedded.o: tests/pe/embed.S $(BUILD_DIR)/win32-counter-import.exe
 	$(CC) -DNT_PE_FIXTURE_PATH='"$(BUILD_DIR)/win32-counter-import.exe"' -c "$<" -o "$@"
+
+$(BUILD_DIR)/desktop-embedded.o: tests/pe/embed.S $(BUILD_DIR)/win32-desktop.exe
+	$(CC) -DNT_PE_FIXTURE_PATH='"$(BUILD_DIR)/win32-desktop.exe"' -c "$<" -o "$@"
 
 $(BUILD_DIR)/pe-import-host: tests/pe/import_host.c src/pe/fixture_import.c \
     $(BUILD_DIR)/import-embedded.o $(RUNTIME_OBJECTS) $(PE_IMPORT_HEADERS) | $(BUILD_DIR)
@@ -112,6 +138,11 @@ $(BUILD_DIR)/pe-import-host: tests/pe/import_host.c src/pe/fixture_import.c \
 $(BUILD_DIR)/pe-win32-import-host: tests/pe/import_host.c src/pe/fixture_import.c \
     $(BUILD_DIR)/win32-import-embedded.o $(RUNTIME_OBJECTS) $(PE_IMPORT_HEADERS) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) -DTEST_WIN32_COUNTER \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+$(BUILD_DIR)/pe-desktop-host: tests/pe/import_host.c src/pe/fixture_import.c \
+    $(BUILD_DIR)/desktop-embedded.o $(RUNTIME_OBJECTS) $(PE_IMPORT_HEADERS) src/runtime/desktop.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) -DTEST_DESKTOP \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
 check-pe-import: $(BUILD_DIR)/pe-import-host $(BUILD_DIR)/pe-win32-import-host $(BUILD_DIR)/pe-import-audit

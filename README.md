@@ -15,9 +15,10 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Un segundo PE de consola, compilado con MinGW-w64, importa
   `ntdll.dll!NtQueryPerformanceCounter`. Linux resuelve esa importación con
   la implementación propia.
-- El runtime expone equivalentes probados en Linux para 104 de las 197
+- El runtime expone equivalentes probados en Linux para 136 de las 197
   importaciones directas de Mines. Un PE de control verifica la llamada
-  Win32 al reloj.
+  Win32 al reloj. Otro PE de control abre y pinta una ventana con SDL
+  y 13 importaciones de USER32 y GDI.
 - `pe-import-audit` lee las importaciones directas de un PE AMD64 y
   cuenta las que tienen un equivalente registrado.
 - Un microbenchmark y un spec RPM para el comando ELF de diagnóstico.
@@ -26,7 +27,7 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 
 ## Compilar y probar
 
-En Linux x86-64 con GCC, GNU Make y GNU binutils:
+En Linux x86-64 con GCC, GNU Make, GNU binutils, pkg-config y SDL 2 de desarrollo:
 
 ```sh
 make
@@ -45,6 +46,10 @@ Con MinGW-w64 AMD64 instalado, `make check-pe-import` genera los
 ejecutables de prueba NT y Win32, muestra sus tablas de importación y
 los ejecuta en los anfitriones correspondientes. Cada anfitrión ejecuta
 exclusivamente el PE generado e incrustado en el build.
+
+Con MinGW-w64 y una sesión Wayland o X11 activa, `make check-desktop`
+prueba la ventana desde el anfitrión Linux y desde un PE. En CI se usa
+`sh tests/pe/run_wayland.sh make -j2 check-desktop` con Weston.
 
 Usa el auditor para medir la cobertura de un archivo externo.
 

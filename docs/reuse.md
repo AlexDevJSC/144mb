@@ -14,6 +14,13 @@ sin CRT. El anfitrión Linux resuelve las importaciones con el runtime propio.
 [Definición Win32](https://github.com/mingw-w64/mingw-w64/blob/master/mingw-w64-crt/lib-common/kernel32.def.in) ·
 [Licencia MinGW-w64](https://github.com/mingw-w64/mingw-w64/blob/master/COPYING).
 
+Las ventanas del runtime usan la biblioteca SDL 2 de la distribución
+mediante su ABI nativa. La dependencia usa licencia Zlib. El fixture se
+probó localmente con SDL 2.32.4 y el backend `offscreen`. La CI usa
+Weston como compositor Wayland de prueba.
+[SDL 2.32.4](https://github.com/libsdl-org/SDL/tree/release-2.32.4) ·
+[Licencia SDL](https://github.com/libsdl-org/SDL/blob/release-2.32.4/LICENSE.txt).
+
 ## Proyectos y dependencias
 
 | Componente | Clasificación | Evidencia, dependencia y restricciones |
