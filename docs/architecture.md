@@ -24,10 +24,10 @@ el contador NT y un conjunto inicial de contratos Win32 y CRT.
 | Módulo | Espacio y responsabilidad | Estado |
 | --- | --- | --- |
 | Reconocimiento y carga | Usuario. Distinguir ELF y PE por cabeceras. Conservar el camino ELF de Linux. Validar arquitectura y rangos PE, mapear secciones, resolver bibliotecas y preparar la entrada. | Perfiles PE32+ AMD64 de laboratorio y lectura de importaciones directas en archivos externos. |
-| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y 104 puntos de entrada Win32 y CRT de Mines con perfiles probados. |
-| Objetos y procesos | Usuario. Tablas de handles por proceso con acceso, herencia, duplicación, nombres y vida útil. Un broker por entorno podrá coordinar recursos compartidos si los casos entre procesos lo requieren. | Diseño inicial. |
+| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y 180 puntos de entrada Win32 y CRT de Mines con perfiles probados. |
+| Objetos y procesos | Usuario. Tablas de handles por proceso con acceso, herencia, duplicación, nombres y vida útil. Un broker por entorno podrá coordinar recursos compartidos si los casos entre procesos lo requieren. | Compartición local de archivos y salida del proceso de prueba con estado de 32 bits. |
 | Recursos de Linux | Kernel y UAPI existentes. Memoria con `mmap` y `mprotect`, descriptores para recursos y `ntsync` opcional para primitivas de espera. | Relojes Linux, memoria, `openat2` y `timerfd` en uso. |
-| Gráficos | Usuario. USER y win32u gestionan ventanas, eventos, entrada y portapapeles. DXVK y VKD3D-Proton aportan Direct3D sobre Vulkan. RADV usa la UAPI DRM de amdgpu. | Superficies GDI en memoria y menús sin ventana. Presentación de escritorio pendiente. |
+| Gráficos | Usuario. USER y win32u gestionan ventanas, eventos, entrada y portapapeles. DXVK y VKD3D-Proton aportan Direct3D sobre Vulkan. RADV usa la UAPI DRM de amdgpu. | Ventanas SDL 2, superficies GDI, teclado, ratón y temporizadores. |
 | Escritorio | Usuario. Lanzador KDE, asociación MIME y estado separado por aplicación. El instalador PE usa la misma política y el mismo entorno que el lanzador. | RPM de diagnóstico preparado. |
 | Pruebas | Usuario y CI en Linux. Contratos documentados, PE sintéticos y mediciones. | Linux y PE controlado comprobados. |
 
@@ -40,9 +40,10 @@ memoria privada. La página pasa de lectura y escritura a lectura y
 ejecución antes de la llamada. El host entrega en RCX un callback con ABI
 Microsoft que enlaza con la implementación en C mediante el ABI de Linux.
 
-El segundo perfil usa un PE de consola generado por MinGW-w64. Cada
-fixture admite una importación por nombre, del contador NT o del contador
-Win32. El anfitrión obtiene la dirección del registro de equivalentes. Admite
+Los perfiles de importación usan PE generados por MinGW-w64. Los dos
+del contador admiten una importación cada uno y el de escritorio admite
+13 nombres distribuidos entre USER32 y GDI. El anfitrión obtiene las
+direcciones del registro de equivalentes mediante una lista cerrada. Admite
 `.text` e `.idata` y la sección opcional `.rdata`, con un máximo de
 una página por sección. Conserva sus direcciones relativas y escribe el
 puntero del puente Microsoft x64 en la IAT. El código queda en lectura

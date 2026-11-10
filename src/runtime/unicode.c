@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "compat.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 enum { CP_ACP = 0, CP_1252 = 1252, CP_UTF8 = 65001, MB_PRECOMPOSED = 1, MB_ERR_INVALID_CHARS = 8 };
@@ -14,6 +15,62 @@ static uint32_t cp1252(unsigned char byte)
         0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178
     };
     return byte >= 0x80 && byte <= 0x9f ? extension[byte - 0x80] : byte;
+}
+
+static char *append_utf8(char *output, uint32_t code)
+{
+    if (code < 0x80) {
+        *output++ = (char)code;
+    } else if (code < 0x800) {
+        *output++ = (char)(0xc0 | (code >> 6));
+        *output++ = (char)(0x80 | (code & 0x3f));
+    } else if (code < 0x10000) {
+        *output++ = (char)(0xe0 | (code >> 12));
+        *output++ = (char)(0x80 | ((code >> 6) & 0x3f));
+        *output++ = (char)(0x80 | (code & 0x3f));
+    } else {
+        *output++ = (char)(0xf0 | (code >> 18));
+        *output++ = (char)(0x80 | ((code >> 12) & 0x3f));
+        *output++ = (char)(0x80 | ((code >> 6) & 0x3f));
+        *output++ = (char)(0x80 | (code & 0x3f));
+    }
+    return output;
+}
+
+char *nt_runtime_ansi_to_utf8(const char *text, size_t length)
+{
+    if (length > (SIZE_MAX - 1) / 3)
+        return NULL;
+    char *converted = malloc(length * 3 + 1);
+    if (converted == NULL)
+        return NULL;
+    char *out = converted;
+    for (size_t i = 0; i < length; ++i)
+        out = append_utf8(out, cp1252((unsigned char)text[i]));
+    *out = '\0';
+    return converted;
+}
+
+char *nt_runtime_utf16_to_utf8(const uint16_t *text, size_t length)
+{
+    if (length > (SIZE_MAX - 1) / 3)
+        return NULL;
+    char *converted = malloc(length * 3 + 1);
+    if (converted == NULL)
+        return NULL;
+    char *out = converted;
+    for (size_t i = 0; i < length; ++i) {
+        uint32_t code = text[i];
+        if (code >= 0xd800 && code <= 0xdfff) {
+            if (code <= 0xdbff && i + 1 < length && text[i + 1] >= 0xdc00 && text[i + 1] <= 0xdfff)
+                code = 0x10000 + ((code - 0xd800) << 10) + (text[++i] - 0xdc00);
+            else
+                code = 0xfffd;
+        }
+        out = append_utf8(out, code);
+    }
+    *out = '\0';
+    return converted;
 }
 
 static uint32_t utf8_next(const unsigned char **cursor, const unsigned char *end, bool *valid)

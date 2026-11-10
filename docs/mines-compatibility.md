@@ -1,20 +1,20 @@
 # Compatibilidad de Mines en Linux
 
 El auditor leyó **197 importaciones directas** en 15 bibliotecas de
-`mines.exe`. Esta etapa agregó **74 equivalentes con pruebas en Linux**.
-Quedaron **93 importaciones sin resolver**, incluida una por ordinal.
+`mines.exe`. La primera etapa agregó **74 equivalentes** y la segunda agregó **76**.
+Quedan **17 importaciones sin resolver**, incluida una por ordinal.
 
-| Estado | Antes | Ahora |
-| --- | ---: | ---: |
-| Importaciones con un equivalente registrado | 30 | 104 |
-| Importaciones sin resolver | 167 | 93 |
+| Estado | Base | Primera etapa | Segunda etapa |
+| --- | ---: | ---: | ---: |
+| Importaciones con un equivalente registrado | 30 | 104 | 180 |
+| Importaciones sin resolver | 167 | 93 | 17 |
 
 El recuento describe los puntos de entrada disponibles y sus perfiles
 probados. Las búsquedas que el programa haga en tiempo de ejecución
 quedan fuera de la medición. El análisis de Mines fue de solo lectura.
 La ejecución de código PE se limitó a los binarios de control del proyecto.
 
-## Equivalentes probados
+## Primera etapa
 
 | Bloque | Nuevos | Contrato comprobado y alcance |
 | --- | ---: | --- |
@@ -41,7 +41,7 @@ Contratos de referencia del Windows SDK, fichas de 2018 a 2025.
 [Menús](https://github.com/MicrosoftDocs/sdk-api/blob/docs/sdk-api-src/content/winuser/nf-winuser-appendmenua.md) ·
 [Temporizadores](https://github.com/MicrosoftDocs/sdk-api/blob/docs/sdk-api-src/content/winuser/nf-winuser-settimer.md)
 
-## Errores reproducidos
+### Errores reproducidos en la primera etapa
 
 | Prueba | Resultado observado |
 | --- | --- |
@@ -60,7 +60,7 @@ Contratos de referencia del Windows SDK, fichas de 2018 a 2025.
 | Menú cíclico, submenú activo y menú ya liberado | `ERROR_INVALID_PARAMETER` (87), `ERROR_ACCESS_DENIED` (5) o `ERROR_INVALID_HANDLE` (6). |
 | Temporizador ya destruido y filtro invertido | `ERROR_INVALID_HANDLE` (6) o `ERROR_INVALID_PARAMETER` (87). La salida del mensaje quedó intacta al usar una ventana inválida. |
 
-## Reproducir la prueba
+### Reproducir la primera etapa
 
 Entorno local del 10 de noviembre de 2026. Debian 13 x86-64, Linux
 6.18.57, GCC 14.2.0, glibc 2.41 y GNU binutils 2.44. Los backends de
@@ -85,32 +85,104 @@ LTO y protección de pila.
 El archivo auditado tiene 353.864 bytes y SHA-256
 `3ba695d8bccac02cb9e6d63e630b50be15b729a952769814bbb684f9c9f096f3`.
 `--unresolved` imprime una fila TSV por importación pendiente, seguida
-del resumen. El inventario de abajo se obtuvo de esas filas.
+del resumen. El inventario se vuelve a generar con el auditor al añadir equivalentes.
 
-## Qué impide el arranque
+## Segunda etapa
 
-- El cargador actual ejecuta PE de laboratorio generados durante el
-  build. Mines necesita un cargador general con relocaciones, TLS,
-  estado de proceso e hilo NT y aislamiento del invitado.
-- La superficie GDI de memoria y los objetos USER32 de esta etapa
-  necesitan una ventana, entrada, recursos y pintura conectados al
-  escritorio para mostrar el juego. También faltan texto, fuentes,
-  formas adicionales, diálogos e impresión.
-- La apertura de archivos por handle, la salida de proceso y el
-  arranque y excepciones del CRT requieren servicios del invitado
-  adicionales. Los resultados de la auditoría solo identifican las
-  dependencias directas que todavía faltan en el registro.
+| Bloque | Nuevos | Contrato probado |
+| --- | ---: | --- |
+| Archivos Win32 y CRT | 3 | Cinco disposiciones de apertura de archivos regulares, lectura y escritura, compartición por inodo dentro del proceso y transferencia HANDLE → descriptor → flujo. El cierre tiene un único propietario. |
+| Arranque y cierre | 8 | Ruta y argumentos del ejecutable invitado, entorno copiado, salida normal con callbacks y salida rápida con código de 32 bits. La terminación se aplica al proceso Linux del fixture. |
+| Ventanas y entrada | 21 | Ventanas superiores, áreas cliente, dibujo con DC y recorte de daño, títulos ANSI 1252, mensajes de teclado y ratón, datos por ventana y área de trabajo. Los temporizadores existentes se pueden asociar a ventanas. |
+| Dibujo y texto GDI | 10 | Cairo y las fuentes de Linux producen medidas ANSI y UTF-16, glifos recortados, elipses, polígonos y polilíneas. Las capacidades del dispositivo describen el raster y el DPI lógico del perfil. |
+| Portapapeles | 4 | Sesión de apertura, borrado y publicación de texto ANSI o UTF-16 a través de SDL. El portapapeles adquiere la memoria móvil tras publicar el texto. |
+| Entrada y salida CRT | 5 | Tres flujos estándar asignados por el lanzador, modo de confirmación con fdatasync y formatos estrechos validados mediante libffi y glibc. |
+| Contexto y excepciones | 6 | Registros x86-64 y FXSAVE, búsqueda por intervalo en la tabla de funciones, filtro superior y slots de excepción por hilo. |
+| Finalización y matemáticas CRT | 4 | Destructores TLS antes de los callbacks, tipo de aplicación y mensaje de aserción, y callback de dominio de sqrt. |
+| Menú en ventana y colores | 6 | Barra y submenú de un nivel dibujados en la ventana SDL, áreas calculadas desde el mismo diseño y selección con WM_COMMAND. El menú reserva parte del área de la ventana y usa una paleta de invitado. |
+| Impresión | 5 | La consulta del dispositivo predeterminado entrega un DC PDF, DEVMODEA y DEVNAMES. El runtime compone y entrega un PDF de varias páginas a un descriptor asignado por el anfitrión. |
+| Desenrollado AMD64 | 1 | Unwind de prólogo y cuerpo para metadatos versión 1, con límites explícitos de imagen y pila. Restaura registros y obtiene datos del manejador dentro de la imagen. |
+| Terminación mínima, filtro CRT y audio | 3 | La terminación mínima registra el estado y conserva los callbacks. El filtro CRT entrega las excepciones soportadas a los manejadores del hilo invitado. SDL encola un tono de aviso. |
+
+El perfil de archivos admite acceso genérico y compartición de lectura y
+escritura. La raíz de archivos, el entorno y la identidad del módulo son
+proporcionados por el anfitrión. El cierre de procesos requiere el trabajador
+Linux del fixture. Los handles de proceso de terceros, los descriptores de
+seguridad personalizados y la expansión de comodines quedan pendientes.
+
+Las ventanas y callbacks pertenecen al hilo que abre SDL 2. La ventana
+tiene una superficie GDI que se presenta al cerrar un ciclo de pintura.
+El perfil inicial usa ventanas superiores, texto ANSI y el subconjunto
+de teclado indicado en las pruebas. Wayland decide la posición global
+de la ventana. Las clases con menús de recursos y ventanas hijas quedan
+pendientes.
+
+### Pruebas y errores de la segunda etapa
+
+- Linux x86-64, Debian 13, kernel 6.18.57, GCC 14.2.0, glibc 2.41, GNU
+  binutils 2.44, MinGW-w64 14 y SDL 2.32.4.
+- Pasaron `make -j2 all check check-pe check-pe-import` y
+  `SDL_VIDEODRIVER=offscreen make check-desktop`. El PE de escritorio
+  resolvió 13 importaciones reales de USER32 y GDI a través de la IAT,
+  pintó una ventana y recibió el cierre desde un temporizador.
+- Un acceso de archivo incompatible devuelve `ERROR_SHARING_VIOLATION`
+  y conserva el contenido al intentar truncarlo. Un handle transferido
+  al CRT deja de poder cerrarse con `CloseHandle`.
+- La prueba de arranque observó `ERROR_INSUFFICIENT_BUFFER` al truncar
+  la ruta del módulo. Un intento de terminar desde el anfitrión devolvió
+  `ERROR_ACCESS_DENIED`.
+- El entorno local denegó sockets AF_UNIX a Weston. En Ubuntu, Weston 13 presentó la ventana del PE de control con la
+  ruta de texturas de SDL y Mesa por software. En el entorno local se
+  verificaron color, recorte, entrada y cierre con `offscreen`.
+- Mines sigue siendo una auditoría de solo lectura. El mapa de carga
+  permite las importaciones por nombre de los PE de control incrustados
+  y conserva la separación entre páginas de código y datos.
+
+Referencias de contrato del Windows SDK, fichas de 2018 a 2025.
+[CreateFileA](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea) ·
+[Propiedad del handle CRT](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/open-osfhandle) ·
+[GetModuleFileNameA](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulefilenamea) ·
+[Ventanas y mensajes](https://learn.microsoft.com/en-us/windows/win32/winmsg/windowing) ·
+[SDL 2](https://github.com/libsdl-org/SDL/tree/release-2.32.4).
+
+El perfil GDI usa fuentes del sistema y puede obtener métricas diferentes a las
+fuentes instaladas en otros entornos. La alineación inicial es superior
+izquierda y las opciones de texto comprobadas son recorte y fondo opaco.
+
+La prueba del CRT reprodujo `D%d%n` y `%2x%2x%2x` de Mines. El
+puente conserva el tamaño de `long` en LLP64, prueba truncamiento y
+rechaza formatos fuera del subconjunto antes de llamar a glibc. El
+portapapeles se verificó en SDL `offscreen` con transferencia de propiedad
+y acentos. Las pruebas de excepción ejercitan entradas controladas,
+contexto por hilo y devolución de filtros. La entrega de fallos de un PE externo, los epílogos y el encadenado
+de desenrollado quedan pendientes.
+
+El menú probado acepta comandos y un nivel de submenú. El ajuste de
+rectángulo se verificó con una ventana sin marco. `PrintDlgA` cubre
+`PD_RETURNDEFAULT` y `PD_RETURNDC` para el dispositivo PDF. La
+impresión mantiene la salida anterior hasta finalizar el documento y
+la prueba comprobó las dos páginas, el título y la cabecera PDF.
+El filtro del CRT usa handlers por hilo sin instalar señales en Linux.
+El audio se probó en la cola SDL del backend de audio de prueba.
+
+| Caso de error | Resultado |
+| --- | --- |
+| Menú adjunto a una ventana | Se rechaza la destrucción directa con `ERROR_ACCESS_DENIED`. El cierre de la ventana destruye el menú adjunto. |
+| Impresión fuera del orden del documento | `ERROR_INVALID_PARAMETER` al cerrar una página inexistente o un documento con una página abierta. |
+| Desenrollado en un epílogo o fuera de la pila autorizada | `ERROR_NOT_SUPPORTED` o `ERROR_INVALID_PARAMETER`, con el contexto de entrada intacto. |
+| Lectura CRT con anchura de texto cero o ausente | `EINVAL` antes de llamar a glibc. |
+| Código de aviso sin tono asignado | `ERROR_INVALID_PARAMETER`. |
+
+El ordinal 17 de COMCTL32 corresponde a `InitCommonControls` en la
+tabla de referencia de Wine 11.0. Sigue pendiente la implementación
+de los controles y la resolución del ordinal en el runtime.
+[Tabla de COMCTL32 en Wine 11.0](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/comctl32/comctl32.spec).
 
 ## Inventario pendiente
 
 | Biblioteca | Pendientes | Símbolos |
 | --- | ---: | --- |
-| `USER32.dll` | 45 | `AdjustWindowRectEx`, `BeginPaint`, `CheckDlgButton`, `CloseClipboard`, `CreateWindowExA`, `DefDlgProcA`, `DefWindowProcA`, `DestroyWindow`, `DrawMenuBar`, `EmptyClipboard`, `EnableWindow`, `EndPaint`, `GetClientRect`, `GetDC`, `GetDlgItemTextA`, `GetKeyboardState`, `GetMenu`, `GetMenuItemRect`, `GetSysColor`, `GetWindowLongPtrA`, `GetWindowRect`, `InvalidateRect`, `IsDialogMessageA`, `IsDlgButtonChecked`, `LoadCursorA`, `LoadIconA`, `MessageBeep`, `MessageBoxA`, `OpenClipboard`, `RegisterClassA`, `ReleaseCapture`, `ReleaseDC`, `SendDlgItemMessageA`, `SendMessageA`, `SetCapture`, `SetClipboardData`, `SetForegroundWindow`, `SetMenu`, `SetWindowLongPtrA`, `SetWindowPos`, `SetWindowTextA`, `ShowWindow`, `SystemParametersInfoA`, `TranslateMessage`, `WinHelpA` |
-| `KERNEL32.dll` | 8 | `CreateFileA`, `GetModuleFileNameA`, `RtlCaptureContext`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `SetUnhandledExceptionFilter`, `TerminateProcess`, `UnhandledExceptionFilter` |
-| `GDI32.dll` | 14 | `CreateFontA`, `CreateFontIndirectA`, `Ellipse`, `EndDoc`, `EndPage`, `ExtTextOutW`, `GetDeviceCaps`, `GetTextExtentPoint32A`, `GetTextExtentPoint32W`, `GetTextMetricsA`, `Polygon`, `Polyline`, `StartDocA`, `StartPage` |
-| `COMDLG32.dll` | 3 | `GetOpenFileNameA`, `GetSaveFileNameA`, `PrintDlgA` |
+| `USER32.dll` | 13 | `CheckDlgButton`, `DefDlgProcA`, `GetDlgItemTextA`, `IsDialogMessageA`, `IsDlgButtonChecked`, `LoadCursorA`, `LoadIconA`, `MessageBoxA`, `ReleaseCapture`, `SendDlgItemMessageA`, `SetCapture`, `SetForegroundWindow`, `WinHelpA` |
+| `COMDLG32.dll` | 2 | `GetOpenFileNameA`, `GetSaveFileNameA` |
 | `COMCTL32.dll` | 1 | `#17` |
-| `VCRUNTIME140.dll` | 3 | `__C_specific_handler`, `__current_exception`, `__current_exception_context` |
-| `api-ms-win-crt-stdio-l1-1-0.dll` | 6 | `__acrt_iob_func`, `__p__commode`, `__stdio_common_vfprintf`, `__stdio_common_vsprintf`, `__stdio_common_vsscanf`, `_open_osfhandle` |
-| `api-ms-win-crt-math-l1-1-0.dll` | 2 | `__setusermatherr`, `_fdopen` |
-| `api-ms-win-crt-runtime-l1-1-0.dll` | 11 | `_c_exit`, `_configure_narrow_argv`, `_exit`, `_get_narrow_winmain_command_line`, `_initialize_narrow_environment`, `_register_thread_local_exe_atexit_callback`, `_seh_filter_exe`, `_set_app_type`, `_wassert`, `exit`, `terminate` |
+| `VCRUNTIME140.dll` | 1 | `__C_specific_handler` |

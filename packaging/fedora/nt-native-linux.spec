@@ -9,6 +9,10 @@ ExclusiveArch:  x86_64
 BuildRequires:  binutils
 BuildRequires:  gcc
 BuildRequires:  make
+BuildRequires:  pkgconfig(sdl2)
+BuildRequires:  pkgconfig(cairo)
+BuildRequires:  pkgconfig(libffi)
+BuildRequires:  dejavu-sans-fonts
 
 %description
 An experimental implementation of the NtQueryPerformanceCounter timing

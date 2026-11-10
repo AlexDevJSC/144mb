@@ -424,7 +424,7 @@ static void check_gdi(void)
           nt_runtime_read_pixel(canvas, 1, 1) == WHITE);
     CHECK(nt_SelectObject(canvas, stock_brush) == hatch && nt_DeleteObject(hatch) != 0);
     CHECK(nt_CreatePen(1, 1, RED) == 0 && last_error() == NT_ERROR_NOT_SUPPORTED);
-    CHECK(nt_GetStockObject(13) == 0 && last_error() == NT_ERROR_NOT_SUPPORTED);
+    CHECK(nt_GetStockObject(19) == 0 && last_error() == NT_ERROR_NOT_SUPPORTED);
     CHECK(nt_DeleteDC(memory) != 0 && nt_DeleteObject(bitmap) != 0 &&
           nt_DeleteObject(pen) != 0 && nt_DeleteObject(brush) != 0);
     CHECK(nt_DeleteObject(old_bitmap) == 0 && last_error() == NT_ERROR_INVALID_HANDLE);

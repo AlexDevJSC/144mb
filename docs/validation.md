@@ -69,8 +69,8 @@ Las pruebas de los 30 equivalentes iniciales y las 74 incorporaciones
 se ejecutan con `make check` en Linux. Las comprobaciones verifican
 el registro y llaman a las funciones mediante el ABI Microsoft x64.
 
-La auditoría de solo lectura leyó 197 importaciones directas, con 104
-equivalentes registrados y 93 pendientes. Una entrada pendiente
+La auditoría de solo lectura leyó 197 importaciones directas, con 180
+equivalentes registrados y 17 pendientes. Una entrada pendiente
 identifica su símbolo por ordinal. Las pruebas y el inventario están
 en [Compatibilidad de Mines](mines-compatibility.md).
 

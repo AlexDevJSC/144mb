@@ -25,8 +25,10 @@ struct memory_object {
     struct memory_object *next;
     uintptr_t handle;
     void *data;
+    size_t size;
     unsigned int locks;
     enum memory_kind kind;
+    bool clipboard_owned;
 };
 
 static pthread_mutex_t objects_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -64,7 +66,8 @@ static uintptr_t allocate_object(enum memory_kind kind, size_t size, bool zero)
     }
     const uintptr_t handle = kind == GLOBAL_MOVABLE ?
                              (next_movable++ << 4) | 1 : (uintptr_t)data;
-    *object = (struct memory_object){objects, handle, data, 0, kind};
+    *object = (struct memory_object){.next = objects, .handle = handle, .data = data,
+                                     .size = size, .kind = kind};
     objects = object;
     pthread_mutex_unlock(&objects_lock);
     return handle;
@@ -93,11 +96,64 @@ static uintptr_t release_object(uintptr_t handle, bool local)
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
         return handle;
     }
+    if (object->clipboard_owned) {
+        pthread_mutex_unlock(&objects_lock);
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return handle;
+    }
     *link = object->next;
     pthread_mutex_unlock(&objects_lock);
     free(object->data);
     free(object);
     return 0;
+}
+
+bool nt_runtime_claim_clipboard_memory(uintptr_t handle, unsigned char **data, size_t *size)
+{
+    pthread_mutex_lock(&objects_lock);
+    struct memory_object *object = *find_object(handle);
+    uint32_t error = NT_ERROR_INVALID_HANDLE;
+    if (object != NULL && object->kind == GLOBAL_MOVABLE) {
+        error = NT_ERROR_ACCESS_DENIED;
+        if (!object->clipboard_owned && object->locks == 0) {
+            error = NT_ERROR_INVALID_PARAMETER;
+            if (object->size != 0 && object->size <= 1024 * 1024) {
+                unsigned char *copy = malloc(object->size);
+                error = NT_ERROR_NOT_ENOUGH_MEMORY;
+                if (copy != NULL) {
+                    memcpy(copy, object->data, object->size);
+                    *data = copy;
+                    *size = object->size;
+                    object->clipboard_owned = true;
+                    error = NT_ERROR_SUCCESS;
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&objects_lock);
+    if (error != NT_ERROR_SUCCESS)
+        nt_SetLastError(error);
+    return error == NT_ERROR_SUCCESS;
+}
+
+void nt_runtime_release_clipboard_memory(uintptr_t handle, bool release)
+{
+    pthread_mutex_lock(&objects_lock);
+    struct memory_object **link = find_object(handle);
+    struct memory_object *object = *link;
+    if (object != NULL && object->clipboard_owned) {
+        if (release)
+            *link = object->next;
+        else
+            object->clipboard_owned = false;
+    } else {
+        object = NULL;
+    }
+    pthread_mutex_unlock(&objects_lock);
+    if (object != NULL && release) {
+        free(object->data);
+        free(object);
+    }
 }
 
 uintptr_t NT_MS_ABI nt_GlobalFree(uintptr_t handle)

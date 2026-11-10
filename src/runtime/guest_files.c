@@ -138,8 +138,14 @@ static int confined_open(int root, const char *path, int flags, unsigned int mod
     return (int)syscall(SYS_openat2, root, path, &how, sizeof(how));
 }
 
-static int open_regular(int root, const char *path, int flags)
+static int open_regular(int root, const char *path, int flags, bool *created)
 {
+    *created = false;
+    if ((flags & O_EXCL) != 0) {
+        const int fd = confined_open(root, path, flags, 0666);
+        *created = fd >= 0;
+        return fd;
+    }
     for (int attempt = 0; attempt < 2; ++attempt) {
         const int pinned = confined_open(root, path, O_PATH, 0);
         if (pinned >= 0) {
@@ -164,6 +170,7 @@ static int open_regular(int root, const char *path, int flags)
             return -1;
 
         const int fd = confined_open(root, path, flags | O_EXCL, 0666);
+        *created = fd >= 0;
         if (fd >= 0 || errno != EEXIST)
             return fd;
     }
@@ -199,9 +206,195 @@ static uint32_t path_error(int error, bool parent)
         return NT_ERROR_INVALID_PARAMETER;
     case ENOMEM:
         return NT_ERROR_NOT_ENOUGH_MEMORY;
+    case EBUSY:
+        return NT_ERROR_SHARING_VIOLATION;
     default:
         return NT_ERROR_GEN_FAILURE;
     }
+}
+
+enum {
+    FILE_READ = 1, FILE_WRITE = 2, FILE_TABLE_SIZE = 256,
+    CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
+    TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80
+};
+
+enum file_owner { FREE_FILE, WIN_HANDLE, CRT_DESCRIPTOR, CRT_STREAM };
+
+struct guest_file {
+    enum file_owner owner;
+    uintptr_t handle;
+    int fd;
+    unsigned int access, share;
+    dev_t device;
+    ino_t inode;
+    bool text;
+};
+
+static pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct guest_file files[FILE_TABLE_SIZE];
+static uintptr_t next_handle = 0x24000004;
+
+static bool same_file(const struct guest_file *file, const struct stat *info)
+{
+    return file->owner != FREE_FILE && file->device == info->st_dev &&
+           file->inode == info->st_ino;
+}
+
+static bool file_in_use(const struct stat *info)
+{
+    for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
+        if (same_file(&files[i], info))
+            return true;
+    }
+    return false;
+}
+
+static struct guest_file *new_file(void)
+{
+    for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
+        if (files[i].owner == FREE_FILE)
+            return &files[i];
+    }
+    errno = ENOMEM;
+    return NULL;
+}
+
+static struct guest_file *find_handle(uintptr_t handle)
+{
+    for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
+        if (files[i].owner == WIN_HANDLE && files[i].handle == handle)
+            return &files[i];
+    }
+    return NULL;
+}
+
+static int open_shared(struct guest_file *slot, int parent, const char *path,
+                       int flags, unsigned int access, unsigned int share, bool *created)
+{
+    const int fd = open_regular(parent, path, flags & ~O_TRUNC, created);
+    if (fd < 0)
+        return -1;
+    struct stat info;
+    int error = fstat(fd, &info) != 0 ? errno : 0;
+    for (size_t i = 0; error == 0 && i < FILE_TABLE_SIZE; ++i) {
+        const struct guest_file *other = &files[i];
+        if (same_file(other, &info) && ((access & ~other->share) != 0 ||
+                                      (other->access & ~share) != 0))
+            error = EBUSY;
+    }
+    if (error != 0) {
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    *slot = (struct guest_file){.fd = fd, .access = access, .share = share,
+                               .device = info.st_dev, .inode = info.st_ino};
+    return fd;
+}
+
+struct security_attributes {
+    uint32_t size;
+    const void *descriptor;
+    int32_t inherit;
+};
+
+_Static_assert(sizeof(struct security_attributes) == 24, "SECURITY_ATTRIBUTES layout");
+
+uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t share,
+                                  const void *security, uint32_t disposition, uint32_t flags,
+                                  uintptr_t template_file)
+{
+    const uint32_t generic_read = UINT32_C(0x80000000), generic_write = UINT32_C(0x40000000);
+    const struct security_attributes *attributes = security;
+    const bool read_access = (desired & generic_read) != 0, write_access = (desired & generic_write) != 0;
+    if (disposition < CREATE_NEW || disposition > TRUNCATE_EXISTING ||
+        (attributes != NULL && attributes->size != sizeof(*attributes))) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return UINTPTR_MAX;
+    }
+    if ((!read_access && !write_access) || (desired & ~(generic_read | generic_write)) != 0 ||
+        (share & ~(FILE_READ | FILE_WRITE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
+        template_file != 0 || (attributes != NULL &&
+                              (attributes->descriptor != NULL || attributes->inherit != 0))) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return UINTPTR_MAX;
+    }
+    const bool truncate = disposition == CREATE_ALWAYS || disposition == TRUNCATE_EXISTING;
+    if (truncate && !write_access) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return UINTPTR_MAX;
+    }
+    char path[PATH_MAX];
+    if (!guest_path(input, path)) {
+        nt_SetLastError(path_error(errno, true));
+        return UINTPTR_MAX;
+    }
+    const int root = duplicate_root();
+    if (root < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return UINTPTR_MAX;
+    }
+    const char *leaf;
+    const int parent = open_parent(root, path, &leaf);
+    const int parent_error = errno;
+    close(root);
+    if (parent < 0) {
+        nt_SetLastError(path_error(parent_error, true));
+        return UINTPTR_MAX;
+    }
+
+    int options = read_access ? (write_access ? O_RDWR : O_RDONLY) : O_WRONLY;
+    if (disposition == CREATE_NEW || disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
+        options |= O_CREAT;
+    if (disposition == CREATE_NEW)
+        options |= O_EXCL;
+    const unsigned int access = (read_access ? FILE_READ : 0) | (write_access ? FILE_WRITE : 0);
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *slot = new_file();
+    bool created = false;
+    uintptr_t result = UINTPTR_MAX;
+    int error = ENOMEM;
+    if (slot != NULL && next_handle <= UINTPTR_MAX - 16) {
+        const int fd = open_shared(slot, parent, leaf, options, access, share, &created);
+        error = errno;
+        if (fd >= 0) {
+            if (truncate && !created && ftruncate(fd, 0) != 0) {
+                error = errno;
+                close(fd);
+            } else {
+                result = next_handle;
+                next_handle += 16;
+                slot->owner = WIN_HANDLE;
+                slot->handle = result;
+            }
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    close(parent);
+    if (result == UINTPTR_MAX)
+        nt_SetLastError(error == EEXIST ? NT_ERROR_FILE_EXISTS : path_error(error, false));
+    else if (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
+        nt_SetLastError(created ? NT_ERROR_SUCCESS : NT_ERROR_ALREADY_EXISTS);
+    return result;
+}
+
+static int close_file(struct guest_file *file)
+{
+    const int result = close(file->fd);
+    file->owner = FREE_FILE;
+    return result;
+}
+
+int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
+{
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file = find_handle(handle);
+    const int result = file != NULL ? close_file(file) : -1;
+    pthread_mutex_unlock(&file_lock);
+    if (result != 0)
+        nt_SetLastError(file != NULL ? path_error(errno, false) : NT_ERROR_INVALID_HANDLE);
+    return result == 0;
 }
 
 enum path_operation { MAKE_DIRECTORY, REMOVE_FILE, REMOVE_DIRECTORY };
@@ -227,20 +420,22 @@ static int32_t change_path(const char *input, enum path_operation operation)
         return 0;
     }
 
+    pthread_mutex_lock(&file_lock);
     int status;
     if (operation == MAKE_DIRECTORY) {
         status = mkdirat(parent, leaf, 0777);
     } else {
         struct stat info;
         status = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW);
-        if (status == 0 && S_ISLNK(info.st_mode)) {
-            errno = EACCES;
+        if (status == 0 && (S_ISLNK(info.st_mode) || file_in_use(&info))) {
+            errno = S_ISLNK(info.st_mode) ? EACCES : EBUSY;
             status = -1;
         }
         if (status == 0)
             status = unlinkat(parent, leaf, operation == REMOVE_DIRECTORY ? AT_REMOVEDIR : 0);
     }
     const int error = errno;
+    pthread_mutex_unlock(&file_lock);
     close(parent);
     if (status != 0)
         nt_SetLastError(path_error(error, operation == REMOVE_DIRECTORY));
@@ -297,10 +492,23 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         return 0;
     }
 
-    const int status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
-                                    destination_parent, destination_leaf,
-                                    flags == 0 ? RENAME_NOREPLACE : 0);
+    pthread_mutex_lock(&file_lock);
+    struct stat info;
+    int status = fstatat(source_parent, source_leaf, &info, AT_SYMLINK_NOFOLLOW);
+    if (status == 0) {
+        if (file_in_use(&info) || (flags != 0 &&
+            fstatat(destination_parent, destination_leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+            file_in_use(&info))) {
+            errno = EBUSY;
+            status = -1;
+        } else {
+            status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
+                                  destination_parent, destination_leaf,
+                                  flags == 0 ? RENAME_NOREPLACE : 0);
+        }
+    }
     const int error = errno;
+    pthread_mutex_unlock(&file_lock);
     close(source_parent);
     close(destination_parent);
     if (status != 0)
@@ -308,8 +516,14 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     return status == 0;
 }
 
-enum { CRT_TEXT = 0x4000, CRT_BINARY = 0x8000 };
+enum { CRT_APPEND = 0x0008, CRT_TEXT = 0x4000, CRT_BINARY = 0x8000 };
 static _Atomic int default_mode = CRT_TEXT;
+static int default_commit;
+
+int *NT_MS_ABI nt_p_commode(void)
+{
+    return &default_commit;
+}
 
 int NT_MS_ABI nt_set_fmode(int mode)
 {
@@ -324,7 +538,8 @@ int NT_MS_ABI nt_set_fmode(int mode)
 struct stream_mode {
     char host[3];
     int flags;
-    bool text, readable, writable;
+    bool text, readable, writable, explicit_translation;
+    bool commit;
 };
 
 static bool parse_mode(const char *mode, struct stream_mode *result)
@@ -334,11 +549,14 @@ static bool parse_mode(const char *mode, struct stream_mode *result)
     const char kind = *mode++;
     bool update = false;
     int translation = 0;
+    char commit = 0;
     for (; *mode != '\0'; ++mode) {
         if (*mode == '+' && !update)
             update = true;
         else if ((*mode == 'b' || *mode == 't') && translation == 0)
             translation = *mode == 'b' ? CRT_BINARY : CRT_TEXT;
+        else if ((*mode == 'c' || *mode == 'n') && commit == 0)
+            commit = *mode;
         else
             return false;
     }
@@ -348,19 +566,21 @@ static bool parse_mode(const char *mode, struct stream_mode *result)
     const int creation = kind == 'r' ? 0 : O_CREAT | (kind == 'w' ? O_TRUNC : O_APPEND);
     *result = (struct stream_mode){{kind, update ? '+' : '\0', '\0'},
         access | creation, (translation == 0 ? atomic_load(&default_mode) : translation) == CRT_TEXT,
-        readable, writable};
+        readable, writable, translation != 0, commit == 'c' || (commit == 0 && default_commit != 0)};
     return true;
 }
 
 struct guest_stream {
     struct guest_stream *next;
     FILE *file;
+    struct guest_file *opened;
     struct stream_mode mode;
     bool text_eof;
 };
 
 static pthread_mutex_t stream_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct guest_stream *streams;
+static struct guest_stream standard[3];
 
 static struct guest_stream **find_stream(const void *handle)
 {
@@ -368,6 +588,86 @@ static struct guest_stream **find_stream(const void *handle)
     while (*link != NULL && *link != handle)
         link = &(*link)->next;
     return link;
+}
+
+void *NT_MS_ABI nt_acrt_iob_func(uint32_t index)
+{
+    if (index >= sizeof(standard) / sizeof(standard[0])) {
+        errno = EINVAL;
+        return NULL;
+    }
+    return &standard[index];
+}
+
+bool nt_runtime_set_standard_streams(int input, int output, int error)
+{
+    const int fd[] = {input, output, error};
+    FILE *files_to_attach[3] = {0};
+    for (size_t i = 0; i < 3; ++i) {
+        if (fd[i] < 0)
+            continue;
+        const int duplicate = fcntl(fd[i], F_DUPFD_CLOEXEC, 0);
+        if (duplicate >= 0)
+            files_to_attach[i] = fdopen(duplicate, i == 0 ? "r" : "w");
+        if (files_to_attach[i] == NULL) {
+            const int cause = errno;
+            if (duplicate >= 0)
+                close(duplicate);
+            for (size_t j = 0; j < i; ++j) {
+                if (files_to_attach[j] != NULL)
+                    fclose(files_to_attach[j]);
+            }
+            errno = cause;
+            return false;
+        }
+    }
+    pthread_mutex_lock(&stream_lock);
+    for (size_t i = 0; i < 3; ++i) {
+        struct guest_stream *stream = &standard[i];
+        if (stream->file != NULL) {
+            *find_stream(stream) = stream->next;
+            fclose(stream->file);
+        }
+        *stream = (struct guest_stream){.file = files_to_attach[i], .mode = {
+            .text = true, .readable = i == 0, .writable = i != 0
+        }};
+        if (stream->file != NULL) {
+            stream->next = streams;
+            streams = stream;
+        }
+    }
+    pthread_mutex_unlock(&stream_lock);
+    return true;
+}
+
+static unsigned int mode_access(struct stream_mode mode)
+{
+    return (mode.readable ? FILE_READ : 0) | (mode.writable ? FILE_WRITE : 0);
+}
+
+static struct guest_stream *attach_stream(struct guest_file *opened, struct stream_mode mode)
+{
+    struct guest_stream *stream = malloc(sizeof(*stream));
+    if (stream == NULL)
+        return NULL;
+    FILE *file = fdopen(opened->fd, mode.host);
+    if (file == NULL) {
+        const int error = errno;
+        free(stream);
+        errno = error;
+        return NULL;
+    }
+    *stream = (struct guest_stream){.file = file, .opened = opened, .mode = mode};
+    return stream;
+}
+
+static void register_stream(struct guest_stream *stream)
+{
+    stream->opened->owner = CRT_STREAM;
+    pthread_mutex_lock(&stream_lock);
+    stream->next = streams;
+    streams = stream;
+    pthread_mutex_unlock(&stream_lock);
 }
 
 void *NT_MS_ABI nt_fopen(const char *input, const char *mode)
@@ -383,38 +683,102 @@ void *NT_MS_ABI nt_fopen(const char *input, const char *mode)
     const int root = duplicate_root();
     if (root < 0)
         return NULL;
-    const int fd = open_regular(root, path, parsed.flags);
-    const int open_error = errno;
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *opened = new_file();
+    bool created;
+    const int fd = opened != NULL ?
+        open_shared(opened, root, path, parsed.flags, mode_access(parsed), FILE_READ | FILE_WRITE, &created) : -1;
+    int error = errno;
     close(root);
-    if (fd < 0) {
-        errno = open_error;
-        return NULL;
+    struct guest_stream *stream = NULL;
+    if (fd >= 0) {
+        stream = attach_stream(opened, parsed);
+        if (stream == NULL) {
+            error = errno;
+            close(fd);
+        } else if ((parsed.flags & O_TRUNC) != 0 && !created && ftruncate(fd, 0) != 0) {
+            error = errno;
+            fclose(stream->file);
+            free(stream);
+            stream = NULL;
+        } else {
+            register_stream(stream);
+        }
     }
-    FILE *file = fdopen(fd, parsed.host);
-    if (file == NULL) {
-        const int error = errno;
-        close(fd);
-        errno = error;
-        return NULL;
-    }
-    struct guest_stream *stream = malloc(sizeof(*stream));
-    if (stream == NULL) {
-        fclose(file);
-        errno = ENOMEM;
-        return NULL;
-    }
-    if ((parsed.flags & O_TRUNC) != 0 && ftruncate(fd, 0) != 0) {
-        const int error = errno;
-        fclose(file);
-        free(stream);
-        errno = error;
-        return NULL;
-    }
-    pthread_mutex_lock(&stream_lock);
-    *stream = (struct guest_stream){streams, file, parsed, false};
-    streams = stream;
-    pthread_mutex_unlock(&stream_lock);
+    pthread_mutex_unlock(&file_lock);
+    if (stream == NULL)
+        errno = error == EBUSY ? EACCES : error;
     return stream;
+}
+
+int NT_MS_ABI nt_open_osfhandle(intptr_t handle, int flags)
+{
+    if ((flags & ~(CRT_TEXT | CRT_BINARY | CRT_APPEND)) != 0 ||
+        (flags & (CRT_TEXT | CRT_BINARY)) == (CRT_TEXT | CRT_BINARY)) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file = find_handle((uintptr_t)handle);
+    int result = -1;
+    if (file == NULL) {
+        errno = EBADF;
+    } else {
+        int options = (flags & CRT_APPEND) != 0 ? fcntl(file->fd, F_GETFL) : 0;
+        if (options >= 0 && ((flags & CRT_APPEND) == 0 ||
+                            fcntl(file->fd, F_SETFL, options | O_APPEND) == 0)) {
+            file->text = (flags & CRT_BINARY) == 0 &&
+                         ((flags & CRT_TEXT) != 0 || atomic_load(&default_mode) == CRT_TEXT);
+            file->owner = CRT_DESCRIPTOR;
+            result = 3 + (int)(file - files);
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    return result;
+}
+
+static struct guest_file *find_descriptor(int descriptor)
+{
+    if (descriptor < 3 || descriptor - 3 >= FILE_TABLE_SIZE)
+        return NULL;
+    struct guest_file *file = &files[descriptor - 3];
+    return file->owner == CRT_DESCRIPTOR ? file : NULL;
+}
+
+void *NT_MS_ABI nt_fdopen(int descriptor, const char *mode)
+{
+    struct stream_mode parsed;
+    if (!parse_mode(mode, &parsed)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file = find_descriptor(descriptor);
+    struct guest_stream *stream = NULL;
+    if (file == NULL) {
+        errno = EBADF;
+    } else if ((mode_access(parsed) & ~file->access) != 0) {
+        errno = EINVAL;
+    } else {
+        if (!parsed.explicit_translation)
+            parsed.text = file->text;
+        stream = attach_stream(file, parsed);
+        if (stream != NULL)
+            register_stream(stream);
+    }
+    pthread_mutex_unlock(&file_lock);
+    return stream;
+}
+
+int NT_MS_ABI nt_close(int descriptor)
+{
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file = find_descriptor(descriptor);
+    const int result = file != NULL ? close_file(file) : -1;
+    pthread_mutex_unlock(&file_lock);
+    if (file == NULL)
+        errno = EBADF;
+    return result;
 }
 
 int NT_MS_ABI nt_fclose(void *handle)
@@ -428,8 +792,23 @@ int NT_MS_ABI nt_fclose(void *handle)
         return EOF;
     }
     *link = stream->next;
+    if (stream->opened == NULL) {
+        const int result = fclose(stream->file);
+        *stream = (struct guest_stream){0};
+        pthread_mutex_unlock(&stream_lock);
+        return result;
+    }
     pthread_mutex_unlock(&stream_lock);
-    const int result = fclose(stream->file);
+    pthread_mutex_lock(&file_lock);
+    int result = 0;
+    if (stream->mode.writable && stream->mode.commit) {
+        if (fflush(stream->file) != 0 || fdatasync(fileno(stream->file)) != 0)
+            result = EOF;
+    }
+    if (fclose(stream->file) != 0)
+        result = EOF;
+    stream->opened->owner = FREE_FILE;
+    pthread_mutex_unlock(&file_lock);
     free(stream);
     return result;
 }
@@ -513,8 +892,8 @@ void nt_runtime_flush_streams(void)
 {
     pthread_mutex_lock(&stream_lock);
     for (struct guest_stream *stream = streams; stream != NULL; stream = stream->next) {
-        if (stream->mode.writable)
-            fflush(stream->file);
+        if (stream->mode.writable && fflush(stream->file) == 0 && stream->mode.commit)
+            fdatasync(fileno(stream->file));
     }
     pthread_mutex_unlock(&stream_lock);
 }

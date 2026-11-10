@@ -14,7 +14,7 @@ enum {
     IMPORT_DIRECTORY = 1,
     IAT_DIRECTORY = 12,
     DESCRIPTOR_SIZE = 20,
-    THUNK_TABLE_SIZE = 16,
+    THUNK_SIZE = 8,
     FILE_ALIGNMENT = 512,
     MAX_IMAGE_SIZE = 64 * 1024
 };
@@ -82,70 +82,102 @@ static bool ranges_disjoint(const struct import_range *ranges, size_t count)
     return true;
 }
 
-static bool valid_import(const unsigned char *directories,
-                         const struct pe_import_section *idata, const char *module,
-                         const char *symbol, uint32_t *iat_rva)
+static size_t expected_symbol(const struct pe_fixture_symbol *symbols, size_t count,
+                              const char *module, const char *name)
 {
-    const size_t module_size = strlen(module) + 1;
-    const size_t symbol_size = strlen(symbol) + 1;
+    for (size_t i = 0; i < count; ++i) {
+        if (nt_module_name_equal(module, symbols[i].module) && strcmp(name, symbols[i].name) == 0)
+            return i;
+    }
+    return count;
+}
+
+static const char *section_string(const struct pe_import_section *section, uint32_t rva)
+{
+    const unsigned char *first = section_bytes(section, rva, 1);
+    if (first == NULL || *first == '\0' ||
+        memchr(first, '\0', section->size - (rva - section->rva)) == NULL)
+        return NULL;
+    return (const char *)first;
+}
+
+static bool valid_imports(const unsigned char *directories, struct pe_import_image *image,
+                          const struct pe_fixture_symbol *symbols, size_t count)
+{
+    const struct pe_import_section *idata = &image->idata;
     const unsigned char *import = directories + IMPORT_DIRECTORY * DIRECTORY_SIZE;
     const unsigned char *iat = directories + IAT_DIRECTORY * DIRECTORY_SIZE;
     const uint32_t import_rva = read_u32(import);
     const uint32_t import_size = read_u32(import + 4);
-    const uint32_t slot_rva = read_u32(iat);
-    const unsigned char *descriptor = section_bytes(idata, import_rva, import_size);
-    const unsigned char *slots = section_bytes(idata, slot_rva, THUNK_TABLE_SIZE);
-
-    /* One descriptor and its all-zero terminator, followed by exactly one
-     * unbound lookup and address entry per table.
-     */
-    if (descriptor == NULL || import_size < 2 * DESCRIPTOR_SIZE ||
-        slots == NULL || read_u32(iat + 4) != THUNK_TABLE_SIZE ||
-        read_u32(descriptor + 4) != 0 || read_u32(descriptor + 8) != 0 ||
-        read_u32(descriptor + 16) != slot_rva ||
-        memcmp(descriptor + DESCRIPTOR_SIZE,
-               (const unsigned char[DESCRIPTOR_SIZE]){0}, DESCRIPTOR_SIZE) != 0)
+    const uint32_t iat_rva = read_u32(iat), iat_size = read_u32(iat + 4);
+    const unsigned char *descriptors = section_bytes(idata, import_rva, import_size);
+    const unsigned char *address_table = section_bytes(idata, iat_rva, iat_size);
+    if (descriptors == NULL || address_table == NULL || iat_rva % THUNK_SIZE != 0 ||
+        import_size < 2 * DESCRIPTOR_SIZE || iat_size < 2 * THUNK_SIZE ||
+        iat_size % THUNK_SIZE != 0)
         return false;
 
-    const uint32_t lookup_rva = read_u32(descriptor);
-    const uint32_t dll_rva = read_u32(descriptor + 12);
-    const unsigned char *lookup = section_bytes(idata, lookup_rva, THUNK_TABLE_SIZE);
-    const unsigned char *dll = section_bytes(idata, dll_rva, module_size);
-    if (lookup == NULL || lookup_rva % 8 != 0 || slot_rva % 8 != 0 ||
-        dll == NULL || dll[module_size - 1] != '\0' ||
-        !nt_module_name_equal((const char *)dll, module))
-        return false;
-
-    const uint64_t name_entry = read_u64(lookup);
-    /* A name is a 32-bit RVA. Ordinals and pre-bound addresses cannot fit. */
-    if (name_entry > UINT32_MAX || read_u64(lookup + 8) != 0 ||
-        read_u64(slots) != name_entry || read_u64(slots + 8) != 0)
-        return false;
-
-    const uint32_t name_rva = (uint32_t)name_entry;
-    const unsigned char *name = section_bytes(idata, name_rva, 2 + symbol_size);
-    if (name == NULL || memcmp(name + 2, symbol, symbol_size) != 0)
-        return false;
-
-    const struct import_range ranges[] = {
-        {import_rva, 2 * DESCRIPTOR_SIZE},
-        {lookup_rva, THUNK_TABLE_SIZE},
-        {slot_rva, THUNK_TABLE_SIZE},
-        {dll_rva, module_size},
-        {name_rva, 2 + symbol_size}
-    };
-    if (!ranges_disjoint(ranges, sizeof(ranges) / sizeof(ranges[0])))
-        return false;
-
-    *iat_rva = slot_rva;
-    return true;
+    struct import_range ranges[2 + 3 * PE_FIXTURE_IMPORT_LIMIT] = {
+        {import_rva, 0}, {iat_rva, iat_size}};
+    size_t range_count = 2, consumed = 0, found = 0;
+    const unsigned char terminator[DESCRIPTOR_SIZE] = {0};
+    for (size_t offset = 0; contains(import_size, offset, DESCRIPTOR_SIZE); offset += DESCRIPTOR_SIZE) {
+        const unsigned char *descriptor = descriptors + offset;
+        if (memcmp(descriptor, terminator, sizeof(terminator)) == 0) {
+            ranges[0].size = offset + DESCRIPTOR_SIZE;
+            image->iat_rva = iat_rva;
+            return found == count && consumed == iat_size && ranges_disjoint(ranges, range_count);
+        }
+        if (found == count || read_u32(descriptor + 4) != 0 || read_u32(descriptor + 8) != 0 ||
+            read_u32(descriptor + 16) != iat_rva + consumed)
+            return false;
+        const uint32_t lookup_rva = read_u32(descriptor), dll_rva = read_u32(descriptor + 12);
+        const char *dll = section_string(idata, dll_rva);
+        if (dll == NULL || lookup_rva % THUNK_SIZE != 0 ||
+            section_bytes(idata, lookup_rva, THUNK_SIZE) == NULL)
+            return false;
+        ranges[range_count++] = (struct import_range){dll_rva, strlen(dll) + 1};
+        const size_t before = consumed;
+        for (;;) {
+            const uint32_t entry_rva = lookup_rva + (uint32_t)(consumed - before);
+            const unsigned char *lookup = section_bytes(idata, entry_rva, THUNK_SIZE);
+            if (lookup == NULL || !contains(iat_size, consumed, THUNK_SIZE))
+                return false;
+            const uint64_t entry = read_u64(lookup);
+            if (entry != read_u64(address_table + consumed))
+                return false;
+            if (entry == 0) {
+                if (consumed == before)
+                    return false;
+                consumed += THUNK_SIZE;
+                break;
+            }
+            /* Fixtures permit only named, unbound entries. */
+            if (found == count || entry > UINT32_MAX - 2 ||
+                section_bytes(idata, (uint32_t)entry, 2) == NULL)
+                return false;
+            const char *name = section_string(idata, (uint32_t)entry + 2);
+            if (name == NULL)
+                return false;
+            const size_t index = expected_symbol(symbols, count, dll, name);
+            if (index == count || image->slots[index] != 0)
+                return false;
+            image->slots[index] = iat_rva + (uint32_t)consumed;
+            ranges[range_count++] = (struct import_range){(uint32_t)entry, strlen(name) + 3};
+            consumed += THUNK_SIZE;
+            ++found;
+        }
+        ranges[range_count++] = (struct import_range){lookup_rva, consumed - before};
+    }
+    return false;
 }
 
-bool pe_parse_import_fixture(const unsigned char *file, size_t length,
-                             const char *module, const char *symbol,
-                             struct pe_import_image *result)
+bool pe_parse_import_fixture_many(const unsigned char *file, size_t length,
+                                  const struct pe_fixture_symbol *symbols, size_t count,
+                                  struct pe_import_image *result)
 {
-    if (!contains(length, 0, 64) || memcmp(file, "MZ", 2) != 0)
+    if (count == 0 || count > PE_FIXTURE_IMPORT_LIMIT ||
+        !contains(length, 0, 64) || memcmp(file, "MZ", 2) != 0)
         return false;
 
     const size_t pe_offset = read_u32(file + 0x3c);
@@ -187,13 +219,11 @@ bool pe_parse_import_fixture(const unsigned char *file, size_t length,
     const unsigned char *sections = optional + optional_size;
     const unsigned char *import_section = sections + (section_count - 1) * SECTION_SIZE;
     const uint32_t entry_rva = read_u32(optional + 16);
-    uint32_t iat_rva;
     if (!read_section(file, length, sections, ".text\0\0\0", headers_size, image_size, &text) ||
         text.permissions != UINT32_C(0x60000000) ||
         section_bytes(&text.view, entry_rva, 1) == NULL ||
         !read_section(file, length, import_section, ".idata\0\0", headers_size, image_size, &idata) ||
-        (idata.permissions & UINT32_C(0x60000000)) != UINT32_C(0x40000000) ||
-        !valid_import(directories, &idata.view, module, symbol, &iat_rva))
+        (idata.permissions & UINT32_C(0x60000000)) != UINT32_C(0x40000000))
         return false;
 
     /* The PE linker can emit read-only constants and constructor sentinels
@@ -208,7 +238,18 @@ bool pe_parse_import_fixture(const unsigned char *file, size_t length,
     if (!sections_ordered(section_count == 3 ? &rdata : &text, &idata))
         return false;
 
-    *result = (struct pe_import_image){text.view, rdata.view, idata.view, image_size,
-                                       entry_rva, iat_rva};
+    struct pe_import_image image = {.text = text.view, .rdata = rdata.view, .idata = idata.view,
+                                    .image_size = image_size, .entry_rva = entry_rva};
+    if (!valid_imports(directories, &image, symbols, count))
+        return false;
+    *result = image;
     return true;
+}
+
+bool pe_parse_import_fixture(const unsigned char *file, size_t length,
+                             const char *module, const char *symbol,
+                             struct pe_import_image *result)
+{
+    const struct pe_fixture_symbol expected = {module, symbol};
+    return pe_parse_import_fixture_many(file, length, &expected, 1, result);
 }

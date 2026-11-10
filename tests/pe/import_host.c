@@ -3,6 +3,9 @@
 #include "fixture_import.h"
 #include "ntnative/runtime.h"
 #include "pe_bytes.h"
+#ifdef TEST_DESKTOP
+#include "desktop.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +16,18 @@
 extern const unsigned char nt_pe_fixture_bytes[];
 extern const size_t nt_pe_fixture_size;
 
-#ifdef TEST_WIN32_COUNTER
+#ifdef TEST_DESKTOP
+static const struct pe_fixture_symbol symbols[] = {
+    {"user32.dll", "BeginPaint"}, {"user32.dll", "CreateWindowExA"},
+    {"user32.dll", "DefWindowProcA"}, {"user32.dll", "DispatchMessageA"},
+    {"user32.dll", "EndPaint"}, {"user32.dll", "GetMessageA"},
+    {"user32.dll", "KillTimer"}, {"user32.dll", "PostQuitMessage"},
+    {"user32.dll", "RegisterClassA"}, {"user32.dll", "SendMessageA"},
+    {"user32.dll", "SetTimer"}, {"user32.dll", "ShowWindow"},
+    {"gdi32.dll", "SetPixel"}
+};
+enum { import_count = sizeof(symbols) / sizeof(symbols[0]) };
+#elif defined(TEST_WIN32_COUNTER)
 static const char fixture_dll[] = "kernel32.dll";
 static const char fixture_symbol[] = "QueryPerformanceCounter";
 enum { fixture_cases = 2 };
@@ -22,6 +36,10 @@ static const char fixture_dll[] = "ntdll.dll";
 static const char fixture_symbol[] = "NtQueryPerformanceCounter";
 enum { fixture_cases = 3 };
 #endif
+
+#ifndef TEST_DESKTOP
+static const struct pe_fixture_symbol symbols[] = {{fixture_dll, fixture_symbol}};
+enum { import_count = 1 };
 
 static bool check_invalid_imports(const struct pe_import_image *image)
 {
@@ -85,13 +103,33 @@ static bool check_invalid_imports(const struct pe_import_image *image)
     free(copy);
     return true;
 }
+#else
+static bool check_invalid_imports(const struct pe_import_image *image)
+{
+    unsigned char *copy = malloc(nt_pe_fixture_size);
+    if (copy == NULL)
+        return false;
+    memcpy(copy, nt_pe_fixture_bytes, nt_pe_fixture_size);
+    const size_t offset = (size_t)(image->idata.bytes - nt_pe_fixture_bytes) +
+                          image->slots[0] - image->idata.rva;
+    memset(copy + offset, 0, 8);
+    struct pe_import_image rejected;
+    const bool valid = pe_parse_import_fixture_many(copy, nt_pe_fixture_size,
+                                                    symbols, import_count, &rejected);
+    free(copy);
+    return !valid;
+}
+#endif
 
 static bool run_fixture(const struct pe_import_image *image)
 {
-    const nt_guest_proc target = nt_runtime_resolve(fixture_dll, fixture_symbol);
-    if (target == NULL) {
-        fputs("The fixture import has no native equivalent\n", stderr);
-        return false;
+    nt_guest_proc targets[import_count];
+    for (size_t i = 0; i < import_count; ++i) {
+        targets[i] = nt_runtime_resolve(symbols[i].module, symbols[i].name);
+        if (targets[i] == NULL) {
+            fprintf(stderr, "Missing fixture import %s!%s\n", symbols[i].module, symbols[i].name);
+            return false;
+        }
     }
 
     if (sysconf(_SC_PAGESIZE) != PE_IMPORT_PAGE_SIZE) {
@@ -110,8 +148,9 @@ static bool run_fixture(const struct pe_import_image *image)
     if (image->rdata.size != 0)
         memcpy(memory + image->rdata.rva, image->rdata.bytes, image->rdata.size);
     memcpy(memory + image->idata.rva, image->idata.bytes, image->idata.size);
-    _Static_assert(sizeof(target) == 8, "PE32+ IAT slot size");
-    memcpy(memory + image->iat_rva, &target, sizeof(target));
+    _Static_assert(sizeof(targets[0]) == 8, "PE32+ IAT slot size");
+    for (size_t i = 0; i < import_count; ++i)
+        memcpy(memory + image->slots[i], &targets[i], sizeof(targets[i]));
 
     if (mprotect(memory, image->image_size, PROT_NONE) != 0 ||
         mprotect(memory + image->text.rva, PE_IMPORT_PAGE_SIZE, PROT_READ | PROT_EXEC) != 0 ||
@@ -127,7 +166,17 @@ static bool run_fixture(const struct pe_import_image *image)
     int (NT_MS_ABI *entry)(void);
     _Static_assert(sizeof(entry) == sizeof(address), "x86-64 pointer size");
     memcpy(&entry, &address, sizeof(entry));
+#ifdef TEST_DESKTOP
+    if (!nt_runtime_open_desktop()) {
+        fputs("Could not open the Linux desktop for the PE fixture\n", stderr);
+        munmap(memory, image->image_size);
+        return false;
+    }
+#endif
     const int status = entry();
+#ifdef TEST_DESKTOP
+    nt_runtime_close_desktop();
+#endif
     if (munmap(memory, image->image_size) != 0) {
         perror("munmap");
         return false;
@@ -137,16 +186,21 @@ static bool run_fixture(const struct pe_import_image *image)
         fprintf(stderr, "PE import fixture case %d failed\n", status);
         return false;
     }
+#ifdef TEST_DESKTOP
+    printf("PASS PE32+ paints and closes a Linux window through %d USER32 and GDI imports\n",
+           import_count);
+#else
     printf("PASS PE32+ imports %s!%s through the IAT (%d cases)\n",
            fixture_dll, fixture_symbol, fixture_cases);
+#endif
     return true;
 }
 
 int main(void)
 {
     struct pe_import_image image;
-    if (!pe_parse_import_fixture(nt_pe_fixture_bytes, nt_pe_fixture_size,
-                                 fixture_dll, fixture_symbol, &image)) {
+    if (!pe_parse_import_fixture_many(nt_pe_fixture_bytes, nt_pe_fixture_size,
+                                      symbols, import_count, &image)) {
         fputs("Embedded PE does not match the import fixture profile\n", stderr);
         return EXIT_FAILURE;
     }

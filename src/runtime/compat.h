@@ -15,6 +15,7 @@ enum {
     NT_ERROR_INVALID_HANDLE = 6,
     NT_ERROR_NOT_ENOUGH_MEMORY = 8,
     NT_ERROR_GEN_FAILURE = 31,
+    NT_ERROR_SHARING_VIOLATION = 32,
     NT_ERROR_NOT_SUPPORTED = 50,
     NT_ERROR_FILE_EXISTS = 80,
     NT_ERROR_INVALID_PARAMETER = 87,
@@ -81,11 +82,14 @@ uintptr_t NT_MS_ABI nt_GlobalFree(uintptr_t handle);
 void *NT_MS_ABI nt_GlobalLock(uintptr_t handle);
 int32_t NT_MS_ABI nt_GlobalUnlock(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_LocalFree(uintptr_t handle);
+bool nt_runtime_claim_clipboard_memory(uintptr_t handle, unsigned char **data, size_t *size);
+void nt_runtime_release_clipboard_memory(uintptr_t handle, bool release);
 uint32_t NT_MS_ABI nt_FormatMessageA(uint32_t flags, const void *source,
                                     uint32_t code, uint32_t language,
                                     char *buffer, uint32_t size, void *arguments);
 
 uintptr_t NT_MS_ABI nt_GetModuleHandleW(const uint16_t *name);
+uint32_t NT_MS_ABI nt_GetModuleFileNameA(uintptr_t module, char *buffer, uint32_t size);
 uintptr_t NT_MS_ABI nt_LoadLibraryA(const char *name);
 int32_t NT_MS_ABI nt_FreeLibrary(uintptr_t module);
 nt_guest_proc NT_MS_ABI nt_GetProcAddress(uintptr_t module, const char *name);
@@ -112,27 +116,116 @@ int NT_MS_ABI nt_register_onexit_function(struct nt_onexit_table *table,
                                          nt_int_callback callback);
 int NT_MS_ABI nt_crt_atexit(nt_void_callback callback);
 void NT_MS_ABI nt_cexit(void);
+void NT_MS_ABI nt_c_exit(void);
+int NT_MS_ABI nt_is_c_termination_complete(void);
+typedef void (NT_MS_ABI *nt_tls_exit_callback)(void *, uint32_t, void *);
+void NT_MS_ABI nt_register_thread_local_exe_atexit_callback(nt_tls_exit_callback callback);
+void NT_MS_ABI nt_set_app_type(int type);
+void NT_MS_ABI nt_wassert(const uint16_t *expression, const uint16_t *file, uint32_t line);
+bool nt_runtime_show_assertion(const char *message);
+struct nt_math_exception {
+    int type;
+    const char *name;
+    double arg1, arg2, result;
+};
+typedef int (NT_MS_ABI *nt_matherr_callback)(struct nt_math_exception *);
+void NT_MS_ABI nt_setusermatherr(nt_matherr_callback callback);
+double nt_runtime_sqrt(double number);
 
 /* The launcher owns this immutable environment for the guest lifetime. */
 void nt_runtime_set_guest_environment(const char *const *environment);
 void nt_runtime_release_onexit_table(struct nt_onexit_table *table);
+int NT_MS_ABI nt_initialize_narrow_environment(void);
+
+/* The single-threaded launcher sets these borrowed strings before entry. */
+bool nt_runtime_set_guest_image(uintptr_t module, const char *path, const char *command_line);
+uintptr_t nt_runtime_guest_module(void);
+const char *const *nt_runtime_guest_argv(int *count);
+int NT_MS_ABI nt_configure_narrow_argv(int mode);
+char *NT_MS_ABI nt_get_narrow_winmain_command_line(void);
+
+/* Call from a single-threaded test host. The child runs only an embedded fixture. */
+bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code);
+int32_t NT_MS_ABI nt_TerminateProcess(uintptr_t process, uint32_t exit_code);
+void NT_MS_ABI nt_exit(int code);
+void NT_MS_ABI nt_quick_exit(int code);
+void NT_MS_ABI nt_terminate(void);
+
+struct nt_context64 {
+    uint64_t homes[6];
+    uint32_t flags, mxcsr;
+    uint16_t cs, ds, es, fs, gs, ss;
+    uint32_t eflags;
+    uint64_t debug[6];
+    uint64_t rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, rip;
+    _Alignas(16) unsigned char floating[512], vectors[26 * 16];
+    uint64_t vector_control, debug_control, last_branch_to, last_branch_from;
+    uint64_t last_exception_to, last_exception_from;
+};
+
+struct nt_runtime_function { uint32_t begin, end, unwind; };
+struct nt_exception_pointers {
+    void *record;
+    struct nt_context64 *context;
+};
+
+typedef int32_t (NT_MS_ABI *nt_exception_filter)(struct nt_exception_pointers *);
+void NT_MS_ABI nt_RtlCaptureContext(struct nt_context64 *context);
+bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
+                                      const struct nt_runtime_function *table, size_t count);
+const struct nt_runtime_function *NT_MS_ABI nt_RtlLookupFunctionEntry(
+    uint64_t pc, uint64_t *base, void *history);
+struct nt_unwind_pointers { void *floating[16], *integer[16]; };
+bool nt_runtime_set_unwind_stack(const void *start, size_t length);
+void *NT_MS_ABI nt_RtlVirtualUnwind(uint32_t type, uint64_t base, uint64_t pc,
+                                   const struct nt_runtime_function *function,
+                                   struct nt_context64 *context, void **handler_data,
+                                   uint64_t *frame, struct nt_unwind_pointers *pointers);
+nt_exception_filter NT_MS_ABI nt_SetUnhandledExceptionFilter(nt_exception_filter filter);
+int32_t NT_MS_ABI nt_UnhandledExceptionFilter(struct nt_exception_pointers *pointers);
+void **NT_MS_ABI nt_current_exception(void);
+void **NT_MS_ABI nt_current_exception_context(void);
+typedef void (NT_MS_ABI *nt_signal_handler)(int);
+nt_signal_handler NT_MS_ABI nt_signal(int signal, nt_signal_handler handler);
+int32_t NT_MS_ABI nt_seh_filter_exe(uint32_t code, struct nt_exception_pointers *pointers);
 
 /* The launcher supplies the host directory for the guest C: drive. */
 bool nt_runtime_set_file_root(const char *directory);
 int32_t NT_MS_ABI nt_CreateDirectoryA(const char *path, const void *security);
+uintptr_t NT_MS_ABI nt_CreateFileA(const char *path, uint32_t access, uint32_t share,
+                                  const void *security, uint32_t disposition, uint32_t flags,
+                                  uintptr_t template_file);
+int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle);
 int32_t NT_MS_ABI nt_DeleteFileA(const char *path);
 int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path);
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags);
 void *NT_MS_ABI nt_fopen(const char *path, const char *mode);
+int NT_MS_ABI nt_open_osfhandle(intptr_t handle, int flags);
+void *NT_MS_ABI nt_fdopen(int descriptor, const char *mode);
+int NT_MS_ABI nt_close(int descriptor);
 int NT_MS_ABI nt_fclose(void *stream);
 size_t NT_MS_ABI nt_fread(void *buffer, size_t size, size_t count, void *stream);
 size_t NT_MS_ABI nt_fwrite(const void *buffer, size_t size, size_t count, void *stream);
 int NT_MS_ABI nt_set_fmode(int mode);
 void nt_runtime_flush_streams(void);
+bool nt_runtime_set_standard_streams(int input, int output, int error);
+void *NT_MS_ABI nt_acrt_iob_func(uint32_t index);
+int *NT_MS_ABI nt_p_commode(void);
+int NT_MS_ABI nt_stdio_vsprintf(uint64_t options, char *buffer, size_t length,
+                                const char *format, void *locale, const unsigned char *args);
+int NT_MS_ABI nt_stdio_vfprintf(uint64_t options, void *stream, const char *format,
+                                void *locale, const unsigned char *args);
+int NT_MS_ABI nt_stdio_vsscanf(uint64_t options, const char *buffer, size_t length,
+                               const char *format, void *locale, const unsigned char *args);
 
 /* A host surface owns its bitmap and can be used as the reference for memory DCs. */
 uintptr_t nt_runtime_create_surface(int32_t width, int32_t height);
 uint32_t nt_runtime_read_pixel(uintptr_t dc, int32_t x, int32_t y);
+typedef bool (*nt_surface_reader)(const uint32_t *pixels, int32_t width, int32_t height,
+                                  void *context);
+bool nt_runtime_read_surface(uintptr_t dc, nt_surface_reader reader, void *context);
+char *nt_runtime_ansi_to_utf8(const char *text, size_t length);
+char *nt_runtime_utf16_to_utf8(const uint16_t *text, size_t length);
 uintptr_t NT_MS_ABI nt_CreateCompatibleDC(uintptr_t dc);
 uintptr_t NT_MS_ABI nt_CreateCompatibleBitmap(uintptr_t dc, int32_t width, int32_t height);
 uintptr_t NT_MS_ABI nt_CreatePen(int32_t style, int32_t width, uint32_t color);
@@ -154,6 +247,63 @@ int32_t NT_MS_ABI nt_Rectangle(uintptr_t dc, int32_t left, int32_t top,
 int32_t NT_MS_ABI nt_BitBlt(uintptr_t dest, int32_t x, int32_t y,
                            int32_t width, int32_t height, uintptr_t source,
                            int32_t source_x, int32_t source_y, uint32_t rop);
+
+struct nt_point { int32_t x, y; };
+struct nt_size { int32_t width, height; };
+struct nt_logfont {
+    int32_t height, width, escapement, orientation, weight;
+    uint8_t italic, underline, strike, charset, out_precision, clip_precision, quality, pitch;
+    char face[32];
+};
+struct nt_text_metrics {
+    int32_t height, ascent, descent, internal_leading, external_leading;
+    int32_t average_width, max_width, weight, overhang, dpi_x, dpi_y;
+    uint8_t first, last, replacement, break_char, italic, underline, strike, pitch, charset;
+};
+
+uintptr_t NT_MS_ABI nt_CreateFontA(int32_t height, int32_t width, int32_t escapement,
+                                 int32_t orientation, int32_t weight, uint32_t italic,
+                                 uint32_t underline, uint32_t strike, uint32_t charset,
+                                 uint32_t out_precision, uint32_t clip_precision, uint32_t quality,
+                                 uint32_t pitch, const char *face);
+uintptr_t NT_MS_ABI nt_CreateFontIndirectA(const struct nt_logfont *font);
+int32_t NT_MS_ABI nt_GetTextMetricsA(uintptr_t dc, struct nt_text_metrics *metrics);
+int32_t NT_MS_ABI nt_GetTextExtentPoint32A(uintptr_t dc, const char *text, int32_t count,
+                                         struct nt_size *size);
+int32_t NT_MS_ABI nt_GetTextExtentPoint32W(uintptr_t dc, const uint16_t *text, int32_t count,
+                                         struct nt_size *size);
+int32_t NT_MS_ABI nt_ExtTextOutW(uintptr_t dc, int32_t x, int32_t y, uint32_t options,
+                                const struct nt_rect *rect, const uint16_t *text,
+                                uint32_t count, const int32_t *advances);
+int32_t NT_MS_ABI nt_Ellipse(uintptr_t dc, int32_t left, int32_t top,
+                            int32_t right, int32_t bottom);
+int32_t NT_MS_ABI nt_Polygon(uintptr_t dc, const struct nt_point *points, int32_t count);
+int32_t NT_MS_ABI nt_Polyline(uintptr_t dc, const struct nt_point *points, int32_t count);
+int32_t NT_MS_ABI nt_GetDeviceCaps(uintptr_t dc, int32_t index);
+
+struct nt_docinfo {
+    int32_t size;
+    const char *name, *output, *data_type;
+    uint32_t type;
+};
+struct nt_print_dialog {
+    uint32_t size;
+    uintptr_t owner, device_mode, device_names, dc;
+    uint32_t flags;
+    uint16_t first, last, min_page, max_page, copies;
+    uintptr_t instance;
+    intptr_t custom_data;
+    uintptr_t print_hook, setup_hook;
+    const char *print_template, *setup_template;
+    uintptr_t print_template_handle, setup_template_handle;
+};
+bool nt_runtime_set_pdf_printer(int fd, int32_t width, int32_t height);
+uintptr_t nt_runtime_create_pdf_printer(int fd, int32_t width, int32_t height);
+int32_t NT_MS_ABI nt_PrintDlgA(struct nt_print_dialog *dialog);
+int32_t NT_MS_ABI nt_StartDocA(uintptr_t dc, const struct nt_docinfo *info);
+int32_t NT_MS_ABI nt_StartPage(uintptr_t dc);
+int32_t NT_MS_ABI nt_EndPage(uintptr_t dc);
+int32_t NT_MS_ABI nt_EndDoc(uintptr_t dc);
 
 uintptr_t NT_MS_ABI nt_CreateMenu(void);
 int32_t NT_MS_ABI nt_AppendMenuA(uintptr_t menu, uint32_t flags, uintptr_t value,

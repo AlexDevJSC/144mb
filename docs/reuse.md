@@ -14,6 +14,24 @@ sin CRT. El anfitrión Linux resuelve las importaciones con el runtime propio.
 [Definición Win32](https://github.com/mingw-w64/mingw-w64/blob/master/mingw-w64-crt/lib-common/kernel32.def.in) ·
 [Licencia MinGW-w64](https://github.com/mingw-w64/mingw-w64/blob/master/COPYING).
 
+Las ventanas del runtime usan la biblioteca SDL 2 de la distribución
+mediante su ABI nativa. La dependencia usa licencia Zlib. El fixture se
+probó localmente con SDL 2.32.4 y el backend `offscreen`. La CI usa
+Weston como compositor Wayland de prueba.
+[SDL 2.32.4](https://github.com/libsdl-org/SDL/tree/release-2.32.4) ·
+[Licencia SDL](https://github.com/libsdl-org/SDL/blob/release-2.32.4/LICENSE.txt).
+
+El rasterizador GDI consume Cairo 1.18.4 de Linux y obtiene tipografías
+del sistema mediante el backend de fuentes de Cairo. Cairo tiene licencia
+MPL-1.1 o LGPL-2.1-only y se enlaza como biblioteca de la distribución.
+[Licencias de Cairo](https://www.cairographics.org/FAQ/#what-is-cairo-license) ·
+[DejaVu Fonts](https://dejavu-fonts.github.io/).
+
+libffi 3.4.8 invoca las funciones variádicas de glibc con el ABI nativo
+después de validar y adaptar los argumentos Microsoft x64 del fixture.
+Se usa el paquete del sistema con licencia MIT.
+[libffi 3.4.8](https://github.com/libffi/libffi/tree/v3.4.8).
+
 ## Proyectos y dependencias
 
 | Componente | Clasificación | Evidencia, dependencia y restricciones |
