@@ -17,7 +17,7 @@ FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
 FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
 RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files process exceptions \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
-                dialogs file_dialogs clipboard
+                dialogs file_dialogs clipboard guest_thread
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
@@ -69,6 +69,10 @@ $(BUILD_DIR)/counter-test: tests/counter_test.c $(BUILD_DIR)/counter.o | $(BUILD
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) $^ \
 	    -Wl,--wrap=clock_gettime $(LDLIBS) -o "$@"
 
+$(BUILD_DIR)/guest-thread-test: tests/guest_thread_test.c src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_thread_test.c src/runtime/guest_thread.c -pthread $(LDLIBS) -o "$@"
+
 $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -101,13 +105,14 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test \
-       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test
+       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test $(BUILD_DIR)/guest-thread-test
 	$(BUILD_DIR)/counter-test
 	$(BUILD_DIR)/nt-native-probe
 	$(BUILD_DIR)/runtime-test
 	$(BUILD_DIR)/compat-batch-test
 	$(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test
+	$(BUILD_DIR)/guest-thread-test
 
 # These explicit flags keep the fixture freestanding, position independent
 # within .text, and free of host sanitizer and library dependencies.
@@ -149,7 +154,7 @@ check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe
 	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe
 
 $(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) \
-    $(PE_IMAGE_HEADERS) src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h | $(BUILD_DIR)
+    $(PE_IMAGE_HEADERS) src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
