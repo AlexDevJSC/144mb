@@ -27,10 +27,13 @@ Para probar el destino de instalación sin privilegios ni RPM:
 
 ```sh
 make install DESTDIR="$PWD/build-stage" PREFIX=/usr
-./build-stage/usr/bin/nt-native-probe\n./build-stage/usr/bin/pe-isolated-run --help
+./build-stage/usr/bin/nt-native-probe
+./build-stage/usr/bin/pe-isolated-run --help
 ```
 
-La carga PE y el aislamiento siguen siendo experimentales; véase [el contrato del cargador](../../docs/isolated-loader.md). El soporte de Mines todavía no está verificado.\n\nLa integración del escritorio tiene su propio hito. El paquete de laboratorio
+La carga PE y el aislamiento siguen siendo experimentales; véase [el contrato del cargador](../../docs/isolated-loader.md). El soporte de Mines todavía no está verificado.
+
+La integración del escritorio tiene su propio hito. El paquete de laboratorio
 puede instalarse sin registrar manejadores MIME, servicios, reglas de
 `binfmt_misc` ni módulos de kernel. El paso a una imagen Fedora requiere
 validación de VM y un kickstart mantenible.
