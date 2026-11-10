@@ -1,6 +1,6 @@
 # RPM experimental para Fedora KDE Plasma 45
 
-El paquete instala el comando ELF `nt-native-probe` y documentación. El
+El paquete instala los comandos ELF `nt-native-probe` y `pe-isolated-run` y documentación. Para ejecutar PE ajenos, el segundo requiere Bubblewrap y no permite omitir el sandbox. El
 comando permite verificar el backend del contador en una VM Fedora antes de
 integrar un lanzador. El spec limita el paquete a x86-64 y ejecuta las pruebas
 nativas en `%check`.
@@ -28,7 +28,10 @@ Para probar el destino de instalación sin privilegios ni RPM:
 ```sh
 make install DESTDIR="$PWD/build-stage" PREFIX=/usr
 ./build-stage/usr/bin/nt-native-probe
+./build-stage/usr/bin/pe-isolated-run --help
 ```
+
+La carga PE y el aislamiento siguen siendo experimentales; véase [el contrato del cargador](../../docs/isolated-loader.md). El soporte de Mines todavía no está verificado.
 
 La integración del escritorio tiene su propio hito. El paquete de laboratorio
 puede instalarse sin registrar manejadores MIME, servicios, reglas de

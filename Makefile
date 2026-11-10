@@ -17,17 +17,18 @@ FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
 FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
 RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files process exceptions \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
-                dialogs file_dialogs clipboard
+                dialogs file_dialogs clipboard guest_thread
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
+PE_IMAGE_HEADERS = src/pe/image.h src/pe/pe_bytes.h
 PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-insert-timestamp \
                      -Wl,--disable-reloc-section,--disable-dynamicbase,--strip-all
 PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector \
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-.PHONY: all check check-pe check-pe-import check-desktop benchmark install
-all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-isolated check-desktop benchmark install
+all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run
 
 $(BUILD_DIR):
 	mkdir -p "$@"
@@ -68,6 +69,10 @@ $(BUILD_DIR)/counter-test: tests/counter_test.c $(BUILD_DIR)/counter.o | $(BUILD
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) $^ \
 	    -Wl,--wrap=clock_gettime $(LDLIBS) -o "$@"
 
+$(BUILD_DIR)/guest-thread-test: tests/guest_thread_test.c src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_thread_test.c src/runtime/guest_thread.c -pthread $(LDLIBS) -o "$@"
+
 $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -100,13 +105,14 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test \
-       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test
+       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test $(BUILD_DIR)/guest-thread-test
 	$(BUILD_DIR)/counter-test
 	$(BUILD_DIR)/nt-native-probe
 	$(BUILD_DIR)/runtime-test
 	$(BUILD_DIR)/compat-batch-test
 	$(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test
+	$(BUILD_DIR)/guest-thread-test
 
 # These explicit flags keep the fixture freestanding, position independent
 # within .text, and free of host sanitizer and library dependencies.
@@ -136,6 +142,31 @@ $(BUILD_DIR)/pe-host: tests/pe/host.c $(BUILD_DIR)/fixture-embedded.o $(BUILD_DI
 check-pe: $(BUILD_DIR)/pe-host
 	$(OBJDUMP) -f $(BUILD_DIR)/nt-counter.exe
 	$(BUILD_DIR)/pe-host
+
+$(BUILD_DIR)/pe-image-test: tests/pe/image_test.c src/pe/image.c $(PE_IMAGE_HEADERS) include/ntnative/runtime.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/pe/image_test.c src/pe/image.c $(LDLIBS) -o "$@"
+
+check-pe-image: $(BUILD_DIR)/pe-image-test
+	$(BUILD_DIR)/pe-image-test
+
+$(BUILD_DIR)/pe-external-host: tests/pe/external_host.c src/pe/image.c $(RUNTIME_OBJECTS) \
+    $(PE_IMAGE_HEADERS) include/ntnative/guest_thread.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/pe/external_host.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+check-pe-external: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
+
+check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe
+	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe
+
+$(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) \
+    $(PE_IMAGE_HEADERS) src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h include/ntnative/guest_thread.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
 
 $(BUILD_DIR)/nt-counter-import.exe: tests/pe/import_fixture.c include/ntnative/counter.h | $(BUILD_DIR)
 	$(MINGW_CC) $(INCLUDES) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
@@ -189,5 +220,6 @@ $(BUILD_DIR)/counter-bench: tests/bench/counter_bench.c $(BUILD_DIR)/counter.o |
 benchmark: $(BUILD_DIR)/counter-bench
 	$(BUILD_DIR)/counter-bench
 
-install: $(BUILD_DIR)/nt-native-probe
-	install -D -m 0755 "$<" "$(DESTDIR)$(BINDIR)/nt-native-probe"
+install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run
+	install -D -m 0755 "$(BUILD_DIR)/nt-native-probe" "$(DESTDIR)$(BINDIR)/nt-native-probe"
+	install -D -m 0755 "$(BUILD_DIR)/pe-isolated-run" "$(DESTDIR)$(BINDIR)/pe-isolated-run"

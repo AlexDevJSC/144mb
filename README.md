@@ -22,8 +22,10 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - `pe-import-audit` lee las importaciones directas de un PE AMD64 y
   cuenta las que tienen un equivalente registrado.
 - Un microbenchmark y un spec RPM para el comando ELF de diagnóstico.
-- Quedan pendientes la carga general de aplicaciones PE, el modelo de
-  procesos y objetos NT y la integración con KDE.
+- Existe un primer cargador PE32+ AMD64 con relocaciones DIR64, IAT y
+  permisos W^X, más un lanzador Linux con Bubblewrap.
+  **No se ha validado aún el arranque real de Mines.** Quedan pendientes
+  TLS con datos, TEB/PEB completos, semántica NT de procesos, inicialización completa y KDE.
 
 ## Compilar y probar
 
@@ -33,7 +35,10 @@ En Linux x86-64 con GCC, GNU Make, GNU binutils, pkg-config, SDL 2, Cairo y libf
 make
 make check
 make check-pe
+make check-pe-image
 make benchmark
+# Con MinGW-w64: make check-pe-external (PE de escritorio generado)
+
 ```
 
 `make check-pe` requiere que `ld -V` liste `i386pep` y que `objdump -i`
@@ -46,6 +51,13 @@ Con MinGW-w64 AMD64 instalado, `make check-pe-import` genera los
 ejecutables de prueba NT y Win32, muestra sus tablas de importación y
 los ejecuta en los anfitriones correspondientes. Cada anfitrión ejecuta
 exclusivamente el PE generado e incrustado en el build.
+
+El lanzador experimental exige Bubblewrap:
+```sh
+build/pe-isolated-run /ruta/a/Mines.exe
+```
+Véanse los [límites y el modelo de aislamiento](docs/isolated-loader.md);
+no se afirma compatibilidad funcional hasta probar una partida.
 
 Con MinGW-w64 y una sesión Wayland o X11 activa, `make check-desktop`
 prueba la ventana desde el anfitrión Linux y desde un PE. En CI se usa
@@ -78,7 +90,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |
 | [Validación](docs/validation.md) | Pruebas realizadas y plan comparativo |
-| [Compatibilidad de Mines](docs/mines-compatibility.md) | Importaciones, errores y límites verificados en Linux |
+| [Cargador aislado](docs/isolated-loader.md) | Mapeo PE, prueba sintética, ejecución y límites |\n| [Compatibilidad de Mines](docs/mines-compatibility.md) | Importaciones, errores y límites verificados en Linux |
 | [Backlog](docs/backlog.md) | Tareas ordenadas y definición del siguiente PR |
 | [Fedora](packaging/fedora/README.md) | Compilación RPM y validación en VM |
 | [AGENTS.md](AGENTS.md) | Instrucciones reproducibles para Codex |
