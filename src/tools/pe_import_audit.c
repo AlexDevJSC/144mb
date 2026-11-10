@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -27,16 +28,29 @@ static void count_import(const struct pe_import *import, void *context)
         ++counts->native;
 }
 
+static void print_unresolved(const struct pe_import *import, void *context)
+{
+    (void)context;
+    if (nt_runtime_resolve(import->module, import->name) != NULL)
+        return;
+    if (import->name != NULL)
+        printf("unresolved\t%s\t%s\n", import->module, import->name);
+    else
+        printf("unresolved\t%s\t#%u\n", import->module, (unsigned int)import->ordinal);
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        fputs("Usage: pe-import-audit FILE.exe\n", stderr);
+    const bool list = argc == 3 && strcmp(argv[1], "--unresolved") == 0;
+    if (argc != 2 && !list) {
+        fputs("Usage: pe-import-audit [--unresolved] FILE.exe\n", stderr);
         return 2;
     }
 
-    const int fd = open(argv[1], O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    const char *path = argv[list ? 2 : 1];
+    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) {
-        perror(argv[1]);
+        perror(path);
         return 2;
     }
     struct stat info;
@@ -65,6 +79,8 @@ int main(int argc, char **argv)
 
     struct audit_counts counts = {0};
     const bool valid = pe_scan_imports(file, length, count_import, &counts);
+    if (valid && list)
+        pe_scan_imports(file, length, print_unresolved, NULL);
     free(file);
     if (!valid) {
         fputs("Invalid or unsupported AMD64 PE import table\n", stderr);
