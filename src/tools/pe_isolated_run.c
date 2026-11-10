@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 #include "image.h"
 #include "ntnative/guest_thread.h"
 #include "pe_bytes.h"
@@ -11,11 +11,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/magic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/prctl.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -99,7 +102,9 @@ static int NT_MS_ABI guest_entry(void)
 
 static int run_worker(const char *name)
 {
-    if (strcmp(getenv("NT_NATIVE_SANDBOXED") ? getenv("NT_NATIVE_SANDBOXED") : "", "1") != 0) {
+    struct statfs root;
+    if (getpid() != 1 || prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 ||
+        statfs("/", &root) != 0 || root.f_type != TMPFS_MAGIC) {
         fputs("Refusing worker outside sandbox; use pe-isolated-run FILE.exe\n", stderr);
         return 125;
     }
@@ -107,7 +112,7 @@ static int run_worker(const char *name)
         strchr(name + 6, '/') != NULL || strchr(name + 6, '\\') != NULL ||
         strstr(name + 6, "..") != NULL)
         return 126;
-    const int fd = open(name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = open(name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
         perror("PE open");
         return 2;
@@ -174,8 +179,8 @@ static bool add_arg(char **args, size_t *count, size_t max, char *item)
 
 static int run_isolated(const char *path)
 {
-    char absolute[PATH_MAX], runner[PATH_MAX], directory[PATH_MAX];
-    if (realpath(path, absolute) == NULL || readlink("/proc/self/exe", runner, sizeof(runner) - 1) <= 0) {
+    char absolute[PATH_MAX], runner[PATH_MAX], socket_path[PATH_MAX];
+    if (realpath(path, absolute) == NULL) {
         perror("Cannot resolve executable paths");
         return 2;
     }
@@ -190,12 +195,10 @@ static int run_isolated(const char *path)
         fputs("Invalid executable name\n", stderr);
         return 2;
     }
-    if (slash == absolute)
-        strcpy(directory, "/");
-    else {
-        const size_t n = (size_t)(slash - absolute);
-        memcpy(directory, absolute, n);
-        directory[n] = '\0';
+    struct stat input;
+    if (stat(absolute, &input) != 0 || !S_ISREG(input.st_mode)) {
+        fputs("Expected a regular PE file\n", stderr);
+        return 2;
     }
     char inside[PATH_MAX];
     if (snprintf(inside, sizeof(inside), "/game/%s", slash + 1) >= (int)sizeof(inside))
@@ -205,23 +208,24 @@ static int run_isolated(const char *path)
     size_t n = 0;
 #define ADD(x) do { if (!add_arg(args, &n, 64, (char *)(x))) return 2; } while (0)
     ADD("bwrap");
-    ADD("--die-with-parent"); ADD("--unshare-all"); ADD("--new-session");
+    ADD("--die-with-parent"); ADD("--unshare-all"); ADD("--new-session"); ADD("--as-pid-1");
     ADD("--clearenv"); ADD("--setenv"); ADD("PATH"); ADD("/usr/bin:/bin");
     ADD("--setenv"); ADD("HOME"); ADD("/game");
-    ADD("--setenv"); ADD("NT_NATIVE_SANDBOXED"); ADD("1");
     ADD("--ro-bind"); ADD("/usr"); ADD("/usr");
     if (access("/lib", F_OK) == 0) { ADD("--ro-bind"); ADD("/lib"); ADD("/lib"); }
     if (access("/lib64", F_OK) == 0) { ADD("--ro-bind"); ADD("/lib64"); ADD("/lib64"); }
-    ADD("--ro-bind"); ADD("/etc"); ADD("/etc");
+    ADD("--ro-bind-try"); ADD("/etc/fonts"); ADD("/etc/fonts");
     ADD("--proc"); ADD("/proc"); ADD("--dev"); ADD("/dev");
     ADD("--tmpfs"); ADD("/tmp");
-    ADD("--bind"); ADD(directory); ADD("/game");
+    ADD("--tmpfs"); ADD("/game");
+    ADD("--ro-bind"); ADD(absolute); ADD(inside);
     ADD("--ro-bind"); ADD(runner); ADD("/runner");
     ADD("--chdir"); ADD("/game");
 
     const char *video = getenv("SDL_VIDEODRIVER");
     if (video != NULL && strcmp(video, "offscreen") == 0) {
         ADD("--setenv"); ADD("SDL_VIDEODRIVER"); ADD("offscreen");
+        ADD("--setenv"); ADD("SDL_FRAMEBUFFER_ACCELERATION"); ADD("0");
     } else {
         const char *runtime = getenv("XDG_RUNTIME_DIR");
         const char *wayland = getenv("WAYLAND_DISPLAY");
@@ -230,27 +234,23 @@ static int run_isolated(const char *path)
             fputs("Wayland session required (or SDL_VIDEODRIVER=offscreen for tests)\n", stderr);
             return 2;
         }
-        char socket_path[PATH_MAX];
-        char sandbox_runtime[96];
-        if (snprintf(socket_path, sizeof(socket_path), "%s/%s", runtime, wayland) >= (int)sizeof(socket_path) ||
-            snprintf(sandbox_runtime, sizeof(sandbox_runtime), "/run/user/%lu",
-                     (unsigned long)getuid()) >= (int)sizeof(sandbox_runtime))
-            return 2;
-        if (access(socket_path, F_OK) != 0) {
-            perror("Wayland socket unavailable");
+        struct stat socket_info;
+        if (runtime[0] != '/' ||
+            snprintf(socket_path, sizeof(socket_path), "%s/%s", runtime, wayland) >= (int)sizeof(socket_path) ||
+            lstat(socket_path, &socket_info) != 0 || !S_ISSOCK(socket_info.st_mode)) {
+            fputs("Wayland socket unavailable\n", stderr);
             return 2;
         }
-        ADD("--dir"); ADD("/run"); ADD("--dir"); ADD("/run/user");
-        ADD("--dir"); ADD(sandbox_runtime);
-        ADD("--bind"); ADD(socket_path); ADD(socket_path);
-        ADD("--setenv"); ADD("XDG_RUNTIME_DIR"); ADD(sandbox_runtime);
-        ADD("--setenv"); ADD("WAYLAND_DISPLAY"); ADD((char *)wayland);
+        ADD("--dir"); ADD("/run/ntnative");
+        ADD("--ro-bind"); ADD(socket_path); ADD("/run/ntnative/wayland");
+        ADD("--setenv"); ADD("XDG_RUNTIME_DIR"); ADD("/run/ntnative");
+        ADD("--setenv"); ADD("WAYLAND_DISPLAY"); ADD("wayland");
         ADD("--setenv"); ADD("SDL_VIDEODRIVER"); ADD("wayland");
     }
     ADD("--"); ADD("/runner"); ADD("--worker"); ADD(inside);
     args[n] = NULL;
 #undef ADD
-    execvp("bwrap", args);
+    execv("/usr/bin/bwrap", args);
     perror("bubblewrap unavailable; install bubblewrap and enable user namespaces");
     return 127;
 }

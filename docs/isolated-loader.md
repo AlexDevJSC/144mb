@@ -12,8 +12,7 @@ auditor previo; no demuestra compatibilidad de comportamiento ni arranque
 del juego. En este cambio, el fixture sintético verifica el mapeo de
 varias secciones, una relocación DIR64, la IAT, callbacks TLS sin datos, puente GS/TEB/PEB mínimo y una llamada MS x64 real
 y el rechazo temprano de imágenes malformadas. La ejecución del Mines
-original **no se ha verificado** porque el binario no está disponible en
-este entorno. Se debe comprobar tanto la entrada como una partida jugable.
+original **no se ha verificado** en una sesión con aislamiento operativo. Se debe comprobar tanto la entrada como una partida jugable.
 
 ### Operaciones implementadas
 
@@ -26,10 +25,11 @@ este entorno. Se debe comprobar tanto la entrada como una partida jugable.
   o relocaciones de tipo DIR64 en memoria privada.
 - Importación por nombre u ordinal, enlazada al registro propio de
   equivalentes Win32. Rechazo explícito de funciones no soportadas.
-- Preparación de un TEB mínimo por hilo mediante GS de Linux, PEB con base de imagen y vector TLS vacío; se restaura el GS anterior tras la ejecución normal.\n- Transferencia de control a un punto de entrada de aplicación con
+- Preparación de un TEB mínimo por hilo mediante GS de Linux, PEB con base de imagen y vector TLS vacío; se restaura el GS anterior tras la ejecución normal.
+- Transferencia de control a un punto de entrada de aplicación con
   ABI Microsoft x64, usando el trabajador de pruebas y SDL en Linux.
-- Límite de archivo de 128 MiB y directorio C: circunscrito al
-  directorio del ejecutable, sin habilitar red ni otros directorios.
+- Límite de archivo de 128 MiB y disco C: temporal con el EXE montado en
+  solo lectura. Los guardados de la sesión son temporales.
 
 ### Ejecución de prueba
 
@@ -51,13 +51,15 @@ Las pruebas `make check-pe-external` ejecutan fuera de Bubblewrap **solo**
 el PE controlado que MinGW-w64 genera durante la compilación. No son
 una autorización para ejecutar PE de terceros sin aislamiento.
 `make check-pe-isolated` intenta comprobar ese mismo ejecutable
-dentro de Bubblewrap; si la política Linux impide crear namespaces,
+dentro de Bubblewrap; si la política Linux impide preparar el sandbox,
 la prueba declara `SKIP` y no cuenta como validación del aislamiento.
 
 El entorno de Bubblewrap monta `/usr` y las bibliotecas del host en
-solo lectura, ofrece `/proc` y `/dev`, crea `/tmp` temporal,
-desactiva red y monta en `/game` únicamente el directorio que contiene
-el EXE. En ese directorio el juego puede crear guardados. Si falla la
+solo lectura junto con la configuración de fuentes. Ofrece `/proc` y
+`/dev` aislados, crea `/tmp` y `/game` temporales y desactiva la red.
+Solo el archivo PE se monta en `/game`, en solo lectura. El worker exige
+PID 1, `no_new_privs` y una raíz tmpfs como comprobación del entorno
+esperado. Estas comprobaciones no constituyen una atestación del sandbox. Si falla la
 creación del sandbox se rechaza la ejecución. Esto reduce el acceso del
 invitado, pero el prototipo **no es un aislamiento de seguridad auditado**
 y no debe emplearse para ejecutar software malicioso.
