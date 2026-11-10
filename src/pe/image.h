@@ -12,6 +12,7 @@ struct pe_image {
     uint32_t entry_rva;
     uint32_t resource_rva, resource_size;
     uint32_t exception_rva, exception_size;
+    uint32_t tls_callbacks_rva, tls_callback_count;
     uint16_t subsystem;
 };
 /* No guest instruction is executed. Caller must sandbox before calling entry. */
