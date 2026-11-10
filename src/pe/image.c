@@ -14,9 +14,11 @@ enum {
     PE_OPTIONAL_MIN = 112, PE_SECTION_SIZE = 40, PE_IMPORT_DIR = 1,
     PE_EXCEPTION_DIR = 3, PE_RESOURCE_DIR = 2, PE_BASERELOC_DIR = 5,
     PE_TLS_DIR = 9, PE_DELAY_DIR = 13, PE_IAT_DIR = 12,
-    MAX_IMPORTS = 65536, MAX_NAME = 512,
-    SCN_EXECUTE = 0x20000000u, SCN_READ = 0x40000000u, SCN_WRITE = 0x80000000u
+    MAX_IMPORTS = 65536, MAX_NAME = 512
 };
+#define SCN_EXECUTE UINT32_C(0x20000000)
+#define SCN_READ    UINT32_C(0x40000000)
+#define SCN_WRITE   UINT32_C(0x80000000)
 struct section {
     uint32_t rva, virtual_size, raw_size, raw_offset, extent, characteristics;
 };
