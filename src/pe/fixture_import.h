@@ -1,0 +1,32 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef NTNATIVE_FIXTURE_IMPORT_H
+#define NTNATIVE_FIXTURE_IMPORT_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+enum { PE_IMPORT_PAGE_SIZE = 4096 };
+
+struct pe_import_section {
+    const unsigned char *bytes;
+    uint32_t rva;
+    uint32_t size;
+};
+
+struct pe_import_image {
+    struct pe_import_section text;
+    struct pe_import_section rdata;
+    struct pe_import_section idata;
+    uint32_t image_size;
+    uint32_t entry_rva;
+    uint32_t iat_rva;
+};
+
+/* Validate the generated fixture profile. On success section views borrow
+ * the input bytes. On failure the result is untouched.
+ */
+bool pe_parse_import_fixture(const unsigned char *file, size_t length,
+                             struct pe_import_image *result);
+
+#endif

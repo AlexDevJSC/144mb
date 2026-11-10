@@ -5,8 +5,10 @@ BINDIR ?= $(PREFIX)/bin
 CFLAGS ?= -O2 -g
 WARN_CFLAGS = -std=c17 -Wall -Wextra -Wpedantic -Werror
 INCLUDES = -Iinclude
+PE_INCLUDES = $(INCLUDES) -Isrc/pe
+MINGW_CC ?= x86_64-w64-mingw32-gcc
 
-.PHONY: all check check-pe benchmark install
+.PHONY: all check check-pe check-pe-import benchmark install
 all: $(BUILD_DIR)/nt-native-probe
 
 $(BUILD_DIR):
@@ -46,13 +48,32 @@ $(BUILD_DIR)/nt-counter.exe: $(BUILD_DIR)/fixture.coff.o tests/pe/fixture.ld
 $(BUILD_DIR)/fixture-embedded.o: tests/pe/embed.S $(BUILD_DIR)/nt-counter.exe
 	$(CC) -DNT_PE_FIXTURE_PATH='"$(BUILD_DIR)/nt-counter.exe"' -c "$<" -o "$@"
 
-$(BUILD_DIR)/pe-host: tests/pe/host.c $(BUILD_DIR)/fixture-embedded.o $(BUILD_DIR)/counter.o tests/pe/fixture_abi.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+$(BUILD_DIR)/pe-host: tests/pe/host.c $(BUILD_DIR)/fixture-embedded.o $(BUILD_DIR)/counter.o tests/pe/fixture_abi.h src/pe/pe_bytes.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) -o "$@"
 
 check-pe: $(BUILD_DIR)/pe-host
 	$(OBJDUMP) -f $(BUILD_DIR)/nt-counter.exe
 	$(BUILD_DIR)/pe-host
+
+$(BUILD_DIR)/nt-counter-import.exe: tests/pe/import_fixture.c include/ntnative/counter.h | $(BUILD_DIR)
+	$(MINGW_CC) $(INCLUDES) $(WARN_CFLAGS) -O2 -ffreestanding -nostdlib -fno-ident \
+	    -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables \
+	    -Wl,--entry,import_fixture_entry,--subsystem,console,--no-insert-timestamp \
+	    -Wl,--disable-reloc-section,--disable-dynamicbase,--strip-all -o "$@" "$<" -lntdll
+
+$(BUILD_DIR)/import-embedded.o: tests/pe/embed.S $(BUILD_DIR)/nt-counter-import.exe
+	$(CC) -DNT_PE_FIXTURE_PATH='"$(BUILD_DIR)/nt-counter-import.exe"' -c "$<" -o "$@"
+
+$(BUILD_DIR)/pe-import-host: tests/pe/import_host.c src/pe/fixture_import.c \
+    $(BUILD_DIR)/import-embedded.o $(BUILD_DIR)/counter.o \
+    tests/pe/fixture_abi.h src/pe/fixture_import.h src/pe/pe_bytes.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) -o "$@"
+
+check-pe-import: $(BUILD_DIR)/pe-import-host
+	$(OBJDUMP) -h -p $(BUILD_DIR)/nt-counter-import.exe
+	$(BUILD_DIR)/pe-import-host
 
 $(BUILD_DIR)/counter-bench: tests/bench/counter_bench.c $(BUILD_DIR)/counter.o | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o "$@"

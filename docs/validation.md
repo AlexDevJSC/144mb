@@ -41,6 +41,28 @@ el límite de 64 bits, desbordamiento y fallo del anfitrión. Los casos PE
 usan el reloj real a través del puente Microsoft x64. Se comprueban
 resultados y efectos sobre salidas cuando los define este prototipo.
 
+## Importación PE por nombre
+
+Con GCC, binutils y MinGW-w64 AMD64 disponibles en Linux x86-64:
+
+```sh
+make -j2 check check-pe check-pe-import
+make -j2 BUILD_DIR=build-ubsan \
+  CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' check check-pe check-pe-import
+```
+
+`objdump -p build/nt-counter-import.exe` muestra la importación de
+`NtQueryPerformanceCounter` desde `ntdll.dll`. El PE comprueba frecuencia
+positiva y estable, contador no decreciente y frecuencia opcional.
+El resultado se comunica mediante el código de salida. El anfitrión
+también verifica el rechazo de tablas truncadas, RVA fuera de rango,
+ordinales, nombres inválidos e importaciones retardadas. Las variantes
+inválidas solo llegan al parser.
+
+GitHub Actions ejecuta el archivo PE compilado en Linux en un job de
+Windows Server 2022 separado de la sonda de referencia. También se puede
+ejecutar el mismo archivo en Windows x64 y comprobar que devuelve 0.
+
 ## Sonda Windows y comparación opcional con Wine
 
 En un equipo Windows x64 o una VM autorizada, desde el Developer Command
