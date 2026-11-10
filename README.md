@@ -37,6 +37,8 @@ make check
 make check-pe
 make check-pe-image
 make benchmark
+# Con MinGW-w64: make check-pe-external (PE de escritorio generado)
+
 ```
 
 `make check-pe` requiere que `ld -V` liste `i386pep` y que `objdump -i`
