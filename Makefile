@@ -203,5 +203,6 @@ $(BUILD_DIR)/counter-bench: tests/bench/counter_bench.c $(BUILD_DIR)/counter.o |
 benchmark: $(BUILD_DIR)/counter-bench
 	$(BUILD_DIR)/counter-bench
 
-install: $(BUILD_DIR)/nt-native-probe
-	install -D -m 0755 "$<" "$(DESTDIR)$(BINDIR)/nt-native-probe"
+install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run
+	install -D -m 0755 "$(BUILD_DIR)/nt-native-probe" "$(DESTDIR)$(BINDIR)/nt-native-probe"
+	install -D -m 0755 "$(BUILD_DIR)/pe-isolated-run" "$(DESTDIR)$(BINDIR)/pe-isolated-run"
