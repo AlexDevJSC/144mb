@@ -81,6 +81,32 @@ Referencias [Diseño Wine NTSYNC](https://list.winehq.org/hyperkitty/list/wine-g
 
 ## Política de incorporación
 
+### Siguiente integración tras las partidas de Mines
+
+La corrección de menús mantiene contratos Win32 compartidos y pruebas con
+menús y ventanas sintéticos. El recuento de importaciones se acompaña de
+resultados de comportamiento, cancelación, errores y ciclo de vida para
+medir la ampliación a otras aplicaciones.
+
+La integración de Wine se centrará primero en las pruebas y la semántica de
+ventanas, mensajes y diálogos. La selección de módulos requiere definir el
+gestor de handles, la cola de mensajes y el punto de conexión con Linux.
+En Wine 11.0, `USER32` declara dependencias de `gdi32`, `sechost`, `advapi32`,
+`kernelbase` y `win32u`, además de otras importaciones. `win32u` incorpora
+una biblioteca Unix y depende de `ntdll`. Esas dependencias delimitan el
+trabajo previo a cargar módulos Wine en este runtime. [Build de USER32](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/user32/Makefile.in) ·
+[Build de win32u](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/win32u/Makefile.in).
+
+Proton reúne Wine con componentes adicionales para juegos. Su árbol incluye
+DXVK y VKD3D-Proton. La integración gráfica tiene sus propios criterios de
+Vulkan y Direct3D en P2-02. La aceptación de cualquier módulo reutilizado
+exige fijar la revisión, conservar sus avisos y licencia, declarar sus
+dependencias y ejecutar los mismos fixtures PE en Linux. El runtime de esta
+revisión utiliza implementaciones propias y bibliotecas del anfitrión.
+[Código y componentes de Proton](https://github.com/ValveSoftware/Proton).
+
+### Procedencia y distribución
+
 MIT cubre los archivos originales del proyecto. Las dependencias del
 sistema se consumen mediante su ABI o en paquetes separados. Antes de
 publicar una integración que redistribuya código, registra revisión,

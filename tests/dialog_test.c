@@ -52,6 +52,33 @@ static intptr_t NT_MS_ABI dialog_proc(uintptr_t window, uint32_t message, uintpt
     return 0;
 }
 
+static void check_extra_window_memory(void)
+{
+    struct nt_window_class type = {.proc = window_proc, .name = "WindowExtraFixture",
+                                  .window_extra = NT_DLGWINDOWEXTRA + sizeof(intptr_t)};
+    CHECK(nt_RegisterClassA(&type) != 0);
+    const uintptr_t first = nt_CreateWindowExA(0, type.name, "Extra bytes", 0,
+                                               0, 0, 80, 60, 0, 0, 0, NULL);
+    const uintptr_t second = nt_CreateWindowExA(0, type.name, "Independent extra bytes", 0,
+                                                0, 0, 80, 60, 0, 0, 0, NULL);
+    CHECK(first != 0 && second != 0);
+    const intptr_t value = (intptr_t)UINT64_C(0x123456789abcdef0);
+    nt_SetLastError(91);
+    CHECK(nt_GetWindowLongPtrA(first, NT_DLGWINDOWEXTRA) == 0 && last_error() == 91);
+    CHECK(nt_SetWindowLongPtrA(first, NT_DLGWINDOWEXTRA, value) == 0 && last_error() == 91);
+    CHECK(nt_GetWindowLongPtrA(first, NT_DLGWINDOWEXTRA) == value);
+    CHECK(nt_GetWindowLongPtrA(second, NT_DLGWINDOWEXTRA) == 0);
+    CHECK(nt_SetWindowLongPtrA(first, NT_DLGWINDOWEXTRA, 73) == value);
+    CHECK(nt_SetWindowLongPtrA(first, NT_DLGWINDOWEXTRA + 1, 19) == 0 &&
+          last_error() == NT_ERROR_INVALID_INDEX);
+    CHECK(nt_GetWindowLongPtrA(first, NT_DLGWINDOWEXTRA) == 73);
+    CHECK(nt_DestroyWindow(first) && nt_DestroyWindow(second));
+    type.name = "InvalidWindowExtraFixture";
+    type.window_extra = -1;
+    CHECK(nt_RegisterClassA(&type) == 0 && last_error() == NT_ERROR_INVALID_PARAMETER);
+    puts("PASS per-window extra bytes, unaligned offsets, isolation and boundary errors");
+}
+
 static void key_event(uint32_t window, SDL_Keycode key, uint16_t mods)
 {
     SDL_Event event = {.type = SDL_KEYDOWN};
@@ -394,6 +421,7 @@ static void check_files(uintptr_t owner)
 int main(void)
 {
     CHECK(nt_runtime_open_desktop());
+    check_extra_window_memory();
     const uintptr_t icon = check_icons();
     SDL_Cursor *probe = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
     const uintptr_t cursor = nt_LoadCursorA(0, (const char *)32512);

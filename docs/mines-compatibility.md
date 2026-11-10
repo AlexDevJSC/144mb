@@ -11,8 +11,9 @@ El auditor resuelve las **197 importaciones directas**, incluida la entrada por 
 
 El recuento describe los puntos de entrada disponibles y sus perfiles
 probados. Las búsquedas que el programa haga en tiempo de ejecución
-quedan fuera de la medición. El análisis de Mines fue de solo lectura.
-La ejecución de código PE se limitó a los binarios de control del proyecto.
+quedan fuera de la medición. Las tres etapas iniciales usaron una auditoría
+de solo lectura y ejecutaron los binarios de control del proyecto. Las
+partidas posteriores y la revisión de menús se documentan al final.
 
 ## Primera etapa
 
@@ -244,3 +245,55 @@ Los contratos se contrastaron con las declaraciones públicas de MinGW-w64
 y `excpt.h`. El ordinal coincide con la tabla de Wine 11.0. El código
 propio mantiene la licencia MIT y reutiliza las dependencias SDL y Cairo del
 proyecto. [Tabla de COMCTL32 en Wine 11.0](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/comctl32/comctl32.spec).
+
+## Partidas y revisión de menús del 10 de noviembre de 2026
+
+Las pruebas anteriores completaron una victoria y una derrota del ejecutable
+original en Linux fuera de pantalla con aislamiento. El usuario comunicó
+después una victoria y una derrota en un portátil Fedora KDE Wayland y aportó
+una captura con `COMPLETED!`. También informó de fallos de menús, con
+`Restart` operativo. La compatibilidad se registra por funcionalidad y por
+entorno junto al recuento de símbolos.
+
+Se reprodujeron tres límites del runtime compartido.
+
+| Fallo reproducido | Contrato y corrección |
+| --- | --- |
+| `GameAboutBox` y `GameConfigBox` pedían 38 bytes por ventana y `RegisterClassA` devolvía 0. | `cbWndExtra` admite de 0 a 65.536 bytes por ventana en este perfil, inicializados a cero y liberados al destruirla. `GetWindowLongPtrA` y `SetWindowLongPtrA` aceptan offsets de bytes dentro del bloque, incluidos los desalineados. La escritura devuelve el valor anterior. Ambas conservan el último error al tener éxito. Un acceso fuera del bloque devuelve 0 y `ERROR_INVALID_INDEX`. |
+| Los elementos que excedían el alto del cliente quedaban inaccesibles. | La rueda desplaza el desplegable activo por sus filas. La representación y la selección usan el mismo intervalo visible. |
+| Pulsar una entrada con submenú cerraba el desplegable. | Se conserva una pila de hasta 16 desplegables. Cada apertura entrega `WM_INITMENUPOPUP` con el handle y la posición del elemento. `WM_INITMENU` precede a la primera apertura y `WM_UNINITMENUPOPUP` acompaña al cierre. Escape retrocede un nivel y los elementos deshabilitados conservan su estado. |
+
+Las pruebas genéricas comprueban bloques independientes por ventana, el
+último offset válido, los errores de límites, un menú mayor que su ventana,
+tres niveles de desplegables, un elemento habilitado durante la notificación
+de apertura, Escape, la destrucción del propietario durante la apertura y
+la entrega de `WM_COMMAND` con `lParam` igual a cero.
+Se mantienen los límites de la representación dentro de la ventana SDL y
+el alcance del teclado definido por esas pruebas.
+
+En el ejecutable original se seleccionaron mediante eventos SDL de clic y
+rueda `New`, `Restart`, `About`, `Specific`, `Random Seed`, `Custom`,
+`Preferences`, el tablero cuadrado de 16 × 16 con 40 minas y el tablero
+Snub-Square de 5 × 5. Los diálogos se abrieron y cerraron mediante su evento
+de cierre. Los nueve procesos terminaron con estado 0 después del cierre
+explícito de la ventana principal. Estas comprobaciones cubren la apertura,
+cancelación y selección de tipos ensayadas. La prueba física de la revisión
+de menús sigue pendiente.
+
+Entorno local Debian 13 x86-64, Linux 6.18.57, GCC 14.2, MinGW-w64 14,
+SDL 2.32.4 y Cairo 1.18.4, con backend `offscreen`. Pasaron
+`make -j2 all check check-pe check-pe-import check-pe-image check-desktop`
+y la repetición de esas suites con UBSan. Para el PE original, la restricción
+de `NETLINK_ROUTE` del entorno impide `--unshare-all`. El arnés conserva
+aislamiento de usuario, PID, montaje, IPC y UTS y aplica seccomp para denegar
+la creación de sockets e `io_uring`. El lanzador publicado conserva su
+aislamiento habitual.
+
+Contratos consultados de Microsoft Learn para
+[WNDCLASSA](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-wndclassa),
+[SetWindowLongPtrA](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowlongptra),
+[WM_INITMENU](https://learn.microsoft.com/en-us/windows/win32/menurc/wm-initmenu),
+[WM_INITMENUPOPUP](https://learn.microsoft.com/en-us/windows/win32/menurc/wm-initmenupopup)
+y [WM_UNINITMENUPOPUP](https://learn.microsoft.com/en-us/windows/win32/menurc/wm-uninitmenupopup).
+La revisión de límites contrastó también el tratamiento de índices inválidos
+de las [pruebas de ventanas de Wine 11.0](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/user32/tests/win.c).

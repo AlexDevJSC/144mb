@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "desktop.h"
+#include "menu_view.h"
 
 #include <SDL.h>
 #include <stdio.h>
@@ -17,6 +18,9 @@
 enum { BLUE = 0xff0000, GREEN = 0x00ff00 };
 static unsigned int creates, paints, characters, mouse, timers, destroys, commands;
 static struct nt_rect painted;
+static uintptr_t enable_on_init;
+static unsigned int menu_initializations;
+static uintptr_t last_command;
 
 static intptr_t NT_MS_ABI procedure(uintptr_t window, uint32_t message,
                                    uintptr_t wparam, intptr_t lparam)
@@ -56,8 +60,14 @@ static intptr_t NT_MS_ABI procedure(uintptr_t window, uint32_t message,
         ++timers;
         return 0;
     case NT_WM_COMMAND:
-        CHECK(wparam == 501);
+        CHECK((wparam == 501 || wparam == 701) && lparam == 0);
+        last_command = wparam;
         ++commands;
+        return 0;
+    case NT_WM_INITMENUPOPUP:
+        ++menu_initializations;
+        if (wparam == enable_on_init)
+            CHECK(nt_EnableMenuItem(wparam, 701, 0) >= 0);
         return 0;
     case NT_WM_DESTROY:
         ++destroys;
@@ -136,6 +146,100 @@ static uintptr_t check_menu(uintptr_t window, uint32_t native_id)
     CHECK(commands == 1 && !nt_GetMenuItemRect(window, popup, 0, &item));
     puts("PASS attached menu, rendered bar, popup hit testing and WM_COMMAND");
     return menu;
+}
+
+static void click_menu_item(uintptr_t window, uint32_t native_id, uintptr_t menu, uint32_t index)
+{
+    struct nt_rect bounds;
+    CHECK(nt_GetMenuItemRect(window, menu, index, &bounds));
+    int x, y;
+    SDL_GetWindowPosition(SDL_GetWindowFromID(native_id), &x, &y);
+    SDL_Event event = {.type = SDL_MOUSEBUTTONUP};
+    event.button.windowID = native_id;
+    event.button.button = SDL_BUTTON_LEFT;
+    event.button.x = (bounds.left + bounds.right) / 2 - x;
+    event.button.y = (bounds.top + bounds.bottom) / 2 - y;
+    CHECK(SDL_PushEvent(&event) == 1);
+}
+
+static uintptr_t check_menu_navigation(uintptr_t window, uint32_t native_id, uintptr_t previous)
+{
+    const uintptr_t bar = nt_CreateMenu(), popup = nt_CreateMenu();
+    const uintptr_t child = nt_CreateMenu(), deep = nt_CreateMenu();
+    CHECK(bar != 0 && popup != 0 && child != 0 && deep != 0);
+    CHECK(nt_AppendMenuA(popup, 1, 500, "Disabled action"));
+    CHECK(nt_AppendMenuA(popup, 0x800, 0, NULL));
+    for (uint32_t i = 0; i < 10; ++i)
+        CHECK(nt_AppendMenuA(popup, 0, 600 + i, "Another action"));
+    CHECK(nt_AppendMenuA(deep, 1, 701, "Dynamic action"));
+    CHECK(nt_AppendMenuA(child, 0x10, deep, "Second level"));
+    CHECK(nt_AppendMenuA(popup, 0x10, child, "First level"));
+    CHECK(nt_AppendMenuA(bar, 0x10, popup, "Actions"));
+    CHECK(nt_SetMenu(window, bar) && nt_DestroyMenu(previous));
+    enable_on_init = deep;
+    const unsigned int before = menu_initializations;
+    struct nt_message message;
+    struct nt_rect bounds;
+    click_menu_item(window, native_id, bar, 0);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
+    CHECK(menu_initializations == before + 1);
+    click_menu_item(window, native_id, popup, 0);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
+    CHECK(nt_GetMenuItemRect(window, popup, 0, &bounds));
+    CHECK(!nt_GetMenuItemRect(window, popup, 12, &bounds));
+    SDL_Event wheel = {.type = SDL_MOUSEWHEEL};
+    wheel.wheel.windowID = native_id;
+    wheel.wheel.y = -1000;
+    CHECK(SDL_PushEvent(&wheel) == 1);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
+    CHECK(!nt_GetMenuItemRect(window, popup, 0, &bounds));
+    click_menu_item(window, native_id, popup, 12);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
+    click_menu_item(window, native_id, child, 0);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
+    CHECK(menu_initializations == before + 3);
+    SDL_Event escape = {.type = SDL_KEYDOWN};
+    escape.key.windowID = native_id;
+    escape.key.keysym.sym = SDLK_ESCAPE;
+    CHECK(SDL_PushEvent(&escape) == 1);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
+    CHECK(!nt_GetMenuItemRect(window, deep, 0, &bounds));
+    click_menu_item(window, native_id, child, 0);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
+    click_menu_item(window, native_id, deep, 0);
+    deliver(window, NT_WM_COMMAND);
+    CHECK(commands == 2 && last_command == 701 && !nt_GetMenuItemRect(window, popup, 12, &bounds));
+    puts("PASS long menu scrolling, nested submenus, disabled items, initialization and Escape");
+    return bar;
+}
+
+static intptr_t NT_MS_ABI destroy_during_menu_init(uintptr_t window, uint32_t message,
+                                                 uintptr_t wparam, intptr_t lparam)
+{
+    if (message == NT_WM_INITMENUPOPUP) {
+        CHECK(nt_DestroyWindow(window));
+        return 0;
+    }
+    return nt_DefWindowProcA(window, message, wparam, lparam);
+}
+
+static void check_menu_lifetime(void)
+{
+    const struct nt_window_class type = {.proc = destroy_during_menu_init,
+                                        .name = "MenuLifetimeFixture"};
+    CHECK(nt_RegisterClassA(&type) != 0);
+    const uintptr_t window = nt_CreateWindowExA(0, type.name, "Menu lifetime", 0,
+                                                0, 0, 100, 100, 0, 0, 0, NULL);
+    const uintptr_t bar = nt_CreateMenu(), popup = nt_CreateMenu();
+    CHECK(window != 0 && bar != 0 && popup != 0);
+    CHECK(nt_AppendMenuA(popup, 0, 701, "An action"));
+    CHECK(nt_AppendMenuA(bar, 0x10, popup, "Actions") && nt_SetMenu(window, bar));
+    click_menu_item(window, nt_runtime_window_id(window), bar, 0);
+    struct nt_message message;
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
+    struct nt_rect rect;
+    CHECK(!nt_GetClientRect(window, &rect) && nt_GetMenuItemCount(bar) == -1);
+    puts("PASS menu initialization tolerates destruction of the owner and menu tree");
 }
 
 int main(void)
@@ -245,7 +349,8 @@ int main(void)
         CHECK(nt_MessageBeep(0x30) && !nt_MessageBeep(123));
         puts("PASS SDL queues an asynchronous alert tone");
     }
-    const uintptr_t menu = check_menu(window, native_id);
+    const uintptr_t menu = check_menu_navigation(window, native_id, check_menu(window, native_id));
+    check_menu_lifetime();
 
     event = (SDL_Event){.type = SDL_WINDOWEVENT};
     event.window.windowID = native_id;
