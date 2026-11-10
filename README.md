@@ -25,7 +25,7 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Existe un primer cargador PE32+ AMD64 con relocaciones DIR64, IAT y
   permisos W^X, más un lanzador Linux con Bubblewrap.
   **No se ha validado aún el arranque real de Mines.** Quedan pendientes
-  TLS, semántica NT de procesos, inicialización completa y KDE.
+  TLS con datos, TEB/PEB completos, semántica NT de procesos, inicialización completa y KDE.
 
 ## Compilar y probar
 
