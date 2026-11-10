@@ -27,7 +27,7 @@ PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-i
 PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector \
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-.PHONY: all check check-pe check-pe-import check-pe-image check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run
 
 $(BUILD_DIR):
@@ -144,6 +144,9 @@ $(BUILD_DIR)/pe-image-test: tests/pe/image_test.c src/pe/image.c $(PE_IMAGE_HEAD
 
 check-pe-image: $(BUILD_DIR)/pe-image-test
 	$(BUILD_DIR)/pe-image-test
+
+check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe
+	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe
 
 $(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h | $(BUILD_DIR)
