@@ -14,13 +14,12 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
   generado e incrustado durante el build.
 - Un segundo PE de consola, compilado con MinGW-w64, importa
   `ntdll.dll!NtQueryPerformanceCounter`. Linux resuelve esa importación con
-  la implementación propia y Windows ejecuta el mismo archivo con su DLL.
+  la implementación propia.
 - El runtime expone 30 equivalentes iniciales de las funciones Win32 y CRT
   que pide Mines. Un PE de control verifica la llamada Win32 al reloj.
 - `pe-import-audit` lee las importaciones directas de un PE AMD64 y
   cuenta las que tienen un equivalente registrado.
-- Una sonda Windows independiente que consulta `ntdll.dll`, un
-  microbenchmark y un spec RPM para el comando ELF de diagnóstico.
+- Un microbenchmark y un spec RPM para el comando ELF de diagnóstico.
 - Quedan pendientes la carga general de aplicaciones PE, el modelo de
   procesos y objetos NT y la integración con KDE.
 
@@ -39,8 +38,7 @@ make benchmark
 liste `pe-x86-64`. El build genera `build/nt-counter.exe` y
 `build/pe-host`. Ejecuta `build/pe-host` para repetir la prueba. El PE
 espera una función entregada por el anfitrión y no tiene un punto de entrada
-de aplicación Windows convencional. Para ejecutar la sonda Windows usa
-`tests/windows/qpc_reference.c` siguiendo la guía de validación.
+de aplicación Windows convencional. Todas las pruebas se ejecutan en Linux.
 
 Con MinGW-w64 AMD64 instalado, `make check-pe-import` genera los
 ejecutables de prueba NT y Win32, muestra sus tablas de importación y
@@ -67,7 +65,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | Ruta | Contenido |
 | --- | --- |
 | [include/ntnative](include/ntnative) y [src/ntdll](src/ntdll) | ABI interno y código de compatibilidad |
-| [tests](tests) | Contrato Linux, PE controlado, sonda Windows y medición |
+| [tests](tests) | Contratos, PE controlados y medición en Linux |
 | [Arquitectura](docs/architecture.md) | Límites entre el kernel, el runtime y el escritorio |
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |

@@ -1,5 +1,5 @@
 name: Comportamiento incompatible
-description: Registra una diferencia reproducible entre Windows y un backend.
+description: Registra una diferencia reproducible entre el contrato y el resultado en Linux.
 title: "[Compat] "
 body:
   - type: textarea
@@ -12,14 +12,14 @@ body:
   - type: textarea
     id: reference
     attributes:
-      label: Referencia Windows
-      description: Incluye edición y compilación del SO, arquitectura, NTSTATUS y efectos observados.
+      label: Contrato esperado
+      description: Enlaza el contrato público e indica NTSTATUS, salidas y efectos esperados.
     validations:
       required: true
   - type: textarea
     id: observed
     attributes:
       label: Resultado del backend
-      description: Incluye commit, distro, kernel, arquitectura y si se usó backend propio, Wine o Proton.
+      description: Incluye commit, distribución, kernel, arquitectura y backend probado en Linux.
     validations:
       required: true
