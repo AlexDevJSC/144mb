@@ -1,5 +1,32 @@
 # RPM experimental para Fedora KDE Plasma 45
 
+## Instalación para tu usuario
+
+Desde una copia del repositorio que incluya el instalador, ejecuta:
+
+```sh
+bash packaging/fedora/install.sh "$(git rev-parse HEAD)"
+```
+
+Usa un commit publicado del proyecto. El instalador descarga el repositorio
+completo en `~/.local/share/nt-native-linux/source`, instala con DNF las
+dependencias que falten y ejecuta `make all check check-pe-image` antes de
+activar la versión. Se puede repetir con el mismo commit. La instalación
+se activa en `~/.local/bin` con los comandos `nt-native-probe` y
+`pe-isolated-run`. La compilación y el lanzador se ejecutan como usuario.
+
+En una sesión KDE Wayland, puedes pasar la ruta de tu EXE como segundo
+argumento para abrirlo después de instalar. El ejecutable de Mines se
+proporciona por separado.
+
+```sh
+bash packaging/fedora/install.sh "$(git rev-parse HEAD)" "$HOME/Descargas/mines.exe"
+# En usos posteriores
+"$HOME/.local/bin/pe-isolated-run" "$HOME/Descargas/mines.exe"
+```
+
+## Construcción del RPM
+
 El paquete instala los comandos ELF `nt-native-probe` y `pe-isolated-run` y documentación. Para ejecutar PE ajenos, el segundo requiere Bubblewrap y no permite omitir el sandbox. El
 comando permite verificar el backend del contador en una VM Fedora antes de
 integrar un lanzador. El spec limita el paquete a x86-64 y ejecuta las pruebas
@@ -31,7 +58,10 @@ make install DESTDIR="$PWD/build-stage" PREFIX=/usr
 ./build-stage/usr/bin/pe-isolated-run --help
 ```
 
-La carga PE y el aislamiento siguen siendo experimentales; véase [el contrato del cargador](../../docs/isolated-loader.md). El soporte de Mines todavía no está verificado.
+La carga PE y el aislamiento siguen siendo experimentales. Se verificaron
+una victoria y una derrota con Mines en Linux fuera de pantalla mediante
+un arnés aislado. La ejecución en Fedora KDE Wayland sobre un portátil
+sigue pendiente. [Contrato del cargador](../../docs/isolated-loader.md).
 
 La integración del escritorio tiene su propio hito. El paquete de laboratorio
 puede instalarse sin registrar manejadores MIME, servicios, reglas de

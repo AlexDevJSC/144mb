@@ -53,7 +53,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install Fedora build tools in the CI container
-        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip 'pkgconfig(sdl2)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' dejavu-sans-fonts
+        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip 'pkgconfig(sdl2)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' dejavu-sans-fonts pkgconf-pkg-config bubblewrap shadow-utils util-linux-core
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -67,3 +67,15 @@ jobs:
           rpm -qpl "$rpm_topdir"/RPMS/x86_64/nt-native-linux-0.1.0-*.rpm > "$rpm_topdir/payload.txt"
           cat "$rpm_topdir/payload.txt"
           grep -Fx /usr/bin/nt-native-probe "$rpm_topdir/payload.txt"
+      - name: Install and reinstall the runtime as a Fedora user
+        env:
+          INSTALL_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          useradd --create-home nt-installer
+          for attempt in 1 2; do
+            runuser -u nt-installer -- bash "$GITHUB_WORKSPACE/packaging/fedora/install.sh" "$INSTALL_REVISION"
+          done
+          install_home=/home/nt-installer/.local
+          test "$(runuser -u nt-installer -- git -C "$install_home/share/nt-native-linux/source" rev-parse HEAD)" = "$INSTALL_REVISION"
+          runuser -u nt-installer -- "$install_home/bin/nt-native-probe"
+          runuser -u nt-installer -- "$install_home/bin/pe-isolated-run" --help

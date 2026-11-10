@@ -29,6 +29,9 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 
 ## Compilar y probar
 
+Para instalar desde GitHub en Fedora x86-64, usa el
+[instalador para tu usuario](packaging/fedora/README.md#instalación-para-tu-usuario).
+
 En Linux x86-64 con GCC, GNU Make, GNU binutils, pkg-config, SDL 2, Cairo y libffi de desarrollo:
 
 ```sh
