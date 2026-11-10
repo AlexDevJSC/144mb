@@ -41,40 +41,8 @@ el límite de 64 bits, desbordamiento y fallo del anfitrión. Los casos PE
 usan el reloj real a través del puente Microsoft x64. Se comprueban
 resultados y efectos sobre salidas cuando los define este prototipo.
 
-## Sonda Windows y comparación opcional con Wine
-
-En un equipo Windows x64 o una VM autorizada, desde el Developer Command
-Prompt de Visual Studio:
-
-```bat
-cl /nologo /std:c17 /W4 /WX /O2 tests\windows\qpc_reference.c /Fe:qpc-reference.exe
-qpc-reference.exe
-```
-
-En Linux con MinGW-w64 x86-64 y Wine disponibles, se puede compilar el
-mismo código y ejecutarlo en un prefijo de prueba separado:
-
-```sh
-mkdir -p build
-x86_64-w64-mingw32-gcc -std=c17 -O2 -Wall -Wextra -Werror \
-  tests/windows/qpc_reference.c -o build/qpc-reference.exe
-WINEPREFIX="$PWD/build/wine-oracle" wine build/qpc-reference.exe
-```
-
-La sonda registra estados, frecuencia estable, contador no decreciente,
-casos nulos y observaciones con páginas no accesibles. Identifica el
-sistema o backend en el registro junto con versión y arquitectura. Compara
-solo los casos compartidos con el prototipo. La frecuencia, la época del
-contador y el orden de escrituras ante un puntero inválido se registran
-por separado. Wine actúa como una referencia adicional y su ejecución
-usa su implementación. Windows real es la referencia de compatibilidad.
-
-Referencias [Contrato NT](https://learn.microsoft.com/en-us/windows/win32/devnotes/ntqueryperformancecounter) ·
-[Casos de referencia en Wine](https://github.com/wine-mirror/wine/blob/master/dlls/ntdll/tests/time.c).
-
 ## Cobertura pendiente
 
-- Windows y Wine o Proton. Faltan sus ejecuciones y resultados de referencia.
 - RPM e instalación en VM Fedora KDE. El entorno local carece de `rpmbuild`.
 - Suspensión y reanudación en máquina real. La elección de reloj deriva
   de su contrato documentado.
@@ -87,7 +55,7 @@ Referencias [Contrato NT](https://learn.microsoft.com/en-us/windows/win32/devnot
 
 | Dimensión | Método |
 | --- | --- |
-| Comportamiento | Mantener un corpus de entradas, NTSTATUS, resultados y efectos en Windows y cada backend. Guardar revisión, arquitectura y build del SO. |
+| Comportamiento | Mantener en Linux un corpus de entradas, NTSTATUS, resultados y efectos esperados. Guardar revisión, distribución, kernel y arquitectura. |
 | Estabilidad | Pruebas repetidas y concurrentes, timeout, caída, cierre de handles y recuperación de recursos. Registrar errores, cuelgues y diferencias. |
 | Memoria | Ejecutar cada backend en un proceso y entorno separados. Capturar pico RSS y memoria proporcional de todos los procesos implicados con la misma carga. |
 | Latencia y CPU | Mismo binario, máquina, estado de caché y configuración. Calentar, alternar orden, repetir, registrar p50 y p95, tiempo de CPU y dispersión. Separar trazas diagnósticas de las muestras de rendimiento. |

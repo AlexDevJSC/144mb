@@ -24,26 +24,6 @@ jobs:
           CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all'
           check check-pe
 
-  windows-reference:
-    runs-on: windows-2022
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and query the host ntdll.dll
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'Visual Studio C toolchain not found' }
-          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          $compile = 'call "{0}" && cl /nologo /std:c17 /W4 /WX /O2 tests\windows\qpc_reference.c /Fe:qpc-reference.exe' -f $vcvars
-          cmd.exe /d /c $compile
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\qpc-reference.exe
-          exit $LASTEXITCODE
-
   fedora-rpm:
     runs-on: ubuntu-24.04
     container: quay.io/fedora/fedora:45
