@@ -3,6 +3,7 @@
 #include "desktop_resources.h"
 #include "../pe/pe_bytes.h"
 
+#include <SDL.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>

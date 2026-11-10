@@ -46,8 +46,7 @@ $(BUILD_DIR)/runtime-menu_view.o: override CPPFLAGS += $(GDI_CFLAGS)
 $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-desktop_resources.o $(BUILD_DIR)/runtime-controls.o \
     $(BUILD_DIR)/runtime-dialogs.o $(BUILD_DIR)/runtime-exports.o: src/runtime/desktop_resources.h
 $(BUILD_DIR)/runtime-desktop_resources.o: src/pe/pe_bytes.h
-$(BUILD_DIR)/runtime-desktop_resources.o $(BUILD_DIR)/runtime-controls.o $(BUILD_DIR)/runtime-dialogs.o \
-    $(BUILD_DIR)/runtime-exports.o: override CPPFLAGS += $(DESKTOP_CFLAGS)
+$(BUILD_DIR)/runtime-desktop_resources.o $(BUILD_DIR)/runtime-controls.o: override CPPFLAGS += $(DESKTOP_CFLAGS)
 $(BUILD_DIR)/runtime-controls.o: override CPPFLAGS += $(GDI_CFLAGS)
 $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-controls.o $(BUILD_DIR)/runtime-dialogs.o \
     $(BUILD_DIR)/runtime-file_dialogs.o $(BUILD_DIR)/runtime-messages.o $(BUILD_DIR)/runtime-exports.o: src/runtime/dialogs.h

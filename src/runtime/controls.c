@@ -3,6 +3,7 @@
 #include "dialogs.h"
 #include "desktop_resources.h"
 
+#include <SDL.h>
 #include <cairo.h>
 #include <stdatomic.h>
 #include <stdlib.h>

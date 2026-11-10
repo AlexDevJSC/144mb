@@ -205,6 +205,9 @@ general de excepciones y la carga de ejecutables externos.
 El entorno local usó Linux 6.18.57 x86-64 en Debian 13, glibc 2.41,
 GCC 14.2.0, binutils 2.44, MinGW GCC 14.2 con cabeceras MinGW-w64 12.0.0,
 SDL 2.32.4 y Cairo 1.18.4. Se usó el backend SDL `offscreen`.
+La suite local pasó también con ASan y UBSan, con la detección de fugas
+desactivada. La prueba de GitHub con Weston verificó la carga nativa del
+cursor de sistema.
 
 ```sh
 make -j2 all check check-pe check-pe-import
