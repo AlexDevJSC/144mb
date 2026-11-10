@@ -21,13 +21,14 @@ RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files p
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
+PE_IMAGE_HEADERS = src/pe/image.h src/pe/pe_bytes.h
 PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-insert-timestamp \
                      -Wl,--disable-reloc-section,--disable-dynamicbase,--strip-all
 PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector \
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-.PHONY: all check check-pe check-pe-import check-desktop benchmark install
-all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit
+.PHONY: all check check-pe check-pe-import check-pe-image check-desktop benchmark install
+all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run
 
 $(BUILD_DIR):
 	mkdir -p "$@"
@@ -136,6 +137,19 @@ $(BUILD_DIR)/pe-host: tests/pe/host.c $(BUILD_DIR)/fixture-embedded.o $(BUILD_DI
 check-pe: $(BUILD_DIR)/pe-host
 	$(OBJDUMP) -f $(BUILD_DIR)/nt-counter.exe
 	$(BUILD_DIR)/pe-host
+
+$(BUILD_DIR)/pe-image-test: tests/pe/image_test.c src/pe/image.c $(PE_IMAGE_HEADERS) include/ntnative/runtime.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/pe/image_test.c src/pe/image.c $(LDLIBS) -o "$@"
+
+check-pe-image: $(BUILD_DIR)/pe-image-test
+	$(BUILD_DIR)/pe-image-test
+
+$(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) \
+    $(PE_IMAGE_HEADERS) src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
 
 $(BUILD_DIR)/nt-counter-import.exe: tests/pe/import_fixture.c include/ntnative/counter.h | $(BUILD_DIR)
 	$(MINGW_CC) $(INCLUDES) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
