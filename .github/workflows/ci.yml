@@ -27,6 +27,8 @@ jobs:
         run: sh tests/pe/run_wayland.sh make -j2 check-desktop
       - name: Exercise window messages and clipboard offscreen
         run: SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-desktop
+      - name: Map and execute trusted external desktop PE on Linux
+        run: make check-pe-external
       - name: Run external PE with native Linux isolation if namespaces permit
         env:
           SDL_VIDEODRIVER: offscreen
