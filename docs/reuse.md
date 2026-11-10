@@ -5,12 +5,14 @@ la ABI de Linux, con GCC, Make y GNU binutils para la compilación. Los
 componentes externos de la tabla se investigaron como referencias o
 dependencias futuras. El artefacto inicial no redistribuye sus binarios.
 
-El PE de prueba se compila con el paquete GNU de MinGW-w64 AMD64 del
-runner Ubuntu. Su biblioteca de importación se deriva de la definición
-de `ntdll.dll` de MinGW-w64, cuyo proyecto usa ZPL-2.1 con excepciones
-marcadas por archivo. El fixture enlaza sin CRT y Windows resuelve la
-llamada con la DLL del sistema. Las acciones de GitHub para subir y
-descargar el PE usan MIT. [Definición de importación](https://github.com/mingw-w64/mingw-w64/blob/master/mingw-w64-crt/lib-common/ntdll.def.in) ·
+Los PE de prueba se compilan con el paquete GNU de MinGW-w64 AMD64 del
+runner Ubuntu. Las bibliotecas de importación se derivan de las
+definiciones de `ntdll.dll` y `kernel32.dll` de MinGW-w64, cuyo proyecto
+usa ZPL-2.1 con excepciones marcadas por archivo. Los fixtures enlazan
+sin CRT y Windows resuelve las llamadas con sus DLL del sistema. Las
+acciones de GitHub para subir y descargar los PE usan MIT.
+[Definición NT](https://github.com/mingw-w64/mingw-w64/blob/master/mingw-w64-crt/lib-common/ntdll.def.in) ·
+[Definición Win32](https://github.com/mingw-w64/mingw-w64/blob/master/mingw-w64-crt/lib-common/kernel32.def.in) ·
 [Licencia MinGW-w64](https://github.com/mingw-w64/mingw-w64/blob/master/COPYING) ·
 [Licencia de upload-artifact](https://github.com/actions/upload-artifact/blob/v7.0.2/LICENSE) ·
 [Licencia de download-artifact](https://github.com/actions/download-artifact/blob/v8.0.2/LICENSE).

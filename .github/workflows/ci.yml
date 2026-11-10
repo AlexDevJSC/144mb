@@ -31,7 +31,9 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pe-counter-import
-          path: build/nt-counter-import.exe
+          path: |
+            build/nt-counter-import.exe
+            build/win32-counter-import.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -49,10 +51,12 @@ jobs:
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vs) { throw 'Visual Studio C toolchain not found' }
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          $compile = 'call "{0}" && cl /nologo /std:c17 /W4 /WX /O2 tests\windows\qpc_reference.c /Fe:qpc-reference.exe' -f $vcvars
+          $compile = 'call "{0}" && cl /nologo /std:c17 /W4 /WX /O2 tests\windows\qpc_reference.c /Fe:qpc-reference.exe && cl /nologo /std:c17 /W4 /WX /O2 /Iinclude tests\runtime_test.c /Fe:nt-runtime-reference.exe' -f $vcvars
           cmd.exe /d /c $compile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\qpc-reference.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\nt-runtime-reference.exe
           exit $LASTEXITCODE
 
   windows-import:
@@ -64,15 +68,17 @@ jobs:
         with:
           name: pe-counter-import
           path: pe-import
-      - name: Run the same PE import fixture with Windows ntdll.dll
+      - name: Run the same PE import fixtures with the Windows DLLs
         shell: pwsh
         run: |
-          $fixture = Join-Path $PWD 'pe-import\nt-counter-import.exe'
-          $process = Start-Process -FilePath $fixture -Wait -PassThru
-          if ($process.ExitCode -ne 0) {
-            throw "PE import fixture failed with exit code $($process.ExitCode)"
+          foreach ($name in @('nt-counter-import.exe', 'win32-counter-import.exe')) {
+            $fixture = Join-Path 'pe-import' $name
+            $process = Start-Process -FilePath $fixture -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "$name failed with exit code $($process.ExitCode)"
+            }
+            Write-Host "PASS $name on $([Environment]::OSVersion.VersionString)"
           }
-          Write-Host "PASS PE import fixture on $([Environment]::OSVersion.VersionString) (3 cases)"
 
   fedora-rpm:
     runs-on: ubuntu-24.04

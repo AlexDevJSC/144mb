@@ -19,12 +19,12 @@ flowchart TD
 ```
 
 El diagrama describe la arquitectura objetivo. El prototipo implementa
-una función NT y un tramo controlado del camino PE hacia ella.
+el contador NT y un conjunto inicial de contratos Win32 y CRT.
 
 | Módulo | Espacio y responsabilidad | Estado |
 | --- | --- | --- |
-| Reconocimiento y carga | Usuario. Distinguir ELF y PE por cabeceras. Conservar el camino ELF de Linux. Validar arquitectura y rangos PE, mapear secciones, resolver bibliotecas y preparar la entrada. | Dos perfiles PE32+ AMD64 de laboratorio. |
-| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y puente de llamada del fixture. |
+| Reconocimiento y carga | Usuario. Distinguir ELF y PE por cabeceras. Conservar el camino ELF de Linux. Validar arquitectura y rangos PE, mapear secciones, resolver bibliotecas y preparar la entrada. | Perfiles PE32+ AMD64 de laboratorio y lectura de importaciones directas en archivos externos. |
+| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y 30 puntos de entrada Win32 y CRT de Mines. |
 | Objetos y procesos | Usuario. Tablas de handles por proceso con acceso, herencia, duplicación, nombres y vida útil. Un broker por entorno podrá coordinar recursos compartidos si los casos entre procesos lo requieren. | Diseño inicial. |
 | Recursos de Linux | Kernel y UAPI existentes. Memoria con `mmap` y `mprotect`, descriptores para recursos y `ntsync` opcional para primitivas de espera. | `CLOCK_BOOTTIME` y memoria del fixture en uso. |
 | Gráficos | Usuario. USER y win32u gestionan ventanas, eventos, entrada y portapapeles. DXVK y VKD3D-Proton aportan Direct3D sobre Vulkan. RADV usa la UAPI DRM de amdgpu. | Diseño inicial. |
@@ -40,14 +40,19 @@ memoria privada. La página pasa de lectura y escritura a lectura y
 ejecución antes de la llamada. El host entrega en RCX un callback con ABI
 Microsoft que enlaza con la implementación en C mediante el ABI de Linux.
 
-El segundo perfil usa un PE de consola generado por MinGW-w64. Admite
-una importación por nombre, `ntdll.dll!NtQueryPerformanceCounter`. Admite
+El segundo perfil usa un PE de consola generado por MinGW-w64. Cada
+fixture admite una importación por nombre, del contador NT o del contador
+Win32. El anfitrión obtiene la dirección del registro de equivalentes. Admite
 `.text` e `.idata` y la sección opcional `.rdata`, con un máximo de
 una página por sección. Conserva sus direcciones relativas y escribe el
 puntero del puente Microsoft x64 en la IAT. El código queda en lectura
 y ejecución y las secciones de datos en solo lectura.
 El resto del mapeo queda inaccesible. El anfitrión ejecuta exclusivamente
 los bytes del archivo generado e incrustado en el build.
+
+El auditor de importaciones inspecciona archivos AMD64 sin mapear código
+para ejecución. Lee descriptores múltiples e importaciones por nombre
+y ordinal. El recuento cubre las importaciones directas.
 
 Quedan pendientes las relocaciones generales, TLS, la carga de aplicaciones
 externas y el arranque NT de procesos. La ejecución de archivos externos
@@ -58,6 +63,22 @@ Referencias [PE/COFF](https://learn.microsoft.com/en-us/windows/win32/debug/pe-f
 [`ms_abi` en GCC](https://gcc.gnu.org/onlinedocs/gcc/x86-Function-Attributes.html).
 
 ## Contrato inicial
+
+Los primeros puntos de entrada de Mines usan el ABI Microsoft x64.
+Los valores Win32 de tipo DWORD y BOOL tienen 32 bits. El contador de
+rendimiento ocupa 64 bits y requiere una salida válida y alineada.
+El adaptador Win32 devuelve TRUE cuando el backend escribe el contador
+y FALSE cuando el backend comunica un fallo. Los identificadores de
+proceso e hilo identifican al proceso y al hilo Linux que ejecutan el
+fixture. El último error es un DWORD independiente por hilo.
+
+Las rutinas de C trabajan con búferes y cadenas válidos de la prueba.
+La asignación y liberación comparten el heap del anfitrión con el modo
+de asignación inicial del runtime. Los tamaños son de 64 bits y las
+cadenas anchas de Windows usan unidades UTF-16 de 16 bits. El comparador
+de qsort entra de vuelta al invitado mediante el ABI Microsoft x64.
+La cobertura de errores del CRT, los punteros invitados inaccesibles y
+el aislamiento del heap pertenecen a etapas posteriores.
 
 `NtQueryPerformanceCounter` escribe un contador de 64 bits y, si se
 solicita, su frecuencia. La implementación usa tiempo desde el arranque

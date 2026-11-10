@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
-#include "fixture_abi.h"
 #include "fixture_import.h"
+#include "ntnative/runtime.h"
 #include "pe_bytes.h"
 
 #include <stdio.h>
@@ -12,6 +12,16 @@
 
 extern const unsigned char nt_pe_fixture_bytes[];
 extern const size_t nt_pe_fixture_size;
+
+#ifdef TEST_WIN32_COUNTER
+static const char fixture_dll[] = "kernel32.dll";
+static const char fixture_symbol[] = "QueryPerformanceCounter";
+enum { fixture_cases = 2 };
+#else
+static const char fixture_dll[] = "ntdll.dll";
+static const char fixture_symbol[] = "NtQueryPerformanceCounter";
+enum { fixture_cases = 3 };
+#endif
 
 static bool check_invalid_imports(const struct pe_import_image *image)
 {
@@ -36,9 +46,9 @@ static bool check_invalid_imports(const struct pe_import_image *image)
         {"import RVA outside the image", import_offset + 3, 0xff},
         {"extra import descriptor", descriptor + 20, 1},
         {"unknown DLL", dll, 'x'},
-        {"missing DLL terminator", dll + sizeof("ntdll.dll") - 1, 'x'},
+        {"missing DLL terminator", dll + sizeof(fixture_dll) - 1, 'x'},
         {"unknown import name", symbol, 'X'},
-        {"missing import name terminator", symbol + sizeof("NtQueryPerformanceCounter") - 1, 'x'},
+        {"missing import name terminator", symbol + sizeof(fixture_symbol) - 1, 'x'},
         {"import by ordinal", lookup + 7, 0x80},
         {"lookup RVA outside the image", descriptor + 3, 0xff},
         {"IAT directory RVA outside the image", directory_offset + 12 * 8 + 3, 0xff},
@@ -48,7 +58,8 @@ static bool check_invalid_imports(const struct pe_import_image *image)
     };
 
     struct pe_import_image rejected;
-    if (pe_parse_import_fixture(file, idata_offset + image->idata.size - 1, &rejected)) {
+    if (pe_parse_import_fixture(file, idata_offset + image->idata.size - 1,
+                                fixture_dll, fixture_symbol, &rejected)) {
         fputs("FAIL accepts a truncated import section\n", stderr);
         return false;
     }
@@ -62,7 +73,8 @@ static bool check_invalid_imports(const struct pe_import_image *image)
     memcpy(copy, file, nt_pe_fixture_size);
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         copy[cases[i].offset] = cases[i].byte;
-        if (pe_parse_import_fixture(copy, nt_pe_fixture_size, &rejected)) {
+        if (pe_parse_import_fixture(copy, nt_pe_fixture_size, fixture_dll,
+                                    fixture_symbol, &rejected)) {
             fprintf(stderr, "FAIL accepts %s\n", cases[i].label);
             free(copy);
             return false;
@@ -76,6 +88,12 @@ static bool check_invalid_imports(const struct pe_import_image *image)
 
 static bool run_fixture(const struct pe_import_image *image)
 {
+    const nt_guest_proc target = nt_runtime_resolve(fixture_dll, fixture_symbol);
+    if (target == NULL) {
+        fputs("The fixture import has no native equivalent\n", stderr);
+        return false;
+    }
+
     if (sysconf(_SC_PAGESIZE) != PE_IMPORT_PAGE_SIZE) {
         fputs("The import fixture needs 4096-byte host pages\n", stderr);
         return false;
@@ -92,9 +110,8 @@ static bool run_fixture(const struct pe_import_image *image)
     if (image->rdata.size != 0)
         memcpy(memory + image->rdata.rva, image->rdata.bytes, image->rdata.size);
     memcpy(memory + image->idata.rva, image->idata.bytes, image->idata.size);
-    const nt_fixture_query query = query_from_pe;
-    _Static_assert(sizeof(query) == 8, "PE32+ IAT slot size");
-    memcpy(memory + image->iat_rva, &query, sizeof(query));
+    _Static_assert(sizeof(target) == 8, "PE32+ IAT slot size");
+    memcpy(memory + image->iat_rva, &target, sizeof(target));
 
     if (mprotect(memory, image->image_size, PROT_NONE) != 0 ||
         mprotect(memory + image->text.rva, PE_IMPORT_PAGE_SIZE, PROT_READ | PROT_EXEC) != 0 ||
@@ -120,14 +137,16 @@ static bool run_fixture(const struct pe_import_image *image)
         fprintf(stderr, "PE import fixture case %d failed\n", status);
         return false;
     }
-    puts("PASS PE32+ imports ntdll.dll!NtQueryPerformanceCounter through the IAT (3 cases)");
+    printf("PASS PE32+ imports %s!%s through the IAT (%d cases)\n",
+           fixture_dll, fixture_symbol, fixture_cases);
     return true;
 }
 
 int main(void)
 {
     struct pe_import_image image;
-    if (!pe_parse_import_fixture(nt_pe_fixture_bytes, nt_pe_fixture_size, &image)) {
+    if (!pe_parse_import_fixture(nt_pe_fixture_bytes, nt_pe_fixture_size,
+                                 fixture_dll, fixture_symbol, &image)) {
         fputs("Embedded PE does not match the import fixture profile\n", stderr);
         return EXIT_FAILURE;
     }
