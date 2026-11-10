@@ -10,7 +10,7 @@ y las importaciones resueltas llaman a equivalentes del runtime propio.
 La cobertura **197/197 importaciones directas** de Mines procede del
 auditor previo; no demuestra compatibilidad de comportamiento ni arranque
 del juego. En este cambio, el fixture sintético verifica el mapeo de
-varias secciones, una relocación DIR64, la IAT, una llamada MS x64 real
+varias secciones, una relocación DIR64, la IAT, callbacks TLS sin datos y una llamada MS x64 real
 y el rechazo temprano de imágenes malformadas. La ejecución del Mines
 original **no se ha verificado** porque el binario no está disponible en
 este entorno. Se debe comprobar tanto la entrada como una partida jugable.
@@ -36,7 +36,7 @@ este entorno. Se debe comprobar tanto la entrada como una partida jugable.
 En Linux x86-64:
 
 ```sh
-make -j2 all check check-pe check-pe-image
+make -j2 all check check-pe check-pe-image check-pe-import
 sudo dnf install bubblewrap
 build/pe-isolated-run /ruta/completa/Mines.exe
 ```
@@ -57,7 +57,7 @@ y no debe emplearse para ejecutar software malicioso.
 
 ### Fuera de alcance y riesgos pendientes
 
-- TLS estática y callbacks de inicialización, importaciones retardadas,
+- TLS estática o con datos por hilo (solo callbacks acotados sin datos), importaciones retardadas,
   PEB/TEB completos, llamadas dinámicas no incluidas en las 197
   importaciones directas de Mines, compatibilidad de DLL externas.
 - Entrega general de SEH y fallos de memoria del código invitado; el
