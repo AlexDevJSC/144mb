@@ -8,4 +8,4 @@ Describe el contrato, módulo y alcance.
 - [ ] Añadí o actualicé pruebas de regresión para los casos nuevos.
 - [ ] Indiqué qué ejecuté, dónde, con qué resultado y qué quedó pendiente.
 - [ ] Revisé entradas, manejo de fallos y permisos afectados.
-- [ ] Distinguí pruebas propias de las ejecutadas con Windows, Wine o Proton.
+- [ ] Registré la distribución y el kernel de Linux usados en las pruebas.

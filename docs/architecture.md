@@ -29,7 +29,7 @@ el contador NT y un conjunto inicial de contratos Win32 y CRT.
 | Recursos de Linux | Kernel y UAPI existentes. Memoria con `mmap` y `mprotect`, descriptores para recursos y `ntsync` opcional para primitivas de espera. | `CLOCK_BOOTTIME` y memoria del fixture en uso. |
 | Gráficos | Usuario. USER y win32u gestionan ventanas, eventos, entrada y portapapeles. DXVK y VKD3D-Proton aportan Direct3D sobre Vulkan. RADV usa la UAPI DRM de amdgpu. | Diseño inicial. |
 | Escritorio | Usuario. Lanzador KDE, asociación MIME y estado separado por aplicación. El instalador PE usa la misma política y el mismo entorno que el lanzador. | RPM de diagnóstico preparado. |
-| Pruebas | Usuario y CI. Contratos, PE sintéticos, oráculo Windows, comparación con referencias y mediciones. | Linux y PE controlado comprobados. |
+| Pruebas | Usuario y CI en Linux. Contratos documentados, PE sintéticos y mediciones. | Linux y PE controlado comprobados. |
 
 ## Ruta de laboratorio
 
@@ -86,7 +86,7 @@ que incluye suspensión y devuelve ticks de 100 ns con frecuencia fija
 de 10 MHz. Una salida obligatoria nula devuelve `0xC0000005`.
 Un fallo de reloj o una conversión fuera de rango devuelve
 `0xC0000001` sin modificar salidas. Esos dos últimos casos se originan
-en el anfitrión y no tienen un oráculo Windows equivalente en esta prueba.
+en el anfitrión y se prueban con un reloj simulado en Linux.
 Las salidas no nulas deben ser objetos de 64 bits escribibles. La entrega
 de fallos de memoria invitada, los efectos de escrituras parciales y el
 orden exacto al solapar punteros se tratan en tareas posteriores.

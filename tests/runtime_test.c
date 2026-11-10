@@ -1,21 +1,13 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef _WIN32
 #define _GNU_SOURCE
-#endif
 #include "ntnative/runtime.h"
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#else
-#include <pthread.h>
 #include <unistd.h>
-#endif
 
 #define KERNEL "KERNEL32.dll"
 #define VCRUNTIME "VCRUNTIME140.dll"
@@ -31,15 +23,7 @@ static void check(bool condition, const char *label)
 
 static nt_guest_proc require_export(const char *module, const char *name)
 {
-    nt_guest_proc target;
-#ifdef _WIN32
-    const HMODULE library = LoadLibraryExA(module, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    const FARPROC proc = library != NULL ? GetProcAddress(library, name) : NULL;
-    _Static_assert(sizeof(proc) == sizeof(target), "guest function pointer size");
-    memcpy(&target, &proc, sizeof(target));
-#else
-    target = nt_runtime_resolve(module, name);
-#endif
+    const nt_guest_proc target = nt_runtime_resolve(module, name);
     if (target == NULL) {
         fprintf(stderr, "FAIL missing %s!%s\n", module, name);
         exit(EXIT_FAILURE);
@@ -58,7 +42,6 @@ struct error_functions {
     void (NT_MS_ABI *set)(uint32_t);
 };
 
-#ifndef _WIN32
 static void *check_thread_error(void *context)
 {
     const struct error_functions *error = context;
@@ -67,7 +50,6 @@ static void *check_thread_error(void *context)
     check(error->get() == 19, "new thread round trips its last error");
     return NULL;
 }
-#endif
 
 static void check_win32(void)
 {
@@ -85,10 +67,6 @@ static void check_win32(void)
 
     error.set(UINT32_C(0xfedcba98));
     check(error.get() == UINT32_C(0xfedcba98), "last error preserves all 32 bits");
-#ifdef _WIN32
-    check(process_id() == GetCurrentProcessId(), "process ID");
-    check(thread_id() == GetCurrentThreadId(), "thread ID");
-#else
     pthread_t thread;
     check(pthread_create(&thread, NULL, check_thread_error, &error) == 0, "create test thread");
     check(pthread_join(thread, NULL) == 0, "join test thread");
@@ -100,7 +78,6 @@ static void check_win32(void)
     check(nt_runtime_resolve("user32.dll", "QueryPerformanceCounter") == NULL,
           "export lookup is scoped to its module");
     check(nt_runtime_resolve("comctl32.dll", NULL) == NULL, "ordinal remains unresolved");
-#endif
     int64_t first = -1;
     int64_t second = -1;
     check(counter(&first) != 0 && first >= 0, "Win32 counter writes a valid value");

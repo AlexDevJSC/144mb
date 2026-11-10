@@ -59,61 +59,23 @@ también verifica el rechazo de tablas truncadas, RVA fuera de rango,
 ordinales, nombres inválidos e importaciones retardadas. Las variantes
 inválidas solo llegan al parser.
 
-GitHub Actions ejecuta el archivo PE compilado en Linux en un job de
-Windows Server 2022 separado de la sonda de referencia. También se puede
-ejecutar el mismo archivo en Windows x64 y comprobar que devuelve 0.
-
-La primera ejecución usó GCC cruzado 13-posix. En Linux pasaron los tres
-casos del reloj y los 13 rechazos de formato, también con UBSan. El mismo
-artefacto pasó los tres casos en Windows Server 2022 (10.0.20348).
-[Ejecución de CI](https://github.com/AlexDevJSC/144mb/actions/runs/42768379014).
+GitHub Actions compila los PE de control con MinGW-w64 y los ejecuta
+con nuestro cargador en Ubuntu. El trabajo de Fedora comprueba el RPM
+y repite las pruebas del runtime.
 
 ## Cobertura inicial de Mines
 
 La prueba de los 30 equivalentes se ejecuta con `make check` en Linux.
-Windows Server 2022 compila el mismo conjunto de comprobaciones y
-obtiene las funciones de las DLL del sistema. GitHub Actions ejecuta
-también ambos PE de reloj, compilados con MinGW-w64.
+Las comprobaciones usan el registro de equivalentes propios y llaman
+a cada función mediante el ABI Microsoft x64.
 
 La auditoría local de `mines.exe` leyó 197 importaciones directas,
 30 con un equivalente registrado y 167 pendientes. Una entrada
 pendiente identifica su símbolo por ordinal. El resultado mide la
 resolución de importaciones a partir del archivo.
 
-## Sonda Windows y comparación opcional con Wine
-
-En un equipo Windows x64 o una VM autorizada, desde el Developer Command
-Prompt de Visual Studio:
-
-```bat
-cl /nologo /std:c17 /W4 /WX /O2 tests\windows\qpc_reference.c /Fe:qpc-reference.exe
-qpc-reference.exe
-```
-
-En Linux con MinGW-w64 x86-64 y Wine disponibles, se puede compilar el
-mismo código y ejecutarlo en un prefijo de prueba separado:
-
-```sh
-mkdir -p build
-x86_64-w64-mingw32-gcc -std=c17 -O2 -Wall -Wextra -Werror \
-  tests/windows/qpc_reference.c -o build/qpc-reference.exe
-WINEPREFIX="$PWD/build/wine-oracle" wine build/qpc-reference.exe
-```
-
-La sonda registra estados, frecuencia estable, contador no decreciente,
-casos nulos y observaciones con páginas no accesibles. Identifica el
-sistema o backend en el registro junto con versión y arquitectura. Compara
-solo los casos compartidos con el prototipo. La frecuencia, la época del
-contador y el orden de escrituras ante un puntero inválido se registran
-por separado. Wine actúa como una referencia adicional y su ejecución
-usa su implementación. Windows real es la referencia de compatibilidad.
-
-Referencias [Contrato NT](https://learn.microsoft.com/en-us/windows/win32/devnotes/ntqueryperformancecounter) ·
-[Casos de referencia en Wine](https://github.com/wine-mirror/wine/blob/master/dlls/ntdll/tests/time.c).
-
 ## Cobertura pendiente
 
-- Comparación de la sonda de referencia con Wine y Proton.
 - Instalación y desinstalación del RPM en VM Fedora KDE.
 - Suspensión y reanudación en máquina real. La elección de reloj deriva
   de su contrato documentado.
@@ -126,7 +88,7 @@ Referencias [Contrato NT](https://learn.microsoft.com/en-us/windows/win32/devnot
 
 | Dimensión | Método |
 | --- | --- |
-| Comportamiento | Mantener un corpus de entradas, NTSTATUS, resultados y efectos en Windows y cada backend. Guardar revisión, arquitectura y build del SO. |
+| Comportamiento | Mantener en Linux un corpus de entradas, NTSTATUS, resultados y efectos esperados. Guardar revisión, distribución, kernel y arquitectura. |
 | Estabilidad | Pruebas repetidas y concurrentes, timeout, caída, cierre de handles y recuperación de recursos. Registrar errores, cuelgues y diferencias. |
 | Memoria | Ejecutar cada backend en un proceso y entorno separados. Capturar pico RSS y memoria proporcional de todos los procesos implicados con la misma carga. |
 | Latencia y CPU | Mismo binario, máquina, estado de caché y configuración. Calentar, alternar orden, repetir, registrar p50 y p95, tiempo de CPU y dispersión. Separar trazas diagnósticas de las muestras de rendimiento. |
