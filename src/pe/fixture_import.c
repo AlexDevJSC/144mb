@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "fixture_import.h"
+#include "ntnative/runtime.h"
 #include "pe_bytes.h"
 
 #include <string.h>
@@ -81,23 +82,12 @@ static bool ranges_disjoint(const struct import_range *ranges, size_t count)
     return true;
 }
 
-static bool is_ntdll(const unsigned char *name)
-{
-    static const char expected[] = "ntdll.dll";
-    for (size_t i = 0; i < sizeof(expected); ++i) {
-        unsigned char byte = name[i];
-        if (byte >= 'A' && byte <= 'Z')
-            byte = (unsigned char)(byte + ('a' - 'A'));
-        if (byte != (unsigned char)expected[i])
-            return false;
-    }
-    return true;
-}
-
 static bool valid_import(const unsigned char *directories,
-                         const struct pe_import_section *idata, uint32_t *iat_rva)
+                         const struct pe_import_section *idata, const char *module,
+                         const char *symbol, uint32_t *iat_rva)
 {
-    static const char symbol[] = "NtQueryPerformanceCounter";
+    const size_t module_size = strlen(module) + 1;
+    const size_t symbol_size = strlen(symbol) + 1;
     const unsigned char *import = directories + IMPORT_DIRECTORY * DIRECTORY_SIZE;
     const unsigned char *iat = directories + IAT_DIRECTORY * DIRECTORY_SIZE;
     const uint32_t import_rva = read_u32(import);
@@ -120,9 +110,10 @@ static bool valid_import(const unsigned char *directories,
     const uint32_t lookup_rva = read_u32(descriptor);
     const uint32_t dll_rva = read_u32(descriptor + 12);
     const unsigned char *lookup = section_bytes(idata, lookup_rva, THUNK_TABLE_SIZE);
-    const unsigned char *dll = section_bytes(idata, dll_rva, sizeof("ntdll.dll"));
+    const unsigned char *dll = section_bytes(idata, dll_rva, module_size);
     if (lookup == NULL || lookup_rva % 8 != 0 || slot_rva % 8 != 0 ||
-        dll == NULL || !is_ntdll(dll))
+        dll == NULL || dll[module_size - 1] != '\0' ||
+        !nt_module_name_equal((const char *)dll, module))
         return false;
 
     const uint64_t name_entry = read_u64(lookup);
@@ -132,16 +123,16 @@ static bool valid_import(const unsigned char *directories,
         return false;
 
     const uint32_t name_rva = (uint32_t)name_entry;
-    const unsigned char *name = section_bytes(idata, name_rva, 2 + sizeof(symbol));
-    if (name == NULL || memcmp(name + 2, symbol, sizeof(symbol)) != 0)
+    const unsigned char *name = section_bytes(idata, name_rva, 2 + symbol_size);
+    if (name == NULL || memcmp(name + 2, symbol, symbol_size) != 0)
         return false;
 
     const struct import_range ranges[] = {
         {import_rva, 2 * DESCRIPTOR_SIZE},
         {lookup_rva, THUNK_TABLE_SIZE},
         {slot_rva, THUNK_TABLE_SIZE},
-        {dll_rva, sizeof("ntdll.dll")},
-        {name_rva, 2 + sizeof(symbol)}
+        {dll_rva, module_size},
+        {name_rva, 2 + symbol_size}
     };
     if (!ranges_disjoint(ranges, sizeof(ranges) / sizeof(ranges[0])))
         return false;
@@ -151,6 +142,7 @@ static bool valid_import(const unsigned char *directories,
 }
 
 bool pe_parse_import_fixture(const unsigned char *file, size_t length,
+                             const char *module, const char *symbol,
                              struct pe_import_image *result)
 {
     if (!contains(length, 0, 64) || memcmp(file, "MZ", 2) != 0)
@@ -201,7 +193,7 @@ bool pe_parse_import_fixture(const unsigned char *file, size_t length,
         section_bytes(&text.view, entry_rva, 1) == NULL ||
         !read_section(file, length, import_section, ".idata\0\0", headers_size, image_size, &idata) ||
         (idata.permissions & UINT32_C(0x60000000)) != UINT32_C(0x40000000) ||
-        !valid_import(directories, &idata.view, &iat_rva))
+        !valid_import(directories, &idata.view, module, symbol, &iat_rva))
         return false;
 
     /* The PE linker can emit read-only constants and constructor sentinels

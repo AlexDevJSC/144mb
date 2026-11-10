@@ -27,6 +27,7 @@ struct pe_import_image {
  * the input bytes. On failure the result is untouched.
  */
 bool pe_parse_import_fixture(const unsigned char *file, size_t length,
+                             const char *module, const char *symbol,
                              struct pe_import_image *result);
 
 #endif

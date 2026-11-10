@@ -68,6 +68,18 @@ casos del reloj y los 13 rechazos de formato, también con UBSan. El mismo
 artefacto pasó los tres casos en Windows Server 2022 (10.0.20348).
 [Ejecución de CI](https://github.com/AlexDevJSC/144mb/actions/runs/42768379014).
 
+## Cobertura inicial de Mines
+
+La prueba de los 30 equivalentes se ejecuta con `make check` en Linux.
+Windows Server 2022 compila el mismo conjunto de comprobaciones y
+obtiene las funciones de las DLL del sistema. GitHub Actions ejecuta
+también ambos PE de reloj, compilados con MinGW-w64.
+
+La auditoría local de `mines.exe` leyó 197 importaciones directas,
+30 con un equivalente registrado y 167 pendientes. Una entrada
+pendiente identifica su símbolo por ordinal. El resultado mide la
+resolución de importaciones a partir del archivo.
+
 ## Sonda Windows y comparación opcional con Wine
 
 En un equipo Windows x64 o una VM autorizada, desde el Developer Command

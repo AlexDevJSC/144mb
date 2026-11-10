@@ -15,6 +15,10 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Un segundo PE de consola, compilado con MinGW-w64, importa
   `ntdll.dll!NtQueryPerformanceCounter`. Linux resuelve esa importación con
   la implementación propia y Windows ejecuta el mismo archivo con su DLL.
+- El runtime expone 30 equivalentes iniciales de las funciones Win32 y CRT
+  que pide Mines. Un PE de control verifica la llamada Win32 al reloj.
+- `pe-import-audit` lee las importaciones directas de un PE AMD64 y
+  cuenta las que tienen un equivalente registrado.
 - Una sonda Windows independiente que consulta `ntdll.dll`, un
   microbenchmark y un spec RPM para el comando ELF de diagnóstico.
 - Quedan pendientes la carga general de aplicaciones PE, el modelo de
@@ -38,10 +42,21 @@ espera una función entregada por el anfitrión y no tiene un punto de entrada
 de aplicación Windows convencional. Para ejecutar la sonda Windows usa
 `tests/windows/qpc_reference.c` siguiendo la guía de validación.
 
-Con MinGW-w64 AMD64 instalado, `make check-pe-import` genera
-`build/nt-counter-import.exe`, muestra su tabla de importaciones y ejecuta
-el anfitrión `build/pe-import-host`. El anfitrión solo ejecuta el PE
-generado e incrustado en el build.
+Con MinGW-w64 AMD64 instalado, `make check-pe-import` genera los
+ejecutables de prueba NT y Win32, muestra sus tablas de importación y
+los ejecuta en los anfitriones correspondientes. Cada anfitrión ejecuta
+exclusivamente el PE generado e incrustado en el build.
+
+Usa el auditor para medir la cobertura de un archivo externo.
+
+```sh
+make
+build/pe-import-audit /ruta/a/mines.exe
+```
+
+El auditor lee una copia del archivo de hasta 128 MiB. Informa sobre
+las importaciones directas y devuelve 0 si todas tienen un equivalente,
+1 si quedan llamadas pendientes y 2 si el formato o la lectura fallan.
 
 La prueba Linux y el comando de diagnóstico se compilan por separado del PE.
 Puedes probar el destino del paquete sin privilegios con `make install
