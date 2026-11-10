@@ -11,6 +11,7 @@ BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  pkgconfig(sdl2)
 BuildRequires:  pkgconfig(cairo)
+BuildRequires:  pkgconfig(libffi)
 BuildRequires:  dejavu-sans-fonts
 
 %description

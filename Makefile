@@ -12,9 +12,11 @@ DESKTOP_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags sdl2)
 DESKTOP_LIBS ?= $(shell $(PKG_CONFIG) --libs sdl2)
 GDI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags cairo)
 GDI_LIBS ?= $(shell $(PKG_CONFIG) --libs cairo)
-RUNTIME_PARTS = exports system global_memory unicode crt guest_files process gdi_memory menus messages desktop
-RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/counter.o
-RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS)
+FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
+FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files process exceptions gdi_memory menus messages desktop clipboard
+RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
+RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
 PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-insert-timestamp \
                      -Wl,--disable-reloc-section,--disable-dynamicbase,--strip-all
@@ -33,9 +35,13 @@ $(BUILD_DIR)/counter.o: src/ntdll/counter.c include/ntnative/counter.h | $(BUILD
 $(BUILD_DIR)/runtime-%.o: src/runtime/%.c src/runtime/compat.h include/ntnative/runtime.h include/ntnative/counter.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -pthread -c "$<" -o "$@"
 
-$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-messages.o $(BUILD_DIR)/runtime-exports.o: src/runtime/desktop.h
-$(BUILD_DIR)/runtime-desktop.o: CPPFLAGS += $(DESKTOP_CFLAGS)
+$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-messages.o $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-clipboard.o: src/runtime/desktop.h
+$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-clipboard.o: CPPFLAGS += $(DESKTOP_CFLAGS)
 $(BUILD_DIR)/runtime-gdi_memory.o: CPPFLAGS += $(GDI_CFLAGS)
+$(BUILD_DIR)/runtime-crt_stdio.o: CPPFLAGS += $(FFI_CFLAGS)
+
+$(BUILD_DIR)/runtime-context.o: src/runtime/context.S | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -c "$<" -o "$@"
 
 $(BUILD_DIR)/pe-import-audit: src/tools/pe_import_audit.c src/pe/imports.c $(RUNTIME_OBJECTS) \
     src/pe/imports.h src/pe/pe_bytes.h include/ntnative/runtime.h | $(BUILD_DIR)
@@ -59,7 +65,7 @@ $(BUILD_DIR)/compat-batch-test: tests/compat_batch_test.c $(RUNTIME_OBJECTS) src
 
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+	    $(filter %.c %.o,$^) -Wl,--wrap=fdatasync $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
 $(BUILD_DIR)/desktop-test: tests/desktop_test.c $(RUNTIME_OBJECTS) src/runtime/desktop.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(DESKTOP_CFLAGS) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \

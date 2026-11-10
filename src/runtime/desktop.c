@@ -67,6 +67,12 @@ bool nt_runtime_desktop_active(void)
     return desktop_thread;
 }
 
+bool nt_runtime_show_assertion(const char *message)
+{
+    return desktop_thread &&
+           SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Assertion failed", message, NULL) == 0;
+}
+
 static struct window *find_window(uintptr_t handle)
 {
     if (desktop_thread && handle != 0) {
@@ -177,6 +183,7 @@ static void invalidate(struct window *window, const struct nt_rect *rect, bool e
 static void release_window(struct window *window)
 {
     nt_runtime_remove_window_timers(window->handle);
+    nt_runtime_clipboard_window_closed(window->handle);
     for (size_t i = 0; i < message_count;) {
         if (messages[i].window != window->handle) {
             ++i;
@@ -195,6 +202,7 @@ void nt_runtime_close_desktop(void)
 {
     if (!desktop_thread)
         return;
+    nt_runtime_close_clipboard();
     for (size_t i = 0; i < MAX_WINDOWS; ++i) {
         if (windows[i].handle != 0)
             release_window(&windows[i]);

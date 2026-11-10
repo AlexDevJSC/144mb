@@ -518,6 +518,12 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
 
 enum { CRT_APPEND = 0x0008, CRT_TEXT = 0x4000, CRT_BINARY = 0x8000 };
 static _Atomic int default_mode = CRT_TEXT;
+static int default_commit;
+
+int *NT_MS_ABI nt_p_commode(void)
+{
+    return &default_commit;
+}
 
 int NT_MS_ABI nt_set_fmode(int mode)
 {
@@ -533,6 +539,7 @@ struct stream_mode {
     char host[3];
     int flags;
     bool text, readable, writable, explicit_translation;
+    bool commit;
 };
 
 static bool parse_mode(const char *mode, struct stream_mode *result)
@@ -542,11 +549,14 @@ static bool parse_mode(const char *mode, struct stream_mode *result)
     const char kind = *mode++;
     bool update = false;
     int translation = 0;
+    char commit = 0;
     for (; *mode != '\0'; ++mode) {
         if (*mode == '+' && !update)
             update = true;
         else if ((*mode == 'b' || *mode == 't') && translation == 0)
             translation = *mode == 'b' ? CRT_BINARY : CRT_TEXT;
+        else if ((*mode == 'c' || *mode == 'n') && commit == 0)
+            commit = *mode;
         else
             return false;
     }
@@ -556,7 +566,7 @@ static bool parse_mode(const char *mode, struct stream_mode *result)
     const int creation = kind == 'r' ? 0 : O_CREAT | (kind == 'w' ? O_TRUNC : O_APPEND);
     *result = (struct stream_mode){{kind, update ? '+' : '\0', '\0'},
         access | creation, (translation == 0 ? atomic_load(&default_mode) : translation) == CRT_TEXT,
-        readable, writable, translation != 0};
+        readable, writable, translation != 0, commit == 'c' || (commit == 0 && default_commit != 0)};
     return true;
 }
 
@@ -570,6 +580,7 @@ struct guest_stream {
 
 static pthread_mutex_t stream_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct guest_stream *streams;
+static struct guest_stream standard[3];
 
 static struct guest_stream **find_stream(const void *handle)
 {
@@ -577,6 +588,56 @@ static struct guest_stream **find_stream(const void *handle)
     while (*link != NULL && *link != handle)
         link = &(*link)->next;
     return link;
+}
+
+void *NT_MS_ABI nt_acrt_iob_func(uint32_t index)
+{
+    if (index >= sizeof(standard) / sizeof(standard[0])) {
+        errno = EINVAL;
+        return NULL;
+    }
+    return &standard[index];
+}
+
+bool nt_runtime_set_standard_streams(int input, int output, int error)
+{
+    const int fd[] = {input, output, error};
+    FILE *files_to_attach[3] = {0};
+    for (size_t i = 0; i < 3; ++i) {
+        if (fd[i] < 0)
+            continue;
+        const int duplicate = fcntl(fd[i], F_DUPFD_CLOEXEC, 0);
+        if (duplicate >= 0)
+            files_to_attach[i] = fdopen(duplicate, i == 0 ? "r" : "w");
+        if (files_to_attach[i] == NULL) {
+            const int cause = errno;
+            if (duplicate >= 0)
+                close(duplicate);
+            for (size_t j = 0; j < i; ++j) {
+                if (files_to_attach[j] != NULL)
+                    fclose(files_to_attach[j]);
+            }
+            errno = cause;
+            return false;
+        }
+    }
+    pthread_mutex_lock(&stream_lock);
+    for (size_t i = 0; i < 3; ++i) {
+        struct guest_stream *stream = &standard[i];
+        if (stream->file != NULL) {
+            *find_stream(stream) = stream->next;
+            fclose(stream->file);
+        }
+        *stream = (struct guest_stream){.file = files_to_attach[i], .mode = {
+            .text = true, .readable = i == 0, .writable = i != 0
+        }};
+        if (stream->file != NULL) {
+            stream->next = streams;
+            streams = stream;
+        }
+    }
+    pthread_mutex_unlock(&stream_lock);
+    return true;
 }
 
 static unsigned int mode_access(struct stream_mode mode)
@@ -731,9 +792,21 @@ int NT_MS_ABI nt_fclose(void *handle)
         return EOF;
     }
     *link = stream->next;
+    if (stream->opened == NULL) {
+        const int result = fclose(stream->file);
+        *stream = (struct guest_stream){0};
+        pthread_mutex_unlock(&stream_lock);
+        return result;
+    }
     pthread_mutex_unlock(&stream_lock);
     pthread_mutex_lock(&file_lock);
-    const int result = fclose(stream->file);
+    int result = 0;
+    if (stream->mode.writable && stream->mode.commit) {
+        if (fflush(stream->file) != 0 || fdatasync(fileno(stream->file)) != 0)
+            result = EOF;
+    }
+    if (fclose(stream->file) != 0)
+        result = EOF;
     stream->opened->owner = FREE_FILE;
     pthread_mutex_unlock(&file_lock);
     free(stream);
@@ -819,8 +892,8 @@ void nt_runtime_flush_streams(void)
 {
     pthread_mutex_lock(&stream_lock);
     for (struct guest_stream *stream = streams; stream != NULL; stream = stream->next) {
-        if (stream->mode.writable)
-            fflush(stream->file);
+        if (stream->mode.writable && fflush(stream->file) == 0 && stream->mode.commit)
+            fdatasync(fileno(stream->file));
     }
     pthread_mutex_unlock(&stream_lock);
 }

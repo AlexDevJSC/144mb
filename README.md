@@ -15,7 +15,7 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Un segundo PE de consola, compilado con MinGW-w64, importa
   `ntdll.dll!NtQueryPerformanceCounter`. Linux resuelve esa importación con
   la implementación propia.
-- El runtime expone equivalentes probados en Linux para 146 de las 197
+- El runtime expone equivalentes probados en Linux para 165 de las 197
   importaciones directas de Mines. Un PE de control verifica la llamada
   Win32 al reloj. Otro PE de control abre y pinta una ventana con SDL
   y 13 importaciones de USER32 y GDI.
@@ -27,7 +27,7 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 
 ## Compilar y probar
 
-En Linux x86-64 con GCC, GNU Make, GNU binutils, pkg-config, SDL 2 y Cairo de desarrollo:
+En Linux x86-64 con GCC, GNU Make, GNU binutils, pkg-config, SDL 2, Cairo y libffi de desarrollo:
 
 ```sh
 make

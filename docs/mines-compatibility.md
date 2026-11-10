@@ -1,13 +1,13 @@
 # Compatibilidad de Mines en Linux
 
 El auditor leyó **197 importaciones directas** en 15 bibliotecas de
-`mines.exe`. La primera etapa agregó **74 equivalentes** y la segunda agregó **42**.
-Quedan **51 importaciones sin resolver**, incluida una por ordinal.
+`mines.exe`. La primera etapa agregó **74 equivalentes** y la segunda agregó **61**.
+Quedan **32 importaciones sin resolver**, incluida una por ordinal.
 
 | Estado | Base | Primera etapa | Segunda etapa |
 | --- | ---: | ---: | ---: |
-| Importaciones con un equivalente registrado | 30 | 104 | 146 |
-| Importaciones sin resolver | 167 | 93 | 51 |
+| Importaciones con un equivalente registrado | 30 | 104 | 165 |
+| Importaciones sin resolver | 167 | 93 | 32 |
 
 El recuento describe los puntos de entrada disponibles y sus perfiles
 probados. Las búsquedas que el programa haga en tiempo de ejecución
@@ -95,6 +95,10 @@ del resumen. El inventario se vuelve a generar con el auditor al añadir equival
 | Arranque y cierre | 8 | Ruta y argumentos del ejecutable invitado, entorno copiado, salida normal con callbacks y salida rápida con código de 32 bits. La terminación se aplica al proceso Linux del fixture. |
 | Ventanas y entrada | 21 | Ventanas superiores, áreas cliente, dibujo con DC y recorte de daño, títulos ANSI 1252, mensajes de teclado y ratón, datos por ventana y área de trabajo. Los temporizadores existentes se pueden asociar a ventanas. |
 | Dibujo y texto GDI | 10 | Cairo y las fuentes de Linux producen medidas ANSI y UTF-16, glifos recortados, elipses, polígonos y polilíneas. Las capacidades del dispositivo describen el raster y el DPI lógico del perfil. |
+| Portapapeles | 4 | Sesión de apertura, borrado y publicación de texto ANSI o UTF-16 a través de SDL. El portapapeles adquiere la memoria móvil tras publicar el texto. |
+| Entrada y salida CRT | 5 | Tres flujos estándar asignados por el lanzador, modo de confirmación con fdatasync y formatos estrechos validados mediante libffi y glibc. |
+| Contexto y excepciones | 6 | Registros x86-64 y FXSAVE, búsqueda por intervalo en la tabla de funciones, filtro superior y slots de excepción por hilo. |
+| Finalización y matemáticas CRT | 4 | Destructores TLS antes de los callbacks, tipo de aplicación y mensaje de aserción, y callback de dominio de sqrt. |
 
 El perfil de archivos admite acceso genérico y compartición de lectura y
 escritura. La raíz de archivos, el entorno y la identidad del módulo son
@@ -141,16 +145,22 @@ El perfil GDI usa fuentes del sistema y puede obtener métricas diferentes a las
 fuentes instaladas en otros entornos. La alineación inicial es superior
 izquierda y las opciones de texto comprobadas son recorte y fondo opaco.
 
+La prueba del CRT reprodujo `D%d%n` y `%2x%2x%2x` de Mines. El
+puente conserva el tamaño de `long` en LLP64, prueba truncamiento y
+rechaza formatos fuera del subconjunto antes de llamar a glibc. El
+portapapeles se verificó en SDL `offscreen` con transferencia de propiedad
+y acentos. Las pruebas de excepción ejercitan entradas controladas,
+contexto por hilo y devolución de filtros. La entrega de fallos PE
+y el desenrollado general quedan pendientes.
+
 ## Inventario pendiente
 
 | Biblioteca | Pendientes | Símbolos |
 | --- | ---: | --- |
-| `USER32.dll` | 24 | `AdjustWindowRectEx`, `CheckDlgButton`, `CloseClipboard`, `DefDlgProcA`, `DrawMenuBar`, `EmptyClipboard`, `GetDlgItemTextA`, `GetMenu`, `GetMenuItemRect`, `GetSysColor`, `IsDialogMessageA`, `IsDlgButtonChecked`, `LoadCursorA`, `LoadIconA`, `MessageBeep`, `MessageBoxA`, `OpenClipboard`, `ReleaseCapture`, `SendDlgItemMessageA`, `SetCapture`, `SetClipboardData`, `SetForegroundWindow`, `SetMenu`, `WinHelpA` |
-| `KERNEL32.dll` | 5 | `RtlCaptureContext`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `SetUnhandledExceptionFilter`, `UnhandledExceptionFilter` |
+| `USER32.dll` | 20 | `AdjustWindowRectEx`, `CheckDlgButton`, `DefDlgProcA`, `DrawMenuBar`, `GetDlgItemTextA`, `GetMenu`, `GetMenuItemRect`, `GetSysColor`, `IsDialogMessageA`, `IsDlgButtonChecked`, `LoadCursorA`, `LoadIconA`, `MessageBeep`, `MessageBoxA`, `ReleaseCapture`, `SendDlgItemMessageA`, `SetCapture`, `SetForegroundWindow`, `SetMenu`, `WinHelpA` |
+| `KERNEL32.dll` | 1 | `RtlVirtualUnwind` |
 | `GDI32.dll` | 4 | `EndDoc`, `EndPage`, `StartDocA`, `StartPage` |
 | `COMDLG32.dll` | 3 | `GetOpenFileNameA`, `GetSaveFileNameA`, `PrintDlgA` |
 | `COMCTL32.dll` | 1 | `#17` |
-| `VCRUNTIME140.dll` | 3 | `__C_specific_handler`, `__current_exception`, `__current_exception_context` |
-| `api-ms-win-crt-stdio-l1-1-0.dll` | 5 | `__acrt_iob_func`, `__p__commode`, `__stdio_common_vfprintf`, `__stdio_common_vsprintf`, `__stdio_common_vsscanf` |
-| `api-ms-win-crt-math-l1-1-0.dll` | 1 | `__setusermatherr` |
-| `api-ms-win-crt-runtime-l1-1-0.dll` | 5 | `_c_exit`, `_register_thread_local_exe_atexit_callback`, `_seh_filter_exe`, `_set_app_type`, `_wassert` |
+| `VCRUNTIME140.dll` | 1 | `__C_specific_handler` |
+| `api-ms-win-crt-runtime-l1-1-0.dll` | 2 | `_c_exit`, `_seh_filter_exe` |

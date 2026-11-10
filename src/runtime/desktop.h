@@ -54,6 +54,8 @@ int nt_runtime_take_window_message(struct nt_message *message, uintptr_t window,
 void nt_runtime_desktop_wait(int milliseconds);
 bool nt_runtime_window_pixel(uintptr_t window, int x, int y, uint32_t *color);
 uint32_t nt_runtime_window_id(uintptr_t window);
+void nt_runtime_clipboard_window_closed(uintptr_t window);
+void nt_runtime_close_clipboard(void);
 
 uint16_t NT_MS_ABI nt_RegisterClassA(const struct nt_window_class *definition);
 uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name, const char *title,
@@ -83,5 +85,9 @@ int32_t NT_MS_ABI nt_GetKeyboardState(unsigned char *keys);
 int32_t NT_MS_ABI nt_TranslateMessage(const struct nt_message *message);
 int32_t NT_MS_ABI nt_SystemParametersInfoA(uint32_t action, uint32_t parameter,
                                           void *result, uint32_t flags);
+int32_t NT_MS_ABI nt_OpenClipboard(uintptr_t window);
+int32_t NT_MS_ABI nt_CloseClipboard(void);
+int32_t NT_MS_ABI nt_EmptyClipboard(void);
+uintptr_t NT_MS_ABI nt_SetClipboardData(uint32_t format, uintptr_t memory);
 
 #endif

@@ -133,7 +133,7 @@ static float NT_MS_ABI crt_roundf(float value)
 
 static double NT_MS_ABI crt_sqrt(double value)
 {
-    return sqrt(value);
+    return nt_runtime_sqrt(value);
 }
 
 static float NT_MS_ABI crt_sqrtf(float value)
@@ -242,20 +242,26 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(MultiByteToWideChar),
     EXPORT("QueryPerformanceCounter", win_counter),
     WIN_EXPORT(RemoveDirectoryA),
+    WIN_EXPORT(RtlCaptureContext),
+    WIN_EXPORT(RtlLookupFunctionEntry),
     WIN_EXPORT(SetLastError),
-    WIN_EXPORT(TerminateProcess)
+    WIN_EXPORT(SetUnhandledExceptionFilter),
+    WIN_EXPORT(TerminateProcess),
+    WIN_EXPORT(UnhandledExceptionFilter)
 };
 
 static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(AppendMenuA),
     WIN_EXPORT(BeginPaint),
     WIN_EXPORT(CheckMenuItem),
+    WIN_EXPORT(CloseClipboard),
     WIN_EXPORT(CreateMenu),
     WIN_EXPORT(CreateWindowExA),
     WIN_EXPORT(DefWindowProcA),
     WIN_EXPORT(DestroyMenu),
     WIN_EXPORT(DestroyWindow),
     WIN_EXPORT(DispatchMessageA),
+    WIN_EXPORT(EmptyClipboard),
     WIN_EXPORT(EnableMenuItem),
     WIN_EXPORT(EnableWindow),
     WIN_EXPORT(EndPaint),
@@ -270,10 +276,12 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(InvalidateRect),
     WIN_EXPORT(KillTimer),
     WIN_EXPORT(OffsetRect),
+    WIN_EXPORT(OpenClipboard),
     WIN_EXPORT(PostQuitMessage),
     WIN_EXPORT(RegisterClassA),
     WIN_EXPORT(ReleaseDC),
     WIN_EXPORT(SendMessageA),
+    WIN_EXPORT(SetClipboardData),
     WIN_EXPORT(SetRect),
     WIN_EXPORT(SetTimer),
     WIN_EXPORT(SetWindowLongPtrA),
@@ -316,6 +324,8 @@ static const struct runtime_export gdi32_exports[] = {
 };
 
 static const struct runtime_export vcruntime_exports[] = {
+    EXPORT("__current_exception", nt_current_exception),
+    EXPORT("__current_exception_context", nt_current_exception_context),
     EXPORT("memchr", crt_memchr),
     EXPORT("memcmp", crt_memcmp),
     EXPORT("memcpy", crt_memcpy),
@@ -333,6 +343,7 @@ static const struct runtime_export heap_exports[] = {
 };
 
 static const struct runtime_export math_exports[] = {
+    EXPORT("__setusermatherr", nt_setusermatherr),
     EXPORT("_fdopen", nt_fdopen),
     EXPORT("ceil", crt_ceil),
     EXPORT("floor", crt_floor),
@@ -379,11 +390,19 @@ static const struct runtime_export crt_runtime_exports[] = {
     EXPORT("_initterm", nt_initterm),
     EXPORT("_initterm_e", nt_initterm_e),
     EXPORT("_register_onexit_function", nt_register_onexit_function),
+    EXPORT("_register_thread_local_exe_atexit_callback", nt_register_thread_local_exe_atexit_callback),
+    EXPORT("_set_app_type", nt_set_app_type),
+    EXPORT("_wassert", nt_wassert),
     EXPORT("exit", nt_exit),
     EXPORT("terminate", nt_terminate)
 };
 
 static const struct runtime_export stdio_exports[] = {
+    EXPORT("__acrt_iob_func", nt_acrt_iob_func),
+    EXPORT("__p__commode", nt_p_commode),
+    EXPORT("__stdio_common_vfprintf", nt_stdio_vfprintf),
+    EXPORT("__stdio_common_vsprintf", nt_stdio_vsprintf),
+    EXPORT("__stdio_common_vsscanf", nt_stdio_vsscanf),
     EXPORT("_close", nt_close),
     EXPORT("_fdopen", nt_fdopen),
     EXPORT("_open_osfhandle", nt_open_osfhandle),

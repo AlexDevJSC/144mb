@@ -82,6 +82,8 @@ uintptr_t NT_MS_ABI nt_GlobalFree(uintptr_t handle);
 void *NT_MS_ABI nt_GlobalLock(uintptr_t handle);
 int32_t NT_MS_ABI nt_GlobalUnlock(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_LocalFree(uintptr_t handle);
+bool nt_runtime_claim_clipboard_memory(uintptr_t handle, unsigned char **data, size_t *size);
+void nt_runtime_release_clipboard_memory(uintptr_t handle, bool release);
 uint32_t NT_MS_ABI nt_FormatMessageA(uint32_t flags, const void *source,
                                     uint32_t code, uint32_t language,
                                     char *buffer, uint32_t size, void *arguments);
@@ -114,6 +116,19 @@ int NT_MS_ABI nt_register_onexit_function(struct nt_onexit_table *table,
                                          nt_int_callback callback);
 int NT_MS_ABI nt_crt_atexit(nt_void_callback callback);
 void NT_MS_ABI nt_cexit(void);
+typedef void (NT_MS_ABI *nt_tls_exit_callback)(void *, uint32_t, void *);
+void NT_MS_ABI nt_register_thread_local_exe_atexit_callback(nt_tls_exit_callback callback);
+void NT_MS_ABI nt_set_app_type(int type);
+void NT_MS_ABI nt_wassert(const uint16_t *expression, const uint16_t *file, uint32_t line);
+bool nt_runtime_show_assertion(const char *message);
+struct nt_math_exception {
+    int type;
+    const char *name;
+    double arg1, arg2, result;
+};
+typedef int (NT_MS_ABI *nt_matherr_callback)(struct nt_math_exception *);
+void NT_MS_ABI nt_setusermatherr(nt_matherr_callback callback);
+double nt_runtime_sqrt(double number);
 
 /* The launcher owns this immutable environment for the guest lifetime. */
 void nt_runtime_set_guest_environment(const char *const *environment);
@@ -134,6 +149,35 @@ void NT_MS_ABI nt_exit(int code);
 void NT_MS_ABI nt_quick_exit(int code);
 void NT_MS_ABI nt_terminate(void);
 
+struct nt_context64 {
+    uint64_t homes[6];
+    uint32_t flags, mxcsr;
+    uint16_t cs, ds, es, fs, gs, ss;
+    uint32_t eflags;
+    uint64_t debug[6];
+    uint64_t rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, rip;
+    _Alignas(16) unsigned char floating[512], vectors[26 * 16];
+    uint64_t vector_control, debug_control, last_branch_to, last_branch_from;
+    uint64_t last_exception_to, last_exception_from;
+};
+
+struct nt_runtime_function { uint32_t begin, end, unwind; };
+struct nt_exception_pointers {
+    void *record;
+    struct nt_context64 *context;
+};
+
+typedef int32_t (NT_MS_ABI *nt_exception_filter)(struct nt_exception_pointers *);
+void NT_MS_ABI nt_RtlCaptureContext(struct nt_context64 *context);
+bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
+                                      const struct nt_runtime_function *table, size_t count);
+const struct nt_runtime_function *NT_MS_ABI nt_RtlLookupFunctionEntry(
+    uint64_t pc, uint64_t *base, void *history);
+nt_exception_filter NT_MS_ABI nt_SetUnhandledExceptionFilter(nt_exception_filter filter);
+int32_t NT_MS_ABI nt_UnhandledExceptionFilter(struct nt_exception_pointers *pointers);
+void **NT_MS_ABI nt_current_exception(void);
+void **NT_MS_ABI nt_current_exception_context(void);
+
 /* The launcher supplies the host directory for the guest C: drive. */
 bool nt_runtime_set_file_root(const char *directory);
 int32_t NT_MS_ABI nt_CreateDirectoryA(const char *path, const void *security);
@@ -153,6 +197,15 @@ size_t NT_MS_ABI nt_fread(void *buffer, size_t size, size_t count, void *stream)
 size_t NT_MS_ABI nt_fwrite(const void *buffer, size_t size, size_t count, void *stream);
 int NT_MS_ABI nt_set_fmode(int mode);
 void nt_runtime_flush_streams(void);
+bool nt_runtime_set_standard_streams(int input, int output, int error);
+void *NT_MS_ABI nt_acrt_iob_func(uint32_t index);
+int *NT_MS_ABI nt_p_commode(void);
+int NT_MS_ABI nt_stdio_vsprintf(uint64_t options, char *buffer, size_t length,
+                                const char *format, void *locale, const unsigned char *args);
+int NT_MS_ABI nt_stdio_vfprintf(uint64_t options, void *stream, const char *format,
+                                void *locale, const unsigned char *args);
+int NT_MS_ABI nt_stdio_vsscanf(uint64_t options, const char *buffer, size_t length,
+                               const char *format, void *locale, const unsigned char *args);
 
 /* A host surface owns its bitmap and can be used as the reference for memory DCs. */
 uintptr_t nt_runtime_create_surface(int32_t width, int32_t height);

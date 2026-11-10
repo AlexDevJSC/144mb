@@ -72,6 +72,29 @@ static void deliver(uintptr_t window, uint32_t type)
     nt_DispatchMessageA(&message);
 }
 
+static void check_clipboard(uintptr_t window)
+{
+    BOUND(OpenClipboard);
+    BOUND(CloseClipboard);
+    BOUND(EmptyClipboard);
+    BOUND(SetClipboardData);
+    const uintptr_t memory = nt_GlobalAlloc(2, 6);
+    CHECK(memory != 0);
+    char *bytes = nt_GlobalLock(memory);
+    CHECK(bytes != NULL);
+    memcpy(bytes, "Caf\xe9!", 6);
+    CHECK(nt_GlobalUnlock(memory) == 0);
+    CHECK(!nt_EmptyClipboard() && nt_OpenClipboard(window) && !nt_OpenClipboard(window));
+    CHECK(nt_EmptyClipboard() && nt_SetClipboardData(1, memory) == memory && nt_CloseClipboard());
+    char *native = SDL_GetClipboardText();
+    CHECK(native != NULL && strcmp(native, "Caf\xc3\xa9!") == 0);
+    SDL_free(native);
+    CHECK(nt_GlobalFree(memory) == memory);
+    CHECK(nt_OpenClipboard(window) && nt_EmptyClipboard() && nt_CloseClipboard());
+    CHECK(nt_GlobalLock(memory) == NULL);
+    puts("PASS clipboard ownership and ANSI text on the SDL backend");
+}
+
 int main(void)
 {
     BOUND(RegisterClassA);
@@ -172,6 +195,8 @@ int main(void)
     CHECK(nt_SetTimer(window, 77, 10, NULL) == 77);
     deliver(window, NT_WM_TIMER);
     CHECK(timers == 1);
+    if (strcmp(SDL_GetCurrentVideoDriver(), "offscreen") == 0)
+        check_clipboard(window);
 
     event = (SDL_Event){.type = SDL_WINDOWEVENT};
     event.window.windowID = native_id;

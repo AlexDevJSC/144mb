@@ -5,7 +5,9 @@
 #include <errno.h>
 #include <limits.h>
 #include <locale.h>
+#include <math.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +16,8 @@ static pthread_once_t c_locale_once = PTHREAD_ONCE_INIT;
 static locale_t c_locale;
 static _Thread_local int thread_locale_mode = 2;
 static _Atomic int new_mode;
+static _Atomic int app_type;
+static _Atomic(nt_matherr_callback) math_error;
 static _Atomic(const char *const *) guest_environment;
 static pthread_mutex_t environment_lock = PTHREAD_MUTEX_INITIALIZER;
 static const char *const *environment_source;
@@ -88,6 +92,63 @@ int NT_MS_ABI nt_set_new_mode(int mode)
         return -1;
     }
     return atomic_exchange(&new_mode, mode);
+}
+
+void NT_MS_ABI nt_set_app_type(int type)
+{
+    if (type < 0 || type > 2) {
+        errno = EINVAL;
+        return;
+    }
+    atomic_store(&app_type, type);
+}
+
+static char *assertion_text(const uint16_t *text)
+{
+    if (text == NULL)
+        return NULL;
+    size_t length = 0;
+    while (length < 2048 && text[length] != 0)
+        ++length;
+    return nt_runtime_utf16_to_utf8(text, length);
+}
+
+void NT_MS_ABI nt_wassert(const uint16_t *expression, const uint16_t *file, uint32_t line)
+{
+    char *expr = assertion_text(expression), *path = assertion_text(file);
+    char message[8192];
+    const int length = snprintf(message, sizeof(message), "Assertion failed: %s, file %s, line %u\n",
+                                expr != NULL ? expr : "?", path != NULL ? path : "?", line);
+    free(expr);
+    free(path);
+    if (length > 0 && !(atomic_load(&app_type) == 2 && nt_runtime_show_assertion(message))) {
+        const size_t size = (size_t)length < sizeof(message) ? (size_t)length : sizeof(message) - 1;
+        nt_fwrite(message, 1, size, nt_acrt_iob_func(2));
+        nt_runtime_flush_streams();
+    }
+    nt_terminate();
+}
+
+void NT_MS_ABI nt_setusermatherr(nt_matherr_callback callback)
+{
+    atomic_store(&math_error, callback);
+}
+
+double nt_runtime_sqrt(double number)
+{
+    const int previous = errno;
+    double result = sqrt(number);
+    if (number < 0) {
+        const nt_matherr_callback callback = atomic_load(&math_error);
+        if (callback != NULL) {
+            struct nt_math_exception exception = {1, "sqrt", number, 0, result};
+            errno = previous;
+            const bool handled = callback(&exception) != 0;
+            result = exception.result;
+            errno = handled ? previous : EDOM;
+        }
+    }
+    return result;
 }
 
 void nt_runtime_set_guest_environment(const char *const *environment)
@@ -192,6 +253,7 @@ _Static_assert(sizeof(struct nt_onexit_table) == 24, "on-exit table layout");
 static pthread_mutex_t callback_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct nt_onexit_table exit_callbacks;
 static bool exit_running;
+static nt_tls_exit_callback tls_exit;
 
 int NT_MS_ABI nt_initialize_onexit_table(struct nt_onexit_table *table)
 {
@@ -242,6 +304,16 @@ int NT_MS_ABI nt_crt_atexit(nt_void_callback callback)
     return append_callback(&exit_callbacks, (nt_guest_proc)callback);
 }
 
+void NT_MS_ABI nt_register_thread_local_exe_atexit_callback(nt_tls_exit_callback callback)
+{
+    pthread_mutex_lock(&callback_lock);
+    if (callback == NULL || tls_exit != NULL || exit_running)
+        errno = EINVAL;
+    else
+        tls_exit = callback;
+    pthread_mutex_unlock(&callback_lock);
+}
+
 static void release_table(struct nt_onexit_table *table)
 {
     free(table->first);
@@ -263,6 +335,13 @@ void NT_MS_ABI nt_cexit(void)
         return;
     }
     exit_running = true;
+    if (tls_exit != NULL) {
+        const nt_tls_exit_callback callback = tls_exit;
+        tls_exit = NULL;
+        pthread_mutex_unlock(&callback_lock);
+        callback(NULL, 0, NULL); /* DLL_PROCESS_DETACH */
+        pthread_mutex_lock(&callback_lock);
+    }
     while (exit_callbacks.last != exit_callbacks.first) {
         const nt_void_callback callback = (nt_void_callback)*--exit_callbacks.last;
         pthread_mutex_unlock(&callback_lock);

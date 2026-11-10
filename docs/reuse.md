@@ -27,6 +27,11 @@ MPL-1.1 o LGPL-2.1-only y se enlaza como biblioteca de la distribución.
 [Licencias de Cairo](https://www.cairographics.org/FAQ/#what-is-cairo-license) ·
 [DejaVu Fonts](https://dejavu-fonts.github.io/).
 
+libffi 3.4.8 invoca las funciones variádicas de glibc con el ABI nativo
+después de validar y adaptar los argumentos Microsoft x64 del fixture.
+Se usa el paquete del sistema con licencia MIT.
+[libffi 3.4.8](https://github.com/libffi/libffi/tree/v3.4.8).
+
 ## Proyectos y dependencias
 
 | Componente | Clasificación | Evidencia, dependencia y restricciones |
