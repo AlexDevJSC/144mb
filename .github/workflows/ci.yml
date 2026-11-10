@@ -19,7 +19,7 @@ jobs:
       - name: Install Linux build and desktop test dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libcairo2-dev libffi-dev weston fonts-dejavu-core
+          sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libcairo2-dev libffi-dev bubblewrap weston fonts-dejavu-core
           x86_64-w64-mingw32-gcc --version
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 all check check-pe check-pe-import check-pe-image
@@ -27,6 +27,11 @@ jobs:
         run: sh tests/pe/run_wayland.sh make -j2 check-desktop
       - name: Exercise window messages and clipboard offscreen
         run: SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-desktop
+      - name: Run external PE with native Linux isolation if namespaces permit
+        env:
+          SDL_VIDEODRIVER: offscreen
+          SDL_FRAMEBUFFER_ACCELERATION: "0"
+        run: make check-pe-isolated
       - name: Undefined behavior sanitizer
         env:
           SDL_VIDEODRIVER: offscreen
