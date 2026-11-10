@@ -145,6 +145,18 @@ int main(void)
         munmap(blocker, 0x4000);
     assert(image.base == NULL);
 
+    unsigned char signed_image[0x4010] = {0};
+    make_pe(signed_image);
+    /* The certificate table is file data, outside the mapped image. */
+    w32(signed_image + 0x98 + 112 + 4 * 8, 0x4000);
+    w32(signed_image + 0x98 + 112 + 4 * 8 + 4, 16);
+    assert(pe_image_load(signed_image, sizeof(signed_image), resolver, NULL,
+                         &image, reason, sizeof(reason)));
+    pe_image_unload(&image);
+    assert(!pe_image_load(signed_image, sizeof(signed_image) - 1, resolver, NULL,
+                          &image, reason, sizeof(reason)));
+    puts("PASS certificate file bounds and truncated certificate rejection");
+
     make_tls_pe(bytes);
     assert(pe_image_load(bytes, sizeof(bytes), resolver, NULL, &image, reason, sizeof(reason)));
     assert(image.tls_callbacks_rva == 0x2140 && image.tls_callback_count == 1);
