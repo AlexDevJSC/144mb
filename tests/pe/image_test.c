@@ -70,10 +70,10 @@ static void make_pe(unsigned char *file)
     section(sh + 40, ".idata", 0x2000, 0x400, 0xc0000040);
     section(sh + 80, ".reloc", 0x3000, 0x600, 0x40000040);
 
-    /* sub rsp,40; call qword ptr [rip+0xff6]; add rsp,40; ret.
+    /* sub rsp,40; call qword ptr [rip+0x1056]; add rsp,40; ret.
      * This is an MS x64 guest-to-host import with a real shadow space.
      */
-    const unsigned char code[] = {0x48,0x83,0xec,0x28,0xff,0x15,0xf6,0x0f,0x00,0x00,
+    const unsigned char code[] = {0x48,0x83,0xec,0x28,0xff,0x15,0x56,0x10,0x00,0x00,
                                   0x48,0x83,0xc4,0x28,0xc3};
     memcpy(file + 0x200, code, sizeof(code));
     unsigned char *idata = file + 0x400;
