@@ -1,0 +1,53 @@
+/* SPDX-License-Identifier: MIT */
+#define _GNU_SOURCE
+#include "ntnative/guest_thread.h"
+
+#include <asm/prctl.h>
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+static uintptr_t from_gs_30(void)
+{
+    uintptr_t pointer;
+    __asm__ volatile("movq %%gs:0x30, %0" : "=r"(pointer));
+    return pointer;
+}
+static uintptr_t from_gs_58(void)
+{
+    uintptr_t pointer;
+    __asm__ volatile("movq %%gs:0x58, %0" : "=r"(pointer));
+    return pointer;
+}
+static uintptr_t from_gs_60(void)
+{
+    uintptr_t pointer;
+    __asm__ volatile("movq %%gs:0x60, %0" : "=r"(pointer));
+    return pointer;
+}
+
+int main(void)
+{
+    uintptr_t previous = 0;
+    assert(syscall(SYS_arch_prctl, ARCH_GET_GS, &previous) == 0);
+    struct nt_guest_thread thread = {0};
+    const uintptr_t image = UINT64_C(0x140000000);
+    assert(nt_guest_thread_enter(&thread, image));
+    assert(from_gs_30() == (uintptr_t)thread.teb);
+    assert(from_gs_58() == (uintptr_t)thread.tls_vector);
+    assert(from_gs_60() == (uintptr_t)thread.peb);
+    assert(thread.tls_vector[0] == (uintptr_t)thread.tls_block);
+    uintptr_t base = 0;
+    __builtin_memcpy(&base, thread.peb + 0x10, sizeof(base));
+    assert(base == image);
+    assert(!nt_guest_thread_enter(&thread, image));
+    assert(nt_guest_thread_leave(&thread));
+    uintptr_t current = UINTPTR_MAX;
+    assert(syscall(SYS_arch_prctl, ARCH_GET_GS, &current) == 0);
+    assert(current == previous);
+    assert(!nt_guest_thread_leave(&thread));
+    puts("PASS Linux GS/TEB/PEB mapping, TLS vector and previous GS restoration");
+    return 0;
+}
