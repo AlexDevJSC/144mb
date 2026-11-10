@@ -12,7 +12,7 @@
 
 enum {
     PE_OPTIONAL_MIN = 112, PE_SECTION_SIZE = 40, PE_IMPORT_DIR = 1,
-    PE_EXCEPTION_DIR = 3, PE_RESOURCE_DIR = 2, PE_BASERELOC_DIR = 5,
+    PE_SECURITY_DIR = 4, PE_EXCEPTION_DIR = 3, PE_RESOURCE_DIR = 2, PE_BASERELOC_DIR = 5,
     PE_TLS_DIR = 9, PE_DELAY_DIR = 13, PE_IAT_DIR = 12,
     MAX_IMPORTS = 65536, MAX_NAME = 512
 };
@@ -315,7 +315,8 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
     if (!valid_entry)
         return fail(error, error_size, "Entry point is not executable");
     for (unsigned i = 0; i < 16; ++i)
-        if (directory[i].size && !span(image_size, directory[i].rva, directory[i].size))
+        if (directory[i].size && !span(i == PE_SECURITY_DIR ? length : image_size,
+                                       directory[i].rva, directory[i].size))
             return fail(error, error_size, "Directory outside image");
 
     /* Mapping preferred address only if the kernel says that region is unused. */
