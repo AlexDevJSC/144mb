@@ -47,6 +47,13 @@ gráfica, se puede usar `SDL_VIDEODRIVER=offscreen`, pero esto **no permite
 jugar**. El worker se invoca automáticamente dentro de Bubblewrap,
 no ejecutándolo directamente con `--worker`.
 
+Las pruebas `make check-pe-external` ejecutan fuera de Bubblewrap **solo**
+el PE controlado que MinGW-w64 genera durante la compilación. No son
+una autorización para ejecutar PE de terceros sin aislamiento.
+`make check-pe-isolated` intenta comprobar ese mismo ejecutable
+dentro de Bubblewrap; si la política Linux impide crear namespaces,
+la prueba declara `SKIP` y no cuenta como validación del aislamiento.
+
 El entorno de Bubblewrap monta `/usr` y las bibliotecas del host en
 solo lectura, ofrece `/proc` y `/dev`, crea `/tmp` temporal,
 desactiva red y monta en `/game` únicamente el directorio que contiene
