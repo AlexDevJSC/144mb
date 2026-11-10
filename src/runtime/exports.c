@@ -3,6 +3,8 @@
 #include "ntnative/counter.h"
 #include "compat.h"
 #include "desktop.h"
+#include "desktop_resources.h"
+#include "dialogs.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -201,9 +203,10 @@ static void NT_MS_ABI crt_qsort(void *base, size_t count, size_t width, guest_co
 struct runtime_export {
     const char *name;
     nt_guest_proc target;
+    uint16_t ordinal;
 };
 
-#define EXPORT(name, function) {name, (nt_guest_proc)function}
+#define EXPORT(name, function) {name, (nt_guest_proc)function, 0}
 #define WIN_EXPORT(name) EXPORT(#name, nt_##name)
 
 static const struct runtime_export ntdll_exports[] = {
@@ -255,10 +258,12 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(AdjustWindowRectEx),
     WIN_EXPORT(AppendMenuA),
     WIN_EXPORT(BeginPaint),
+    WIN_EXPORT(CheckDlgButton),
     WIN_EXPORT(CheckMenuItem),
     WIN_EXPORT(CloseClipboard),
     WIN_EXPORT(CreateMenu),
     WIN_EXPORT(CreateWindowExA),
+    WIN_EXPORT(DefDlgProcA),
     WIN_EXPORT(DefWindowProcA),
     WIN_EXPORT(DestroyMenu),
     WIN_EXPORT(DestroyWindow),
@@ -270,6 +275,7 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(EndPaint),
     WIN_EXPORT(GetClientRect),
     WIN_EXPORT(GetDC),
+    WIN_EXPORT(GetDlgItemTextA),
     WIN_EXPORT(GetKeyboardState),
     WIN_EXPORT(GetMenu),
     WIN_EXPORT(GetMenuItemCount),
@@ -279,16 +285,25 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(GetWindowLongPtrA),
     WIN_EXPORT(GetWindowRect),
     WIN_EXPORT(IntersectRect),
+    WIN_EXPORT(IsDialogMessageA),
+    WIN_EXPORT(IsDlgButtonChecked),
     WIN_EXPORT(InvalidateRect),
     WIN_EXPORT(KillTimer),
+    WIN_EXPORT(LoadCursorA),
+    WIN_EXPORT(LoadIconA),
     WIN_EXPORT(MessageBeep),
+    WIN_EXPORT(MessageBoxA),
     WIN_EXPORT(OffsetRect),
     WIN_EXPORT(OpenClipboard),
     WIN_EXPORT(PostQuitMessage),
     WIN_EXPORT(RegisterClassA),
+    WIN_EXPORT(ReleaseCapture),
     WIN_EXPORT(ReleaseDC),
+    WIN_EXPORT(SendDlgItemMessageA),
     WIN_EXPORT(SendMessageA),
+    WIN_EXPORT(SetCapture),
     WIN_EXPORT(SetClipboardData),
+    WIN_EXPORT(SetForegroundWindow),
     WIN_EXPORT(SetMenu),
     WIN_EXPORT(SetRect),
     WIN_EXPORT(SetTimer),
@@ -298,7 +313,8 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(ShowWindow),
     WIN_EXPORT(SystemParametersInfoA),
     WIN_EXPORT(TranslateMessage),
-    WIN_EXPORT(UnionRect)
+    WIN_EXPORT(UnionRect),
+    WIN_EXPORT(WinHelpA)
 };
 
 static const struct runtime_export gdi32_exports[] = {
@@ -336,10 +352,18 @@ static const struct runtime_export gdi32_exports[] = {
 };
 
 static const struct runtime_export comdlg32_exports[] = {
+    WIN_EXPORT(CommDlgExtendedError),
+    WIN_EXPORT(GetOpenFileNameA),
+    WIN_EXPORT(GetSaveFileNameA),
     WIN_EXPORT(PrintDlgA)
 };
 
+static const struct runtime_export comctl32_exports[] = {
+    {"InitCommonControls", (nt_guest_proc)nt_InitCommonControls, 17}
+};
+
 static const struct runtime_export vcruntime_exports[] = {
+    EXPORT("__C_specific_handler", nt_C_specific_handler),
     EXPORT("__current_exception", nt_current_exception),
     EXPORT("__current_exception_context", nt_current_exception_context),
     EXPORT("memchr", crt_memchr),
@@ -457,7 +481,8 @@ static const struct {
     MODULE("api-ms-win-crt-runtime-l1-1-0.dll", crt_runtime_exports),
     MODULE("api-ms-win-crt-stdio-l1-1-0.dll", stdio_exports),
     MODULE("api-ms-win-crt-string-l1-1-0.dll", string_exports),
-    MODULE("api-ms-win-crt-utility-l1-1-0.dll", utility_exports)
+    MODULE("api-ms-win-crt-utility-l1-1-0.dll", utility_exports),
+    MODULE("comctl32.dll", comctl32_exports)
 #undef MODULE
 };
 
@@ -490,6 +515,22 @@ nt_guest_proc nt_runtime_resolve(const char *module, const char *name)
     if (module == NULL || name == NULL)
         return NULL;
     return find_export(module_index(module), name);
+}
+
+static nt_guest_proc find_ordinal(size_t module, unsigned int ordinal)
+{
+    if (module < MODULE_COUNT && ordinal != 0) {
+        for (size_t i = 0; i < modules[module].count; ++i) {
+            if (ordinal == modules[module].exports[i].ordinal)
+                return modules[module].exports[i].target;
+        }
+    }
+    return NULL;
+}
+
+nt_guest_proc nt_runtime_resolve_ordinal(const char *module, unsigned int ordinal)
+{
+    return module == NULL ? NULL : find_ordinal(module_index(module), ordinal);
 }
 
 static size_t requested_module(const char *name)
@@ -578,7 +619,8 @@ nt_guest_proc NT_MS_ABI nt_GetProcAddress(uintptr_t handle, const char *name)
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
         return NULL;
     }
-    const nt_guest_proc target = (uintptr_t)name > UINT16_MAX ? find_export(module, name) : NULL;
+    const nt_guest_proc target = (uintptr_t)name > UINT16_MAX ? find_export(module, name) :
+                                 find_ordinal(module, (unsigned int)(uintptr_t)name);
     if (target == NULL)
         nt_SetLastError(NT_ERROR_PROC_NOT_FOUND);
     return target;

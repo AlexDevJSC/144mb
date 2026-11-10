@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -322,6 +323,96 @@ static void check_unwind(void)
     puts("PASS checked AMD64 frame unwind, prologue bounds and handler metadata");
 }
 
+static uint32_t scope_table[9];
+static int32_t filter_result;
+static unsigned int scope_filters, scope_finalizers;
+static uintptr_t expected_frame, expected_target;
+static jmp_buf transfer_target;
+
+static int32_t NT_MS_ABI scope_filter(struct nt_exception_pointers *pointers, uint64_t frame)
+{
+    const struct nt_exception_record *record = pointers->record;
+    CHECK(record->code == UINT32_C(0xe0010001) && pointers->context != NULL && frame == expected_frame);
+    ++scope_filters;
+    return filter_result;
+}
+
+static void NT_MS_ABI scope_finally(unsigned char abnormal, uint64_t frame)
+{
+    CHECK(abnormal == 1 && frame == expected_frame);
+    ++scope_finalizers;
+}
+
+static void transfer_handler(struct nt_exception_record *record, uint64_t frame,
+                             uint64_t target, const struct nt_dispatcher_context *dispatch)
+{
+    CHECK(record->code == UINT32_C(0xe0010001) && frame == expected_frame &&
+          target == expected_target && dispatch->context->rip == target);
+    longjmp(transfer_target, 1);
+}
+
+static void check_c_specific_handler(void)
+{
+    BOUND("vcruntime140.dll", "__C_specific_handler", nt_C_specific_handler);
+    const uintptr_t filter = (uintptr_t)scope_filter, finalizer = (uintptr_t)scope_finally;
+    const uintptr_t code_begin = filter < finalizer ? filter : finalizer;
+    const uintptr_t code_end = (filter > finalizer ? filter : finalizer) + 1;
+    const uintptr_t table = (uintptr_t)scope_table;
+    const uintptr_t base = ((table < code_begin ? table : code_begin) & ~(uintptr_t)3) - 4;
+    const uintptr_t limit = code_end > table + sizeof(scope_table) ? code_end : table + sizeof(scope_table);
+    CHECK(limit - base <= UINT32_MAX);
+    const struct nt_runtime_function function = {(uint32_t)(filter - base), (uint32_t)(filter - base + 1),
+                                                  (uint32_t)(table - base)};
+    const uint32_t code_first = (uint32_t)(code_begin - base), code_last = (uint32_t)(code_end - base);
+    const uint32_t entries[] = {2, code_first, code_last, (uint32_t)(finalizer - base), 0,
+        code_first, code_last, (uint32_t)(filter - base), (uint32_t)(finalizer - base)};
+    memcpy(scope_table, entries, sizeof(entries));
+    uint64_t stack[8] = {0};
+    expected_frame = (uintptr_t)stack;
+    expected_target = finalizer;
+    CHECK(nt_runtime_set_runtime_functions(base, limit - base, &function, 1));
+    CHECK(nt_runtime_set_unwind_stack(stack, sizeof(stack)));
+    CHECK(nt_runtime_set_seh_dispatch(code_first, code_last, transfer_handler));
+
+    struct nt_exception_record record = {.code = UINT32_C(0xe0010001)};
+    struct nt_context64 context = {.rip = filter, .rsp = expected_frame};
+    struct nt_context64 unwind = {.rip = finalizer, .rsp = expected_frame};
+    struct nt_dispatcher_context dispatch = {.pc = filter, .base = base, .function = &function,
+        .frame = expected_frame, .context = &unwind, .handler_data = scope_table};
+    filter_result = -1;
+    CHECK(nt_C_specific_handler(&record, expected_frame, &context, &dispatch) == 0 && scope_filters == 1);
+    filter_result = 0;
+    CHECK(nt_C_specific_handler(&record, expected_frame, &context, &dispatch) == 1 && scope_filters == 2);
+    filter_result = 1;
+    if (setjmp(transfer_target) == 0) {
+        nt_C_specific_handler(&record, expected_frame, &context, &dispatch);
+        CHECK(false);
+    }
+    CHECK(scope_filters == 3 && scope_finalizers == 0);
+    CHECK(nt_runtime_set_seh_dispatch(code_first, code_last, NULL));
+    CHECK(nt_C_specific_handler(&record, expected_frame, &context, &dispatch) == 1 &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
+
+    record.flags = 0x20; /* Target unwind stays in the scope. */
+    dispatch.target = filter;
+    CHECK(nt_C_specific_handler(&record, expected_frame, &context, &dispatch) == 1 &&
+          scope_finalizers == 0 && dispatch.scope_index == 0);
+    record.flags = 0x4;
+    CHECK(nt_C_specific_handler(&record, expected_frame, &context, &dispatch) == 1 &&
+          scope_finalizers == 1 && dispatch.scope_index == 1);
+    CHECK(nt_C_specific_handler(&record, expected_frame, &context, &dispatch) == 1 && scope_finalizers == 1);
+
+    scope_table[0] = UINT32_MAX;
+    CHECK(nt_C_specific_handler(&record, expected_frame, &context, &dispatch) == 1 &&
+          last_error() == NT_ERROR_INVALID_PARAMETER && scope_finalizers == 1);
+    scope_table[0] = 2;
+    scope_table[3] = (uint32_t)(table - base); /* Data is outside the registered executable range. */
+    CHECK(nt_C_specific_handler(&record, expected_frame, &context, &dispatch) == 1 &&
+          last_error() == NT_ERROR_INVALID_PARAMETER && scope_finalizers == 1);
+    CHECK(nt_runtime_set_unwind_stack(NULL, 0) && nt_runtime_set_runtime_functions(0, 0, NULL, 0));
+    puts("PASS AMD64 C SEH filters, handler transfer, finally and malformed scope tables");
+}
+
 static unsigned int guest_faults;
 static void *fault_record;
 static void NT_MS_ABI on_arithmetic_fault(int signal, int reason)
@@ -569,6 +660,7 @@ int main(void)
     check_quick_cleanup();
     check_exceptions();
     check_unwind();
+    check_c_specific_handler();
     check_seh_filter();
     check_matherr();
     check_graphics();

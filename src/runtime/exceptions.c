@@ -13,6 +13,14 @@ _Static_assert(offsetof(struct nt_context64, rsp) == 0x98, "AMD64 CONTEXT Rsp");
 _Static_assert(offsetof(struct nt_context64, rip) == 0xf8, "AMD64 CONTEXT Rip");
 _Static_assert(offsetof(struct nt_context64, floating) == 0x100, "AMD64 CONTEXT FltSave");
 _Static_assert(sizeof(struct nt_runtime_function) == 12, "RUNTIME_FUNCTION size");
+_Static_assert(sizeof(struct nt_exception_record) == 152, "EXCEPTION_RECORD size");
+_Static_assert(offsetof(struct nt_dispatcher_context, scope_index) == 72 &&
+               sizeof(struct nt_dispatcher_context) == 80, "DISPATCHER_CONTEXT layout");
+
+static _Thread_local struct {
+    uint32_t begin, end;
+    nt_seh_transfer transfer;
+} seh;
 
 /* The launcher sets the immutable image view before running the guest. */
 static struct {
@@ -32,6 +40,7 @@ bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
         image.image_size = 0;
         image.table = NULL;
         image.count = 0;
+        nt_runtime_set_seh_dispatch(0, 0, NULL);
         return true;
     }
     if (image_size < 4 || image_size > UINT32_MAX || image_size > UINTPTR_MAX - base ||
@@ -49,6 +58,7 @@ bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
     image.image_size = image_size;
     image.table = table;
     image.count = count;
+    nt_runtime_set_seh_dispatch(0, 0, NULL);
     return true;
 }
 
@@ -307,6 +317,112 @@ void *NT_MS_ABI nt_RtlVirtualUnwind(uint32_t type, uint64_t base, uint64_t pc,
     if (pointers != NULL)
         *pointers = restored;
     return handler;
+}
+
+bool nt_runtime_set_seh_dispatch(uint32_t begin, uint32_t end, nt_seh_transfer transfer)
+{
+    if ((begin != 0 || end != 0 || transfer != NULL) &&
+        (begin == 0 || begin >= end || end > image.image_size))
+        return false;
+    seh.begin = begin;
+    seh.end = end;
+    seh.transfer = transfer;
+    return true;
+}
+
+struct seh_scope {
+    uint32_t begin, end, handler, target;
+};
+
+static struct seh_scope read_scope(const unsigned char *table, size_t index)
+{
+    const unsigned char *entry = table + 4 + index * 16;
+    return (struct seh_scope){load_dword(entry), load_dword(entry + 4),
+                              load_dword(entry + 8), load_dword(entry + 12)};
+}
+
+static bool code_rva(uint32_t rva)
+{
+    return rva >= seh.begin && rva < seh.end;
+}
+
+enum {
+    SEH_CONTINUE_EXECUTION = 0, SEH_CONTINUE_SEARCH = 1, SEH_EXECUTE_HANDLER = 1,
+    SEH_UNWIND_FLAGS = 0x66, SEH_TARGET_UNWIND = 0x20, MAX_SEH_SCOPES = 256
+};
+
+typedef int32_t (NT_MS_ABI *scope_filter)(struct nt_exception_pointers *, uint64_t);
+typedef void (NT_MS_ABI *scope_finally)(unsigned char, uint64_t);
+
+int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint64_t frame,
+                                       struct nt_context64 *context,
+                                       struct nt_dispatcher_context *dispatch)
+{
+    uint64_t base;
+    if (record == NULL || context == NULL || dispatch == NULL || dispatch->context == NULL || seh.end == 0 ||
+        stack_low == 0 || frame < stack_low || frame >= stack_high || dispatch->frame != frame ||
+        dispatch->function == NULL || dispatch->base != image.base ||
+        nt_RtlLookupFunctionEntry(dispatch->pc, &base, NULL) != dispatch->function)
+        goto invalid;
+    const uintptr_t data = (uintptr_t)dispatch->handler_data;
+    if (data < image.base || data - image.base > UINT32_MAX || (data - image.base) % 4 != 0)
+        goto invalid;
+    const uint32_t offset = (uint32_t)(data - image.base);
+    const unsigned char *table = image_bytes(offset, 4);
+    if (table == NULL)
+        goto invalid;
+    const uint32_t count = load_dword(table);
+    if (count > MAX_SEH_SCOPES || dispatch->scope_index > count ||
+        image_bytes(offset, 4 + (size_t)count * 16) == NULL)
+        goto invalid;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const struct seh_scope scope = read_scope(table, i);
+        if (scope.begin >= scope.end || !code_rva(scope.begin) || scope.end > seh.end ||
+            (scope.target == 0 ? !code_rva(scope.handler) :
+             !code_rva(scope.target) ||
+             (scope.handler != SEH_EXECUTE_HANDLER && !code_rva(scope.handler))))
+            goto invalid;
+    }
+
+    const uint32_t pc = (uint32_t)(dispatch->pc - image.base);
+    const bool unwinding = (record->flags & SEH_UNWIND_FLAGS) != 0;
+    for (uint32_t i = dispatch->scope_index; i < count; ++i) {
+        const struct seh_scope scope = read_scope(table, i);
+        if (pc < scope.begin || pc >= scope.end)
+            continue;
+        if (unwinding) {
+            if ((record->flags & SEH_TARGET_UNWIND) != 0 &&
+                ((dispatch->target >= image.base + scope.begin &&
+                  dispatch->target < image.base + scope.end) ||
+                 (scope.target != 0 && dispatch->target == image.base + scope.target)))
+                break;
+            if (scope.target == 0) {
+                dispatch->scope_index = i + 1;
+                ((scope_finally)(image.base + scope.handler))(1, frame);
+            }
+        } else if (scope.target != 0) {
+            struct nt_exception_pointers pointers = {record, context};
+            const int32_t filter = scope.handler == SEH_EXECUTE_HANDLER ? SEH_EXECUTE_HANDLER :
+                ((scope_filter)(image.base + scope.handler))(&pointers, frame);
+            if (filter < 0)
+                return SEH_CONTINUE_EXECUTION;
+            if (filter > 0) {
+                if (seh.transfer == NULL) {
+                    nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+                    break;
+                }
+                seh.transfer(record, frame, image.base + scope.target, dispatch);
+                nt_SetLastError(NT_ERROR_GEN_FAILURE);
+                break;
+            }
+        }
+    }
+    return SEH_CONTINUE_SEARCH;
+
+invalid:
+    nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+    return SEH_CONTINUE_SEARCH;
 }
 
 static _Atomic(nt_exception_filter) exception_filter;

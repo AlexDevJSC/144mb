@@ -56,8 +56,10 @@ make -j2 BUILD_DIR=build-ubsan \
 positiva y estable, contador no decreciente y frecuencia opcional.
 El resultado se comunica mediante el código de salida. El anfitrión
 también verifica el rechazo de tablas truncadas, RVA fuera de rango,
-ordinales, nombres inválidos e importaciones retardadas. Las variantes
-inválidas solo llegan al parser.
+ordinales en los perfiles del contador, nombres inválidos e importaciones
+retardadas. El perfil de escritorio admite `COMCTL32.dll #17` y rechaza
+un ordinal distinto, bits reservados activos y una IAT inconsistente.
+Las variantes inválidas solo llegan al parser.
 
 GitHub Actions compila los PE de control con MinGW-w64 y los ejecuta
 con nuestro cargador en Ubuntu. El trabajo de Fedora comprueba el RPM
@@ -69,10 +71,10 @@ Las pruebas de los 30 equivalentes iniciales y las 74 incorporaciones
 se ejecutan con `make check` en Linux. Las comprobaciones verifican
 el registro y llaman a las funciones mediante el ABI Microsoft x64.
 
-La auditoría de solo lectura leyó 197 importaciones directas, con 180
-equivalentes registrados y 17 pendientes. Una entrada pendiente
-identifica su símbolo por ordinal. Las pruebas y el inventario están
-en [Compatibilidad de Mines](mines-compatibility.md).
+La auditoría de solo lectura encontró equivalentes para las 197 importaciones
+directas del archivo de referencia. `make check-desktop` prueba los perfiles
+de diálogo, recursos, captura y selección de archivos con SDL en Linux.
+Las pruebas y sus límites están en [Compatibilidad de Mines](mines-compatibility.md).
 
 ## Cobertura pendiente
 

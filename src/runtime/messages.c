@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "desktop.h"
+#include "dialogs.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -249,6 +250,12 @@ intptr_t NT_MS_ABI nt_DispatchMessageA(const struct nt_message *message)
             callback(message->window, WM_TIMER, message->wparam, nt_GetTickCount());
         return 0;
     }
+    const uint32_t type = message->message;
+    if (((type >= NT_WM_KEYDOWN && type <= 0x109) || (type >= NT_WM_MOUSEMOVE && type <= 0x20e)) &&
+        !nt_runtime_control_valid(message->window) && !nt_runtime_window_enabled(message->window))
+        return 0;
+    if (nt_runtime_dialog_input(message->window, message, nt_runtime_dialog_window(message->window)))
+        return 0;
     return message->window != 0 ?
            nt_SendMessageA(message->window, message->message, message->wparam, message->lparam) : 0;
 }

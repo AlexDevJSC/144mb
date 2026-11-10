@@ -15,9 +15,10 @@
 typedef void (NT_MS_ABI *nt_guest_proc)(void);
 
 /* The caller converts the returned address to the declared guest signature
- * before calling it. A missing symbol or an ordinal (NULL name) returns NULL.
+ * before calling it. A missing symbol returns NULL.
  */
 nt_guest_proc nt_runtime_resolve(const char *module, const char *name);
+nt_guest_proc nt_runtime_resolve_ordinal(const char *module, unsigned int ordinal);
 
 static inline bool nt_module_name_equal(const char *left, const char *right)
 {

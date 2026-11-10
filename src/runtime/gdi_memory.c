@@ -271,6 +271,17 @@ static bool initialize_stock_fonts(void)
     return true;
 }
 
+bool nt_runtime_apply_font(uintptr_t handle, cairo_t *target)
+{
+    pthread_mutex_lock(&gdi_lock);
+    const struct gdi_object *object = find(handle);
+    const bool available = object != NULL && object->kind == FONT && initialize_stock_fonts();
+    if (available)
+        cairo_set_scaled_font(target, object->value.font.scaled);
+    pthread_mutex_unlock(&gdi_lock);
+    return available;
+}
+
 static void release_thread_contexts(void *unused)
 {
     (void)unused;

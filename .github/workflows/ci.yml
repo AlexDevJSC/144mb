@@ -28,10 +28,13 @@ jobs:
       - name: Exercise window messages and clipboard offscreen
         run: SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-desktop
       - name: Undefined behavior sanitizer
+        env:
+          SDL_VIDEODRIVER: offscreen
+          SDL_FRAMEBUFFER_ACCELERATION: "0"
         run: >-
           make -j2 BUILD_DIR=build-ubsan
           CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all'
-          check check-pe check-pe-import
+          check check-pe check-pe-import check-desktop
 
   fedora-rpm:
     runs-on: ubuntu-24.04

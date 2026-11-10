@@ -24,7 +24,7 @@ el contador NT y un conjunto inicial de contratos Win32 y CRT.
 | Módulo | Espacio y responsabilidad | Estado |
 | --- | --- | --- |
 | Reconocimiento y carga | Usuario. Distinguir ELF y PE por cabeceras. Conservar el camino ELF de Linux. Validar arquitectura y rangos PE, mapear secciones, resolver bibliotecas y preparar la entrada. | Perfiles PE32+ AMD64 de laboratorio y lectura de importaciones directas en archivos externos. |
-| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y 180 puntos de entrada Win32 y CRT de Mines con perfiles probados. |
+| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y 197 importaciones directas de Mines con perfiles probados. |
 | Objetos y procesos | Usuario. Tablas de handles por proceso con acceso, herencia, duplicación, nombres y vida útil. Un broker por entorno podrá coordinar recursos compartidos si los casos entre procesos lo requieren. | Compartición local de archivos y salida del proceso de prueba con estado de 32 bits. |
 | Recursos de Linux | Kernel y UAPI existentes. Memoria con `mmap` y `mprotect`, descriptores para recursos y `ntsync` opcional para primitivas de espera. | Relojes Linux, memoria, `openat2` y `timerfd` en uso. |
 | Gráficos | Usuario. USER y win32u gestionan ventanas, eventos, entrada y portapapeles. DXVK y VKD3D-Proton aportan Direct3D sobre Vulkan. RADV usa la UAPI DRM de amdgpu. | Ventanas SDL 2, superficies GDI, teclado, ratón y temporizadores. |
@@ -42,7 +42,7 @@ Microsoft que enlaza con la implementación en C mediante el ABI de Linux.
 
 Los perfiles de importación usan PE generados por MinGW-w64. Los dos
 del contador admiten una importación cada uno y el de escritorio admite
-13 nombres distribuidos entre USER32 y GDI. El anfitrión obtiene las
+20 nombres y el ordinal 17 de COMCTL32. El anfitrión obtiene las
 direcciones del registro de equivalentes mediante una lista cerrada. Admite
 `.text` e `.idata` y la sección opcional `.rdata`, con un máximo de
 una página por sección. Conserva sus direcciones relativas y escribe el
@@ -54,6 +54,18 @@ los bytes del archivo generado e incrustado en el build.
 El auditor de importaciones inspecciona archivos AMD64 sin mapear código
 para ejecución. Lee descriptores múltiples e importaciones por nombre
 y ordinal. El recuento cubre las importaciones directas.
+
+Las ventanas de diálogo tienen hijos dibujados con Cairo en la superficie
+SDL del padre. Los IDs, el foco, los datos de cada control y las notificaciones
+pertenecen al hilo del escritorio. Los selectores de archivos reutilizan la raíz
+C: y la apertura confinada de archivos. El lanzador puede entregar un directorio
+de recursos PE de solo lectura para iconos y un documento de ayuda en texto.
+La captura se enruta dentro del proceso y el compositor controla la activación
+de ventanas y el acceso al puntero fuera de la aplicación.
+
+El manejador SEH de C procesa filtros y finalizadores en un rango de código
+entregado por el despachador de confianza. El despachador valida el mapa
+ejecutable y se encarga de la transferencia al handler seleccionado.
 
 Quedan pendientes las relocaciones generales, TLS, la carga de aplicaciones
 externas y el arranque NT de procesos. La ejecución de archivos externos

@@ -83,10 +83,12 @@ static bool ranges_disjoint(const struct import_range *ranges, size_t count)
 }
 
 static size_t expected_symbol(const struct pe_fixture_symbol *symbols, size_t count,
-                              const char *module, const char *name)
+                              const char *module, const char *name, uint16_t ordinal)
 {
     for (size_t i = 0; i < count; ++i) {
-        if (nt_module_name_equal(module, symbols[i].module) && strcmp(name, symbols[i].name) == 0)
+        if (nt_module_name_equal(module, symbols[i].module) &&
+            (name == NULL ? symbols[i].name == NULL && symbols[i].ordinal == ordinal :
+             symbols[i].name != NULL && strcmp(name, symbols[i].name) == 0))
             return i;
     }
     return count;
@@ -152,18 +154,27 @@ static bool valid_imports(const unsigned char *directories, struct pe_import_ima
                 consumed += THUNK_SIZE;
                 break;
             }
-            /* Fixtures permit only named, unbound entries. */
-            if (found == count || entry > UINT32_MAX - 2 ||
-                section_bytes(idata, (uint32_t)entry, 2) == NULL)
+            if (found == count)
                 return false;
-            const char *name = section_string(idata, (uint32_t)entry + 2);
-            if (name == NULL)
-                return false;
-            const size_t index = expected_symbol(symbols, count, dll, name);
+            const char *name = NULL;
+            uint16_t ordinal = 0;
+            const uint64_t ordinal_flag = UINT64_C(1) << 63;
+            if ((entry & ordinal_flag) != 0) {
+                ordinal = (uint16_t)entry;
+                if (ordinal == 0 || entry != (ordinal_flag | ordinal))
+                    return false;
+            } else {
+                if (entry > UINT32_MAX - 2 || section_bytes(idata, (uint32_t)entry, 2) == NULL)
+                    return false;
+                name = section_string(idata, (uint32_t)entry + 2);
+                if (name == NULL)
+                    return false;
+                ranges[range_count++] = (struct import_range){(uint32_t)entry, strlen(name) + 3};
+            }
+            const size_t index = expected_symbol(symbols, count, dll, name, ordinal);
             if (index == count || image->slots[index] != 0)
                 return false;
             image->slots[index] = iat_rva + (uint32_t)consumed;
-            ranges[range_count++] = (struct import_range){(uint32_t)entry, strlen(name) + 3};
             consumed += THUNK_SIZE;
             ++found;
         }
@@ -250,6 +261,6 @@ bool pe_parse_import_fixture(const unsigned char *file, size_t length,
                              const char *module, const char *symbol,
                              struct pe_import_image *result)
 {
-    const struct pe_fixture_symbol expected = {module, symbol};
+    const struct pe_fixture_symbol expected = {module, symbol, 0};
     return pe_parse_import_fixture_many(file, length, &expected, 1, result);
 }
