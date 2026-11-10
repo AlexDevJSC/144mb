@@ -23,7 +23,7 @@ una función NT y un tramo controlado del camino PE hacia ella.
 
 | Módulo | Espacio y responsabilidad | Estado |
 | --- | --- | --- |
-| Reconocimiento y carga | Usuario. Distinguir ELF y PE por cabeceras. Conservar el camino ELF de Linux. Validar arquitectura y rangos PE, mapear secciones, resolver bibliotecas y preparar la entrada. | Un perfil PE32+ AMD64 de laboratorio. |
+| Reconocimiento y carga | Usuario. Distinguir ELF y PE por cabeceras. Conservar el camino ELF de Linux. Validar arquitectura y rangos PE, mapear secciones, resolver bibliotecas y preparar la entrada. | Dos perfiles PE32+ AMD64 de laboratorio. |
 | NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y puente de llamada del fixture. |
 | Objetos y procesos | Usuario. Tablas de handles por proceso con acceso, herencia, duplicación, nombres y vida útil. Un broker por entorno podrá coordinar recursos compartidos si los casos entre procesos lo requieren. | Diseño inicial. |
 | Recursos de Linux | Kernel y UAPI existentes. Memoria con `mmap` y `mprotect`, descriptores para recursos y `ntsync` opcional para primitivas de espera. | `CLOCK_BOOTTIME` y memoria del fixture en uso. |
@@ -40,11 +40,18 @@ memoria privada. La página pasa de lectura y escritura a lectura y
 ejecución antes de la llamada. El host entrega en RCX un callback con ABI
 Microsoft que enlaza con la implementación en C mediante el ABI de Linux.
 
-El código que se ejecuta procede del `.exe` generado. La resolución de
-importaciones IAT, las relocaciones, los callbacks TLS y el arranque NT
-de procesos están pendientes. El anfitrión toma los bytes de su propia
-sección de solo lectura. Sus comprobaciones de formato no constituyen
-una frontera de seguridad para PE arbitrarios.
+El segundo perfil usa un PE de consola generado por MinGW-w64. Admite
+una importación por nombre, `ntdll.dll!NtQueryPerformanceCounter`. Admite
+`.text` e `.idata` y la sección opcional `.rdata`, con un máximo de
+una página por sección. Conserva sus direcciones relativas y escribe el
+puntero del puente Microsoft x64 en la IAT. El código queda en lectura
+y ejecución y las secciones de datos en solo lectura.
+El resto del mapeo queda inaccesible. El anfitrión ejecuta exclusivamente
+los bytes del archivo generado e incrustado en el build.
+
+Quedan pendientes las relocaciones generales, TLS, la carga de aplicaciones
+externas y el arranque NT de procesos. La ejecución de archivos externos
+requiere su propio diseño de aislamiento.
 
 Referencias [PE/COFF](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format) ·
 [ABI Microsoft x64](https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention) ·

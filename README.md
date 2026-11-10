@@ -12,10 +12,13 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Un programa de prueba PE32+ AMD64 que llama a esa implementación mediante
   el ABI Microsoft x64. El anfitrión ejecuta el código de un binario de prueba
   generado e incrustado durante el build.
+- Un segundo PE de consola, compilado con MinGW-w64, importa
+  `ntdll.dll!NtQueryPerformanceCounter`. Linux resuelve esa importación con
+  la implementación propia y Windows ejecuta el mismo archivo con su DLL.
 - Una sonda Windows independiente que consulta `ntdll.dll`, un
   microbenchmark y un spec RPM para el comando ELF de diagnóstico.
-- Quedan pendientes el cargador de aplicaciones PE, la resolución de
-  importaciones, el modelo de procesos y objetos NT y la integración con KDE.
+- Quedan pendientes la carga general de aplicaciones PE, el modelo de
+  procesos y objetos NT y la integración con KDE.
 
 ## Compilar y probar
 
@@ -34,6 +37,11 @@ liste `pe-x86-64`. El build genera `build/nt-counter.exe` y
 espera una función entregada por el anfitrión y no tiene un punto de entrada
 de aplicación Windows convencional. Para ejecutar la sonda Windows usa
 `tests/windows/qpc_reference.c` siguiendo la guía de validación.
+
+Con MinGW-w64 AMD64 instalado, `make check-pe-import` genera
+`build/nt-counter-import.exe`, muestra su tabla de importaciones y ejecuta
+el anfitrión `build/pe-import-host`. El anfitrión solo ejecuta el PE
+generado e incrustado en el build.
 
 La prueba Linux y el comando de diagnóstico se compilan por separado del PE.
 Puedes probar el destino del paquete sin privilegios con `make install
