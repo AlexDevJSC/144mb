@@ -58,7 +58,7 @@ jobs:
         run: |
           rpm_topdir="$PWD/build-rpm"
           mkdir -p "$rpm_topdir/SOURCES"
-          git archive --format=tar.gz --prefix=nt-native-linux-0.1.0/ HEAD \
+          git -c safe.directory="$PWD" archive --format=tar.gz --prefix=nt-native-linux-0.1.0/ HEAD \
             > "$rpm_topdir/SOURCES/nt-native-linux-0.1.0.tar.gz"
           rpmbuild --define "_topdir $rpm_topdir" -ba packaging/fedora/nt-native-linux.spec
           rpm -qpl "$rpm_topdir"/RPMS/x86_64/nt-native-linux-0.1.0-*.rpm > "$rpm_topdir/payload.txt"
