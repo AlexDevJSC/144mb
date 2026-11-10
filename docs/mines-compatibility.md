@@ -271,6 +271,11 @@ la entrega de `WM_COMMAND` con `lParam` igual a cero.
 Se mantienen los límites de la representación dentro de la ventana SDL y
 el alcance del teclado definido por esas pruebas.
 
+El uso de `DefDlgProcA` con el bloque de diálogo reservado identifica las
+ventanas de diálogo. Una ventana ordinaria con bytes adicionales conserva
+la entrega de Intro y Escape a su procedimiento. La prueba de teclado cubre
+esta distinción tras la revisión del PR.
+
 En el ejecutable original se seleccionaron mediante eventos SDL de clic y
 rueda `New`, `Restart`, `About`, `Specific`, `Random Seed`, `Custom`,
 `Preferences`, el tablero cuadrado de 16 × 16 con 40 minas y el tablero

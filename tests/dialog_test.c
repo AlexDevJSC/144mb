@@ -22,6 +22,7 @@
 enum { ID_EDIT = 91, ID_CHECK = 92, ID_CHOICE = 93 };
 static uintptr_t command_control, capture_changed, capture_target;
 static uintptr_t command_value;
+static unsigned int ordinary_keys;
 
 static uint32_t last_error(void)
 {
@@ -35,6 +36,8 @@ static intptr_t NT_MS_ABI window_proc(uintptr_t window, uint32_t message, uintpt
         capture_changed = window;
         capture_target = (uintptr_t)lparam;
     }
+    if (message == NT_WM_KEYDOWN && (wparam == 0x1b || wparam == 0x0d))
+        ++ordinary_keys;
     return nt_DefWindowProcA(window, message, wparam, lparam);
 }
 
@@ -62,6 +65,18 @@ static void check_extra_window_memory(void)
     const uintptr_t second = nt_CreateWindowExA(0, type.name, "Independent extra bytes", 0,
                                                 0, 0, 80, 60, 0, 0, 0, NULL);
     CHECK(first != 0 && second != 0);
+    CHECK(!nt_runtime_dialog_window(first));
+    const SDL_Keycode keys[] = {SDLK_ESCAPE, SDLK_RETURN};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        SDL_Event event = {.type = SDL_KEYDOWN};
+        event.key.windowID = nt_runtime_window_id(first);
+        event.key.keysym.sym = keys[i];
+        CHECK(SDL_PushEvent(&event) == 1);
+        struct nt_message message;
+        CHECK(nt_GetMessageA(&message, first, NT_WM_KEYDOWN, NT_WM_KEYDOWN) == 1);
+        nt_DispatchMessageA(&message);
+    }
+    CHECK(ordinary_keys == 2);
     const intptr_t value = (intptr_t)UINT64_C(0x123456789abcdef0);
     nt_SetLastError(91);
     CHECK(nt_GetWindowLongPtrA(first, NT_DLGWINDOWEXTRA) == 0 && last_error() == 91);
@@ -76,7 +91,7 @@ static void check_extra_window_memory(void)
     type.name = "InvalidWindowExtraFixture";
     type.window_extra = -1;
     CHECK(nt_RegisterClassA(&type) == 0 && last_error() == NT_ERROR_INVALID_PARAMETER);
-    puts("PASS per-window extra bytes, unaligned offsets, isolation and boundary errors");
+    puts("PASS ordinary window keys, per-window extra bytes, unaligned offsets and boundary errors");
 }
 
 static void key_event(uint32_t window, SDL_Keycode key, uint16_t mods)

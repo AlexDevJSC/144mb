@@ -44,7 +44,7 @@ struct window {
     uint32_t style, exstyle;
     int width, height;
     unsigned int dc_users;
-    bool visible, enabled, destroying, painting, erase, invalidated;
+    bool visible, enabled, destroying, painting, erase, invalidated, dialog_window;
 };
 
 static pthread_mutex_t desktop_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -156,7 +156,7 @@ bool nt_runtime_window_enabled(uintptr_t handle)
 bool nt_runtime_dialog_window(uintptr_t handle)
 {
     const struct window *window = find_window(handle);
-    return window != NULL && window->type->definition.window_extra >= NT_DLGWINDOWEXTRA;
+    return window != NULL && window->dialog_window;
 }
 
 static struct window *require_window(uintptr_t handle)
@@ -630,6 +630,7 @@ intptr_t NT_MS_ABI nt_DefDlgProcA(uintptr_t handle, uint32_t message, uintptr_t 
     struct window *window = require_window(handle);
     if (window == NULL)
         return 0;
+    window->dialog_window = window->type->definition.window_extra >= NT_DLGWINDOWEXTRA;
     nt_window_proc dialog = NULL;
     if (nt_runtime_dialog_window(handle))
         dialog = (nt_window_proc)nt_GetWindowLongPtrA(handle, NT_DWLP_DLGPROC);
