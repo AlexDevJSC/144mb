@@ -208,7 +208,7 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         header_size == 0 || header_size > image_size || header_size > length ||
         header_size % file_align || !span(header_size, section_offset, (size_t)count * PE_SECTION_SIZE) ||
         entry_rva >= image_size || preferred == 0 ||
-        dir_count > (optional_length - PE_OPTIONAL_MIN) / 8 ||
+        dir_count > ((uint32_t)optional_length - PE_OPTIONAL_MIN) / 8u ||
         (subsystem != 2 && subsystem != 3))
         return fail(error, error_size, "Invalid image dimensions or optional header");
     struct directory directory[16];
