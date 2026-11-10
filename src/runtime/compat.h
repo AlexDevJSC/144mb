@@ -184,6 +184,39 @@ int32_t NT_MS_ABI nt_BitBlt(uintptr_t dest, int32_t x, int32_t y,
                            int32_t width, int32_t height, uintptr_t source,
                            int32_t source_x, int32_t source_y, uint32_t rop);
 
+struct nt_point { int32_t x, y; };
+struct nt_size { int32_t width, height; };
+struct nt_logfont {
+    int32_t height, width, escapement, orientation, weight;
+    uint8_t italic, underline, strike, charset, out_precision, clip_precision, quality, pitch;
+    char face[32];
+};
+struct nt_text_metrics {
+    int32_t height, ascent, descent, internal_leading, external_leading;
+    int32_t average_width, max_width, weight, overhang, dpi_x, dpi_y;
+    uint8_t first, last, replacement, break_char, italic, underline, strike, pitch, charset;
+};
+
+uintptr_t NT_MS_ABI nt_CreateFontA(int32_t height, int32_t width, int32_t escapement,
+                                 int32_t orientation, int32_t weight, uint32_t italic,
+                                 uint32_t underline, uint32_t strike, uint32_t charset,
+                                 uint32_t out_precision, uint32_t clip_precision, uint32_t quality,
+                                 uint32_t pitch, const char *face);
+uintptr_t NT_MS_ABI nt_CreateFontIndirectA(const struct nt_logfont *font);
+int32_t NT_MS_ABI nt_GetTextMetricsA(uintptr_t dc, struct nt_text_metrics *metrics);
+int32_t NT_MS_ABI nt_GetTextExtentPoint32A(uintptr_t dc, const char *text, int32_t count,
+                                         struct nt_size *size);
+int32_t NT_MS_ABI nt_GetTextExtentPoint32W(uintptr_t dc, const uint16_t *text, int32_t count,
+                                         struct nt_size *size);
+int32_t NT_MS_ABI nt_ExtTextOutW(uintptr_t dc, int32_t x, int32_t y, uint32_t options,
+                                const struct nt_rect *rect, const uint16_t *text,
+                                uint32_t count, const int32_t *advances);
+int32_t NT_MS_ABI nt_Ellipse(uintptr_t dc, int32_t left, int32_t top,
+                            int32_t right, int32_t bottom);
+int32_t NT_MS_ABI nt_Polygon(uintptr_t dc, const struct nt_point *points, int32_t count);
+int32_t NT_MS_ABI nt_Polyline(uintptr_t dc, const struct nt_point *points, int32_t count);
+int32_t NT_MS_ABI nt_GetDeviceCaps(uintptr_t dc, int32_t index);
+
 uintptr_t NT_MS_ABI nt_CreateMenu(void);
 int32_t NT_MS_ABI nt_AppendMenuA(uintptr_t menu, uint32_t flags, uintptr_t value,
                                  const char *label);

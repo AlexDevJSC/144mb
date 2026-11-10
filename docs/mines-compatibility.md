@@ -1,13 +1,13 @@
 # Compatibilidad de Mines en Linux
 
 El auditor leyó **197 importaciones directas** en 15 bibliotecas de
-`mines.exe`. La primera etapa agregó **74 equivalentes** y la segunda agregó **32**.
-Quedan **61 importaciones sin resolver**, incluida una por ordinal.
+`mines.exe`. La primera etapa agregó **74 equivalentes** y la segunda agregó **42**.
+Quedan **51 importaciones sin resolver**, incluida una por ordinal.
 
 | Estado | Base | Primera etapa | Segunda etapa |
 | --- | ---: | ---: | ---: |
-| Importaciones con un equivalente registrado | 30 | 104 | 136 |
-| Importaciones sin resolver | 167 | 93 | 61 |
+| Importaciones con un equivalente registrado | 30 | 104 | 146 |
+| Importaciones sin resolver | 167 | 93 | 51 |
 
 El recuento describe los puntos de entrada disponibles y sus perfiles
 probados. Las búsquedas que el programa haga en tiempo de ejecución
@@ -94,6 +94,7 @@ del resumen. El inventario se vuelve a generar con el auditor al añadir equival
 | Archivos Win32 y CRT | 3 | Cinco disposiciones de apertura de archivos regulares, lectura y escritura, compartición por inodo dentro del proceso y transferencia HANDLE → descriptor → flujo. El cierre tiene un único propietario. |
 | Arranque y cierre | 8 | Ruta y argumentos del ejecutable invitado, entorno copiado, salida normal con callbacks y salida rápida con código de 32 bits. La terminación se aplica al proceso Linux del fixture. |
 | Ventanas y entrada | 21 | Ventanas superiores, áreas cliente, dibujo con DC y recorte de daño, títulos ANSI 1252, mensajes de teclado y ratón, datos por ventana y área de trabajo. Los temporizadores existentes se pueden asociar a ventanas. |
+| Dibujo y texto GDI | 10 | Cairo y las fuentes de Linux producen medidas ANSI y UTF-16, glifos recortados, elipses, polígonos y polilíneas. Las capacidades del dispositivo describen el raster y el DPI lógico del perfil. |
 
 El perfil de archivos admite acceso genérico y compartición de lectura y
 escritura. La raíz de archivos, el entorno y la identidad del módulo son
@@ -136,13 +137,17 @@ Referencias de contrato del Windows SDK, fichas de 2018 a 2025.
 [Ventanas y mensajes](https://learn.microsoft.com/en-us/windows/win32/winmsg/windowing) ·
 [SDL 2](https://github.com/libsdl-org/SDL/tree/release-2.32.4).
 
+El perfil GDI usa fuentes del sistema y puede obtener métricas diferentes a las
+fuentes instaladas en otros entornos. La alineación inicial es superior
+izquierda y las opciones de texto comprobadas son recorte y fondo opaco.
+
 ## Inventario pendiente
 
 | Biblioteca | Pendientes | Símbolos |
 | --- | ---: | --- |
 | `USER32.dll` | 24 | `AdjustWindowRectEx`, `CheckDlgButton`, `CloseClipboard`, `DefDlgProcA`, `DrawMenuBar`, `EmptyClipboard`, `GetDlgItemTextA`, `GetMenu`, `GetMenuItemRect`, `GetSysColor`, `IsDialogMessageA`, `IsDlgButtonChecked`, `LoadCursorA`, `LoadIconA`, `MessageBeep`, `MessageBoxA`, `OpenClipboard`, `ReleaseCapture`, `SendDlgItemMessageA`, `SetCapture`, `SetClipboardData`, `SetForegroundWindow`, `SetMenu`, `WinHelpA` |
 | `KERNEL32.dll` | 5 | `RtlCaptureContext`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `SetUnhandledExceptionFilter`, `UnhandledExceptionFilter` |
-| `GDI32.dll` | 14 | `CreateFontA`, `CreateFontIndirectA`, `Ellipse`, `EndDoc`, `EndPage`, `ExtTextOutW`, `GetDeviceCaps`, `GetTextExtentPoint32A`, `GetTextExtentPoint32W`, `GetTextMetricsA`, `Polygon`, `Polyline`, `StartDocA`, `StartPage` |
+| `GDI32.dll` | 4 | `EndDoc`, `EndPage`, `StartDocA`, `StartPage` |
 | `COMDLG32.dll` | 3 | `GetOpenFileNameA`, `GetSaveFileNameA`, `PrintDlgA` |
 | `COMCTL32.dll` | 1 | `#17` |
 | `VCRUNTIME140.dll` | 3 | `__C_specific_handler`, `__current_exception`, `__current_exception_context` |

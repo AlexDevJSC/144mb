@@ -247,8 +247,16 @@ static bool present(struct window *window)
     if (!window->visible)
         return true;
     SDL_Surface *surface = SDL_GetWindowSurface(window->native);
-    if (surface == NULL || !resize_surface(window, surface->w, surface->h) ||
-        SDL_LockSurface(surface) != 0)
+    if (surface == NULL) {
+        if (*SDL_GetError() == '\0')
+            SDL_SetError("SDL window framebuffer unavailable");
+        return false;
+    }
+    if (!resize_surface(window, surface->w, surface->h)) {
+        SDL_SetError("GDI surface resize to %dx%d failed", surface->w, surface->h);
+        return false;
+    }
+    if (SDL_LockSurface(surface) != 0)
         return false;
     const bool copied = nt_runtime_read_surface(window->dc, copy_to_native, surface);
     SDL_UnlockSurface(surface);

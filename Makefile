@@ -10,9 +10,11 @@ MINGW_CC ?= x86_64-w64-mingw32-gcc
 PKG_CONFIG ?= pkg-config
 DESKTOP_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags sdl2)
 DESKTOP_LIBS ?= $(shell $(PKG_CONFIG) --libs sdl2)
+GDI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags cairo)
+GDI_LIBS ?= $(shell $(PKG_CONFIG) --libs cairo)
 RUNTIME_PARTS = exports system global_memory unicode crt guest_files process gdi_memory menus messages desktop
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/counter.o
-RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS)
+RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
 PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-insert-timestamp \
                      -Wl,--disable-reloc-section,--disable-dynamicbase,--strip-all
@@ -33,6 +35,7 @@ $(BUILD_DIR)/runtime-%.o: src/runtime/%.c src/runtime/compat.h include/ntnative/
 
 $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-messages.o $(BUILD_DIR)/runtime-exports.o: src/runtime/desktop.h
 $(BUILD_DIR)/runtime-desktop.o: CPPFLAGS += $(DESKTOP_CFLAGS)
+$(BUILD_DIR)/runtime-gdi_memory.o: CPPFLAGS += $(GDI_CFLAGS)
 
 $(BUILD_DIR)/pe-import-audit: src/tools/pe_import_audit.c src/pe/imports.c $(RUNTIME_OBJECTS) \
     src/pe/imports.h src/pe/pe_bytes.h include/ntnative/runtime.h | $(BUILD_DIR)

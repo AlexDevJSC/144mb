@@ -21,6 +21,12 @@ Weston como compositor Wayland de prueba.
 [SDL 2.32.4](https://github.com/libsdl-org/SDL/tree/release-2.32.4) ·
 [Licencia SDL](https://github.com/libsdl-org/SDL/blob/release-2.32.4/LICENSE.txt).
 
+El rasterizador GDI consume Cairo 1.18.4 de Linux y obtiene tipografías
+del sistema mediante el backend de fuentes de Cairo. Cairo tiene licencia
+MPL-1.1 o LGPL-2.1-only y se enlaza como biblioteca de la distribución.
+[Licencias de Cairo](https://www.cairographics.org/FAQ/#what-is-cairo-license) ·
+[DejaVu Fonts](https://dejavu-fonts.github.io/).
+
 ## Proyectos y dependencias
 
 | Componente | Clasificación | Evidencia, dependencia y restricciones |

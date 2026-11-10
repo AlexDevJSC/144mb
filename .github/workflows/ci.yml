@@ -19,7 +19,7 @@ jobs:
       - name: Install Linux build and desktop test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64-posix libsdl2-dev weston
+          sudo apt-get install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libcairo2-dev weston fonts-dejavu-core
           x86_64-w64-mingw32-gcc --version
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 check check-pe check-pe-import
@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install Fedora build tools in the CI container
-        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip 'pkgconfig(sdl2)'
+        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip 'pkgconfig(sdl2)' 'pkgconfig(cairo)' dejavu-sans-fonts
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false

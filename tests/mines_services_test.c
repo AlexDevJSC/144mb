@@ -171,10 +171,73 @@ static void check_exit(void)
     puts("PASS guest termination, callback order and full 32-bit status from Linux child");
 }
 
+static void check_graphics(void)
+{
+    BOUND("gdi32.dll", "CreateFontA", nt_CreateFontA);
+    BOUND("gdi32.dll", "CreateFontIndirectA", nt_CreateFontIndirectA);
+    BOUND("gdi32.dll", "Ellipse", nt_Ellipse);
+    BOUND("gdi32.dll", "ExtTextOutW", nt_ExtTextOutW);
+    BOUND("gdi32.dll", "GetDeviceCaps", nt_GetDeviceCaps);
+    BOUND("gdi32.dll", "GetTextExtentPoint32A", nt_GetTextExtentPoint32A);
+    BOUND("gdi32.dll", "GetTextExtentPoint32W", nt_GetTextExtentPoint32W);
+    BOUND("gdi32.dll", "GetTextMetricsA", nt_GetTextMetricsA);
+    BOUND("gdi32.dll", "Polygon", nt_Polygon);
+    BOUND("gdi32.dll", "Polyline", nt_Polyline);
+    enum { RED = 0x0000ff, WHITE = 0xffffff };
+    const uintptr_t dc = nt_runtime_create_surface(120, 80);
+    CHECK(dc != 0 && nt_GetDeviceCaps(dc, 8) == 120 && nt_GetDeviceCaps(dc, 10) == 80 &&
+          nt_GetDeviceCaps(dc, 12) == 32 && nt_GetDeviceCaps(dc, 88) == 96);
+    const uintptr_t brush = nt_CreateSolidBrush(RED);
+    const uintptr_t pen = nt_CreatePen(0, 1, WHITE);
+    const uintptr_t old_brush = nt_SelectObject(dc, brush), old_pen = nt_SelectObject(dc, pen);
+    CHECK(brush != 0 && pen != 0 && old_brush != 0 && old_pen != 0);
+    CHECK(nt_Ellipse(dc, 2, 2, 18, 18) && nt_runtime_read_pixel(dc, 10, 10) == RED &&
+          nt_runtime_read_pixel(dc, 18, 18) == 0);
+    const struct nt_point triangle[] = {{20, 2}, {36, 2}, {26, 18}};
+    const struct nt_point line[] = {{40, 2}, {56, 2}, {56, 20}};
+    CHECK(nt_Polygon(dc, triangle, 3) && nt_runtime_read_pixel(dc, 26, 6) == RED);
+    CHECK(nt_Polyline(dc, line, 3) && nt_runtime_read_pixel(dc, 46, 2) == WHITE &&
+          nt_runtime_read_pixel(dc, 56, 10) == WHITE && nt_runtime_read_pixel(dc, 45, 10) == 0);
+    CHECK(!nt_Polygon(dc, triangle, 2) && last_error() == NT_ERROR_INVALID_PARAMETER);
+
+    const uintptr_t bold = nt_CreateFontA(-18, 0, 0, 0, 700, 1, 0, 0, 0, 0, 0, 0, 0,
+                                         "DejaVu Sans");
+    const struct nt_logfont definition = {.height = -20, .weight = 400, .face = "DejaVu Sans"};
+    const uintptr_t normal = nt_CreateFontIndirectA(&definition);
+    CHECK(bold != 0 && normal != 0 && nt_SelectObject(dc, bold) == nt_GetStockObject(13));
+    struct nt_text_metrics metrics;
+    CHECK(nt_GetTextMetricsA(dc, &metrics) && metrics.weight == 700 && metrics.italic &&
+          metrics.ascent > 0 && metrics.height == metrics.ascent + metrics.descent);
+    CHECK(!nt_DeleteObject(bold) && last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_SelectObject(dc, normal) == bold && nt_DeleteObject(bold));
+    const uint16_t wide[] = {'C', 'a', 'f', 0xe9};
+    struct nt_size narrow_size, wide_size;
+    CHECK(nt_GetTextExtentPoint32A(dc, "Caf\xe9", 4, &narrow_size) &&
+          nt_GetTextExtentPoint32W(dc, wide, 4, &wide_size) &&
+          narrow_size.width > 0 && narrow_size.width == wide_size.width &&
+          narrow_size.height == wide_size.height);
+    const struct nt_rect text = {1, 30, 30, 62};
+    CHECK(nt_ExtTextOutW(dc, 2, 31, 2 | 4, &text, wide, 4, NULL));
+    unsigned int black = 0, white = 0;
+    for (int y = text.top; y < text.bottom; ++y) {
+        for (int x = text.left; x < text.right; ++x) {
+            const uint32_t pixel = nt_runtime_read_pixel(dc, x, y);
+            black += pixel == 0;
+            white += pixel == WHITE;
+        }
+    }
+    CHECK(black > 0 && white > black && nt_runtime_read_pixel(dc, text.right, 45) == 0);
+    CHECK(!nt_ExtTextOutW(dc, 0, 0, 0x10, NULL, wide, 4, NULL) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
+    CHECK(nt_DeleteDC(dc) && nt_DeleteObject(normal) && nt_DeleteObject(brush) && nt_DeleteObject(pen));
+    puts("PASS Cairo fonts, ANSI/UTF-16 metrics, clipped glyphs and GDI shape pixels");
+}
+
 int main(void)
 {
     check_file_handles();
     check_startup();
     check_exit();
+    check_graphics();
     return EXIT_SUCCESS;
 }

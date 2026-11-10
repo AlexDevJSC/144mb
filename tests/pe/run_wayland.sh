@@ -6,7 +6,9 @@ runtime=$(mktemp -d /tmp/ntnative-wayland.XXXXXX)
 export XDG_RUNTIME_DIR="$runtime"
 export WAYLAND_DISPLAY=ntnative-test
 export SDL_VIDEODRIVER=wayland
-export SDL_FRAMEBUFFER_ACCELERATION=0
+export SDL_FRAMEBUFFER_ACCELERATION=1
+export SDL_VIDEO_WAYLAND_PREFER_LIBDECOR=0
+export LIBGL_ALWAYS_SOFTWARE=1
 
 cleanup() {
     status=$?
