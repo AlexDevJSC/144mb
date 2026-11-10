@@ -68,9 +68,9 @@ static bool dir_read(const unsigned char *opt, size_t opt_size,
 static bool relocate(unsigned char *base, size_t size, int64_t delta,
                      struct directory reloc)
 {
-    if (delta == 0)
-        return true;
-    if (reloc.size == 0 || !span(size, reloc.rva, reloc.size))
+    if (reloc.size == 0)
+        return delta == 0;
+    if (!span(size, reloc.rva, reloc.size))
         return false;
     size_t offset = reloc.rva, end = offset + reloc.size;
     while (offset < end) {
