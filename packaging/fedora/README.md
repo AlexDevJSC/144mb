@@ -60,8 +60,11 @@ make install DESTDIR="$PWD/build-stage" PREFIX=/usr
 
 La carga PE y el aislamiento siguen siendo experimentales. Se verificaron
 una victoria y una derrota con Mines en Linux fuera de pantalla mediante
-un arnés aislado. La ejecución en Fedora KDE Wayland sobre un portátil
-sigue pendiente. [Contrato del cargador](../../docs/isolated-loader.md).
+un arnés aislado. El usuario ha confirmado ambos finales en un portátil
+Fedora KDE Wayland y ha comunicado fallos de menús. Las correcciones de
+diálogos y menús tienen pruebas genéricas y comprobaciones adicionales del
+Mines original en Linux fuera de pantalla. La revisión actual requiere
+repetir los menús en el portátil. [Contrato del cargador](../../docs/isolated-loader.md).
 
 La integración del escritorio tiene su propio hito. El paquete de laboratorio
 puede instalarse sin registrar manejadores MIME, servicios, reglas de

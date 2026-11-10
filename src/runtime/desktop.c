@@ -13,7 +13,7 @@
 
 enum {
     MAX_CLASSES = 64, MAX_WINDOWS = 32, MAX_MESSAGES = 256, MAX_TITLE = 4096,
-    MAX_SIZE = 4096, CLASS_ATOM = 0xc000,
+    MAX_SIZE = 4096, MAX_WINDOW_EXTRA = 65536, CLASS_ATOM = 0xc000,
     WS_CAPTION = 0x00c00000, WS_VISIBLE = 0x10000000, WS_DISABLED = 0x08000000,
     WS_THICKFRAME = 0x00040000, WS_EX_TOPMOST = 8, WS_EX_APPWINDOW = 0x00040000,
     CS_DBLCLKS = 8, SRCCOPY = 0x00cc0020, PATCOPY = 0x00f00021
@@ -30,19 +30,21 @@ struct window_class {
 
 struct window {
     uintptr_t handle, dc, instance, owner;
-    uintptr_t menu, popup;
+    uintptr_t menu;
+    struct nt_menu_popup popups[NT_MENU_DEPTH];
+    size_t popup_count;
     struct window_class *type;
-    nt_window_proc proc, dialog;
+    nt_window_proc proc;
     SDL_Window *native;
     char *title;
+    unsigned char *extra;
     struct nt_rect dirty;
-    intptr_t userdata, dialog_result, dialog_user;
+    intptr_t userdata;
     uint16_t default_id;
     uint32_t style, exstyle;
     int width, height;
-    int popup_x;
     unsigned int dc_users;
-    bool visible, enabled, destroying, painting, erase, invalidated;
+    bool visible, enabled, destroying, painting, erase, invalidated, dialog_window;
 };
 
 static pthread_mutex_t desktop_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -154,7 +156,7 @@ bool nt_runtime_window_enabled(uintptr_t handle)
 bool nt_runtime_dialog_window(uintptr_t handle)
 {
     const struct window *window = find_window(handle);
-    return window != NULL && window->type->definition.window_extra >= NT_DLGWINDOWEXTRA;
+    return window != NULL && window->dialog_window;
 }
 
 static struct window *require_window(uintptr_t handle)
@@ -207,8 +209,11 @@ uint16_t NT_MS_ABI nt_RegisterClassA(const struct nt_window_class *definition)
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
+    if (definition->window_extra < 0 || definition->window_extra > MAX_WINDOW_EXTRA) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
     if (definition->class_extra != 0 ||
-        (definition->window_extra != 0 && definition->window_extra != NT_DLGWINDOWEXTRA) ||
         definition->menu != NULL ||
         (definition->cursor != 0 && nt_runtime_cursor(definition->cursor) == NULL) ||
         (definition->icon != 0 && nt_runtime_icon(definition->icon) == NULL)) {
@@ -272,6 +277,7 @@ static void release_window(struct window *window)
     SDL_DestroyWindow(window->native);
     nt_DeleteDC(window->dc);
     free(window->title);
+    free(window->extra);
     *window = (struct window){0};
 }
 
@@ -342,6 +348,8 @@ static bool resize_surface(struct window *window, int width, int height)
     window->dc = resized;
     window->width = width;
     window->height = height;
+    for (size_t i = 0; i < window->popup_count; ++i)
+        window->popups[i].first = 0;
     window->invalidated = false;
     invalidate(window, NULL, true);
     return true;
@@ -368,7 +376,7 @@ static bool present(struct window *window)
     const bool copied = nt_runtime_read_surface(window->dc, copy_to_native, &target) &&
                         nt_runtime_draw_controls(surface, window->handle, offset) &&
                         (window->menu == 0 || nt_runtime_draw_menu(surface, window->menu,
-                                                                  window->popup, window->popup_x));
+                                                                  window->popups, window->popup_count));
     SDL_UnlockSurface(surface);
     return copied && SDL_UpdateWindowSurface(window->native) == 0;
 }
@@ -447,9 +455,12 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
     }
     char *utf8 = nt_runtime_ansi_to_utf8(title, title_length);
     char *copy = strdup(title);
-    if (utf8 == NULL || copy == NULL) {
+    const size_t extra_size = (size_t)type->definition.window_extra;
+    unsigned char *extra = extra_size != 0 ? calloc(1, extra_size) : NULL;
+    if (utf8 == NULL || copy == NULL || (extra_size != 0 && extra == NULL)) {
         free(utf8);
         free(copy);
+        free(extra);
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
@@ -469,6 +480,7 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
         if (native != NULL)
             SDL_DestroyWindow(native);
         free(copy);
+        free(extra);
         nt_SetLastError(native == NULL ? NT_ERROR_GEN_FAILURE : NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
@@ -480,7 +492,7 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
     next_handle += 16;
     *window = (struct window){
         .handle = handle, .dc = dc, .instance = instance, .type = type, .owner = parent,
-        .proc = type->definition.proc, .native = native, .title = copy,
+        .proc = type->definition.proc, .native = native, .title = copy, .extra = extra,
         .style = style & ~WS_VISIBLE, .exstyle = exstyle, .width = width, .height = height,
         .enabled = (style & WS_DISABLED) == 0
     };
@@ -618,20 +630,24 @@ intptr_t NT_MS_ABI nt_DefDlgProcA(uintptr_t handle, uint32_t message, uintptr_t 
     struct window *window = require_window(handle);
     if (window == NULL)
         return 0;
-    if (window->dialog != NULL) {
-        window->dialog_result = 0;
-        const intptr_t handled = window->dialog(handle, message, wparam, lparam);
+    window->dialog_window = window->type->definition.window_extra >= NT_DLGWINDOWEXTRA;
+    nt_window_proc dialog = NULL;
+    if (nt_runtime_dialog_window(handle))
+        dialog = (nt_window_proc)nt_GetWindowLongPtrA(handle, NT_DWLP_DLGPROC);
+    if (dialog != NULL) {
+        nt_SetWindowLongPtrA(handle, NT_DWLP_MSGRESULT, 0);
+        const intptr_t handled = dialog(handle, message, wparam, lparam);
         if (message == NT_WM_INITDIALOG || message == 0x39 ||
             message == 0x2e || message == 0x2f || (message >= 0x132 && message <= 0x138))
             return handled;
         if (window->handle != handle)
             return 0;
         if (handled != 0)
-            return window->dialog_result;
+            return nt_GetWindowLongPtrA(handle, NT_DWLP_MSGRESULT);
     }
     switch (message) {
     case NT_WM_CLOSE:
-        if (window->dialog != NULL)
+        if (dialog != NULL)
             nt_SendMessageA(handle, NT_WM_COMMAND, NT_IDCANCEL, 0);
         else
             nt_DestroyWindow(handle);
@@ -719,7 +735,7 @@ int32_t NT_MS_ABI nt_SetMenu(uintptr_t handle, uintptr_t menu)
     }
     nt_runtime_detach_menu(window->menu, handle, false);
     window->menu = menu;
-    window->popup = 0;
+    window->popup_count = 0;
     invalidate(window, NULL, true);
     return 1;
 }
@@ -748,13 +764,18 @@ int32_t NT_MS_ABI nt_GetMenuItemRect(uintptr_t handle, uintptr_t menu, uint32_t 
     const struct window *window = require_window(handle);
     if (window == NULL)
         return 0;
-    if (rect == NULL || menu == 0 || (menu != window->menu && menu != window->popup)) {
+    const struct nt_menu_popup *position = NULL;
+    for (size_t i = 0; i < window->popup_count; ++i) {
+        if (window->popups[i].menu == menu)
+            position = &window->popups[i];
+    }
+    if (rect == NULL || menu == 0 || (menu != window->menu && position == NULL)) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
     struct nt_menu_view_item entry;
     struct nt_rect row;
-    if (!nt_runtime_menu_bounds(menu, menu == window->menu ? -1 : window->popup_x,
+    if (!nt_runtime_menu_bounds(menu, position,
                                window->width, window->height + menu_height(window), item,
                                &row, &entry)) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
@@ -981,11 +1002,18 @@ intptr_t NT_MS_ABI nt_GetWindowLongPtrA(uintptr_t handle, int32_t index)
     case -16: return (int32_t)window->style;
     case -20: return (int32_t)window->exstyle;
     case -21: return window->userdata;
-    case NT_DWLP_MSGRESULT: if (nt_runtime_dialog_window(handle)) return window->dialog_result; break;
-    case NT_DWLP_DLGPROC: if (nt_runtime_dialog_window(handle)) return (intptr_t)window->dialog; break;
-    case NT_DWLP_USER: if (nt_runtime_dialog_window(handle)) return window->dialog_user; break;
     default:
         break;
+    }
+    if (index >= 0) {
+        const size_t size = (size_t)window->type->definition.window_extra;
+        if ((size_t)index <= size && sizeof(intptr_t) <= size - (size_t)index) {
+            intptr_t value;
+            memcpy(&value, window->extra + index, sizeof(value));
+            return value;
+        }
+        nt_SetLastError(NT_ERROR_INVALID_INDEX);
+        return 0;
     }
     nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
     return 0;
@@ -1006,18 +1034,16 @@ intptr_t NT_MS_ABI nt_SetWindowLongPtrA(uintptr_t handle, int32_t index, intptr_
         window->proc = (nt_window_proc)value;
         return previous;
     }
-    if (nt_runtime_dialog_window(handle)) {
-        if (index == NT_DWLP_DLGPROC) {
-            const intptr_t previous = (intptr_t)window->dialog;
-            window->dialog = (nt_window_proc)value;
+    if (index >= 0) {
+        const size_t size = (size_t)window->type->definition.window_extra;
+        if ((size_t)index <= size && sizeof(intptr_t) <= size - (size_t)index) {
+            intptr_t previous;
+            memcpy(&previous, window->extra + index, sizeof(previous));
+            memcpy(window->extra + index, &value, sizeof(value));
             return previous;
         }
-        if (index == NT_DWLP_USER || index == NT_DWLP_MSGRESULT) {
-            intptr_t *slot = index == NT_DWLP_USER ? &window->dialog_user : &window->dialog_result;
-            const intptr_t previous = *slot;
-            *slot = value;
-            return previous;
-        }
+        nt_SetLastError(NT_ERROR_INVALID_INDEX);
+        return 0;
     }
     nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
     return 0;
@@ -1149,52 +1175,125 @@ static uintptr_t mouse_keys(uint32_t state)
            ((modifiers & KMOD_CTRL) != 0 ? 8u : 0u);
 }
 
+static void close_popups(struct window *window, size_t keep)
+{
+    const uintptr_t handle = window->handle;
+    uintptr_t closed[NT_MENU_DEPTH];
+    const size_t count = window->popup_count;
+    for (size_t i = keep; i < count; ++i)
+        closed[i] = window->popups[i].menu;
+    window->popup_count = keep;
+    for (size_t i = count; i > keep && window->handle == handle; --i)
+        nt_SendMessageA(handle, NT_WM_UNINITMENUPOPUP, closed[i - 1], 0);
+}
+
+static bool open_popup(struct window *window, uintptr_t menu, uint32_t index,
+                        int x, int y, size_t depth)
+{
+    if (depth >= NT_MENU_DEPTH) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return false;
+    }
+    const uintptr_t handle = window->handle, bar = window->menu;
+    if (window->popup_count == 0)
+        nt_SendMessageA(handle, NT_WM_INITMENU, bar, 0);
+    if (window->handle != handle || window->menu != bar || depth > window->popup_count)
+        return false;
+    close_popups(window, depth);
+    if (window->handle != handle || window->menu != bar || window->popup_count != depth)
+        return false;
+    nt_SendMessageA(handle, NT_WM_INITMENUPOPUP, menu, index);
+    if (window->handle != handle || window->menu != bar || nt_GetMenuItemCount(menu) <= 0)
+        return false;
+    window->popups[depth] = (struct nt_menu_popup){.menu = menu, .x = x, .y = y};
+    window->popup_count = depth + 1;
+    return true;
+}
+
 static bool menu_pointer(struct window *window, int x, int y, bool released)
 {
     if (window->menu == 0)
         return false;
+    const uintptr_t handle = window->handle;
     if (y < NT_MENU_HEIGHT) {
         if (released) {
-            const uintptr_t previous = window->popup;
-            window->popup = 0;
+            bool opened = false;
             for (uint32_t i = 0; ; ++i) {
                 struct nt_menu_view_item item;
                 struct nt_rect row;
-                if (!nt_runtime_menu_bounds(window->menu, -1, window->width,
+                if (!nt_runtime_menu_bounds(window->menu, NULL, window->width,
                                            window->height + NT_MENU_HEIGHT, i, &row, &item))
                     break;
                 if (x < row.left || x >= row.right)
                     continue;
                 if ((item.flags & (NT_MENU_DISABLED | NT_MENU_SEPARATOR)) == 0) {
                     if (item.submenu != 0) {
-                        window->popup = previous != item.submenu ? item.submenu : 0;
-                        window->popup_x = row.left;
+                        const bool same = window->popup_count != 0 &&
+                                          window->popups[0].menu == item.submenu;
+                        if (!same)
+                            opened = open_popup(window, item.submenu, i, row.left, NT_MENU_HEIGHT, 0);
                     } else {
-                        enqueue(window, NT_WM_COMMAND, item.id & UINT16_MAX, 0, 0, 0, 0);
+                        close_popups(window, 0);
+                        if (window->handle == handle)
+                            enqueue(window, NT_WM_COMMAND, item.id & UINT16_MAX, 0, 0, 0, 0);
                     }
                 }
                 break;
             }
-            nt_DrawMenuBar(window->handle);
+            if (!opened && window->handle == handle)
+                close_popups(window, 0);
+            if (window->handle == handle)
+                nt_DrawMenuBar(handle);
         }
         return true;
     }
-    if (window->popup != 0) {
-        const uint32_t index = (uint32_t)(y - NT_MENU_HEIGHT) / NT_MENU_ROW;
-        struct nt_menu_view_item item;
-        struct nt_rect row;
-        const bool hit = nt_runtime_menu_bounds(window->popup, window->popup_x, window->width,
-                                                window->height + NT_MENU_HEIGHT, index, &row, &item) &&
-                         x >= row.left && x < row.right && y < row.bottom;
-        if (released) {
-            window->popup = 0;
-            if (hit && item.submenu == 0 && (item.flags & (NT_MENU_DISABLED | NT_MENU_SEPARATOR)) == 0)
-                enqueue(window, NT_WM_COMMAND, item.id & UINT16_MAX, 0, 0, 0, 0);
-            nt_DrawMenuBar(window->handle);
-        }
+    if (window->popup_count == 0)
+        return false;
+    if (!released)
         return true;
+    for (size_t depth = window->popup_count; depth > 0; --depth) {
+        const struct nt_menu_popup *popup = &window->popups[depth - 1];
+        for (uint32_t i = popup->first; ; ++i) {
+            struct nt_menu_view_item item;
+            struct nt_rect row;
+            if (!nt_runtime_menu_bounds(popup->menu, popup, window->width,
+                                        window->height + NT_MENU_HEIGHT, i, &row, &item))
+                break;
+            if (x < row.left || x >= row.right || y < row.top || y >= row.bottom)
+                continue;
+            if ((item.flags & (NT_MENU_DISABLED | NT_MENU_SEPARATOR)) == 0) {
+                if (item.submenu != 0) {
+                    open_popup(window, item.submenu, i, row.right, row.top, depth);
+                } else {
+                    close_popups(window, 0);
+                    if (window->handle == handle)
+                        enqueue(window, NT_WM_COMMAND, item.id & UINT16_MAX, 0, 0, 0, 0);
+                }
+            }
+            if (window->handle == handle)
+                nt_DrawMenuBar(handle);
+            return true;
+        }
     }
-    return false;
+    close_popups(window, 0);
+    if (window->handle == handle)
+        nt_DrawMenuBar(handle);
+    return true;
+}
+
+static void scroll_popup(struct window *window, int delta)
+{
+    if (window->popup_count == 0)
+        return;
+    struct nt_menu_popup *popup = &window->popups[window->popup_count - 1];
+    const int count = nt_GetMenuItemCount(popup->menu);
+    const int capacity = window->height / NT_MENU_ROW;
+    if (count <= 0 || capacity <= 0)
+        return;
+    const int64_t next = (int64_t)popup->first - delta;
+    const int limit = count > capacity ? count - capacity : 0;
+    popup->first = next < 0 ? 0 : next > limit ? (uint32_t)limit : (uint32_t)next;
+    nt_DrawMenuBar(window->handle);
 }
 
 static struct window *pointer_window(uint32_t native_id, int *x, int *y)
@@ -1246,9 +1345,11 @@ static void translate_event(const SDL_Event *event)
         window = window_from_id(event->key.windowID);
         if (window != NULL && window->enabled) {
             const bool down = event->type == SDL_KEYDOWN;
-            if (down && event->key.keysym.sym == SDLK_ESCAPE && window->popup != 0) {
-                window->popup = 0;
-                nt_DrawMenuBar(window->handle);
+            if (down && event->key.keysym.sym == SDLK_ESCAPE && window->popup_count != 0) {
+                const uintptr_t handle = window->handle;
+                close_popups(window, window->popup_count - 1);
+                if (window->handle == handle)
+                    nt_DrawMenuBar(handle);
                 break;
             }
             const unsigned int key = virtual_key(event->key.keysym.sym);
@@ -1259,11 +1360,20 @@ static void translate_event(const SDL_Event *event)
                          0, 0, down ? key_character(event->key.keysym.sym, event->key.keysym.mod) : 0);
         }
         break;
+    case SDL_MOUSEWHEEL:
+        window = window_from_id(event->wheel.windowID);
+        if (window != NULL && window->enabled) {
+            int delta = event->wheel.y;
+            if (event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED)
+                delta = delta == INT_MIN ? INT_MAX : -delta;
+            scroll_popup(window, delta);
+        }
+        break;
     case SDL_MOUSEMOTION: {
         int x = event->motion.x, y = event->motion.y;
         window = pointer_window(event->motion.windowID, &x, &y);
         if (window != NULL && window->enabled &&
-            (capture != 0 || (y >= menu_height(window) && window->popup == 0))) {
+            (capture != 0 || (y >= menu_height(window) && window->popup_count == 0))) {
             y -= menu_height(window);
             enqueue(window, NT_WM_MOUSEMOVE, mouse_keys(event->motion.state),
                      pair(x, y), x, y, 0);
@@ -1282,7 +1392,7 @@ static void translate_event(const SDL_Event *event)
                 menu_pointer(window, x, y, !down))
                 break;
             y -= menu_height(window);
-            if (capture == 0 && (y < 0 || window->popup != 0))
+            if (capture == 0 && (y < 0 || window->popup_count != 0))
                 break;
             const uint32_t mask = SDL_BUTTON(event->button.button);
             const uint32_t current = SDL_GetMouseState(NULL, NULL);

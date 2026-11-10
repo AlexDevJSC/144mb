@@ -8,11 +8,13 @@ las instrucciones AMD64 del invitado se ejecutan en el procesador Linux,
 y las importaciones resueltas llaman a equivalentes del runtime propio.
 
 La cobertura **197/197 importaciones directas** de Mines procede del
-auditor previo; no demuestra compatibilidad de comportamiento ni arranque
-del juego. En este cambio, el fixture sintético verifica el mapeo de
+auditor previo y mide símbolos con equivalente registrado. El fixture sintético verifica el mapeo de
 varias secciones, una relocación DIR64, la IAT, callbacks TLS sin datos, puente GS/TEB/PEB mínimo y una llamada MS x64 real
-y el rechazo temprano de imágenes malformadas. La ejecución del Mines
-original **no se ha verificado** en una sesión con aislamiento operativo. Se debe comprobar tanto la entrada como una partida jugable.
+y el rechazo temprano de imágenes malformadas. Posteriormente se completaron
+una victoria y una derrota del Mines original con un arnés aislado en Linux
+fuera de pantalla. El usuario ha confirmado ambos finales en su portátil
+Fedora KDE y ha comunicado fallos de menús. La revisión de esos fallos y el
+alcance funcional están en [Compatibilidad de Mines](mines-compatibility.md).
 
 ### Operaciones implementadas
 

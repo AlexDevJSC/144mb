@@ -44,13 +44,13 @@ static int item_width(const struct nt_menu_view_item *item)
     return 18 + label_width(item->label, NULL) * 8;
 }
 
-bool nt_runtime_menu_bounds(uintptr_t menu, int popup_x, int width, int height,
+bool nt_runtime_menu_bounds(uintptr_t menu, const struct nt_menu_popup *popup, int width, int height,
                             uint32_t index, struct nt_rect *rect, struct nt_menu_view_item *item)
 {
     if (!nt_runtime_menu_item(menu, index, item) || width <= 0 || height < NT_MENU_HEIGHT)
         return false;
     struct nt_menu_view_item entry;
-    if (popup_x < 0) {
+    if (popup == NULL) {
         int x = 0;
         for (uint32_t i = 0; i < index && nt_runtime_menu_item(menu, i, &entry); ++i)
             x += item_width(&entry);
@@ -59,16 +59,22 @@ bool nt_runtime_menu_bounds(uintptr_t menu, int popup_x, int width, int height,
     } else {
         int popup_width = 48;
         for (uint32_t i = 0; nt_runtime_menu_item(menu, i, &entry); ++i) {
-            const int row_width = 16 + item_width(&entry);
+            const int row_width = 32 + item_width(&entry);
             if (row_width > popup_width)
                 popup_width = row_width;
         }
         if (popup_width > width)
             popup_width = width;
-        const int x = popup_x + popup_width > width ? width - popup_width : popup_x;
-        const int y = NT_MENU_HEIGHT + (int)index * NT_MENU_ROW;
-        const int bottom = y + NT_MENU_ROW;
-        *rect = (struct nt_rect){x, y, x + popup_width, bottom < height ? bottom : height};
+        const int count = nt_GetMenuItemCount(menu);
+        const int capacity = (height - NT_MENU_HEIGHT) / NT_MENU_ROW;
+        const int visible = count < capacity ? count : capacity;
+        if (visible <= 0 || index < popup->first || index - popup->first >= (uint32_t)visible)
+            return false;
+        const int x = popup->x + popup_width > width ? width - popup_width : popup->x;
+        const int top = popup->y + visible * NT_MENU_ROW > height ?
+                        height - visible * NT_MENU_ROW : popup->y;
+        const int y = top + (int)(index - popup->first) * NT_MENU_ROW;
+        *rect = (struct nt_rect){x, y, x + popup_width, y + NT_MENU_ROW};
     }
     return rect->left < rect->right && rect->top < rect->bottom;
 }
@@ -109,22 +115,28 @@ static bool paint_row(cairo_t *draw, struct nt_rect rect, const struct nt_menu_v
         cairo_move_to(draw, rect.left + (popup ? 18 : 8), rect.top + 16);
         cairo_show_text(draw, utf8);
         free(utf8);
+        if (popup && item->submenu != 0) {
+            cairo_move_to(draw, rect.right - 12, rect.top + 16);
+            cairo_show_text(draw, ">");
+        }
     }
     cairo_restore(draw);
     return cairo_status(draw) == CAIRO_STATUS_SUCCESS;
 }
 
-static bool draw_part(SDL_Surface *surface, uintptr_t menu, uintptr_t active, int popup_x)
+static bool draw_part(SDL_Surface *surface, uintptr_t menu, uintptr_t active,
+                       const struct nt_menu_popup *position)
 {
-    const bool popup = popup_x >= 0;
+    const bool popup = position != NULL;
+    const uint32_t first = popup ? position->first : 0;
     struct nt_menu_view_item item;
     struct nt_rect region = {0, 0, surface->w, NT_MENU_HEIGHT};
     if (popup) {
-        if (!nt_runtime_menu_bounds(menu, popup_x, surface->w, surface->h, 0, &region, &item))
+        if (!nt_runtime_menu_bounds(menu, position, surface->w, surface->h, first, &region, &item))
             return true;
-        for (uint32_t i = 1; ; ++i) {
+        for (uint32_t i = first + 1; ; ++i) {
             struct nt_rect row;
-            if (!nt_runtime_menu_bounds(menu, popup_x, surface->w, surface->h, i, &row, &item))
+            if (!nt_runtime_menu_bounds(menu, position, surface->w, surface->h, i, &row, &item))
                 break;
             region.bottom = row.bottom;
         }
@@ -140,9 +152,9 @@ static bool draw_part(SDL_Surface *surface, uintptr_t menu, uintptr_t active, in
     cairo_set_font_size(draw, 13);
     cairo_translate(draw, -region.left, -region.top);
     bool drawn = true;
-    for (uint32_t i = 0; drawn; ++i) {
+    for (uint32_t i = first; drawn; ++i) {
         struct nt_rect row;
-        if (!nt_runtime_menu_bounds(menu, popup_x, surface->w, surface->h, i, &row, &item))
+        if (!nt_runtime_menu_bounds(menu, position, surface->w, surface->h, i, &row, &item))
             break;
         drawn = paint_row(draw, row, &item, popup, active != 0 && item.submenu == active);
     }
@@ -161,8 +173,15 @@ static bool draw_part(SDL_Surface *surface, uintptr_t menu, uintptr_t active, in
     return drawn;
 }
 
-bool nt_runtime_draw_menu(SDL_Surface *surface, uintptr_t menu, uintptr_t popup, int popup_x)
+bool nt_runtime_draw_menu(SDL_Surface *surface, uintptr_t menu,
+                          const struct nt_menu_popup *popups, size_t count)
 {
-    return draw_part(surface, menu, popup, -1) &&
-           (popup == 0 || draw_part(surface, popup, 0, popup_x));
+    if (!draw_part(surface, menu, count != 0 ? popups[0].menu : 0, NULL))
+        return false;
+    for (size_t i = 0; i < count; ++i) {
+        const uintptr_t child = i + 1 < count ? popups[i + 1].menu : 0;
+        if (!draw_part(surface, popups[i].menu, child, &popups[i]))
+            return false;
+    }
+    return true;
 }

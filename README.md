@@ -24,8 +24,11 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Un microbenchmark y un spec RPM para el comando ELF de diagnóstico.
 - Existe un primer cargador PE32+ AMD64 con relocaciones DIR64, IAT y
   permisos W^X, más un lanzador Linux con Bubblewrap.
-  **No se ha validado aún el arranque real de Mines.** Quedan pendientes
-  TLS con datos, TEB/PEB completos, semántica NT de procesos, inicialización completa y KDE.
+  Se verificaron victoria y derrota de Mines en Linux fuera de pantalla.
+  El usuario ha confirmado también ambos finales en su portátil Fedora KDE.
+  La revisión posterior amplía los diálogos y los menús a partir de los fallos
+  comunicados. El alcance probado se detalla en `docs/mines-compatibility.md`.
+  Siguen pendientes TLS con datos, TEB/PEB completos y semántica NT general de procesos.
 
 ## Compilar y probar
 
