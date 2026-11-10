@@ -8,8 +8,8 @@ de modificar código. Usa una rama corta por tarea.
 
 - Define entradas, salidas, tamaños, alineación, ABI, códigos NTSTATUS,
   permisos y efectos parciales observables antes de implementar una API.
-- Usa documentación pública y pruebas sintéticas en Windows autorizado.
-  Registra la versión de la referencia, el comando y el resultado obtenido.
+- Verifica los contratos con documentación pública y pruebas sintéticas
+  en Linux. Registra la versión de la referencia, el comando y el resultado.
 - Usa Linux estándar y conserva los caminos de error. Las primitivas de
   objetos y memoria deben tener límites explícitos de vida, propiedad y
   concurrencia. Conserva SELinux y el principio de mínimo privilegio.
@@ -23,12 +23,13 @@ de modificar código. Usa una rama corta por tarea.
 
 ## Verificación y entrega
 
-- Ejecuta `make -j2 check check-pe` con GCC y binutils en Linux x86-64.
+- Ejecuta todas las pruebas en Linux x86-64, incluidos los PE de laboratorio.
+  Usa `make -j2 check check-pe` con GCC y binutils.
   Si no está disponible la herramienta PE, ejecuta `make check` y
   registra la limitación.
 - Para cambios de parser o ABI, repite las pruebas con UBSan y agrega un
-  caso mínimo que cubra el fallo. Para cambios observables, añade el caso
-  a la sonda Windows cuando sea viable.
+  caso mínimo que cubra el fallo. Para cambios observables, añade un
+  fixture reproducible que se ejecute en Linux.
 - Registra compilador, kernel, arquitectura, backend y comandos. Separa
   resultados locales de CI y de mediciones externas. Usa las indicaciones
   de `docs/validation.md` para comparar rendimiento.

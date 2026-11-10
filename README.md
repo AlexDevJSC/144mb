@@ -12,8 +12,7 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Un programa de prueba PE32+ AMD64 que llama a esa implementación mediante
   el ABI Microsoft x64. El anfitrión ejecuta el código de un binario de prueba
   generado e incrustado durante el build.
-- Una sonda Windows independiente que consulta `ntdll.dll`, un
-  microbenchmark y un spec RPM para el comando ELF de diagnóstico.
+- Un microbenchmark y un spec RPM para el comando ELF de diagnóstico.
 - Quedan pendientes el cargador de aplicaciones PE, la resolución de
   importaciones, el modelo de procesos y objetos NT y la integración con KDE.
 
@@ -32,8 +31,7 @@ make benchmark
 liste `pe-x86-64`. El build genera `build/nt-counter.exe` y
 `build/pe-host`. Ejecuta `build/pe-host` para repetir la prueba. El PE
 espera una función entregada por el anfitrión y no tiene un punto de entrada
-de aplicación Windows convencional. Para ejecutar la sonda Windows usa
-`tests/windows/qpc_reference.c` siguiendo la guía de validación.
+de aplicación Windows convencional. Todas las pruebas se ejecutan en Linux.
 
 La prueba Linux y el comando de diagnóstico se compilan por separado del PE.
 Puedes probar el destino del paquete sin privilegios con `make install
@@ -44,7 +42,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | Ruta | Contenido |
 | --- | --- |
 | [include/ntnative](include/ntnative) y [src/ntdll](src/ntdll) | ABI interno y código de compatibilidad |
-| [tests](tests) | Contrato Linux, PE controlado, sonda Windows y medición |
+| [tests](tests) | Contratos, PE controlados y medición en Linux |
 | [Arquitectura](docs/architecture.md) | Límites entre el kernel, el runtime y el escritorio |
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |
