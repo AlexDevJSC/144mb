@@ -10,7 +10,7 @@ y las importaciones resueltas llaman a equivalentes del runtime propio.
 La cobertura **197/197 importaciones directas** de Mines procede del
 auditor previo; no demuestra compatibilidad de comportamiento ni arranque
 del juego. En este cambio, el fixture sintético verifica el mapeo de
-varias secciones, una relocación DIR64, la IAT, callbacks TLS sin datos y una llamada MS x64 real
+varias secciones, una relocación DIR64, la IAT, callbacks TLS sin datos, puente GS/TEB/PEB mínimo y una llamada MS x64 real
 y el rechazo temprano de imágenes malformadas. La ejecución del Mines
 original **no se ha verificado** porque el binario no está disponible en
 este entorno. Se debe comprobar tanto la entrada como una partida jugable.
@@ -26,7 +26,7 @@ este entorno. Se debe comprobar tanto la entrada como una partida jugable.
   o relocaciones de tipo DIR64 en memoria privada.
 - Importación por nombre u ordinal, enlazada al registro propio de
   equivalentes Win32. Rechazo explícito de funciones no soportadas.
-- Transferencia de control a un punto de entrada de aplicación con
+- Preparación de un TEB mínimo por hilo mediante GS de Linux, PEB con base de imagen y vector TLS vacío; se restaura el GS anterior tras la ejecución normal.\n- Transferencia de control a un punto de entrada de aplicación con
   ABI Microsoft x64, usando el trabajador de pruebas y SDL en Linux.
 - Límite de archivo de 128 MiB y directorio C: circunscrito al
   directorio del ejecutable, sin habilitar red ni otros directorios.
@@ -58,7 +58,7 @@ y no debe emplearse para ejecutar software malicioso.
 ### Fuera de alcance y riesgos pendientes
 
 - TLS estática o con datos por hilo (solo callbacks acotados sin datos), importaciones retardadas,
-  PEB/TEB completos, llamadas dinámicas no incluidas en las 197
+  PEB/TEB completos (hay solo estructuras mínimas), llamadas dinámicas no incluidas en las 197
   importaciones directas de Mines, compatibilidad de DLL externas.
 - Entrega general de SEH y fallos de memoria del código invitado; el
   backend existente solo admite los perfiles descritos en la documentación.
