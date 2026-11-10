@@ -59,7 +59,8 @@ static int32_t NT_MS_ABI win_mul_div(int32_t left, int32_t right, int32_t diviso
 
 static void *NT_MS_ABI crt_memchr(const void *data, int byte, size_t count)
 {
-    return memchr(data, byte, count);
+    /* The guest CRT returns an unqualified pointer into the same buffer. */
+    return (void *)memchr(data, byte, count);
 }
 
 static int NT_MS_ABI crt_memcmp(const void *left, const void *right, size_t count)
@@ -84,12 +85,12 @@ static void *NT_MS_ABI crt_memset(void *destination, int byte, size_t count)
 
 static char *NT_MS_ABI crt_strchr(const char *string, int byte)
 {
-    return strchr(string, byte);
+    return (char *)strchr(string, byte);
 }
 
 static char *NT_MS_ABI crt_strrchr(const char *string, int byte)
 {
-    return strrchr(string, byte);
+    return (char *)strrchr(string, byte);
 }
 
 static void *NT_MS_ABI crt_malloc(size_t size)
