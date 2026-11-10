@@ -162,6 +162,70 @@ static bool imports(unsigned char *base, size_t size, struct directory directory
     return false;
 }
 
+static bool section_has(const struct section *sections, size_t count,
+                        uint32_t rva, size_t length, uint32_t required)
+{
+    for (size_t i = 0; i < count; ++i) {
+        const struct section *section = &sections[i];
+        if (rva >= section->rva && span(section->extent, rva - section->rva, length) &&
+            (section->characteristics & required) == required)
+            return true;
+    }
+    return false;
+}
+
+/* MSVC CRT images may carry process-attach callbacks without any TLS data.
+ * Dynamic/static thread-local data is deliberately refused until the TEB
+ * and thread inheritance model have been implemented.
+ */
+static bool prepare_tls(unsigned char *base, size_t size, struct directory tls,
+                        const struct section *sections, size_t section_count,
+                        uint32_t *callback_rva, uint32_t *callback_count)
+{
+    *callback_rva = 0;
+    *callback_count = 0;
+    if (tls.size == 0)
+        return true;
+    if (tls.size < 40 || !span(size, tls.rva, tls.size))
+        return false;
+    const unsigned char *data = base + tls.rva;
+    const uint64_t start = read_u64(data);
+    const uint64_t end = read_u64(data + 8);
+    const uint64_t index_va = read_u64(data + 16);
+    const uint64_t callbacks_va = read_u64(data + 24);
+    const uint32_t fill = read_u32(data + 32);
+    if (start != end || fill != 0 || index_va < (uintptr_t)base ||
+        index_va - (uintptr_t)base > UINT32_MAX ||
+        !section_has(sections, section_count,
+                     (uint32_t)(index_va - (uintptr_t)base), 4, SCN_WRITE))
+        return false;
+    const uint32_t index_rva = (uint32_t)(index_va - (uintptr_t)base);
+    const uint32_t zero = 0;
+    memcpy(base + index_rva, &zero, sizeof(zero));
+    if (callbacks_va == 0)
+        return true;
+    if (callbacks_va < (uintptr_t)base || callbacks_va - (uintptr_t)base > UINT32_MAX)
+        return false;
+    const uint32_t array_rva = (uint32_t)(callbacks_va - (uintptr_t)base);
+    for (uint32_t i = 0; i <= 64; ++i) {
+        const uint64_t offset = (uint64_t)array_rva + (uint64_t)i * 8;
+        if (!span(size, offset, 8))
+            return false;
+        const uint64_t address = read_u64(base + offset);
+        if (address == 0) {
+            *callback_rva = array_rva;
+            *callback_count = i;
+            return true;
+        }
+        if (i == 64 || address < (uintptr_t)base ||
+            address - (uintptr_t)base > UINT32_MAX ||
+            !section_has(sections, section_count,
+                         (uint32_t)(address - (uintptr_t)base), 1, SCN_EXECUTE))
+            return false;
+    }
+    return false;
+}
+
 void pe_image_unload(struct pe_image *image)
 {
     if (image == NULL)
@@ -216,8 +280,8 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         if (!dir_read(opt, optional_length, dir_count, i, &directory[i]))
             return fail(error, error_size, "Malformed data directory");
     }
-    if (directory[PE_TLS_DIR].size || directory[PE_DELAY_DIR].size)
-        return fail(error, error_size, "TLS and delayed imports are not supported yet");
+    if (directory[PE_DELAY_DIR].size)
+        return fail(error, error_size, "Delayed imports are not supported yet");
 
     struct section sections[PE_IMAGE_MAX_SECTIONS] = {{0}};
     uint64_t previous_end = (uint64_t)(header_size + 4095u) & ~UINT64_C(4095);
@@ -268,6 +332,7 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         return fail(error, error_size, "Linux mmap failed");
     unsigned char *base = mapped;
     bool success = false;
+    uint32_t tls_callbacks_rva = 0, tls_callback_count = 0;
     do {
         memcpy(base, file, header_size);
         for (unsigned i = 0; i < count; ++i)
@@ -279,6 +344,11 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         memcpy(&delta, &offset, sizeof(delta));
         if (!relocate(base, image_size, delta, directory[PE_BASERELOC_DIR])) {
             fail(error, error_size, "Missing or invalid DIR64 base relocations");
+            break;
+        }
+        if (!prepare_tls(base, image_size, directory[PE_TLS_DIR],
+                         sections, count, &tls_callbacks_rva, &tls_callback_count)) {
+            fail(error, error_size, "Invalid TLS directory or static TLS unsupported");
             break;
         }
         if (!imports(base, image_size, directory[PE_IMPORT_DIR], resolver, context)) {
@@ -318,6 +388,8 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
             .resource_size = directory[PE_RESOURCE_DIR].size,
             .exception_rva = directory[PE_EXCEPTION_DIR].rva,
             .exception_size = directory[PE_EXCEPTION_DIR].size,
+            .tls_callbacks_rva = tls_callbacks_rva,
+            .tls_callback_count = tls_callback_count,
             .subsystem = subsystem
         };
         success = true;
