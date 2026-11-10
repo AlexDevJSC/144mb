@@ -254,6 +254,7 @@ static pthread_mutex_t callback_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct nt_onexit_table exit_callbacks;
 static bool exit_running;
 static nt_tls_exit_callback tls_exit;
+static _Atomic bool termination_complete;
 
 int NT_MS_ABI nt_initialize_onexit_table(struct nt_onexit_table *table)
 {
@@ -327,6 +328,16 @@ void nt_runtime_release_onexit_table(struct nt_onexit_table *table)
     pthread_mutex_unlock(&callback_lock);
 }
 
+void NT_MS_ABI nt_c_exit(void)
+{
+    atomic_store(&termination_complete, true);
+}
+
+int NT_MS_ABI nt_is_c_termination_complete(void)
+{
+    return atomic_load(&termination_complete);
+}
+
 void NT_MS_ABI nt_cexit(void)
 {
     pthread_mutex_lock(&callback_lock);
@@ -335,6 +346,7 @@ void NT_MS_ABI nt_cexit(void)
         return;
     }
     exit_running = true;
+    atomic_store(&termination_complete, true);
     if (tls_exit != NULL) {
         const nt_tls_exit_callback callback = tls_exit;
         tls_exit = NULL;

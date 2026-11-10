@@ -1,13 +1,13 @@
 # Compatibilidad de Mines en Linux
 
 El auditor leyó **197 importaciones directas** en 15 bibliotecas de
-`mines.exe`. La primera etapa agregó **74 equivalentes** y la segunda agregó **61**.
-Quedan **32 importaciones sin resolver**, incluida una por ordinal.
+`mines.exe`. La primera etapa agregó **74 equivalentes** y la segunda agregó **76**.
+Quedan **17 importaciones sin resolver**, incluida una por ordinal.
 
 | Estado | Base | Primera etapa | Segunda etapa |
 | --- | ---: | ---: | ---: |
-| Importaciones con un equivalente registrado | 30 | 104 | 165 |
-| Importaciones sin resolver | 167 | 93 | 32 |
+| Importaciones con un equivalente registrado | 30 | 104 | 180 |
+| Importaciones sin resolver | 167 | 93 | 17 |
 
 El recuento describe los puntos de entrada disponibles y sus perfiles
 probados. Las búsquedas que el programa haga en tiempo de ejecución
@@ -99,6 +99,10 @@ del resumen. El inventario se vuelve a generar con el auditor al añadir equival
 | Entrada y salida CRT | 5 | Tres flujos estándar asignados por el lanzador, modo de confirmación con fdatasync y formatos estrechos validados mediante libffi y glibc. |
 | Contexto y excepciones | 6 | Registros x86-64 y FXSAVE, búsqueda por intervalo en la tabla de funciones, filtro superior y slots de excepción por hilo. |
 | Finalización y matemáticas CRT | 4 | Destructores TLS antes de los callbacks, tipo de aplicación y mensaje de aserción, y callback de dominio de sqrt. |
+| Menú en ventana y colores | 6 | Barra y submenú de un nivel dibujados en la ventana SDL, áreas calculadas desde el mismo diseño y selección con WM_COMMAND. El menú reserva parte del área de la ventana y usa una paleta de invitado. |
+| Impresión | 5 | La consulta del dispositivo predeterminado entrega un DC PDF, DEVMODEA y DEVNAMES. El runtime compone y entrega un PDF de varias páginas a un descriptor asignado por el anfitrión. |
+| Desenrollado AMD64 | 1 | Unwind de prólogo y cuerpo para metadatos versión 1, con límites explícitos de imagen y pila. Restaura registros y obtiene datos del manejador dentro de la imagen. |
+| Terminación mínima, filtro CRT y audio | 3 | La terminación mínima registra el estado y conserva los callbacks. El filtro CRT entrega las excepciones soportadas a los manejadores del hilo invitado. SDL encola un tono de aviso. |
 
 El perfil de archivos admite acceso genérico y compartición de lectura y
 escritura. La raíz de archivos, el entorno y la identidad del módulo son
@@ -127,9 +131,9 @@ pendientes.
 - La prueba de arranque observó `ERROR_INSUFFICIENT_BUFFER` al truncar
   la ruta del módulo. Un intento de terminar desde el anfitrión devolvió
   `ERROR_ACCESS_DENIED`.
-- El entorno local denegó sockets AF_UNIX a Weston. La prueba de
-  presentación Wayland se ejecuta en la CI de Linux. El backend local
-  `offscreen` permitió verificar color, recorte, entrada y cierre.
+- El entorno local denegó sockets AF_UNIX a Weston. En Ubuntu, Weston 13 presentó la ventana del PE de control con la
+  ruta de texturas de SDL y Mesa por software. En el entorno local se
+  verificaron color, recorte, entrada y cierre con `offscreen`.
 - Mines sigue siendo una auditoría de solo lectura. El mapa de carga
   permite las importaciones por nombre de los PE de control incrustados
   y conserva la separación entre páginas de código y datos.
@@ -150,17 +154,35 @@ puente conserva el tamaño de `long` en LLP64, prueba truncamiento y
 rechaza formatos fuera del subconjunto antes de llamar a glibc. El
 portapapeles se verificó en SDL `offscreen` con transferencia de propiedad
 y acentos. Las pruebas de excepción ejercitan entradas controladas,
-contexto por hilo y devolución de filtros. La entrega de fallos PE
-y el desenrollado general quedan pendientes.
+contexto por hilo y devolución de filtros. La entrega de fallos de un PE externo, los epílogos y el encadenado
+de desenrollado quedan pendientes.
+
+El menú probado acepta comandos y un nivel de submenú. El ajuste de
+rectángulo se verificó con una ventana sin marco. `PrintDlgA` cubre
+`PD_RETURNDEFAULT` y `PD_RETURNDC` para el dispositivo PDF. La
+impresión mantiene la salida anterior hasta finalizar el documento y
+la prueba comprobó las dos páginas, el título y la cabecera PDF.
+El filtro del CRT usa handlers por hilo sin instalar señales en Linux.
+El audio se probó en la cola SDL del backend de audio de prueba.
+
+| Caso de error | Resultado |
+| --- | --- |
+| Menú adjunto a una ventana | Se rechaza la destrucción directa con `ERROR_ACCESS_DENIED`. El cierre de la ventana destruye el menú adjunto. |
+| Impresión fuera del orden del documento | `ERROR_INVALID_PARAMETER` al cerrar una página inexistente o un documento con una página abierta. |
+| Desenrollado en un epílogo o fuera de la pila autorizada | `ERROR_NOT_SUPPORTED` o `ERROR_INVALID_PARAMETER`, con el contexto de entrada intacto. |
+| Lectura CRT con anchura de texto cero o ausente | `EINVAL` antes de llamar a glibc. |
+| Código de aviso sin tono asignado | `ERROR_INVALID_PARAMETER`. |
+
+El ordinal 17 de COMCTL32 corresponde a `InitCommonControls` en la
+tabla de referencia de Wine 11.0. Sigue pendiente la implementación
+de los controles y la resolución del ordinal en el runtime.
+[Tabla de COMCTL32 en Wine 11.0](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/comctl32/comctl32.spec).
 
 ## Inventario pendiente
 
 | Biblioteca | Pendientes | Símbolos |
 | --- | ---: | --- |
-| `USER32.dll` | 20 | `AdjustWindowRectEx`, `CheckDlgButton`, `DefDlgProcA`, `DrawMenuBar`, `GetDlgItemTextA`, `GetMenu`, `GetMenuItemRect`, `GetSysColor`, `IsDialogMessageA`, `IsDlgButtonChecked`, `LoadCursorA`, `LoadIconA`, `MessageBeep`, `MessageBoxA`, `ReleaseCapture`, `SendDlgItemMessageA`, `SetCapture`, `SetForegroundWindow`, `SetMenu`, `WinHelpA` |
-| `KERNEL32.dll` | 1 | `RtlVirtualUnwind` |
-| `GDI32.dll` | 4 | `EndDoc`, `EndPage`, `StartDocA`, `StartPage` |
-| `COMDLG32.dll` | 3 | `GetOpenFileNameA`, `GetSaveFileNameA`, `PrintDlgA` |
+| `USER32.dll` | 13 | `CheckDlgButton`, `DefDlgProcA`, `GetDlgItemTextA`, `IsDialogMessageA`, `IsDlgButtonChecked`, `LoadCursorA`, `LoadIconA`, `MessageBoxA`, `ReleaseCapture`, `SendDlgItemMessageA`, `SetCapture`, `SetForegroundWindow`, `WinHelpA` |
+| `COMDLG32.dll` | 2 | `GetOpenFileNameA`, `GetSaveFileNameA` |
 | `COMCTL32.dll` | 1 | `#17` |
 | `VCRUNTIME140.dll` | 1 | `__C_specific_handler` |
-| `api-ms-win-crt-runtime-l1-1-0.dll` | 2 | `_c_exit`, `_seh_filter_exe` |

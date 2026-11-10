@@ -15,7 +15,7 @@
 #define BOUND(name) CHECK(nt_runtime_resolve("user32.dll", #name) == (nt_guest_proc)nt_##name)
 
 enum { BLUE = 0xff0000, GREEN = 0x00ff00 };
-static unsigned int creates, paints, characters, mouse, timers, destroys;
+static unsigned int creates, paints, characters, mouse, timers, destroys, commands;
 static struct nt_rect painted;
 
 static intptr_t NT_MS_ABI procedure(uintptr_t window, uint32_t message,
@@ -55,6 +55,10 @@ static intptr_t NT_MS_ABI procedure(uintptr_t window, uint32_t message,
         CHECK(wparam == 77 && nt_KillTimer(window, wparam));
         ++timers;
         return 0;
+    case NT_WM_COMMAND:
+        CHECK(wparam == 501);
+        ++commands;
+        return 0;
     case NT_WM_DESTROY:
         ++destroys;
         nt_PostQuitMessage(37);
@@ -93,6 +97,45 @@ static void check_clipboard(uintptr_t window)
     CHECK(nt_OpenClipboard(window) && nt_EmptyClipboard() && nt_CloseClipboard());
     CHECK(nt_GlobalLock(memory) == NULL);
     puts("PASS clipboard ownership and ANSI text on the SDL backend");
+}
+
+static uintptr_t check_menu(uintptr_t window, uint32_t native_id)
+{
+    BOUND(SetMenu);
+    BOUND(GetMenu);
+    BOUND(DrawMenuBar);
+    BOUND(GetMenuItemRect);
+    BOUND(AdjustWindowRectEx);
+    BOUND(GetSysColor);
+    const uintptr_t menu = nt_CreateMenu(), popup = nt_CreateMenu();
+    CHECK(menu != 0 && popup != 0);
+    CHECK(nt_AppendMenuA(popup, 0, 501, "&Restart") && nt_AppendMenuA(menu, 0x10, popup, "&Game"));
+    struct nt_rect client, bounds, item;
+    CHECK(nt_GetClientRect(window, &client));
+    bounds = client;
+    CHECK(nt_AdjustWindowRectEx(&bounds, UINT32_C(0x80000000), 1, 0) && bounds.top == -24);
+    CHECK(nt_SetMenu(window, menu) && nt_GetMenu(window) == menu && !nt_DestroyMenu(menu));
+    CHECK(nt_GetClientRect(window, &bounds) && bounds.bottom == client.bottom - 24);
+    CHECK(nt_DrawMenuBar(window) && nt_GetMenuItemRect(window, menu, 0, &item) &&
+          item.right > item.left && item.bottom - item.top == 24);
+    uint32_t color;
+    CHECK(nt_runtime_window_pixel(window, 120, 4, &color) && color == nt_GetSysColor(4));
+
+    SDL_Event click = {.type = SDL_MOUSEBUTTONUP};
+    click.button.windowID = native_id;
+    click.button.button = SDL_BUTTON_LEFT;
+    click.button.x = 8;
+    click.button.y = 12;
+    CHECK(SDL_PushEvent(&click) == 1);
+    struct nt_message message;
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0 &&
+          nt_GetMenuItemRect(window, popup, 0, &item) && item.bottom - item.top == 22);
+    click.button.y = 33;
+    CHECK(SDL_PushEvent(&click) == 1);
+    deliver(window, NT_WM_COMMAND);
+    CHECK(commands == 1 && !nt_GetMenuItemRect(window, popup, 0, &item));
+    puts("PASS attached menu, rendered bar, popup hit testing and WM_COMMAND");
+    return menu;
 }
 
 int main(void)
@@ -195,8 +238,14 @@ int main(void)
     CHECK(nt_SetTimer(window, 77, 10, NULL) == 77);
     deliver(window, NT_WM_TIMER);
     CHECK(timers == 1);
-    if (strcmp(SDL_GetCurrentVideoDriver(), "offscreen") == 0)
+    if (strcmp(SDL_GetCurrentVideoDriver(), "offscreen") == 0) {
         check_clipboard(window);
+        BOUND(MessageBeep);
+        CHECK(SDL_setenv("SDL_AUDIODRIVER", "dummy", 1) == 0);
+        CHECK(nt_MessageBeep(0x30) && !nt_MessageBeep(123));
+        puts("PASS SDL queues an asynchronous alert tone");
+    }
+    const uintptr_t menu = check_menu(window, native_id);
 
     event = (SDL_Event){.type = SDL_WINDOWEVENT};
     event.window.windowID = native_id;
@@ -204,6 +253,7 @@ int main(void)
     CHECK(SDL_PushEvent(&event) == 1);
     deliver(window, NT_WM_CLOSE);
     CHECK(destroys == 1 && !nt_GetClientRect(window, &client) && !nt_DestroyWindow(window));
+    CHECK(nt_GetMenuItemCount(menu) == -1);
     CHECK(nt_GetMessageA(&message, 0, 0, 0) == 0 && message.wparam == 37);
     printf("PASS SDL %s window, painted pixels, damage clipping, input and close\n",
            SDL_GetCurrentVideoDriver());

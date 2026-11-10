@@ -209,6 +209,24 @@ static void check_exit(void)
     puts("PASS guest termination, callback order and full 32-bit status from Linux child");
 }
 
+static unsigned int quick_cleanup_marker;
+static void NT_MS_ABI mark_cleanup(void)
+{
+    ++quick_cleanup_marker;
+}
+
+static void check_quick_cleanup(void)
+{
+    BOUND(CRT("runtime"), "_c_exit", nt_c_exit);
+    BOUND(CRT("runtime"), "_is_c_termination_complete", nt_is_c_termination_complete);
+    CHECK(nt_is_c_termination_complete() == 0 && nt_crt_atexit(mark_cleanup) == 0);
+    nt_c_exit();
+    CHECK(nt_is_c_termination_complete() == 1 && quick_cleanup_marker == 0);
+    nt_cexit();
+    CHECK(quick_cleanup_marker == 1);
+    puts("PASS minimal CRT exit records termination without running the full cleanup");
+}
+
 static int32_t NT_MS_ABI report_exception(struct nt_exception_pointers *pointers)
 {
     CHECK(*nt_current_exception() == pointers->record);
@@ -260,6 +278,75 @@ static void check_exceptions(void)
           pthread_join(thread, NULL) == 0);
     *nt_current_exception() = NULL;
     puts("PASS AMD64 context, runtime function search and thread-local exception filters");
+}
+
+static void check_unwind(void)
+{
+    BOUND(KERNEL, "RtlVirtualUnwind", nt_RtlVirtualUnwind);
+    unsigned char image[256] = {0};
+    /* push rbx; sub rsp, 32; nop. The prologue length is five bytes. */
+    const unsigned char function_code[] = {0x53, 0x48, 0x83, 0xec, 0x20, 0x90, 0x90};
+    memcpy(image + 64, function_code, sizeof(function_code));
+    image[80] = 0xc3;
+    const unsigned char unwind[] = {9, 5, 2, 0, 5, 0x32, 1, 0x30, 160, 0, 0, 0};
+    memcpy(image + 224, unwind, sizeof(unwind));
+    const struct nt_runtime_function function = {64, 96, 224};
+    const uintptr_t base = (uintptr_t)image;
+    CHECK(nt_runtime_set_runtime_functions(base, sizeof(image), &function, 1));
+    uint64_t stack[8] = {0};
+    stack[4] = UINT64_C(0x1234567890abcdef);
+    stack[5] = UINT64_C(0x140005532);
+    CHECK(nt_runtime_set_unwind_stack(stack, sizeof(stack)));
+    struct nt_context64 context = {.rsp = (uintptr_t)stack, .rip = base + 70};
+    struct nt_unwind_pointers saved;
+    void *data = NULL;
+    uint64_t frame = 0;
+    CHECK(nt_RtlVirtualUnwind(1, base, context.rip, &function, &context, &data, &frame, &saved) ==
+          image + 160);
+    CHECK(context.rbx == stack[4] && context.rip == stack[5] &&
+          context.rsp == (uintptr_t)&stack[6] && frame == (uintptr_t)stack &&
+          saved.integer[3] == &stack[4] && data == image + 236);
+    context = (struct nt_context64){.rsp = (uintptr_t)&stack[4], .rip = base + 65};
+    data = image;
+    CHECK(nt_RtlVirtualUnwind(1, base, context.rip, &function, &context, &data, &frame, NULL) == NULL &&
+          data == NULL && context.rbx == stack[4] && context.rsp == (uintptr_t)&stack[6]);
+    context = (struct nt_context64){.rsp = (uintptr_t)stack, .rip = base + 80};
+    const struct nt_context64 before = context;
+    CHECK(nt_RtlVirtualUnwind(0, base, context.rip, &function, &context, &data, &frame, NULL) == NULL &&
+          last_error() == NT_ERROR_NOT_SUPPORTED && context.rip == before.rip && context.rsp == before.rsp);
+    CHECK(nt_runtime_set_unwind_stack(stack, 16));
+    context.rip = base + 70;
+    CHECK(nt_RtlVirtualUnwind(0, base, context.rip, &function, &context, &data, &frame, NULL) == NULL &&
+          last_error() == NT_ERROR_INVALID_PARAMETER && context.rsp == before.rsp);
+    CHECK(nt_runtime_set_unwind_stack(NULL, 0) && nt_runtime_set_runtime_functions(0, 0, NULL, 0));
+    puts("PASS checked AMD64 frame unwind, prologue bounds and handler metadata");
+}
+
+static unsigned int guest_faults;
+static void *fault_record;
+static void NT_MS_ABI on_arithmetic_fault(int signal, int reason)
+{
+    CHECK(signal == 8 && reason == 0x83 && *nt_current_exception() == fault_record);
+    ++guest_faults;
+}
+
+static void check_seh_filter(void)
+{
+    BOUND(CRT("runtime"), "_seh_filter_exe", nt_seh_filter_exe);
+    BOUND(CRT("runtime"), "signal", nt_signal);
+    struct nt_context64 context = {0};
+    int record = 1;
+    fault_record = &record;
+    struct nt_exception_pointers pointers = {&record, &context};
+    CHECK(nt_seh_filter_exe(UINT32_C(0xc000008e), &pointers) == 0);
+    CHECK(nt_signal(8, (nt_signal_handler)(nt_guest_proc)on_arithmetic_fault) == NULL);
+    CHECK(nt_seh_filter_exe(UINT32_C(0xc000008e), &pointers) == -1 && guest_faults == 1);
+    CHECK(nt_seh_filter_exe(UINT32_C(0xc000008e), &pointers) == 0 && *nt_current_exception() == NULL);
+    CHECK(nt_signal(11, (nt_signal_handler)(uintptr_t)1) == NULL);
+    CHECK(nt_seh_filter_exe(UINT32_C(0xc0000005), &pointers) == -1 &&
+          nt_seh_filter_exe(UINT32_C(0xe06d7363), &pointers) == 0);
+    CHECK(nt_signal(11, NULL) == (nt_signal_handler)(uintptr_t)1);
+    puts("PASS CRT SEH filter dispatches guest signal handlers without changing Linux signals");
 }
 
 static int NT_MS_ABI matherr(struct nt_math_exception *error)
@@ -398,6 +485,7 @@ static void check_stdio(void)
           red == 0 && green == 0xab && blue == 0x4f);
     CHECK(scan("abcdef", 3, "%3s", buffer) == 1 && strcmp(buffer, "abc") == 0);
     CHECK(scan("abcdef", 3, "%s", buffer) == -1 && errno == EINVAL);
+    CHECK(scan("abcdef", 3, "%0s", buffer) == -1 && errno == EINVAL);
 
     int channel[2];
     CHECK(pipe(channel) == 0 && nt_runtime_set_standard_streams(-1, channel[1], -1));
@@ -421,14 +509,70 @@ static void check_stdio(void)
     puts("PASS Microsoft variadic ABI, LLP64 formats, scan counts and guest stdio");
 }
 
+static bool includes(const char *bytes, size_t length, const char *needle)
+{
+    const size_t size = strlen(needle);
+    if (size > length)
+        return false;
+    for (size_t i = 0; i <= length - size; ++i) {
+        if (memcmp(bytes + i, needle, size) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void check_printing(void)
+{
+    BOUND("comdlg32.dll", "PrintDlgA", nt_PrintDlgA);
+    BOUND("gdi32.dll", "StartDocA", nt_StartDocA);
+    BOUND("gdi32.dll", "EndDoc", nt_EndDoc);
+    BOUND("gdi32.dll", "StartPage", nt_StartPage);
+    BOUND("gdi32.dll", "EndPage", nt_EndPage);
+    struct nt_print_dialog dialog = {.size = sizeof(dialog), .flags = 0x500};
+    CHECK(nt_PrintDlgA(&dialog) == 0 && last_error() == NT_ERROR_FILE_NOT_FOUND);
+    char path[] = "/tmp/nt-mines-print.XXXXXX";
+    const int fd = mkstemp(path);
+    CHECK(fd >= 0 && unlink(path) == 0 && write(fd, "old", 3) == 3);
+    CHECK(nt_runtime_set_pdf_printer(fd, 128, 96));
+    CHECK(nt_PrintDlgA(&dialog) && dialog.dc != 0 && dialog.device_mode != 0 && dialog.device_names != 0);
+    const char *mode = nt_GlobalLock(dialog.device_mode);
+    const uint16_t *names = nt_GlobalLock(dialog.device_names);
+    CHECK(mode != NULL && strcmp(mode, "Linux PDF") == 0 &&
+          names != NULL && names[3] == 1 && strcmp((const char *)names + names[2], "FILE:") == 0);
+    nt_GlobalUnlock(dialog.device_mode);
+    nt_GlobalUnlock(dialog.device_names);
+    CHECK(nt_GetDeviceCaps(dialog.dc, 2) == 2 && nt_GetDeviceCaps(dialog.dc, 8) == 128);
+    const struct nt_docinfo job = {.size = sizeof(job), .name = "Mines fixture", .output = "FILE:"};
+    CHECK(nt_EndPage(dialog.dc) == -1 && last_error() == NT_ERROR_INVALID_PARAMETER);
+    CHECK(nt_StartDocA(dialog.dc, &job) > 0 && nt_StartPage(dialog.dc) > 0);
+    CHECK(nt_SetPixel(dialog.dc, 5, 5, 0x0000ff) == 0x0000ff && nt_EndPage(dialog.dc) > 0);
+    CHECK(nt_StartPage(dialog.dc) > 0 && nt_runtime_read_pixel(dialog.dc, 5, 5) == 0xffffff);
+    CHECK(nt_EndDoc(dialog.dc) == -1 && last_error() == NT_ERROR_INVALID_PARAMETER);
+    CHECK(nt_Rectangle(dialog.dc, 1, 1, 30, 20) && nt_EndPage(dialog.dc) > 0);
+    char pdf[16384];
+    CHECK(pread(fd, pdf, 3, 0) == 3 && memcmp(pdf, "old", 3) == 0);
+    CHECK(nt_EndDoc(dialog.dc) > 0);
+    const ssize_t length = pread(fd, pdf, sizeof(pdf), 0);
+    CHECK(length > 100 && memcmp(pdf, "%PDF-", 5) == 0 &&
+          includes(pdf, (size_t)length, "/Count 2") && includes(pdf, (size_t)length, "%%EOF"));
+    CHECK(nt_DeleteDC(dialog.dc) && nt_GlobalFree(dialog.device_mode) == 0 &&
+          nt_GlobalFree(dialog.device_names) == 0 && nt_runtime_set_pdf_printer(-1, 0, 0) &&
+          close(fd) == 0);
+    puts("PASS default PDF printer, device settings and committed two-page print job");
+}
+
 int main(void)
 {
     check_file_handles();
     check_startup();
     check_exit();
+    check_quick_cleanup();
     check_exceptions();
+    check_unwind();
+    check_seh_filter();
     check_matherr();
     check_graphics();
     check_stdio();
+    check_printing();
     return EXIT_SUCCESS;
 }

@@ -112,6 +112,7 @@ static bool normalize(struct format_call *call, const char *format, bool scan)
         const bool suppress = scan && *input == '*';
         if (suppress)
             *output++ = *input++;
+        bool dynamic_width = false;
         if (!scan) {
             while (*input != '\0' && strchr("-+ #0", *input) != NULL)
                 *output++ = *input++;
@@ -119,12 +120,22 @@ static bool normalize(struct format_call *call, const char *format, bool scan)
                 if (!fetch(call, &ffi_type_sint32, true))
                     return false;
                 *output++ = *input++;
+                dynamic_width = true;
             }
         }
         const char *width = input;
         if (!digits(&input, &output))
             return false;
         const bool has_width = input != width;
+        if (dynamic_width && has_width)
+            return false;
+        if (scan && has_width) {
+            const char *nonzero = width;
+            while (nonzero < input && *nonzero == '0')
+                ++nonzero;
+            if (nonzero == input)
+                return false;
+        }
         if (!scan && *input == '.') {
             *output++ = *input++;
             if (*input == '*') {

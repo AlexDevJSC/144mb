@@ -2,11 +2,17 @@
 #define _POSIX_C_SOURCE 200809L
 #include "compat.h"
 
+#include <cairo-pdf.h>
 #include <cairo.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 enum {
     MAX_OBJECTS = 512,
@@ -52,6 +58,13 @@ struct font {
     uint8_t italic, underline, strike, charset, pitch;
 };
 
+struct printer {
+    int fd;
+    FILE *spool;
+    cairo_surface_t *document;
+    bool page;
+};
+
 struct context {
     struct gdi_object *bitmap, *pen, *brush, *font, *original;
     struct nt_rect clip;
@@ -61,6 +74,7 @@ struct context {
     int32_t background_mode;
     int32_t device_width, device_height;
     bool device_mono;
+    struct printer *printer;
 };
 
 struct gdi_object {
@@ -181,6 +195,14 @@ static void release_context(struct gdi_object *object)
     --dc->pen->selections;
     --dc->brush->selections;
     --dc->font->selections;
+    if (dc->printer != NULL) {
+        if (dc->printer->document != NULL)
+            cairo_surface_destroy(dc->printer->document);
+        if (dc->printer->spool != NULL)
+            fclose(dc->printer->spool);
+        close(dc->printer->fd);
+        free(dc->printer);
+    }
     release_bitmap(dc->original);
     object->handle = 0;
 }
@@ -422,7 +444,7 @@ uintptr_t NT_MS_ABI nt_SelectObject(uintptr_t handle, uintptr_t selection)
     struct gdi_object **slot;
     if (object->kind == BITMAP) {
         const struct bitmap *bitmap = &object->value.bitmap;
-        if ((bitmap->owner != NULL && bitmap->owner != dc_object) ||
+        if (dc->printer != NULL || (bitmap->owner != NULL && bitmap->owner != dc_object) ||
             (object->selections != 0 && dc->bitmap != object)) {
             finish(NT_ERROR_ACCESS_DENIED);
             return 0;
@@ -907,7 +929,7 @@ int32_t NT_MS_ABI nt_GetDeviceCaps(uintptr_t handle, int32_t index)
     int32_t result = 0;
     if (dc != NULL) {
         switch (index) {
-        case 2: result = 1; break; /* TECHNOLOGY, raster display */
+        case 2: result = dc->printer != NULL ? 2 : 1; break; /* TECHNOLOGY */
         case 8: result = dc->device_width; break; /* HORZRES */
         case 10: result = dc->device_height; break; /* VERTRES */
         case 12: result = dc->device_mono ? 1 : 32; break; /* BITSPIXEL */
@@ -1133,4 +1155,185 @@ int32_t NT_MS_ABI nt_ExtTextOutW(uintptr_t handle, int32_t x, int32_t y, uint32_
     free(utf8);
     finish(painted ? NT_ERROR_SUCCESS : NT_ERROR_GEN_FAILURE);
     return painted;
+}
+
+_Static_assert(sizeof(struct nt_docinfo) == 40, "DOCINFOA layout");
+
+uintptr_t nt_runtime_create_pdf_printer(int fd, int32_t width, int32_t height)
+{
+    const int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (duplicate < 0)
+        return 0;
+    struct printer *printer = calloc(1, sizeof(*printer));
+    const uintptr_t handle = printer != NULL ? nt_runtime_create_surface(width, height) : 0;
+    if (handle == 0) {
+        close(duplicate);
+        free(printer);
+        return 0;
+    }
+    printer->fd = duplicate;
+    pthread_mutex_lock(&gdi_lock);
+    find_context(handle)->printer = printer;
+    finish(NT_ERROR_SUCCESS);
+    return handle;
+}
+
+static cairo_status_t spool_bytes(void *output, const unsigned char *bytes, unsigned int length)
+{
+    return fwrite(bytes, 1, length, output) == length ? CAIRO_STATUS_SUCCESS : CAIRO_STATUS_WRITE_ERROR;
+}
+
+static int32_t next_job = 1;
+
+int32_t NT_MS_ABI nt_StartDocA(uintptr_t handle, const struct nt_docinfo *info)
+{
+    if (info == NULL || info->size != sizeof(*info) || info->name == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+    if (info->type != 0 || info->data_type != NULL ||
+        (info->output != NULL && strcmp(info->output, "FILE:") != 0)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return -1;
+    }
+    const size_t length = strnlen(info->name, 4096);
+    if (length == 4096) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+    char *name = nt_runtime_ansi_to_utf8(info->name, length);
+    if (name == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return -1;
+    }
+    pthread_mutex_lock(&gdi_lock);
+    const struct context *dc = find_context(handle);
+    struct printer *printer = dc != NULL ? dc->printer : NULL;
+    if (printer == NULL || printer->document != NULL || next_job == INT32_MAX) {
+        free(name);
+        finish(printer == NULL ? NT_ERROR_INVALID_HANDLE : NT_ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+    FILE *spool = tmpfile();
+    if (spool == NULL) {
+        free(name);
+        finish(NT_ERROR_GEN_FAILURE);
+        return -1;
+    }
+    cairo_surface_t *document = cairo_pdf_surface_create_for_stream(spool_bytes, spool,
+        dc->device_width * 72.0 / LOGICAL_DPI, dc->device_height * 72.0 / LOGICAL_DPI);
+    cairo_pdf_surface_restrict_to_version(document, CAIRO_PDF_VERSION_1_4);
+    cairo_pdf_surface_set_metadata(document, CAIRO_PDF_METADATA_TITLE, name);
+    free(name);
+    if (cairo_surface_status(document) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(document);
+        fclose(spool);
+        finish(NT_ERROR_GEN_FAILURE);
+        return -1;
+    }
+    printer->spool = spool;
+    printer->document = document;
+    const int32_t id = next_job++;
+    finish(NT_ERROR_SUCCESS);
+    return id;
+}
+
+int32_t NT_MS_ABI nt_StartPage(uintptr_t handle)
+{
+    pthread_mutex_lock(&gdi_lock);
+    struct context *dc = find_context(handle);
+    struct printer *printer = dc != NULL ? dc->printer : NULL;
+    if (printer == NULL || printer->document == NULL || printer->page) {
+        finish(printer == NULL ? NT_ERROR_INVALID_HANDLE : NT_ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+    const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
+    const size_t count = (size_t)bitmap->width * (size_t)bitmap->height;
+    for (size_t i = 0; i < count; ++i)
+        bitmap->pixels[i] = WHITE;
+    dc->clipped = false;
+    printer->page = true;
+    finish(NT_ERROR_SUCCESS);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_EndPage(uintptr_t handle)
+{
+    pthread_mutex_lock(&gdi_lock);
+    const struct context *dc = find_context(handle);
+    struct printer *printer = dc != NULL ? dc->printer : NULL;
+    if (printer == NULL || printer->document == NULL || !printer->page) {
+        finish(printer == NULL ? NT_ERROR_INVALID_HANDLE : NT_ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+    const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
+    cairo_surface_t *raster = cairo_image_surface_create(CAIRO_FORMAT_RGB24, bitmap->width, bitmap->height);
+    bool copied = cairo_surface_status(raster) == CAIRO_STATUS_SUCCESS;
+    if (copied) {
+        unsigned char *bytes = cairo_image_surface_get_data(raster);
+        const int stride = cairo_image_surface_get_stride(raster);
+        for (int y = 0; y < bitmap->height; ++y) {
+            uint32_t *row = (uint32_t *)(bytes + y * stride);
+            for (int x = 0; x < bitmap->width; ++x) {
+                const uint32_t color = *pixel_at(bitmap, x, y);
+                row[x] = (color & 255) << 16 | (color & 0xff00) | (color >> 16 & 255);
+            }
+        }
+        cairo_surface_mark_dirty(raster);
+        cairo_t *draw = cairo_create(printer->document);
+        cairo_scale(draw, 72.0 / LOGICAL_DPI, 72.0 / LOGICAL_DPI);
+        cairo_set_source_surface(draw, raster, 0, 0);
+        cairo_paint(draw);
+        cairo_show_page(draw);
+        copied = cairo_status(draw) == CAIRO_STATUS_SUCCESS;
+        cairo_destroy(draw);
+    }
+    cairo_surface_destroy(raster);
+    if (copied)
+        printer->page = false;
+    finish(copied ? NT_ERROR_SUCCESS : NT_ERROR_GEN_FAILURE);
+    return copied ? 1 : -1;
+}
+
+static bool copy_print_job(const struct printer *printer)
+{
+    if (fflush(printer->spool) != 0 || fseeko(printer->spool, 0, SEEK_SET) != 0 ||
+        ftruncate(printer->fd, 0) != 0)
+        return false;
+    unsigned char buffer[16384];
+    off_t offset = 0;
+    size_t bytes;
+    while ((bytes = fread(buffer, 1, sizeof(buffer), printer->spool)) != 0) {
+        size_t written = 0;
+        while (written < bytes) {
+            const ssize_t step = pwrite(printer->fd, buffer + written, bytes - written, offset);
+            if (step < 0 && errno == EINTR)
+                continue;
+            if (step <= 0)
+                return false;
+            written += (size_t)step;
+            offset += step;
+        }
+    }
+    return !ferror(printer->spool) && fdatasync(printer->fd) == 0;
+}
+
+int32_t NT_MS_ABI nt_EndDoc(uintptr_t handle)
+{
+    pthread_mutex_lock(&gdi_lock);
+    const struct context *dc = find_context(handle);
+    struct printer *printer = dc != NULL ? dc->printer : NULL;
+    if (printer == NULL || printer->document == NULL || printer->page) {
+        finish(printer == NULL ? NT_ERROR_INVALID_HANDLE : NT_ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+    cairo_surface_finish(printer->document);
+    const bool printed = cairo_surface_status(printer->document) == CAIRO_STATUS_SUCCESS &&
+                         copy_print_job(printer);
+    cairo_surface_destroy(printer->document);
+    fclose(printer->spool);
+    printer->document = NULL;
+    printer->spool = NULL;
+    finish(printed ? NT_ERROR_SUCCESS : NT_ERROR_GEN_FAILURE);
+    return printed ? 1 : -1;
 }

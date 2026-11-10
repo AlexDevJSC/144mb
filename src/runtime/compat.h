@@ -116,6 +116,8 @@ int NT_MS_ABI nt_register_onexit_function(struct nt_onexit_table *table,
                                          nt_int_callback callback);
 int NT_MS_ABI nt_crt_atexit(nt_void_callback callback);
 void NT_MS_ABI nt_cexit(void);
+void NT_MS_ABI nt_c_exit(void);
+int NT_MS_ABI nt_is_c_termination_complete(void);
 typedef void (NT_MS_ABI *nt_tls_exit_callback)(void *, uint32_t, void *);
 void NT_MS_ABI nt_register_thread_local_exe_atexit_callback(nt_tls_exit_callback callback);
 void NT_MS_ABI nt_set_app_type(int type);
@@ -173,10 +175,19 @@ bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
                                       const struct nt_runtime_function *table, size_t count);
 const struct nt_runtime_function *NT_MS_ABI nt_RtlLookupFunctionEntry(
     uint64_t pc, uint64_t *base, void *history);
+struct nt_unwind_pointers { void *floating[16], *integer[16]; };
+bool nt_runtime_set_unwind_stack(const void *start, size_t length);
+void *NT_MS_ABI nt_RtlVirtualUnwind(uint32_t type, uint64_t base, uint64_t pc,
+                                   const struct nt_runtime_function *function,
+                                   struct nt_context64 *context, void **handler_data,
+                                   uint64_t *frame, struct nt_unwind_pointers *pointers);
 nt_exception_filter NT_MS_ABI nt_SetUnhandledExceptionFilter(nt_exception_filter filter);
 int32_t NT_MS_ABI nt_UnhandledExceptionFilter(struct nt_exception_pointers *pointers);
 void **NT_MS_ABI nt_current_exception(void);
 void **NT_MS_ABI nt_current_exception_context(void);
+typedef void (NT_MS_ABI *nt_signal_handler)(int);
+nt_signal_handler NT_MS_ABI nt_signal(int signal, nt_signal_handler handler);
+int32_t NT_MS_ABI nt_seh_filter_exe(uint32_t code, struct nt_exception_pointers *pointers);
 
 /* The launcher supplies the host directory for the guest C: drive. */
 bool nt_runtime_set_file_root(const char *directory);
@@ -269,6 +280,30 @@ int32_t NT_MS_ABI nt_Ellipse(uintptr_t dc, int32_t left, int32_t top,
 int32_t NT_MS_ABI nt_Polygon(uintptr_t dc, const struct nt_point *points, int32_t count);
 int32_t NT_MS_ABI nt_Polyline(uintptr_t dc, const struct nt_point *points, int32_t count);
 int32_t NT_MS_ABI nt_GetDeviceCaps(uintptr_t dc, int32_t index);
+
+struct nt_docinfo {
+    int32_t size;
+    const char *name, *output, *data_type;
+    uint32_t type;
+};
+struct nt_print_dialog {
+    uint32_t size;
+    uintptr_t owner, device_mode, device_names, dc;
+    uint32_t flags;
+    uint16_t first, last, min_page, max_page, copies;
+    uintptr_t instance;
+    intptr_t custom_data;
+    uintptr_t print_hook, setup_hook;
+    const char *print_template, *setup_template;
+    uintptr_t print_template_handle, setup_template_handle;
+};
+bool nt_runtime_set_pdf_printer(int fd, int32_t width, int32_t height);
+uintptr_t nt_runtime_create_pdf_printer(int fd, int32_t width, int32_t height);
+int32_t NT_MS_ABI nt_PrintDlgA(struct nt_print_dialog *dialog);
+int32_t NT_MS_ABI nt_StartDocA(uintptr_t dc, const struct nt_docinfo *info);
+int32_t NT_MS_ABI nt_StartPage(uintptr_t dc);
+int32_t NT_MS_ABI nt_EndPage(uintptr_t dc);
+int32_t NT_MS_ABI nt_EndDoc(uintptr_t dc);
 
 uintptr_t NT_MS_ABI nt_CreateMenu(void);
 int32_t NT_MS_ABI nt_AppendMenuA(uintptr_t menu, uint32_t flags, uintptr_t value,

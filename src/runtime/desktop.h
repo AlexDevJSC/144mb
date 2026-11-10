@@ -11,6 +11,7 @@ enum {
     NT_WM_ERASEBKGND = 0x14, NT_WM_SHOWWINDOW = 0x18, NT_WM_CANCELMODE = 0x1f,
     NT_WM_NCCREATE = 0x81, NT_WM_NCDESTROY = 0x82, NT_WM_KEYDOWN = 0x100,
     NT_WM_KEYUP = 0x101, NT_WM_CHAR = 0x102, NT_WM_TIMER = 0x113,
+    NT_WM_COMMAND = 0x111,
     NT_WM_MOUSEMOVE = 0x200, NT_WM_LBUTTONDOWN = 0x201, NT_WM_LBUTTONUP = 0x202,
     NT_WM_LBUTTONDBLCLK = 0x203, NT_WM_RBUTTONDOWN = 0x204,
     NT_WM_MBUTTONDOWN = 0x207
@@ -89,5 +90,14 @@ int32_t NT_MS_ABI nt_OpenClipboard(uintptr_t window);
 int32_t NT_MS_ABI nt_CloseClipboard(void);
 int32_t NT_MS_ABI nt_EmptyClipboard(void);
 uintptr_t NT_MS_ABI nt_SetClipboardData(uint32_t format, uintptr_t memory);
+int32_t NT_MS_ABI nt_SetMenu(uintptr_t window, uintptr_t menu);
+uintptr_t NT_MS_ABI nt_GetMenu(uintptr_t window);
+int32_t NT_MS_ABI nt_DrawMenuBar(uintptr_t window);
+int32_t NT_MS_ABI nt_GetMenuItemRect(uintptr_t window, uintptr_t menu, uint32_t item,
+                                     struct nt_rect *rect);
+int32_t NT_MS_ABI nt_AdjustWindowRectEx(struct nt_rect *rect, uint32_t style, int32_t menu,
+                                       uint32_t exstyle);
+uint32_t NT_MS_ABI nt_GetSysColor(int32_t index);
+int32_t NT_MS_ABI nt_MessageBeep(uint32_t type);
 
 #endif

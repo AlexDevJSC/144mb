@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
-#include "compat.h"
+#include "menu_view.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -31,6 +31,7 @@ struct menu_item {
 
 struct menu {
     uintptr_t handle;
+    uintptr_t window;
     struct menu *parent;
     struct menu_item *items;
     size_t count, capacity;
@@ -82,7 +83,7 @@ static uint32_t append_item(struct menu *menu, uint32_t flags, uintptr_t value,
         child = find_menu(value);
         if (child == NULL)
             return NT_ERROR_INVALID_HANDLE;
-        if (child->parent != NULL)
+        if (child->parent != NULL || child->window != 0)
             return NT_ERROR_ACCESS_DENIED;
         for (struct menu *ancestor = menu; ancestor != NULL; ancestor = ancestor->parent) {
             if (child == ancestor)
@@ -151,7 +152,7 @@ int32_t NT_MS_ABI nt_DestroyMenu(uintptr_t handle)
 {
     pthread_mutex_lock(&menu_lock);
     struct menu *menu = find_menu(handle);
-    if (menu == NULL || menu->parent != NULL) {
+    if (menu == NULL || menu->parent != NULL || menu->window != 0) {
         const uint32_t error = menu == NULL ? NT_ERROR_INVALID_HANDLE : NT_ERROR_ACCESS_DENIED;
         pthread_mutex_unlock(&menu_lock);
         nt_SetLastError(error);
@@ -222,4 +223,48 @@ uint32_t NT_MS_ABI nt_CheckMenuItem(uintptr_t handle, uint32_t id, uint32_t flag
 int32_t NT_MS_ABI nt_EnableMenuItem(uintptr_t handle, uint32_t id, uint32_t flags)
 {
     return change_state(handle, id, flags, MF_GRAYED | MF_DISABLED);
+}
+
+bool nt_runtime_attach_menu(uintptr_t handle, uintptr_t window)
+{
+    pthread_mutex_lock(&menu_lock);
+    struct menu *menu = find_menu(handle);
+    const bool attached = menu != NULL && menu->window == 0 && menu->parent == NULL;
+    if (attached)
+        menu->window = window;
+    pthread_mutex_unlock(&menu_lock);
+    if (!attached)
+        nt_SetLastError(menu != NULL ? NT_ERROR_ACCESS_DENIED : NT_ERROR_INVALID_HANDLE);
+    return attached;
+}
+
+void nt_runtime_detach_menu(uintptr_t handle, uintptr_t window, bool destroy)
+{
+    pthread_mutex_lock(&menu_lock);
+    struct menu *menu = find_menu(handle);
+    if (menu != NULL && menu->window == window) {
+        if (destroy)
+            release_menu(menu);
+        else
+            menu->window = 0;
+    }
+    pthread_mutex_unlock(&menu_lock);
+}
+
+bool nt_runtime_menu_item(uintptr_t handle, uint32_t index, struct nt_menu_view_item *item)
+{
+    pthread_mutex_lock(&menu_lock);
+    const struct menu *menu = find_menu(handle);
+    const bool valid = menu != NULL && index < menu->count;
+    if (valid) {
+        const struct menu_item *entry = &menu->items[index];
+        *item = (struct nt_menu_view_item){.flags = entry->flags, .id = entry->id,
+                                         .submenu = entry->child != NULL ? entry->child->handle : 0};
+        if (entry->label != NULL) {
+            const size_t size = strnlen(entry->label, sizeof(item->label) - 1);
+            memcpy(item->label, entry->label, size);
+        }
+    }
+    pthread_mutex_unlock(&menu_lock);
+    return valid;
 }

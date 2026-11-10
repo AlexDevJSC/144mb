@@ -14,7 +14,7 @@ GDI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags cairo)
 GDI_LIBS ?= $(shell $(PKG_CONFIG) --libs cairo)
 FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
 FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files process exceptions gdi_memory menus messages desktop clipboard
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files process exceptions gdi_memory printer menus menu_view messages desktop clipboard
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
@@ -36,9 +36,12 @@ $(BUILD_DIR)/runtime-%.o: src/runtime/%.c src/runtime/compat.h include/ntnative/
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -pthread -c "$<" -o "$@"
 
 $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-messages.o $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-clipboard.o: src/runtime/desktop.h
-$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-clipboard.o: CPPFLAGS += $(DESKTOP_CFLAGS)
-$(BUILD_DIR)/runtime-gdi_memory.o: CPPFLAGS += $(GDI_CFLAGS)
-$(BUILD_DIR)/runtime-crt_stdio.o: CPPFLAGS += $(FFI_CFLAGS)
+$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-clipboard.o: override CPPFLAGS += $(DESKTOP_CFLAGS)
+$(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-menus.o $(BUILD_DIR)/runtime-menu_view.o: src/runtime/menu_view.h
+$(BUILD_DIR)/runtime-menus.o $(BUILD_DIR)/runtime-menu_view.o: override CPPFLAGS += $(DESKTOP_CFLAGS)
+$(BUILD_DIR)/runtime-menu_view.o: override CPPFLAGS += $(GDI_CFLAGS)
+$(BUILD_DIR)/runtime-gdi_memory.o: override CPPFLAGS += $(GDI_CFLAGS)
+$(BUILD_DIR)/runtime-crt_stdio.o: override CPPFLAGS += $(FFI_CFLAGS)
 
 $(BUILD_DIR)/runtime-context.o: src/runtime/context.S | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -c "$<" -o "$@"

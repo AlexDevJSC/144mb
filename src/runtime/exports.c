@@ -244,6 +244,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(RemoveDirectoryA),
     WIN_EXPORT(RtlCaptureContext),
     WIN_EXPORT(RtlLookupFunctionEntry),
+    WIN_EXPORT(RtlVirtualUnwind),
     WIN_EXPORT(SetLastError),
     WIN_EXPORT(SetUnhandledExceptionFilter),
     WIN_EXPORT(TerminateProcess),
@@ -251,6 +252,7 @@ static const struct runtime_export kernel32_exports[] = {
 };
 
 static const struct runtime_export user32_exports[] = {
+    WIN_EXPORT(AdjustWindowRectEx),
     WIN_EXPORT(AppendMenuA),
     WIN_EXPORT(BeginPaint),
     WIN_EXPORT(CheckMenuItem),
@@ -261,6 +263,7 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(DestroyMenu),
     WIN_EXPORT(DestroyWindow),
     WIN_EXPORT(DispatchMessageA),
+    WIN_EXPORT(DrawMenuBar),
     WIN_EXPORT(EmptyClipboard),
     WIN_EXPORT(EnableMenuItem),
     WIN_EXPORT(EnableWindow),
@@ -268,13 +271,17 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(GetClientRect),
     WIN_EXPORT(GetDC),
     WIN_EXPORT(GetKeyboardState),
+    WIN_EXPORT(GetMenu),
     WIN_EXPORT(GetMenuItemCount),
+    WIN_EXPORT(GetMenuItemRect),
     WIN_EXPORT(GetMessageA),
+    WIN_EXPORT(GetSysColor),
     WIN_EXPORT(GetWindowLongPtrA),
     WIN_EXPORT(GetWindowRect),
     WIN_EXPORT(IntersectRect),
     WIN_EXPORT(InvalidateRect),
     WIN_EXPORT(KillTimer),
+    WIN_EXPORT(MessageBeep),
     WIN_EXPORT(OffsetRect),
     WIN_EXPORT(OpenClipboard),
     WIN_EXPORT(PostQuitMessage),
@@ -282,6 +289,7 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(ReleaseDC),
     WIN_EXPORT(SendMessageA),
     WIN_EXPORT(SetClipboardData),
+    WIN_EXPORT(SetMenu),
     WIN_EXPORT(SetRect),
     WIN_EXPORT(SetTimer),
     WIN_EXPORT(SetWindowLongPtrA),
@@ -305,6 +313,8 @@ static const struct runtime_export gdi32_exports[] = {
     WIN_EXPORT(DeleteDC),
     WIN_EXPORT(DeleteObject),
     WIN_EXPORT(Ellipse),
+    WIN_EXPORT(EndDoc),
+    WIN_EXPORT(EndPage),
     WIN_EXPORT(ExtTextOutW),
     WIN_EXPORT(GetDeviceCaps),
     WIN_EXPORT(GetStockObject),
@@ -320,7 +330,13 @@ static const struct runtime_export gdi32_exports[] = {
     WIN_EXPORT(SetBkMode),
     WIN_EXPORT(SetMapMode),
     WIN_EXPORT(SetPixel),
-    WIN_EXPORT(SetTextColor)
+    WIN_EXPORT(SetTextColor),
+    WIN_EXPORT(StartDocA),
+    WIN_EXPORT(StartPage)
+};
+
+static const struct runtime_export comdlg32_exports[] = {
+    WIN_EXPORT(PrintDlgA)
 };
 
 static const struct runtime_export vcruntime_exports[] = {
@@ -380,6 +396,7 @@ static const struct runtime_export locale_exports[] = {
 };
 
 static const struct runtime_export crt_runtime_exports[] = {
+    EXPORT("_c_exit", nt_c_exit),
     EXPORT("_cexit", nt_cexit),
     EXPORT("_configure_narrow_argv", nt_configure_narrow_argv),
     EXPORT("_crt_atexit", nt_crt_atexit),
@@ -389,11 +406,14 @@ static const struct runtime_export crt_runtime_exports[] = {
     EXPORT("_initialize_onexit_table", nt_initialize_onexit_table),
     EXPORT("_initterm", nt_initterm),
     EXPORT("_initterm_e", nt_initterm_e),
+    EXPORT("_is_c_termination_complete", nt_is_c_termination_complete),
     EXPORT("_register_onexit_function", nt_register_onexit_function),
     EXPORT("_register_thread_local_exe_atexit_callback", nt_register_thread_local_exe_atexit_callback),
+    EXPORT("_seh_filter_exe", nt_seh_filter_exe),
     EXPORT("_set_app_type", nt_set_app_type),
     EXPORT("_wassert", nt_wassert),
     EXPORT("exit", nt_exit),
+    EXPORT("signal", nt_signal),
     EXPORT("terminate", nt_terminate)
 };
 
@@ -427,6 +447,7 @@ static const struct {
     MODULE("kernel32.dll", kernel32_exports),
     MODULE("user32.dll", user32_exports),
     MODULE("gdi32.dll", gdi32_exports),
+    MODULE("comdlg32.dll", comdlg32_exports),
     MODULE("vcruntime140.dll", vcruntime_exports),
     MODULE("api-ms-win-crt-convert-l1-1-0.dll", convert_exports),
     MODULE("api-ms-win-crt-environment-l1-1-0.dll", environment_exports),

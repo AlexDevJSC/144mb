@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "desktop.h"
+#include "menu_view.h"
 
 #include <SDL.h>
 #include <limits.h>
@@ -27,6 +28,7 @@ struct window_class {
 
 struct window {
     uintptr_t handle, dc, instance;
+    uintptr_t menu, popup;
     struct window_class *type;
     nt_window_proc proc;
     SDL_Window *native;
@@ -35,6 +37,7 @@ struct window {
     intptr_t userdata;
     uint32_t style, exstyle;
     int width, height;
+    int popup_x;
     unsigned int dc_users;
     bool visible, enabled, destroying, painting, erase, invalidated;
 };
@@ -49,6 +52,7 @@ static size_t class_count, message_count;
 static bool overflow;
 static uintptr_t next_handle = 0x25000005;
 static unsigned char keyboard[256];
+static SDL_AudioDeviceID beep_device;
 
 bool nt_runtime_open_desktop(void)
 {
@@ -71,6 +75,54 @@ bool nt_runtime_show_assertion(const char *message)
 {
     return desktop_thread &&
            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Assertion failed", message, NULL) == 0;
+}
+
+int32_t NT_MS_ABI nt_MessageBeep(uint32_t type)
+{
+    enum { RATE = 22050, SAMPLES = 2205 };
+    unsigned int frequency;
+    switch (type) {
+    case UINT32_MAX: case 0: frequency = 880; break;
+    case 0x10: frequency = 440; break;
+    case 0x20: frequency = 660; break;
+    case 0x30: frequency = 550; break;
+    case 0x40: frequency = 990; break;
+    default:
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (!desktop_thread) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (beep_device == 0) {
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+        const SDL_AudioSpec format = {.freq = RATE, .format = AUDIO_S16SYS, .channels = 1, .samples = 512};
+        beep_device = SDL_OpenAudioDevice(NULL, 0, &format, NULL, 0);
+        if (beep_device == 0) {
+            SDL_QuitSubSystem(SDL_INIT_AUDIO);
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+        SDL_PauseAudioDevice(beep_device, 0);
+    }
+    if (SDL_GetQueuedAudioSize(beep_device) >= RATE * sizeof(int16_t)) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    int16_t samples[SAMPLES];
+    for (unsigned int i = 0; i < SAMPLES; ++i) {
+        const int amplitude = 1200 * (int)(SAMPLES - i) / SAMPLES;
+        samples[i] = (int16_t)((i * frequency % RATE) < RATE / 2 ? amplitude : -amplitude);
+    }
+    if (SDL_QueueAudio(beep_device, samples, sizeof(samples)) != 0) {
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    return 1;
 }
 
 static struct window *find_window(uintptr_t handle)
@@ -184,6 +236,7 @@ static void release_window(struct window *window)
 {
     nt_runtime_remove_window_timers(window->handle);
     nt_runtime_clipboard_window_closed(window->handle);
+    nt_runtime_detach_menu(window->menu, window->handle, true);
     for (size_t i = 0; i < message_count;) {
         if (messages[i].window != window->handle) {
             ++i;
@@ -211,19 +264,36 @@ void nt_runtime_close_desktop(void)
     overflow = false;
     memset(keyboard, 0, sizeof(keyboard));
     pthread_mutex_lock(&desktop_lock);
+    if (beep_device != 0) {
+        SDL_CloseAudioDevice(beep_device);
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        beep_device = 0;
+    }
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
     desktop_thread = desktop_started = false;
     pthread_mutex_unlock(&desktop_lock);
 }
 
+struct present_target {
+    SDL_Surface *surface;
+    int offset;
+};
+
+static int menu_height(const struct window *window)
+{
+    return window->menu != 0 ? NT_MENU_HEIGHT : 0;
+}
+
 static bool copy_to_native(const uint32_t *pixels, int32_t width, int32_t height, void *context)
 {
-    SDL_Surface *surface = context;
-    if (width != surface->w || height != surface->h)
+    const struct present_target *target = context;
+    SDL_Surface *surface = target->surface;
+    if (width != surface->w || height != surface->h - target->offset)
         return false;
+    unsigned char *first = (unsigned char *)surface->pixels + target->offset * surface->pitch;
     return SDL_ConvertPixels(width, height, SDL_PIXELFORMAT_XBGR8888, pixels,
                              width * (int)sizeof(*pixels), surface->format->format,
-                             surface->pixels, surface->pitch) == 0;
+                             first, surface->pitch) == 0;
 }
 
 static bool resize_surface(struct window *window, int width, int height)
@@ -260,13 +330,17 @@ static bool present(struct window *window)
             SDL_SetError("SDL window framebuffer unavailable");
         return false;
     }
-    if (!resize_surface(window, surface->w, surface->h)) {
+    const int offset = menu_height(window);
+    if (!resize_surface(window, surface->w, surface->h - offset)) {
         SDL_SetError("GDI surface resize to %dx%d failed", surface->w, surface->h);
         return false;
     }
     if (SDL_LockSurface(surface) != 0)
         return false;
-    const bool copied = nt_runtime_read_surface(window->dc, copy_to_native, surface);
+    struct present_target target = {surface, offset};
+    const bool copied = nt_runtime_read_surface(window->dc, copy_to_native, &target) &&
+                        (window->menu == 0 || nt_runtime_draw_menu(surface, window->menu,
+                                                                  window->popup, window->popup_x));
     SDL_UnlockSurface(surface);
     return copied && SDL_UpdateWindowSurface(window->native) == 0;
 }
@@ -457,13 +531,18 @@ intptr_t NT_MS_ABI nt_DefWindowProcA(uintptr_t handle, uint32_t message,
         return 0;
     case NT_WM_ERASEBKGND:
         if (window->type->definition.background != 0 && wparam == window->dc) {
-            const uintptr_t previous = nt_SelectObject(window->dc, window->type->definition.background);
+            const uintptr_t background = window->type->definition.background;
+            const bool system_color = background <= 32;
+            const uintptr_t brush = system_color ? nt_CreateSolidBrush(nt_GetSysColor((int32_t)background - 1)) : background;
+            const uintptr_t previous = nt_SelectObject(window->dc, brush);
+            int32_t result = 0;
             if (previous != 0) {
-                const int32_t result = nt_BitBlt(window->dc, 0, 0, window->width, window->height,
-                                                 0, 0, 0, PATCOPY);
+                result = nt_BitBlt(window->dc, 0, 0, window->width, window->height, 0, 0, 0, PATCOPY);
                 nt_SelectObject(window->dc, previous);
-                return result;
             }
+            if (system_color && brush != 0)
+                nt_DeleteObject(brush);
+            return result;
         }
         return 0;
     case NT_WM_PAINT: {
@@ -495,12 +574,99 @@ int32_t NT_MS_ABI nt_GetWindowRect(uintptr_t handle, struct nt_rect *rect)
     SDL_GetWindowPosition(window->native, &x, &y);
     SDL_GetWindowBordersSize(window->native, &top, &left, &bottom, &right);
     const int64_t l = (int64_t)x - left, t = (int64_t)y - top;
-    const int64_t r = (int64_t)x + window->width + right, b = (int64_t)y + window->height + bottom;
+    const int64_t r = (int64_t)x + window->width + right;
+    const int64_t b = (int64_t)y + window->height + menu_height(window) + bottom;
     if (l < INT32_MIN || t < INT32_MIN || r > INT32_MAX || b > INT32_MAX) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
     *rect = (struct nt_rect){(int32_t)l, (int32_t)t, (int32_t)r, (int32_t)b};
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_AdjustWindowRectEx(struct nt_rect *rect, uint32_t style, int32_t menu,
+                                       uint32_t exstyle)
+{
+    if (rect == NULL || rect->left > rect->right || rect->top > rect->bottom ||
+        (menu != 0 && rect->top < INT32_MIN + NT_MENU_HEIGHT)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if ((style & (WS_CAPTION | WS_THICKFRAME | UINT32_C(0x40000000))) != 0 ||
+        (exstyle & ~(WS_EX_TOPMOST | WS_EX_APPWINDOW)) != 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (menu != 0)
+        rect->top -= NT_MENU_HEIGHT;
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_SetMenu(uintptr_t handle, uintptr_t menu)
+{
+    struct window *window = require_window(handle);
+    if (window == NULL)
+        return 0;
+    if (window->menu == menu)
+        return 1;
+    if (menu != 0 && !nt_runtime_attach_menu(menu, handle))
+        return 0;
+    const int height = window->height + menu_height(window) - (menu != 0 ? NT_MENU_HEIGHT : 0);
+    if (!resize_surface(window, window->width, height)) {
+        nt_runtime_detach_menu(menu, handle, false);
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    nt_runtime_detach_menu(window->menu, handle, false);
+    window->menu = menu;
+    window->popup = 0;
+    invalidate(window, NULL, true);
+    return 1;
+}
+
+uintptr_t NT_MS_ABI nt_GetMenu(uintptr_t handle)
+{
+    const struct window *window = require_window(handle);
+    return window != NULL ? window->menu : 0;
+}
+
+int32_t NT_MS_ABI nt_DrawMenuBar(uintptr_t handle)
+{
+    struct window *window = require_window(handle);
+    if (window == NULL)
+        return 0;
+    if (!present(window)) {
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetMenuItemRect(uintptr_t handle, uintptr_t menu, uint32_t item,
+                                     struct nt_rect *rect)
+{
+    const struct window *window = require_window(handle);
+    if (window == NULL)
+        return 0;
+    if (rect == NULL || menu == 0 || (menu != window->menu && menu != window->popup)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_menu_view_item entry;
+    struct nt_rect row;
+    if (!nt_runtime_menu_bounds(menu, menu == window->menu ? -1 : window->popup_x,
+                               window->width, window->height + menu_height(window), item,
+                               &row, &entry)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    int x, y;
+    SDL_GetWindowPosition(window->native, &x, &y);
+    if ((int64_t)x + row.right > INT32_MAX || (int64_t)y + row.bottom > INT32_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *rect = (struct nt_rect){row.left + x, row.top + y, row.right + x, row.bottom + y};
     return 1;
 }
 
@@ -682,7 +848,8 @@ int32_t NT_MS_ABI nt_SetWindowPos(uintptr_t handle, uintptr_t after, int32_t x, 
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
-    if ((flags & NOSIZE) == 0 && !resize_surface(window, width, height)) {
+    if ((flags & NOSIZE) == 0 && (!valid_dimensions(width, height) ||
+                                 !resize_surface(window, width, height - menu_height(window)))) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
@@ -776,6 +943,54 @@ static uintptr_t mouse_keys(uint32_t state)
            ((modifiers & KMOD_CTRL) != 0 ? 8u : 0u);
 }
 
+static bool menu_pointer(struct window *window, int x, int y, bool released)
+{
+    if (window->menu == 0)
+        return false;
+    if (y < NT_MENU_HEIGHT) {
+        if (released) {
+            const uintptr_t previous = window->popup;
+            window->popup = 0;
+            for (uint32_t i = 0; ; ++i) {
+                struct nt_menu_view_item item;
+                struct nt_rect row;
+                if (!nt_runtime_menu_bounds(window->menu, -1, window->width,
+                                           window->height + NT_MENU_HEIGHT, i, &row, &item))
+                    break;
+                if (x < row.left || x >= row.right)
+                    continue;
+                if ((item.flags & (NT_MENU_DISABLED | NT_MENU_SEPARATOR)) == 0) {
+                    if (item.submenu != 0) {
+                        window->popup = previous != item.submenu ? item.submenu : 0;
+                        window->popup_x = row.left;
+                    } else {
+                        enqueue(window, NT_WM_COMMAND, item.id & UINT16_MAX, 0, 0, 0, 0);
+                    }
+                }
+                break;
+            }
+            nt_DrawMenuBar(window->handle);
+        }
+        return true;
+    }
+    if (window->popup != 0) {
+        const uint32_t index = (uint32_t)(y - NT_MENU_HEIGHT) / NT_MENU_ROW;
+        struct nt_menu_view_item item;
+        struct nt_rect row;
+        const bool hit = nt_runtime_menu_bounds(window->popup, window->popup_x, window->width,
+                                                window->height + NT_MENU_HEIGHT, index, &row, &item) &&
+                         x >= row.left && x < row.right && y < row.bottom;
+        if (released) {
+            window->popup = 0;
+            if (hit && item.submenu == 0 && (item.flags & (NT_MENU_DISABLED | NT_MENU_SEPARATOR)) == 0)
+                enqueue(window, NT_WM_COMMAND, item.id & UINT16_MAX, 0, 0, 0, 0);
+            nt_DrawMenuBar(window->handle);
+        }
+        return true;
+    }
+    return false;
+}
+
 static void translate_event(const SDL_Event *event)
 {
     struct window *window;
@@ -794,7 +1009,7 @@ static void translate_event(const SDL_Event *event)
         } else if (event->window.event == SDL_WINDOWEVENT_MOVED) {
             enqueue(window, NT_WM_MOVE, 0, pair(event->window.data1, event->window.data2), 0, 0, 0);
         } else if (event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-            const int width = event->window.data1, height = event->window.data2;
+            const int width = event->window.data1, height = event->window.data2 - menu_height(window);
             if (resize_surface(window, width, height))
                 enqueue(window, NT_WM_SIZE, 0, pair(width, height), 0, 0, 0);
         } else if (event->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
@@ -805,6 +1020,11 @@ static void translate_event(const SDL_Event *event)
         window = window_from_id(event->key.windowID);
         if (window != NULL && window->enabled) {
             const bool down = event->type == SDL_KEYDOWN;
+            if (down && event->key.keysym.sym == SDLK_ESCAPE && window->popup != 0) {
+                window->popup = 0;
+                nt_DrawMenuBar(window->handle);
+                break;
+            }
             const unsigned int key = virtual_key(event->key.keysym.sym);
             const uint32_t detail = UINT32_C(1) | (uint32_t)(event->key.keysym.scancode & 255) << 16 |
                                     (down ? (uint32_t)(event->key.repeat != 0) << 30 : UINT32_C(3) << 30);
@@ -815,9 +1035,11 @@ static void translate_event(const SDL_Event *event)
         break;
     case SDL_MOUSEMOTION:
         window = window_from_id(event->motion.windowID);
-        if (window != NULL && window->enabled)
+        if (window != NULL && window->enabled && event->motion.y >= menu_height(window) && window->popup == 0) {
+            const int y = event->motion.y - menu_height(window);
             enqueue(window, NT_WM_MOUSEMOVE, mouse_keys(event->motion.state),
-                     pair(event->motion.x, event->motion.y), event->motion.x, event->motion.y, 0);
+                     pair(event->motion.x, y), event->motion.x, y, 0);
+        }
         break;
     case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
         window = window_from_id(event->button.windowID);
@@ -826,13 +1048,19 @@ static void translate_event(const SDL_Event *event)
             const uint32_t base = event->button.button == SDL_BUTTON_LEFT ? NT_WM_LBUTTONDOWN :
                                   (event->button.button == SDL_BUTTON_RIGHT ? NT_WM_RBUTTONDOWN : NT_WM_MBUTTONDOWN);
             const bool down = event->type == SDL_MOUSEBUTTONDOWN;
+            if (event->button.button == SDL_BUTTON_LEFT &&
+                menu_pointer(window, event->button.x, event->button.y, !down))
+                break;
+            const int y = event->button.y - menu_height(window);
+            if (y < 0 || window->popup != 0)
+                break;
             const uint32_t mask = SDL_BUTTON(event->button.button);
             const uint32_t current = SDL_GetMouseState(NULL, NULL);
             const bool twice = down && event->button.clicks == 2 &&
                                (window->type->definition.style & CS_DBLCLKS) != 0;
             enqueue(window, base + (down ? (twice ? 2u : 0u) : 1u),
                      mouse_keys(down ? current | mask : current & ~mask),
-                     pair(event->button.x, event->button.y), event->button.x, event->button.y, 0);
+                     pair(event->button.x, y), event->button.x, y, 0);
         }
         break;
     default:

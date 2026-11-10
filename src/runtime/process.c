@@ -254,8 +254,10 @@ void NT_MS_ABI nt_exit(int code)
 
 void NT_MS_ABI nt_quick_exit(int code)
 {
-    if (worker_status_fd >= 0)
+    if (worker_status_fd >= 0) {
+        nt_c_exit();
         finish_worker((uint32_t)code);
+    }
     errno = EPERM;
 }
 
