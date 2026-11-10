@@ -66,10 +66,23 @@ static int NT_MS_ABI guest_entry(void)
             (const struct nt_runtime_function *)(const void *)(active.base + active.exception_rva),
             active.exception_size / sizeof(struct nt_runtime_function));
     }
+    typedef void (NT_MS_ABI *tls_callback)(void *, uint32_t, void *);
+    for (uint32_t i = 0; i < active.tls_callback_count; ++i) {
+        const uint64_t value = read_u64(active.base + active.tls_callbacks_rva + i * 8);
+        tls_callback callback;
+        memcpy(&callback, &value, sizeof(callback));
+        callback(active.base, 1, NULL); /* DLL_PROCESS_ATTACH */
+    }
     const void *address = active.base + active.entry_rva;
     int (NT_MS_ABI *entry)(void);
     memcpy(&entry, &address, sizeof(entry));
     const int status = entry();
+    for (uint32_t i = 0; i < active.tls_callback_count; ++i) {
+        const uint64_t value = read_u64(active.base + active.tls_callbacks_rva + i * 8);
+        tls_callback callback;
+        memcpy(&callback, &value, sizeof(callback));
+        callback(active.base, 0, NULL); /* DLL_PROCESS_DETACH */
+    }
     nt_runtime_close_desktop();
     return status;
 }
