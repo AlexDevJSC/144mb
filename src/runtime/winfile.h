@@ -55,6 +55,9 @@ uint32_t NT_MS_ABI nt_GetFinalPathNameByHandleW(uintptr_t handle, uint16_t *buff
 uintptr_t NT_MS_ABI nt_GetStdHandle(uint32_t which);
 int32_t NT_MS_ABI nt_SetStdHandle(uint32_t which, uintptr_t handle);
 int32_t NT_MS_ABI nt_GetConsoleMode(uintptr_t handle, uint32_t *mode);
+int32_t NT_MS_ABI nt_ReadConsoleW(uintptr_t handle, uint16_t *buffer, uint32_t count,
+                                  uint32_t *done, const void *control);
+int32_t NT_MS_ABI nt_SetConsoleTitleA(const char *title);
 int32_t NT_MS_ABI nt_WriteConsoleA(uintptr_t handle, const char *buffer, uint32_t count, uint32_t *done, void *reserved);
 int32_t NT_MS_ABI nt_WriteConsoleW(uintptr_t handle, const uint16_t *buffer, uint32_t count, uint32_t *done, void *reserved);
 uint32_t NT_MS_ABI nt_GetConsoleOutputCP(void);
