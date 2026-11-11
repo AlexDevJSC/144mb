@@ -27,7 +27,7 @@ PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-i
 PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector \
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run
 
 $(BUILD_DIR):
@@ -199,6 +199,14 @@ $(BUILD_DIR)/pe-external-host: tests/pe/external_host.c src/pe/image.c $(RUNTIME
 check-pe-external: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
+
+$(BUILD_DIR)/console-fixture.exe: tests/pe/console_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
+
+check-pe-console: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/console-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/console-fixture.exe
 
 $(BUILD_DIR)/displayconfig-fixture.exe: tests/pe/displayconfig_fixture.c | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
