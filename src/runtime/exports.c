@@ -17,6 +17,7 @@
 #include "raw_input.h"
 #include "task_dialog.h"
 #include "windesktop.h"
+#include "display_config.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -400,6 +401,9 @@ static const struct runtime_export kernel32_exports[] = {
 };
 
 static const struct runtime_export user32_exports[] = {
+    WIN_EXPORT(GetDisplayConfigBufferSizes),
+    WIN_EXPORT(QueryDisplayConfig),
+    WIN_EXPORT(DisplayConfigGetDeviceInfo),
     WIN_EXPORT(DrawTextW),
     WIN_EXPORT(FillRect),
     WIN_EXPORT(AdjustWindowRect),
