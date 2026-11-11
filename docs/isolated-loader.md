@@ -9,7 +9,7 @@ y las importaciones resueltas llaman a equivalentes del runtime propio.
 
 La cobertura **197/197 importaciones directas** de Mines procede del
 auditor previo y mide símbolos con equivalente registrado. El fixture sintético verifica el mapeo de
-varias secciones, una relocación DIR64, la IAT, callbacks TLS sin datos, puente GS/TEB/PEB mínimo y una llamada MS x64 real
+varias secciones, una relocación DIR64, la IAT, la plantilla y callbacks TLS, el puente GS/TEB/PEB mínimo y una llamada MS x64 real
 y el rechazo temprano de imágenes malformadas. Posteriormente se completaron
 una victoria y una derrota del Mines original con un arnés aislado en Linux
 fuera de pantalla. El usuario ha confirmado ambos finales en su portátil
@@ -27,7 +27,11 @@ alcance funcional están en [Compatibilidad de Mines](mines-compatibility.md).
   o relocaciones de tipo DIR64 en memoria privada.
 - Importación por nombre u ordinal, enlazada al registro propio de
   equivalentes Win32. Rechazo explícito de funciones no soportadas.
-- Preparación de un TEB mínimo por hilo mediante GS de Linux, PEB con base de imagen y vector TLS vacío; se restaura el GS anterior tras la ejecución normal.
+- Preparación de un TEB mínimo por hilo mediante GS de Linux y un PEB
+  con la base de la imagen. Se copia la plantilla TLS del ejecutable
+  al slot 0 de cada hilo, con hasta 4 KiB de datos y relleno y alineación
+  de hasta 16 bytes. Se validan las direcciones de callbacks antes de
+  su entrega. Se restaura el GS anterior al salir del código invitado.
 - Transferencia de control a un punto de entrada de aplicación con
   ABI Microsoft x64, usando el trabajador de pruebas y SDL en Linux.
 - Límite de archivo de 128 MiB y disco C: persistente por usuario con el EXE
@@ -161,7 +165,8 @@ de Squadron121 fue de solo lectura.
 
 ### Fuera de alcance y riesgos pendientes
 
-- TLS estática o con datos por hilo (solo callbacks acotados sin datos), importaciones retardadas,
+- TLS de DLL adicionales, plantillas fuera de los límites del cargador,
+  importaciones retardadas,
   PEB/TEB completos (hay solo estructuras mínimas), llamadas dinámicas no incluidas en las 197
   importaciones directas de Mines, compatibilidad de DLL externas.
 - Entrega general de SEH y fallos de memoria del código invitado; el

@@ -6,6 +6,7 @@ License:        MIT
 Source0:        %{name}-%{version}.tar.gz
 ExclusiveArch:  x86_64
 Requires:       bubblewrap
+Requires:       fluidsynth-libs
 
 BuildRequires:  binutils
 BuildRequires:  gcc
@@ -13,6 +14,8 @@ BuildRequires:  make
 BuildRequires:  pkgconfig(sdl2)
 BuildRequires:  pkgconfig(cairo)
 BuildRequires:  pkgconfig(libffi)
+BuildRequires:  pkgconfig(libcrypto)
+BuildRequires:  fluidsynth-libs
 BuildRequires:  dejavu-sans-fonts
 
 %description

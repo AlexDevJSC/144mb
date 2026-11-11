@@ -48,6 +48,16 @@ int main(void)
     assert(syscall(SYS_arch_prctl, ARCH_GET_GS, &current) == 0);
     assert(current == previous);
     assert(!nt_guest_thread_leave(&thread));
-    puts("PASS Linux GS/TEB/PEB mapping, TLS vector and previous GS restoration");
+    const unsigned char seed[] = {0xc2, 0x39, 0x42};
+    const struct nt_guest_tls template = {seed, sizeof(seed), 6};
+    assert(nt_guest_thread_enter_with_tls(&thread, image, &template));
+    assert(__builtin_memcmp((const void *)thread.tls_vector[0], seed, sizeof(seed)) == 0);
+    assert(thread.tls_block[3] == 0 && thread.tls_block[8] == 0);
+    thread.tls_block[0] = 0;
+    assert(nt_guest_thread_leave(&thread));
+    assert(nt_guest_thread_enter_with_tls(&thread, image, &template));
+    assert(thread.tls_block[0] == seed[0]);
+    assert(nt_guest_thread_leave(&thread));
+    puts("PASS Linux GS/TEB/PEB mapping, static TLS copy and previous GS restoration");
     return 0;
 }

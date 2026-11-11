@@ -432,3 +432,102 @@ uint32_t NT_MS_ABI nt_CommDlgExtendedError(void)
 {
     return dialog_error;
 }
+
+static char *wide_dialog_string(const void *pointer, bool filter)
+{
+    if (pointer == NULL)
+        return NULL;
+    const uint16_t *text = pointer;
+    size_t length = 0;
+    while (length < MAX_FILTER_BYTES) {
+        if (text[length] == 0 && (!filter || (length != 0 && text[length - 1] == 0)))
+            return nt_runtime_utf16_to_utf8(text, length);
+        ++length;
+    }
+    return NULL;
+}
+
+static int32_t wide_file_dialog(struct nt_open_file_name *request, bool save)
+{
+    dialog_error = 0;
+    if (request == NULL || (request->size != offsetof(struct nt_open_file_name, reserved) &&
+                            request->size != sizeof(*request))) {
+        dialog_error = CDERR_STRUCTSIZE;
+        return 0;
+    }
+    struct nt_open_file_name narrow = {0};
+    memcpy(&narrow, request, request->size);
+    const uint16_t *initial_file = (const uint16_t *)request->file;
+    char filename[MAX_PATH_BYTES];
+    if (initial_file == NULL || request->max_file == 0 ||
+        nt_runtime_wide_length(initial_file, request->max_file < MAX_PATH_BYTES ?
+                               request->max_file : MAX_PATH_BYTES) ==
+        (request->max_file < MAX_PATH_BYTES ? request->max_file : MAX_PATH_BYTES) ||
+        nt_WideCharToMultiByte(65001, 0x80, initial_file, -1, filename, sizeof(filename), NULL, NULL) == 0) {
+        dialog_error = FNERR_INVALIDFILENAME;
+        return 0;
+    }
+    char *filter = wide_dialog_string(request->filter, true);
+    char *initial = wide_dialog_string(request->initial_directory, false);
+    char *title = wide_dialog_string(request->title, false);
+    char *extension = wide_dialog_string(request->default_extension, false);
+    narrow.filter = filter;
+    narrow.initial_directory = initial;
+    narrow.title = title;
+    narrow.default_extension = extension;
+    narrow.file = filename;
+    narrow.max_file = sizeof(filename);
+    narrow.file_title = NULL;
+    narrow.max_file_title = 0;
+    bool selected = false;
+    if ((request->filter != NULL && filter == NULL) || (request->initial_directory != NULL && initial == NULL) ||
+        (request->title != NULL && title == NULL) || (request->default_extension != NULL && extension == NULL)) {
+        dialog_error = CDERR_INITIALIZATION;
+    } else {
+        selected = file_dialog(&narrow, save);
+    }
+    free(filter);
+    free(initial);
+    free(title);
+    free(extension);
+    if (!selected)
+        return 0;
+
+    uint16_t *output = (uint16_t *)request->file;
+    const int32_t units = nt_MultiByteToWideChar(65001, 8, filename, -1, NULL, 0);
+    if (units == 0) {
+        dialog_error = FNERR_INVALIDFILENAME;
+        return 0;
+    }
+    if ((uint32_t)units > request->max_file) {
+        output[0] = (uint16_t)units;
+        dialog_error = FNERR_BUFFERTOOSMALL;
+        return 0;
+    }
+    nt_MultiByteToWideChar(65001, 8, filename, -1, output, units);
+    uint16_t *leaf = output, *dot = NULL;
+    for (uint16_t *cursor = output; *cursor != 0; ++cursor) {
+        if (*cursor == '\\') {
+            leaf = cursor + 1;
+            dot = NULL;
+        } else if (*cursor == '.') {
+            dot = cursor;
+        }
+    }
+    request->file_offset = (uint16_t)(leaf - output);
+    request->extension_offset = dot != NULL ? (uint16_t)(dot + 1 - output) : (uint16_t)(units - 1);
+    request->filter_index = narrow.filter_index;
+    request->flags = narrow.flags;
+    if (request->file_title != NULL && request->max_file_title != 0) {
+        uint16_t *out_title = (uint16_t *)request->file_title;
+        size_t length = (size_t)(output + units - 1 - leaf);
+        if (length >= request->max_file_title)
+            length = request->max_file_title - 1;
+        memcpy(out_title, leaf, length * sizeof(*leaf));
+        out_title[length] = 0;
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetOpenFileNameW(struct nt_open_file_name *request) { return wide_file_dialog(request, false); }
+int32_t NT_MS_ABI nt_GetSaveFileNameW(struct nt_open_file_name *request) { return wide_file_dialog(request, true); }

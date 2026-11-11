@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
-#include "compat.h"
+#include "winbase.h"
 
 #include <limits.h>
 #include <pthread.h>
@@ -19,7 +19,7 @@ enum {
     FORMAT_MAX_MESSAGE = 128 * 1024
 };
 
-enum memory_kind { GLOBAL_FIXED, GLOBAL_MOVABLE, LOCAL_FIXED };
+enum memory_kind { GLOBAL_FIXED, GLOBAL_MOVABLE, LOCAL_FIXED, PROCESS_HEAP };
 
 struct memory_object {
     struct memory_object *next;
@@ -91,7 +91,7 @@ static uintptr_t release_object(uintptr_t handle, bool local)
     pthread_mutex_lock(&objects_lock);
     struct memory_object **link = find_object(handle);
     struct memory_object *object = *link;
-    if (object == NULL || (object->kind == LOCAL_FIXED) != local) {
+    if (object == NULL || object->kind == PROCESS_HEAP || (object->kind == LOCAL_FIXED) != local) {
         pthread_mutex_unlock(&objects_lock);
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
         return handle;
@@ -172,7 +172,7 @@ void *NT_MS_ABI nt_GlobalLock(uintptr_t handle)
     struct memory_object *object = *find_object(handle);
     uint32_t error = NT_ERROR_SUCCESS;
     void *data = NULL;
-    if (object == NULL || object->kind == LOCAL_FIXED)
+    if (object == NULL || (object->kind == LOCAL_FIXED || object->kind == PROCESS_HEAP))
         error = NT_ERROR_INVALID_HANDLE;
     else if (object->data == NULL)
         error = NT_ERROR_DISCARDED;
@@ -195,7 +195,7 @@ int32_t NT_MS_ABI nt_GlobalUnlock(uintptr_t handle)
     struct memory_object *object = *find_object(handle);
     uint32_t error = NT_ERROR_SUCCESS;
     bool locked = false;
-    if (object == NULL || object->kind == LOCAL_FIXED)
+    if (object == NULL || (object->kind == LOCAL_FIXED || object->kind == PROCESS_HEAP))
         error = NT_ERROR_INVALID_HANDLE;
     else if (object->kind == GLOBAL_FIXED)
         locked = true;
@@ -278,6 +278,138 @@ uint32_t NT_MS_ABI nt_FormatMessageA(uint32_t flags, const void *source,
             return 0;
         }
         memmove(buffer, message, length + 1);
+    }
+    return (uint32_t)length;
+}
+
+uintptr_t NT_MS_ABI nt_LocalAlloc(uint32_t flags, size_t size)
+{
+    if ((flags & ~GMEM_ZEROINIT) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_FLAGS);
+        return 0;
+    }
+    return allocate_object(LOCAL_FIXED, size, (flags & GMEM_ZEROINIT) != 0);
+}
+
+enum { PROCESS_HEAP_HANDLE = 0x73000001, HEAP_NO_SERIALIZE = 1, HEAP_ZERO_MEMORY = 8,
+       HEAP_REALLOC_IN_PLACE_ONLY = 16 };
+
+uintptr_t NT_MS_ABI nt_GetProcessHeap(void) { return PROCESS_HEAP_HANDLE; }
+
+void *NT_MS_ABI nt_HeapAlloc(uintptr_t heap, uint32_t flags, size_t size)
+{
+    if (heap != PROCESS_HEAP_HANDLE || (flags & ~(HEAP_NO_SERIALIZE | HEAP_ZERO_MEMORY)) != 0)
+        return NULL;
+    return (void *)allocate_object(PROCESS_HEAP, size, (flags & HEAP_ZERO_MEMORY) != 0);
+}
+
+void *NT_MS_ABI nt_HeapReAlloc(uintptr_t heap, uint32_t flags, void *memory, size_t size)
+{
+    const uint32_t allowed = HEAP_NO_SERIALIZE | HEAP_ZERO_MEMORY | HEAP_REALLOC_IN_PLACE_ONLY;
+    if (heap != PROCESS_HEAP_HANDLE || memory == NULL || (flags & ~allowed) != 0)
+        return NULL;
+    void *result = NULL;
+    pthread_mutex_lock(&objects_lock);
+    struct memory_object *object = *find_object((uintptr_t)memory);
+    if (object != NULL && object->kind == PROCESS_HEAP) {
+        if ((flags & HEAP_REALLOC_IN_PLACE_ONLY) == 0)
+            result = realloc(memory, size != 0 ? size : 1);
+        else if (size <= object->size)
+            result = memory;
+        if (result != NULL) {
+            if (size > object->size && (flags & HEAP_ZERO_MEMORY) != 0)
+                memset((char *)result + object->size, 0, size - object->size);
+            object->handle = (uintptr_t)result;
+            object->data = result;
+            object->size = size;
+        }
+    }
+    pthread_mutex_unlock(&objects_lock);
+    return result;
+}
+
+size_t NT_MS_ABI nt_HeapSize(uintptr_t heap, uint32_t flags, const void *memory)
+{
+    if (heap != PROCESS_HEAP_HANDLE || memory == NULL || (flags & ~HEAP_NO_SERIALIZE) != 0)
+        return SIZE_MAX;
+    pthread_mutex_lock(&objects_lock);
+    const struct memory_object *object = *find_object((uintptr_t)memory);
+    const size_t size = object != NULL && object->kind == PROCESS_HEAP ? object->size : SIZE_MAX;
+    pthread_mutex_unlock(&objects_lock);
+    return size;
+}
+
+int32_t NT_MS_ABI nt_HeapFree(uintptr_t heap, uint32_t flags, void *memory)
+{
+    if (heap != PROCESS_HEAP_HANDLE || memory == NULL || (flags & ~HEAP_NO_SERIALIZE) != 0)
+        return 0;
+    pthread_mutex_lock(&objects_lock);
+    struct memory_object **link = find_object((uintptr_t)memory);
+    struct memory_object *object = *link;
+    const bool valid = object != NULL && object->kind == PROCESS_HEAP;
+    if (valid)
+        *link = object->next;
+    pthread_mutex_unlock(&objects_lock);
+    if (valid) {
+        free(memory);
+        free(object);
+    }
+    return valid;
+}
+
+uint32_t NT_MS_ABI nt_FormatMessageW(uint32_t flags, const void *source,
+                                    uint32_t code, uint32_t language,
+                                    uint16_t *buffer, uint32_t size, void *arguments)
+{
+    (void)arguments;
+    const uint32_t supported = FORMAT_ALLOCATE | FORMAT_IGNORE_INSERTS |
+                               FORMAT_FROM_STRING | FORMAT_FROM_SYSTEM;
+    const bool from_string = (flags & FORMAT_FROM_STRING) != 0;
+    const bool from_system = (flags & FORMAT_FROM_SYSTEM) != 0;
+    if (buffer == NULL || from_string == from_system || (flags & ~supported) != 0 ||
+        (from_string && (source == NULL || (flags & FORMAT_IGNORE_INSERTS) == 0))) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    uint16_t wide[256];
+    const uint16_t *message = source;
+    if (from_system) {
+        const char *ascii = system_message(code);
+        if (ascii == NULL || (language != 0 && language != 0x0409)) {
+            nt_SetLastError(NT_ERROR_MR_MID_NOT_FOUND);
+            return 0;
+        }
+        if (nt_MultiByteToWideChar(1252, 0, ascii, -1, wide, sizeof(wide) / sizeof(*wide)) == 0)
+            return 0;
+        message = wide;
+    }
+    const size_t length = nt_runtime_wide_length(message, FORMAT_MAX_MESSAGE / sizeof(*message));
+    if (length == FORMAT_MAX_MESSAGE / sizeof(*message) ||
+        ((flags & FORMAT_ALLOCATE) != 0 && size > FORMAT_MAX_MESSAGE / sizeof(*message))) {
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    if (from_string) {
+        for (size_t i = 0; i < length; ++i) {
+            if (message[i] == '%') {
+                nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+                return 0;
+            }
+        }
+    }
+    if ((flags & FORMAT_ALLOCATE) != 0) {
+        const size_t units = size > length + 1 ? size : length + 1;
+        uint16_t *allocated = (uint16_t *)nt_LocalAlloc(0, units * sizeof(*allocated));
+        if (allocated == NULL)
+            return 0;
+        memcpy(allocated, message, (length + 1) * sizeof(*message));
+        memcpy(buffer, &allocated, sizeof(allocated));
+    } else {
+        if (size <= length) {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        memmove(buffer, message, (length + 1) * sizeof(*message));
     }
     return (uint32_t)length;
 }

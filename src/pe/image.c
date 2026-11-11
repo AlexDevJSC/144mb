@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "image.h"
+#include "ntnative/guest_thread.h"
 #include "pe_bytes.h"
 
 #include <errno.h>
@@ -174,16 +175,12 @@ static bool section_has(const struct section *sections, size_t count,
     return false;
 }
 
-/* MSVC CRT images may carry process-attach callbacks without any TLS data.
- * Dynamic/static thread-local data is deliberately refused until the TEB
- * and thread inheritance model have been implemented.
- */
+/* The executable is the only module assigned a static TLS index. */
 static bool prepare_tls(unsigned char *base, size_t size, struct directory tls,
                         const struct section *sections, size_t section_count,
-                        uint32_t *callback_rva, uint32_t *callback_count)
+                        struct pe_image_tls *out)
 {
-    *callback_rva = 0;
-    *callback_count = 0;
+    *out = (struct pe_image_tls){0};
     if (tls.size == 0)
         return true;
     if (tls.size < 40 || !span(size, tls.rva, tls.size))
@@ -194,11 +191,24 @@ static bool prepare_tls(unsigned char *base, size_t size, struct directory tls,
     const uint64_t index_va = read_u64(data + 16);
     const uint64_t callbacks_va = read_u64(data + 24);
     const uint32_t fill = read_u32(data + 32);
-    if (start != end || fill != 0 || index_va < (uintptr_t)base ||
+    const uint32_t alignment_code = (read_u32(data + 36) >> 20) & 15;
+    if (start > end || end - start > NT_GUEST_TLS_MAX ||
+        fill > NT_GUEST_TLS_MAX - (end - start) ||
+        (alignment_code != 0 && (1u << (alignment_code - 1)) > NT_GUEST_TLS_ALIGNMENT) ||
+        index_va < (uintptr_t)base ||
         index_va - (uintptr_t)base > UINT32_MAX ||
         !section_has(sections, section_count,
                      (uint32_t)(index_va - (uintptr_t)base), 4, SCN_WRITE))
         return false;
+    if (end != start) {
+        if (start < (uintptr_t)base || !span(size, start - (uintptr_t)base, end - start) ||
+            !section_has(sections, section_count, (uint32_t)(start - (uintptr_t)base),
+                         (uint32_t)(end - start), SCN_READ))
+            return false;
+        out->data_rva = (uint32_t)(start - (uintptr_t)base);
+        out->bytes = (uint32_t)(end - start);
+    }
+    out->zero_fill = fill;
     const uint32_t index_rva = (uint32_t)(index_va - (uintptr_t)base);
     const uint32_t zero = 0;
     memcpy(base + index_rva, &zero, sizeof(zero));
@@ -209,12 +219,13 @@ static bool prepare_tls(unsigned char *base, size_t size, struct directory tls,
     const uint32_t array_rva = (uint32_t)(callbacks_va - (uintptr_t)base);
     for (uint32_t i = 0; i <= 64; ++i) {
         const uint64_t offset = (uint64_t)array_rva + (uint64_t)i * 8;
-        if (!span(size, offset, 8))
+        if (!span(size, offset, 8) ||
+            !section_has(sections, section_count, (uint32_t)offset, 8, SCN_READ))
             return false;
         const uint64_t address = read_u64(base + offset);
         if (address == 0) {
-            *callback_rva = array_rva;
-            *callback_count = i;
+            out->callbacks_rva = array_rva;
+            out->callback_count = i;
             return true;
         }
         if (i == 64 || address < (uintptr_t)base ||
@@ -333,7 +344,7 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         return fail(error, error_size, "Linux mmap failed");
     unsigned char *base = mapped;
     bool success = false;
-    uint32_t tls_callbacks_rva = 0, tls_callback_count = 0;
+    struct pe_image_tls tls;
     do {
         memcpy(base, file, header_size);
         for (unsigned i = 0; i < count; ++i)
@@ -348,8 +359,8 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
             break;
         }
         if (!prepare_tls(base, image_size, directory[PE_TLS_DIR],
-                         sections, count, &tls_callbacks_rva, &tls_callback_count)) {
-            fail(error, error_size, "Invalid TLS directory or static TLS unsupported");
+                         sections, count, &tls)) {
+            fail(error, error_size, "Invalid or unsupported TLS directory");
             break;
         }
         if (!imports(base, image_size, directory[PE_IMPORT_DIR], resolver, context)) {
@@ -389,8 +400,7 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
             .resource_size = directory[PE_RESOURCE_DIR].size,
             .exception_rva = directory[PE_EXCEPTION_DIR].rva,
             .exception_size = directory[PE_EXCEPTION_DIR].size,
-            .tls_callbacks_rva = tls_callbacks_rva,
-            .tls_callback_count = tls_callback_count,
+            .tls = tls,
             .subsystem = subsystem
         };
         success = true;

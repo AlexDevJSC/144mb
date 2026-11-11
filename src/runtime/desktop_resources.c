@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "desktop.h"
+#include "windesktop.h"
 #include "desktop_resources.h"
 #include "../pe/pe_bytes.h"
 
@@ -331,4 +331,34 @@ void nt_runtime_close_desktop_resources(void)
     }
     memset(icons, 0, sizeof(icons));
     nt_runtime_set_icon_resources(0, 0, NULL, 0);
+}
+
+uintptr_t NT_MS_ABI nt_LoadCursorW(uintptr_t instance, const uint16_t *name)
+{
+    if ((uintptr_t)name <= UINT16_MAX)
+        return nt_LoadCursorA(instance, (const char *)name);
+    char narrow[128];
+    return nt_WideCharToMultiByte(1252, 0, name, -1, narrow, sizeof(narrow), NULL, NULL) != 0 ?
+           nt_LoadCursorA(instance, narrow) : 0;
+}
+
+uintptr_t NT_MS_ABI nt_LoadImageW(uintptr_t instance, const uint16_t *name, uint32_t type,
+                                  int32_t width, int32_t height, uint32_t flags)
+{
+    if ((flags & ~UINT32_C(0x8040)) != 0 || width < 0 || height < 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (type == 2 && width == 0 && height == 0)
+        return nt_LoadCursorW(instance, name);
+    if (type == 1 && (uintptr_t)name <= UINT16_MAX) {
+        const uintptr_t icon = nt_LoadIconA(instance, (const char *)name);
+        const SDL_Surface *surface = nt_runtime_icon(icon);
+        if (surface == NULL)
+            return 0;
+        if ((width == 0 || width == surface->w) && (height == 0 || height == surface->h))
+            return icon;
+    }
+    nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    return 0;
 }

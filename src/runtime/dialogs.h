@@ -79,6 +79,8 @@ struct nt_open_file_name {
 
 int32_t NT_MS_ABI nt_GetOpenFileNameA(struct nt_open_file_name *request);
 int32_t NT_MS_ABI nt_GetSaveFileNameA(struct nt_open_file_name *request);
+int32_t NT_MS_ABI nt_GetOpenFileNameW(struct nt_open_file_name *request);
+int32_t NT_MS_ABI nt_GetSaveFileNameW(struct nt_open_file_name *request);
 uint32_t NT_MS_ABI nt_CommDlgExtendedError(void);
 
 #endif

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "desktop.h"
+#include "raw_input.h"
 #include "menu_view.h"
 
 #include <SDL.h>
@@ -242,6 +243,33 @@ static void check_menu_lifetime(void)
     puts("PASS menu initialization tolerates destruction of the owner and menu tree");
 }
 
+static void check_raw_mouse(uintptr_t window)
+{
+    BOUND(RegisterRawInputDevices);
+    BOUND(GetRawInputData);
+    const struct nt_raw_input_device device = {1, 2, 0, window};
+    CHECK(nt_RegisterRawInputDevices(&device, 1, sizeof(device)));
+    SDL_Event event = {.type = SDL_MOUSEMOTION};
+    event.motion.windowID = nt_runtime_window_id(window);
+    event.motion.x = 32;
+    event.motion.y = 34;
+    event.motion.xrel = 9;
+    event.motion.yrel = -4;
+    CHECK(SDL_PushEvent(&event) == 1);
+    struct nt_message message;
+    CHECK(nt_PeekMessageW(&message, window, 0xff, 0xff, 1));
+    uint32_t size = 0;
+    CHECK(nt_GetRawInputData((uintptr_t)message.lparam, 0x10000003, NULL, &size, 24) == 0 && size == 48);
+    unsigned char data[48];
+    CHECK(nt_GetRawInputData((uintptr_t)message.lparam, 0x10000003, data, &size, 24) == sizeof(data));
+    int32_t motion[2];
+    memcpy(motion, data + 36, sizeof(motion));
+    CHECK(motion[0] == 9 && motion[1] == -4);
+    const struct nt_raw_input_device remove = {1, 2, 1, 0};
+    CHECK(nt_RegisterRawInputDevices(&remove, 1, sizeof(remove)));
+    puts("PASS Win32 raw mouse packet contains Linux SDL relative motion");
+}
+
 int main(void)
 {
     BOUND(RegisterClassA);
@@ -314,6 +342,7 @@ int main(void)
     CHECK(nt_runtime_window_pixel(window, 9, 8, &color) && color == GREEN);
 
     const uint32_t native_id = nt_runtime_window_id(window);
+    check_raw_mouse(window);
     SDL_Event event = {.type = SDL_KEYDOWN};
     event.key.windowID = native_id;
     event.key.keysym.sym = SDLK_a;

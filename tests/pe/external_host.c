@@ -9,6 +9,8 @@
 #include "compat.h"
 #include "desktop.h"
 #include "desktop_resources.h"
+#include "winbase.h"
+#include "sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -96,6 +98,9 @@ int main(int argc, char **argv)
         pe_image_unload(&image);
         return 4;
     }
+    nt_runtime_set_guest_image_extent(image.size);
+    const struct nt_guest_tls initial = {image.base + image.tls.data_rva, image.tls.bytes, image.tls.zero_fill};
+    nt_runtime_set_guest_tls(&initial, image.base + image.tls.callbacks_rva, image.tls.callback_count);
     nt_runtime_set_guest_environment(guest_env);
     if (!nt_runtime_open_desktop()) {
         fputs("Cannot initialize SDL desktop\n", stderr);
@@ -111,7 +116,7 @@ int main(int argc, char **argv)
         return 6;
     }
     struct nt_guest_thread thread = {0};
-    if (!nt_guest_thread_enter(&thread, (uintptr_t)image.base)) {
+    if (!nt_guest_thread_enter_with_tls(&thread, (uintptr_t)image.base, &initial)) {
         fputs("Cannot initialize guest thread GS/TEB\n", stderr);
         nt_runtime_close_desktop();
         pe_image_unload(&image);
@@ -120,21 +125,24 @@ int main(int argc, char **argv)
     const void *addr = image.base + image.entry_rva;
     int (NT_MS_ABI *entry)(void);
     memcpy(&entry, &addr, sizeof(entry));
+    nt_runtime_notify_tls(1);
     const int status = entry();
+    nt_runtime_notify_tls(0);
+    nt_runtime_run_fls_cleanup();
     if (!nt_guest_thread_leave(&thread)) {
         fputs("Failed to restore GS base\n", stderr);
         return 8;
     }
     nt_runtime_close_desktop();
     pe_image_unload(&image);
+    if (status != 0)
+        fprintf(stderr, "External PE fixture returned %d\n", status);
     if (rmdir(temp) != 0) {
         perror("Temporary fixture directory");
         return 9;
     }
-    if (status != 0) {
-        fprintf(stderr, "External PE fixture returned %d\n", status);
+    if (status != 0)
         return 10;
-    }
     puts("PASS trusted external PE32+ fixture mapped and executed on Linux");
     return 0;
 }

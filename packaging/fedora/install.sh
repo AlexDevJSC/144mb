@@ -34,7 +34,7 @@ fi
     fail 'Este instalador requiere Fedora x86-64.'
 
 dependencies=(git gcc binutils make pkgconf-pkg-config bubblewrap dejavu-sans-fonts
-              /usr/bin/flock 'pkgconfig(sdl2)' 'pkgconfig(cairo)' 'pkgconfig(libffi)')
+              /usr/bin/flock 'pkgconfig(sdl2)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' 'pkgconfig(libcrypto)' fluidsynth-libs)
 missing=()
 for dependency in "${dependencies[@]}"; do
     if ! rpm -q --whatprovides "$dependency" >/dev/null 2>&1; then

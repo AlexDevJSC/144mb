@@ -2,3 +2,4 @@
 LIBRARY COMCTL32.dll
 EXPORTS
     InitCommonControls @17 NONAME
+    TaskDialogIndirect @345 NONAME
