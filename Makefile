@@ -17,7 +17,7 @@ FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
 FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
 RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process environment sync threads fluid crypto winsock nls registry raw_input exceptions \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
-                dialogs file_dialogs clipboard guest_thread
+                dialogs file_dialogs clipboard guest_thread display_config
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
@@ -27,7 +27,7 @@ PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-i
 PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector \
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run
 
 $(BUILD_DIR):
@@ -72,6 +72,8 @@ $(BUILD_DIR)/runtime-gdi_memory.o: src/runtime/desktop.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-registry.o: src/runtime/registry.h
 $(BUILD_DIR)/runtime-registry.o: src/runtime/winbase.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-raw_input.o: src/runtime/raw_input.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-display_config.o: src/runtime/display_config.h
+$(BUILD_DIR)/runtime-display_config.o: override CPPFLAGS += $(DESKTOP_CFLAGS)
 $(BUILD_DIR)/runtime-raw_input.o: src/runtime/windesktop.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-dialogs.o: src/runtime/task_dialog.h
 
@@ -192,6 +194,14 @@ $(BUILD_DIR)/pe-external-host: tests/pe/external_host.c src/pe/image.c $(RUNTIME
 check-pe-external: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
+
+$(BUILD_DIR)/displayconfig-fixture.exe: tests/pe/displayconfig_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -luser32
+
+check-pe-displayconfig: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/displayconfig-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/displayconfig-fixture.exe
 
 check-pe-native: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/native-services.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
