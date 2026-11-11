@@ -39,6 +39,22 @@ informó versión 1.4.309 y `VkResult=-9` al consultar el dispositivo
 (sin controlador/dispositivo Vulkan utilizable en dicho entorno).
 Esto **no** es una medición de la GPU AMD del usuario.
 
+Las pruebas de CI añaden `tests/vulkan_mock_loader.c`, una
+biblioteca Vulkan simulada que se carga solo durante la suite Linux y
+Fedora. Verifica el recorrido completo del diagnóstico para cuatro
+situaciones deterministas:
+
+| Simulación | Estado esperado |
+| --- | --- |
+| API 1.3 y dispositivo con `VK_KHR_swapchain` | `NT_VULKAN_PRELIMINARY_READY` |
+| API 1.2 | `NT_VULKAN_API_BELOW_1_3` |
+| Dispositivo sin `VK_KHR_swapchain` | `NT_VULKAN_NO_SWAPCHAIN` |
+| Ningún dispositivo físico | `NT_VULKAN_NO_PHYSICAL_DEVICE` |
+
+El mock **no es un controlador gráfico** y no constituye ejecución
+D3D12. Se usa únicamente para verificar los caminos del diagnóstico,
+incluidos los sistemas de CI sin GPU.
+
 ## Por qué NO se resuelve todavía D3D12CreateDevice
 
 `D3D12CreateDevice` exige crear y devolver una interfaz
