@@ -38,9 +38,10 @@ incomplete and must not be represented as general Windows compatibility.
 
 %files
 %license LICENSE
-%doc README.md docs/architecture.md docs/validation.md docs/isolated-loader.md
+%doc README.md docs/architecture.md docs/validation.md docs/isolated-loader.md docs/vulkan-d3d12.md
 %{_bindir}/nt-native-probe
 %{_bindir}/pe-isolated-run
+%{_bindir}/nt-vulkan-probe
 
 %changelog
 * Mon Nov 09 2026 nt-native-linux contributors - 0.1.0-1
