@@ -98,6 +98,14 @@ de 337 bytes. Tras el cambio el cargador supera esa validación y se
 detiene en `sl.interposer.dll!D3D12CreateDevice`, antes de ejecutar
 código del juego.
 
+## Investigación posterior a la PR #47
+
+La rama de diagnóstico de Vulkan añade una consulta nativa a la biblioteca
+`libvulkan.so.1` y una prueba reproducible. **No registra todavía**
+`sl.interposer.dll!D3D12CreateDevice`; no modifica los 288/324
+equivalentes ni las 36 importaciones pendientes. Véase
+[la fase 0 de D3D12](vulkan-d3d12.md).
+
 ## Pendientes de la versión auditada
 
 | Bloque | Símbolos pendientes |
