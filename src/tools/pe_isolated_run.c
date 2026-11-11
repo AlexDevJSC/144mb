@@ -8,6 +8,7 @@
 #include "desktop.h"
 #include "desktop_resources.h"
 #include "guest_profile.h"
+#include "user_folders.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -46,6 +47,14 @@ static int NT_MS_ABI guest_entry(void)
     nt_runtime_set_guest_environment((const char *const *)environ);
     if (!nt_runtime_set_file_root("/game"))
         return 118;
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+        char directory[sizeof(NT_GUEST_FOLDER_MOUNTS) + 32];
+        snprintf(directory, sizeof(directory), "%s/%s", NT_GUEST_FOLDER_MOUNTS, nt_user_folders[i].name);
+        if (!nt_runtime_set_user_folder_root(i, directory) && errno != ENOENT) {
+            perror("Cannot open shared folder in sandbox");
+            return 118;
+        }
+    }
     char command[PATH_MAX + 4];
     if (snprintf(command, sizeof(command), "\"%s\"", active_dos_path) >= (int)sizeof(command))
         return 119;
@@ -185,7 +194,19 @@ static bool add_arg(char **args, size_t *count, size_t max, char *item)
     return true;
 }
 
-static int run_isolated(const char *path)
+static int inherit_mount_descriptor(int fd)
+{
+    if (fd < 0)
+        return -1;
+    /* Keep host directory handles out of the worker's standard streams. */
+    const int inherited = fcntl(fd, F_DUPFD, STDERR_FILENO + 1);
+    const int error = errno;
+    close(fd);
+    errno = error;
+    return inherited;
+}
+
+static int run_isolated(const char *path, const char *const folders[NT_USER_FOLDER_COUNT])
 {
     char absolute[PATH_MAX], runner[PATH_MAX], socket_path[PATH_MAX];
     if (realpath(path, absolute) == NULL) {
@@ -212,11 +233,10 @@ static int run_isolated(const char *path)
     if (snprintf(inside, sizeof(inside), "/game/%s", slash + 1) >= (int)sizeof(inside))
         return 2;
 
-    const int profile = nt_open_guest_profile(getenv("XDG_STATE_HOME"), getenv("HOME"));
-    if (profile < 0 || fcntl(profile, F_SETFD, 0) != 0) {
+    const char *home = getenv("HOME");
+    const int profile = inherit_mount_descriptor(nt_open_guest_profile(getenv("XDG_STATE_HOME"), home));
+    if (profile < 0) {
         perror("Cannot prepare guest profile");
-        if (profile >= 0)
-            close(profile);
         return 2;
     }
     char profile_source[64];
@@ -228,9 +248,9 @@ static int run_isolated(const char *path)
     ADD("--die-with-parent"); ADD("--unshare-all"); ADD("--new-session"); ADD("--as-pid-1");
     ADD("--clearenv"); ADD("--setenv"); ADD("PATH"); ADD("/usr/bin:/bin");
     ADD("--setenv"); ADD("HOME"); ADD("/game");
-    ADD("--setenv"); ADD("USERPROFILE"); ADD("C:\\Users\\guest");
-    ADD("--setenv"); ADD("APPDATA"); ADD("C:\\Users\\guest\\AppData\\Roaming");
-    ADD("--setenv"); ADD("LOCALAPPDATA"); ADD("C:\\Users\\guest\\AppData\\Local");
+    ADD("--setenv"); ADD("USERPROFILE"); ADD(NT_GUEST_USER_PROFILE);
+    ADD("--setenv"); ADD("APPDATA"); ADD(NT_GUEST_USER_PROFILE "\\AppData\\Roaming");
+    ADD("--setenv"); ADD("LOCALAPPDATA"); ADD(NT_GUEST_USER_PROFILE "\\AppData\\Local");
     ADD("--setenv"); ADD("TEMP"); ADD("C:\\Temp");
     ADD("--setenv"); ADD("TMP"); ADD("C:\\Temp");
     ADD("--ro-bind"); ADD("/usr"); ADD("/usr");
@@ -269,6 +289,20 @@ static int run_isolated(const char *path)
         ADD("--setenv"); ADD("WAYLAND_DISPLAY"); ADD("wayland");
         ADD("--setenv"); ADD("SDL_VIDEODRIVER"); ADD("wayland");
     }
+    char folder_sources[NT_USER_FOLDER_COUNT][64];
+    char folder_targets[NT_USER_FOLDER_COUNT][sizeof(NT_GUEST_FOLDER_MOUNTS) + 32];
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+        if (folders[i] == NULL)
+            continue;
+        const int fd = inherit_mount_descriptor(nt_open_shared_folder(folders[i], home));
+        if (fd < 0) {
+            fprintf(stderr, "Cannot share %s=%s: %s\n", nt_user_folders[i].name, folders[i], strerror(errno));
+            return 2;
+        }
+        snprintf(folder_sources[i], sizeof(folder_sources[i]), "/proc/self/fd/%d", fd);
+        snprintf(folder_targets[i], sizeof(folder_targets[i]), "%s/%s", NT_GUEST_FOLDER_MOUNTS, nt_user_folders[i].name);
+        ADD("--bind"); ADD(folder_sources[i]); ADD(folder_targets[i]);
+    }
     ADD("--"); ADD("/runner"); ADD("--worker"); ADD(inside);
     args[n] = NULL;
 #undef ADD
@@ -280,15 +314,52 @@ static int run_isolated(const char *path)
     return 127;
 }
 
+static void usage(const char *command)
+{
+    fprintf(stderr, "Usage: %s [--share Folder=/absolute/linux/path]... [--] path/to/program.exe\n"
+            "Folders with read/write access: Desktop, Documents, Downloads, Music, Pictures, Videos.\n"
+            "Requires bubblewrap + Wayland. For headless smoke tests use SDL_VIDEODRIVER=offscreen.\n",
+            command);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--worker") == 0)
         return run_worker(argv[2]);
-    if (argc != 2 || strcmp(argv[1], "--help") == 0) {
-        fprintf(stderr, "Usage: %s path/to/Mines.exe\n"
-                "Requires bubblewrap + Wayland. For headless smoke tests use SDL_VIDEODRIVER=offscreen.\n",
-                argv[0]);
-        return argc == 2 ? 0 : 2;
+    if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+        usage(argv[0]);
+        return 0;
     }
-    return run_isolated(argv[1]);
+    const char *folders[NT_USER_FOLDER_COUNT] = {0};
+    int arg = 1;
+    while (arg + 1 < argc && strcmp(argv[arg], "--share") == 0) {
+        const char *mapping = argv[arg + 1];
+        const char *equals = strchr(mapping, '=');
+        size_t folder = 0;
+        if (equals != NULL && equals[1] == '/') {
+            const size_t length = (size_t)(equals - mapping);
+            for (; folder < NT_USER_FOLDER_COUNT; ++folder) {
+                const char *name = nt_user_folders[folder].name;
+                if (strlen(name) == length && memcmp(mapping, name, length) == 0)
+                    break;
+            }
+        } else {
+            folder = NT_USER_FOLDER_COUNT;
+        }
+        if (folder == NT_USER_FOLDER_COUNT || folders[folder] != NULL) {
+            fprintf(stderr, "Invalid or duplicate folder mapping: %s\n", mapping);
+            usage(argv[0]);
+            return 2;
+        }
+        folders[folder] = equals + 1;
+        arg += 2;
+    }
+    const bool end_options = arg < argc && strcmp(argv[arg], "--") == 0;
+    if (end_options)
+        ++arg;
+    if (arg != argc - 1 || (!end_options && argv[arg][0] == '-')) {
+        usage(argv[0]);
+        return 2;
+    }
+    return run_isolated(argv[arg], folders);
 }

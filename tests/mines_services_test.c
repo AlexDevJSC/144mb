@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "compat.h"
+#include "user_folders.h"
 
 #include <errno.h>
 #include <math.h>
@@ -86,6 +87,61 @@ static void check_file_handles(void)
     CHECK(stream != NULL && nt_fread(bytes, 1, 1, stream) == 0 && nt_fclose(stream) == 0);
     CHECK(nt_DeleteFileA("scores") && nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS shared Win32 files and ownership from HANDLE to CRT fd to FILE");
+}
+
+static void check_user_folders(void)
+{
+    BOUND("shell32.dll", "SHGetKnownFolderPath", nt_SHGetKnownFolderPath);
+    typedef void (NT_MS_ABI *task_free)(void *);
+    task_free release = (task_free)nt_runtime_resolve("ole32.dll", "CoTaskMemFree");
+    CHECK(release != NULL);
+    char drive[] = "/tmp/nt-folder-drive.XXXXXX", native[] = "/tmp/nt-folder-native.XXXXXX";
+    CHECK(mkdtemp(drive) != NULL && mkdtemp(native) != NULL && nt_runtime_set_file_root(drive));
+    const size_t folder = NT_USER_FOLDER_DOCUMENTS;
+    const struct nt_folder_id *id = &nt_user_folders[folder].id;
+    uint16_t *path = NULL;
+    CHECK(nt_SHGetKnownFolderPath(id, 0, 0, &path) < 0 && path == NULL);
+    CHECK(nt_SHGetKnownFolderPath(id, 0x4000, 0, &path) == 0 && path != NULL);
+    release(path);
+    CHECK(nt_runtime_set_user_folder_root(folder, native));
+    CHECK(nt_runtime_shared_user_folders() == (1u << folder));
+    CHECK(nt_SHGetKnownFolderPath(id, 0, 0, &path) == 0 && path != NULL);
+    const char dos_path[] = "C:\\Users\\guest\\Documents";
+    for (size_t i = 0; i < sizeof(dos_path); ++i)
+        CHECK(path[i] == (uint16_t)dos_path[i]);
+    release(path);
+    const struct nt_folder_id unknown = {0};
+    CHECK(nt_SHGetKnownFolderPath(&unknown, 0, 0, &path) < 0 && path == NULL);
+    CHECK(nt_SHGetKnownFolderPath(id, 0, 1, &path) < 0 && path == NULL);
+
+    const char filename[] = "c:/users/GUEST/documents/input.txt";
+    char input[128], link[128];
+    snprintf(input, sizeof(input), "%s/input.txt", native);
+    snprintf(link, sizeof(link), "%s/link.txt", native);
+    FILE *host = fopen(input, "wb");
+    CHECK(host != NULL && fputs("native", host) >= 0 && fclose(host) == 0);
+    char bytes[8] = {0};
+    void *file = nt_fopen(filename, "rb");
+    CHECK(file != NULL && nt_fread(bytes, 1, 6, file) == 6 &&
+          strcmp(bytes, "native") == 0 && nt_fclose(file) == 0);
+    file = nt_fopen(filename, "ab");
+    CHECK(file != NULL && nt_fwrite("!", 1, 1, file) == 1 && nt_fclose(file) == 0);
+    host = fopen(input, "rb");
+    CHECK(host != NULL && fread(bytes, 1, sizeof(bytes), host) == 7 &&
+          strcmp(bytes, "native!") == 0 && fclose(host) == 0);
+
+    CHECK(symlink(input, link) == 0 && nt_fopen("C:/Users/guest/Documents/link.txt", "rb") == NULL);
+    CHECK(nt_fopen("C:/Users/guest/Documents/../input.txt", "rb") == NULL && errno == EACCES);
+    CHECK(nt_fopen("C:/Users/guest/DocumentsX/input.txt", "rb") == NULL);
+    CHECK(!nt_MoveFileExA(filename, "C:/input.txt", 0) && last_error() == NT_ERROR_NOT_SAME_DEVICE);
+    CHECK(nt_CreateDirectoryA("C:/Users/guest/Documents/sub", NULL));
+    CHECK(nt_MoveFileExA(filename, "C:/Users/guest/Documents/sub/output.txt", 0));
+    CHECK(access(input, F_OK) < 0 && errno == ENOENT);
+    CHECK(nt_DeleteFileA("C:/Users/guest/Documents/sub/output.txt") &&
+          nt_RemoveDirectoryA("C:/Users/guest/Documents/sub"));
+    CHECK(nt_runtime_set_file_root(NULL) && nt_runtime_shared_user_folders() == 0);
+    CHECK(unlink(link) == 0 && rmdir(native) == 0 && rmdir(drive) == 0);
+    puts("PASS Windows known folders and direct Linux file access with separate roots");
 }
 
 static void check_startup(void)
@@ -655,6 +711,7 @@ static void check_printing(void)
 int main(void)
 {
     check_file_handles();
+    check_user_folders();
     check_startup();
     check_exit();
     check_quick_cleanup();

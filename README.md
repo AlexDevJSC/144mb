@@ -32,6 +32,9 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - El lanzador proporciona un perfil persistente de usuario para las variables
   `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, `TEMP` y `TMP`. Se verificó el
   guardado y la recuperación de preferencias de Mines y de un PE independiente.
+- Las aplicaciones pueden acceder directamente a carpetas elegidas de Linux
+  mediante sus rutas de usuario de Windows. El runtime implementa el
+  subconjunto de `SHGetKnownFolderPath` que corresponde a esas carpetas.
 
 ## Compilar y probar
 
@@ -61,12 +64,15 @@ ejecutables de prueba NT y Win32, muestra sus tablas de importación y
 los ejecuta en los anfitriones correspondientes. Cada anfitrión ejecuta
 exclusivamente el PE generado e incrustado en el build.
 
-El lanzador experimental exige Bubblewrap:
+El mismo lanzador sirve para cada EXE compatible. Requiere Bubblewrap.
+
 ```sh
-build/pe-isolated-run /ruta/a/Mines.exe
+build/pe-isolated-run /ruta/al/programa.exe
+build/pe-isolated-run --share "Documents=$(xdg-user-dir DOCUMENTS)" /ruta/al/programa.exe
 ```
-Véanse los [límites y el modelo de aislamiento](docs/isolated-loader.md);
-no se afirma compatibilidad funcional hasta probar una partida.
+
+El acceso a carpetas de Linux se habilita por lanzamiento. La cobertura
+funcional se comprueba con cada aplicación. [Límites y modelo de aislamiento](docs/isolated-loader.md).
 
 Con MinGW-w64 y una sesión Wayland o X11 activa, `make check-desktop`
 prueba la ventana desde el anfitrión Linux y desde un PE. En CI se usa
@@ -99,7 +105,8 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |
 | [Validación](docs/validation.md) | Pruebas realizadas y plan comparativo |
-| [Cargador aislado](docs/isolated-loader.md) | Mapeo PE, prueba sintética, ejecución y límites |\n| [Compatibilidad de Mines](docs/mines-compatibility.md) | Importaciones, errores y límites verificados en Linux |
+| [Cargador aislado](docs/isolated-loader.md) | Mapeo PE, prueba sintética, ejecución y límites |
+| [Compatibilidad de Mines](docs/mines-compatibility.md) | Importaciones, errores y límites verificados en Linux |
 | [Backlog](docs/backlog.md) | Tareas ordenadas y definición del siguiente PR |
 | [Fedora](packaging/fedora/README.md) | Compilación RPM y validación en VM |
 | [AGENTS.md](AGENTS.md) | Instrucciones reproducibles para Codex |

@@ -15,15 +15,26 @@ activar la versión. Se puede repetir con el mismo commit. La instalación
 se activa en `~/.local/bin` con los comandos `nt-native-probe` y
 `pe-isolated-run`. La compilación y el lanzador se ejecutan como usuario.
 
-En una sesión KDE Wayland, puedes pasar la ruta de tu EXE como segundo
-argumento para abrirlo después de instalar. El ejecutable de Mines se
-proporciona por separado.
+Ejecuta el instalador una vez por versión del runtime. Después, en una
+sesión KDE Wayland, abre cada EXE compatible con el mismo lanzador.
+El segundo argumento del instalador sigue disponible para abrir un EXE
+al terminar la instalación.
 
 ```sh
-bash packaging/fedora/install.sh "$(git rev-parse HEAD)" "$HOME/Descargas/mines.exe"
-# En usos posteriores
-"$HOME/.local/bin/pe-isolated-run" "$HOME/Descargas/mines.exe"
+"$HOME/.local/bin/pe-isolated-run" /ruta/al/programa.exe
 ```
+
+Para dar al programa acceso de lectura y escritura a tus Documentos de
+Linux, usa la ruta que configuraste en el escritorio.
+
+```sh
+"$HOME/.local/bin/pe-isolated-run" \
+  --share "Documents=$(xdg-user-dir DOCUMENTS)" /ruta/al/programa.exe
+```
+
+Puedes usar la ruta absoluta si tu escritorio carece de `xdg-user-dir`.
+El programa accede a esos mismos archivos mediante `C:\Users\guest\Documents`.
+Consulta las [carpetas disponibles](../../docs/isolated-loader.md#carpetas-de-linux-compartidas).
 
 Las aplicaciones comparten un disco C: persistente del usuario en
 `$XDG_STATE_HOME/nt-native-linux/drive-c`, con

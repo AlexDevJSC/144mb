@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "compat.h"
+#include "user_folders.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -12,12 +13,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 static int drive_root = -1;
+static struct { int fd; bool active; } folder_roots[NT_USER_FOLDER_COUNT];
 
 bool nt_runtime_set_file_root(const char *directory)
 {
@@ -27,18 +30,71 @@ bool nt_runtime_set_file_root(const char *directory)
     pthread_mutex_lock(&root_lock);
     const int previous = drive_root;
     drive_root = next;
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+        if (folder_roots[i].active) {
+            close(folder_roots[i].fd);
+            folder_roots[i].active = false;
+        }
+    }
     pthread_mutex_unlock(&root_lock);
     if (previous >= 0)
         close(previous);
     return true;
 }
 
-static int duplicate_root(void)
+bool nt_runtime_set_user_folder_root(size_t folder, const char *directory)
+{
+    if (folder >= NT_USER_FOLDER_COUNT) {
+        errno = EINVAL;
+        return false;
+    }
+    const int fd = directory != NULL ? open(directory, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (directory != NULL && fd < 0)
+        return false;
+    pthread_mutex_lock(&root_lock);
+    if (folder_roots[folder].active)
+        close(folder_roots[folder].fd);
+    folder_roots[folder].active = fd >= 0;
+    folder_roots[folder].fd = fd;
+    pthread_mutex_unlock(&root_lock);
+    return true;
+}
+
+unsigned int nt_runtime_shared_user_folders(void)
+{
+    unsigned int folders = 0;
+    pthread_mutex_lock(&root_lock);
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+        if (folder_roots[i].active)
+            folders |= 1u << i;
+    }
+    pthread_mutex_unlock(&root_lock);
+    return folders;
+}
+
+/* The caller holds root_lock while resolving paths and duplicating the root. */
+static int path_root(const char **path)
+{
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+        if (!folder_roots[i].active)
+            continue;
+        const char *prefix = nt_user_folders[i].relative;
+        const size_t length = strlen(prefix);
+        if (strncasecmp(*path, prefix, length) == 0 && ((*path)[length] == '/' || (*path)[length] == '\0')) {
+            *path = (*path)[length] == '/' ? *path + length + 1 : ".";
+            return folder_roots[i].fd;
+        }
+    }
+    return drive_root;
+}
+
+static int duplicate_root(const char **path)
 {
     pthread_mutex_lock(&root_lock);
+    const int root = path_root(path);
     int result = -1;
-    if (drive_root >= 0)
-        result = fcntl(drive_root, F_DUPFD_CLOEXEC, 0);
+    if (root >= 0)
+        result = fcntl(root, F_DUPFD_CLOEXEC, 0);
     else
         errno = ENOENT;
     const int error = errno;
@@ -177,16 +233,19 @@ static int open_regular(int root, const char *path, int flags, bool *created)
     return -1;
 }
 
-static int open_parent(int root, char path[PATH_MAX], const char **leaf)
+static int open_parent(int root, const char *path, const char **leaf)
 {
-    char *slash = strrchr(path, '/');
+    const char *slash = strrchr(path, '/');
     if (slash == NULL) {
         *leaf = path;
         return fcntl(root, F_DUPFD_CLOEXEC, 0);
     }
-    *slash = '\0';
+    char parent[PATH_MAX];
+    const size_t length = (size_t)(slash - path);
+    memcpy(parent, path, length);
+    parent[length] = '\0';
     *leaf = slash + 1;
-    return confined_open(root, path, O_PATH | O_DIRECTORY, 0);
+    return confined_open(root, parent, O_PATH | O_DIRECTORY, 0);
 }
 
 static bool copy_dos_path(const char *relative, char *output, size_t capacity)
@@ -210,10 +269,11 @@ int nt_runtime_open_guest_directory(const char *path, char *output, size_t capac
         relative[0] = '\0';
     else if (!guest_path(path, relative))
         return -1;
-    const int root = duplicate_root();
+    const char *resolved = relative[0] != '\0' ? relative : ".";
+    const int root = duplicate_root(&resolved);
     if (root < 0)
         return -1;
-    int directory = confined_open(root, relative[0] != '\0' ? relative : ".", O_RDONLY | O_DIRECTORY, 0);
+    int directory = confined_open(root, resolved, O_RDONLY | O_DIRECTORY, 0);
     int error = errno;
     if (directory >= 0 && !copy_dos_path(relative, output, capacity)) {
         error = errno;
@@ -246,10 +306,11 @@ bool nt_runtime_check_guest_file(const char *path, char *output, size_t capacity
     char relative[PATH_MAX];
     if (!guest_path(path, relative))
         return false;
-    const int root = duplicate_root();
+    const char *resolved = relative;
+    const int root = duplicate_root(&resolved);
     if (root < 0)
         return false;
-    int fd = confined_open(root, relative, O_PATH, 0);
+    int fd = confined_open(root, resolved, O_PATH, 0);
     bool valid = false, found = false;
     if (fd >= 0) {
         struct stat info;
@@ -257,10 +318,8 @@ bool nt_runtime_check_guest_file(const char *path, char *output, size_t capacity
         found = valid;
         close(fd);
     } else if (errno == ENOENT) {
-        char parent[PATH_MAX];
-        strcpy(parent, relative);
         const char *leaf;
-        fd = open_parent(root, parent, &leaf);
+        fd = open_parent(root, resolved, &leaf);
         if (fd >= 0) {
             valid = true;
             close(fd);
@@ -414,13 +473,14 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
     }
-    const int root = duplicate_root();
+    const char *resolved = path;
+    const int root = duplicate_root(&resolved);
     if (root < 0) {
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
     }
     const char *leaf;
-    const int parent = open_parent(root, path, &leaf);
+    const int parent = open_parent(root, resolved, &leaf);
     const int parent_error = errno;
     close(root);
     if (parent < 0) {
@@ -490,13 +550,14 @@ static int32_t change_path(const char *input, enum path_operation operation)
         nt_SetLastError(path_error(errno, true));
         return 0;
     }
-    const int root = duplicate_root();
+    const char *resolved = path;
+    const int root = duplicate_root(&resolved);
     if (root < 0) {
         nt_SetLastError(path_error(errno, true));
         return 0;
     }
     const char *leaf;
-    const int parent = open_parent(root, path, &leaf);
+    const int parent = open_parent(root, resolved, &leaf);
     const int parent_error = errno;
     close(root);
     if (parent < 0) {
@@ -556,15 +617,23 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         nt_SetLastError(path_error(errno, true));
         return 0;
     }
-    const int root = duplicate_root();
+    const char *resolved_source = source, *resolved_destination = destination;
+    pthread_mutex_lock(&root_lock);
+    const int source_root = path_root(&resolved_source);
+    const int destination_root = path_root(&resolved_destination);
+    const int root = source_root >= 0 && source_root == destination_root ?
+                     fcntl(source_root, F_DUPFD_CLOEXEC, 0) : -1;
+    const int root_error = errno;
+    pthread_mutex_unlock(&root_lock);
     if (root < 0) {
-        nt_SetLastError(path_error(errno, true));
+        nt_SetLastError(source_root < 0 || destination_root < 0 ? NT_ERROR_PATH_NOT_FOUND :
+                        source_root != destination_root ? NT_ERROR_NOT_SAME_DEVICE : path_error(root_error, true));
         return 0;
     }
     const char *source_leaf, *destination_leaf;
-    const int source_parent = open_parent(root, source, &source_leaf);
+    const int source_parent = open_parent(root, resolved_source, &source_leaf);
     const int source_error = errno;
-    const int destination_parent = open_parent(root, destination, &destination_leaf);
+    const int destination_parent = open_parent(root, resolved_destination, &destination_leaf);
     const int destination_error = errno;
     close(root);
     if (source_parent < 0 || destination_parent < 0) {
@@ -764,14 +833,15 @@ void *NT_MS_ABI nt_fopen(const char *input, const char *mode)
     }
     if (!guest_path(input, path))
         return NULL;
-    const int root = duplicate_root();
+    const char *resolved = path;
+    const int root = duplicate_root(&resolved);
     if (root < 0)
         return NULL;
     pthread_mutex_lock(&file_lock);
     struct guest_file *opened = new_file();
     bool created;
     const int fd = opened != NULL ?
-        open_shared(opened, root, path, parsed.flags, mode_access(parsed), FILE_READ | FILE_WRITE, &created) : -1;
+        open_shared(opened, root, resolved, parsed.flags, mode_access(parsed), FILE_READ | FILE_WRITE, &created) : -1;
     int error = errno;
     close(root);
     struct guest_stream *stream = NULL;
