@@ -76,6 +76,32 @@ directas del archivo de referencia. `make check-desktop` prueba los perfiles
 de diálogo, recursos, captura y selección de archivos con SDL en Linux.
 Las pruebas y sus límites están en [Compatibilidad de Mines](mines-compatibility.md).
 
+## Reutilización entre ejecutables
+
+Auditoría de los archivos aportados por el usuario, revisada el 11 de
+noviembre de 2026 en Linux x86-64. La tabla registra arquitectura,
+importaciones directas y pruebas realizadas. Un equivalente registrado
+requiere además comprobar su comportamiento para la aplicación concreta.
+
+| Ejecutable | Arquitectura | Importaciones con equivalente | Resultado comprobado |
+| --- | --- | --- | --- |
+| `mines.exe` | AMD64 | 197 de 197 | Victoria y derrota en Linux, confirmadas también por el usuario en Fedora. Guardado y recuperación de preferencias comprobados fuera de pantalla. |
+| PE de prueba del perfil | AMD64 | 5 de 5 | Dos procesos independientes conservan datos usando las funciones de entorno y archivos del runtime. |
+| `Squadron121_DX12.exe` | AMD64 | 69 de 324 | Auditoría de solo lectura con 255 importaciones pendientes, incluidas funciones de sistema, ventanas, bibliotecas externas y gráficos. |
+| Instalador AssaultCube 1.3.0.2 | x86, PE32 | Auditor AMD64 fuera de alcance | Se inspeccionó la arquitectura del instalador. El contenido instalado requiere una comprobación separada. |
+| `Maniaplanet_Setup.exe` | x86, PE32 | Auditor AMD64 fuera de alcance | Se inspeccionó la arquitectura del instalador. |
+
+En Squadron121 quedan 121 entradas de `KERNEL32`, 47 de `USER32`, 22 de
+`libfluidsynth-3`, 18 de `sl.interposer` y 15 de `WS2_32`, además de
+otras bibliotecas. La auditoría usa el registro compartido de equivalentes
+y cuantifica la reutilización existente. Las pruebas funcionales y la
+integración de dependencias siguen teniendo sus propios criterios de cierre.
+El archivo auditado tiene SHA-256
+`cfc4bbeb6948490f72ca63b031c9339c7eb68a9ef40f0b54b78da58cd8355d01`.
+
+Se reproduce con `build/pe-import-audit --unresolved /ruta/Squadron121_DX12.exe`.
+El auditor devuelve estado 1 al encontrar importaciones pendientes.
+
 ## Cobertura pendiente
 
 - Instalación y desinstalación del RPM en VM Fedora KDE.

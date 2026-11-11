@@ -3,6 +3,7 @@
 set -eu
 runner="${1:-build/pe-isolated-run}"
 fixture="${2:-build/win32-desktop.exe}"
+profile_fixture="${3:-build/profile-fixture.exe}"
 # A caller-supplied environment flag cannot activate the internal worker.
 status=0
 NT_NATIVE_SANDBOXED=1 "$runner" --worker /game/win32-desktop.exe || status=$?
@@ -22,3 +23,14 @@ fi
 echo "Running external PE fixture with Linux bubblewrap and SDL offscreen"
 SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
   timeout 30s "$runner" "$fixture"
+profile_state=$(mktemp -d)
+trap 'rm -rf -- "$profile_state"' EXIT HUP INT TERM
+expected=P
+for attempt in 1 2; do
+  XDG_STATE_HOME="$profile_state" SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
+    timeout 30s "$runner" "$profile_fixture"
+  saved="$profile_state/nt-native-linux/drive-c/Users/guest/AppData/Roaming/nt-native-profile-fixture.dat"
+  test "$(cat "$saved")" = "$expected"
+  expected="${expected}P"
+done
+echo "PASS PE preferences persist across two isolated processes"

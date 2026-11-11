@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#define _XOPEN_SOURCE 700
+#define _GNU_SOURCE
 #include "image.h"
 #include "ntnative/guest_thread.h"
 #include "pe_bytes.h"
@@ -7,6 +7,7 @@
 #include "compat.h"
 #include "desktop.h"
 #include "desktop_resources.h"
+#include "guest_profile.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -108,6 +109,13 @@ static int run_worker(const char *name)
         fputs("Refusing worker outside sandbox; use pe-isolated-run FILE.exe\n", stderr);
         return 125;
     }
+    /* Drop setup descriptors before loading guest code. A host directory fd
+     * would otherwise retain access beyond the sandbox's filesystem root.
+     */
+    if (close_range(3, UINT_MAX, 0) != 0) {
+        perror("Cannot close sandbox setup descriptors");
+        return 125;
+    }
     if (name[0] != '/' || strncmp(name, "/game/", 6) != 0 ||
         strchr(name + 6, '/') != NULL || strchr(name + 6, '\\') != NULL ||
         strstr(name + 6, "..") != NULL)
@@ -204,20 +212,34 @@ static int run_isolated(const char *path)
     if (snprintf(inside, sizeof(inside), "/game/%s", slash + 1) >= (int)sizeof(inside))
         return 2;
 
-    char *args[64];
+    const int profile = nt_open_guest_profile(getenv("XDG_STATE_HOME"), getenv("HOME"));
+    if (profile < 0 || fcntl(profile, F_SETFD, 0) != 0) {
+        perror("Cannot prepare guest profile");
+        if (profile >= 0)
+            close(profile);
+        return 2;
+    }
+    char profile_source[64];
+    snprintf(profile_source, sizeof(profile_source), "/proc/self/fd/%d", profile);
+    char *args[128];
     size_t n = 0;
-#define ADD(x) do { if (!add_arg(args, &n, 64, (char *)(x))) return 2; } while (0)
+#define ADD(x) do { if (!add_arg(args, &n, 128, (char *)(x))) return 2; } while (0)
     ADD("bwrap");
     ADD("--die-with-parent"); ADD("--unshare-all"); ADD("--new-session"); ADD("--as-pid-1");
     ADD("--clearenv"); ADD("--setenv"); ADD("PATH"); ADD("/usr/bin:/bin");
     ADD("--setenv"); ADD("HOME"); ADD("/game");
+    ADD("--setenv"); ADD("USERPROFILE"); ADD("C:\\Users\\guest");
+    ADD("--setenv"); ADD("APPDATA"); ADD("C:\\Users\\guest\\AppData\\Roaming");
+    ADD("--setenv"); ADD("LOCALAPPDATA"); ADD("C:\\Users\\guest\\AppData\\Local");
+    ADD("--setenv"); ADD("TEMP"); ADD("C:\\Temp");
+    ADD("--setenv"); ADD("TMP"); ADD("C:\\Temp");
     ADD("--ro-bind"); ADD("/usr"); ADD("/usr");
     if (access("/lib", F_OK) == 0) { ADD("--ro-bind"); ADD("/lib"); ADD("/lib"); }
     if (access("/lib64", F_OK) == 0) { ADD("--ro-bind"); ADD("/lib64"); ADD("/lib64"); }
     ADD("--ro-bind-try"); ADD("/etc/fonts"); ADD("/etc/fonts");
     ADD("--proc"); ADD("/proc"); ADD("--dev"); ADD("/dev");
     ADD("--tmpfs"); ADD("/tmp");
-    ADD("--tmpfs"); ADD("/game");
+    ADD("--bind"); ADD(profile_source); ADD("/game");
     ADD("--ro-bind"); ADD(absolute); ADD(inside);
     ADD("--ro-bind"); ADD(runner); ADD("/runner");
     ADD("--chdir"); ADD("/game");
@@ -251,6 +273,9 @@ static int run_isolated(const char *path)
     args[n] = NULL;
 #undef ADD
     execv("/usr/bin/bwrap", args);
+    const int error = errno;
+    close(profile);
+    errno = error;
     perror("bubblewrap unavailable; install bubblewrap and enable user namespaces");
     return 127;
 }
