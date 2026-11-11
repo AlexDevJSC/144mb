@@ -1841,6 +1841,165 @@ int32_t NT_MS_ABI nt_GetConsoleMode(uintptr_t handle, uint32_t *mode)
     return file_result(fd, ok);
 }
 
+/* Native console operations use the same real Linux TTY descriptors that
+ * GetStdHandle, ReadFile and GetConsoleMode expose to the guest. */
+int32_t NT_MS_ABI nt_ReadConsoleW(uintptr_t handle, uint16_t *buffer, uint32_t count,
+                                  uint32_t *done, const void *control)
+{
+    if (done == NULL || (count != 0 && buffer == NULL) || control != NULL) {
+        nt_SetLastError(control != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *done = 0;
+    const int fd = duplicate_handle(handle, FILE_READ);
+    struct termios term;
+    if (fd < 0 || tcgetattr(fd, &term) != 0) {
+        if (fd >= 0)
+            errno = EBADF;
+        return file_result(fd, false);
+    }
+    static _Thread_local struct {
+        uintptr_t handle;
+        uint16_t low;
+        bool ready;
+    } pending;
+    if (pending.handle != handle)
+        pending.ready = false;
+    pending.handle = handle;
+    if (pending.ready && count != 0) {
+        buffer[(*done)++] = pending.low;
+        pending.ready = false;
+    }
+    while (*done < count) {
+        char bytes[4];
+        ssize_t got;
+        do {
+            got = read(fd, bytes, 1);
+        } while (got < 0 && errno == EINTR);
+        if (got < 0)
+            return file_result(fd, false);
+        if (got == 0)
+            break;
+        const unsigned char first = (unsigned char)bytes[0];
+        unsigned int length = first < 0x80 ? 1 : first >= 0xc2 && first <= 0xdf ? 2 :
+                              first >= 0xe0 && first <= 0xef ? 3 :
+                              first >= 0xf0 && first <= 0xf4 ? 4 : 0;
+        if (length == 0) {
+            nt_SetLastError(NT_ERROR_NO_UNICODE_TRANSLATION);
+            close(fd);
+            return 0;
+        }
+        for (unsigned int i = 1; i < length; ++i) {
+            do {
+                got = read(fd, bytes + i, 1);
+            } while (got < 0 && errno == EINTR);
+            if (got != 1 || ((unsigned char)bytes[i] & 0xc0u) != 0x80u) {
+                nt_SetLastError(NT_ERROR_NO_UNICODE_TRANSLATION);
+                close(fd);
+                return 0;
+            }
+        }
+        uint16_t wide[2];
+        const int32_t converted = nt_MultiByteToWideChar(65001, 8, bytes,
+                                                          (int32_t)length, wide, 2);
+        if (converted == 0) {
+            close(fd);
+            return 0;
+        }
+        buffer[(*done)++] = wide[0];
+        if (converted == 2) {
+            if (*done < count)
+                buffer[(*done)++] = wide[1];
+            else {
+                pending.low = wide[1];
+                pending.ready = true;
+            }
+        }
+        if (first == '\n')
+            break;
+    }
+    close(fd);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_SetConsoleTitleA(const char *title)
+{
+    if (title == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const size_t length = strnlen(title, 8193);
+    if (length > 8192) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(nt_GetStdHandle((uint32_t)-11), FILE_WRITE);
+    struct termios term;
+    if (fd < 0 || tcgetattr(fd, &term) != 0) {
+        if (fd >= 0)
+            errno = EBADF;
+        return file_result(fd, false);
+    }
+    /* CP1252 is the current Win32 ANSI compatibility profile. Convert to
+     * UTF-8 before sending an OSC 0 terminal title to the Linux console. */
+    const int32_t units = nt_MultiByteToWideChar(1252, 0, title,
+                                                  (int32_t)length, NULL, 0);
+    uint16_t *wide = units >= 0 ? calloc((size_t)units + 1, sizeof(*wide)) : NULL;
+    if (wide == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        close(fd);
+        return 0;
+    }
+    if (length != 0 && nt_MultiByteToWideChar(1252, 0, title,
+                                             (int32_t)length, wide, units) != units) {
+        free(wide);
+        close(fd);
+        return 0;
+    }
+    const int32_t needed = units != 0 ?
+        nt_WideCharToMultiByte(65001, 0, wide, units, NULL, 0, NULL, NULL) : 0;
+    char *text = needed >= 0 ? malloc((size_t)needed + 6) : NULL;
+    if (text == NULL) {
+        free(wide);
+        close(fd);
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    if (needed != 0 && nt_WideCharToMultiByte(65001, 0, wide, units, text + 4,
+                                              needed, NULL, NULL) != needed) {
+        free(wide);
+        free(text);
+        close(fd);
+        return 0;
+    }
+    free(wide);
+    /* Reject controls to prevent terminal escape sequence injection. */
+    for (int32_t i = 0; i < needed; ++i) {
+        if ((unsigned char)text[4 + i] < 0x20 || (unsigned char)text[4 + i] == 0x7f) {
+            free(text);
+            close(fd);
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    }
+    memcpy(text, "\x1b]0;", 4);
+    text[4 + needed] = '\x07';
+    size_t pos = 0, total = (size_t)needed + 5;
+    while (pos < total) {
+        ssize_t written = write(fd, text + pos, total - pos);
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written <= 0)
+            break;
+        pos += (size_t)written;
+    }
+    free(text);
+    if (pos != total)
+        return file_result(fd, false);
+    close(fd);
+    return 1;
+}
+
 int32_t NT_MS_ABI nt_WriteConsoleA(uintptr_t handle, const char *buffer, uint32_t count, uint32_t *done, void *reserved)
 {
     if (reserved != NULL) {
