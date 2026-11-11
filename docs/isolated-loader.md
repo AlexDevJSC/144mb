@@ -30,8 +30,9 @@ alcance funcional están en [Compatibilidad de Mines](mines-compatibility.md).
 - Preparación de un TEB mínimo por hilo mediante GS de Linux, PEB con base de imagen y vector TLS vacío; se restaura el GS anterior tras la ejecución normal.
 - Transferencia de control a un punto de entrada de aplicación con
   ABI Microsoft x64, usando el trabajador de pruebas y SDL en Linux.
-- Límite de archivo de 128 MiB y disco C: temporal con el EXE montado en
-  solo lectura. Los guardados de la sesión son temporales.
+- Límite de archivo de 128 MiB y disco C: persistente por usuario con el EXE
+  montado en solo lectura. `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, `TEMP`
+  y `TMP` apuntan a directorios del perfil invitado.
 
 ### Ejecución de prueba
 
@@ -58,13 +59,52 @@ la prueba declara `SKIP` y no cuenta como validación del aislamiento.
 
 El entorno de Bubblewrap monta `/usr` y las bibliotecas del host en
 solo lectura junto con la configuración de fuentes. Ofrece `/proc` y
-`/dev` aislados, crea `/tmp` y `/game` temporales y desactiva la red.
-Solo el archivo PE se monta en `/game`, en solo lectura. El worker exige
+`/dev` aislados, crea `/tmp` temporal y desactiva la red.
+El perfil persistente se monta en `/game`, con el archivo PE en solo lectura.
+El worker cierra los descriptores heredados de preparación desde el número 3
+antes de cargar código invitado. Exige
 PID 1, `no_new_privs` y una raíz tmpfs como comprobación del entorno
 esperado. Estas comprobaciones no constituyen una atestación del sandbox. Si falla la
 creación del sandbox se rechaza la ejecución. Esto reduce el acceso del
 invitado, pero el prototipo **no es un aislamiento de seguridad auditado**
 y no debe emplearse para ejecutar software malicioso.
+
+### Perfil persistente del usuario
+
+El lanzador usa `$XDG_STATE_HOME/nt-native-linux/drive-c`. Cuando la variable
+está vacía o contiene una ruta relativa, usa
+`$HOME/.local/state/nt-native-linux/drive-c`. El directorio es compartido por
+las aplicaciones del usuario y conserva preferencias y otros archivos de C:
+entre procesos. La carpeta personal de Linux mantiene su ubicación habitual
+fuera del sistema de archivos invitado.
+
+| Variable invitada | Ruta Windows |
+| --- | --- |
+| `USERPROFILE` | `C:\Users\guest` |
+| `APPDATA` | `C:\Users\guest\AppData\Roaming` |
+| `LOCALAPPDATA` | `C:\Users\guest\AppData\Local` |
+| `TEMP` y `TMP` | `C:\Temp` |
+
+El preparador abre los directorios respecto de descriptores de sus padres.
+El perfil y los directorios estándar deben pertenecer al usuario y tener
+permisos privados. Las aperturas de esos componentes rechazan enlaces
+simbólicos. Las creaciones concurrentes aceptan `EEXIST` y vuelven a validar
+el directorio. La entrada del worker cierra los descriptores heredados para
+que la aplicación use exclusivamente los archivos visibles en el sandbox.
+Las rutas Win32 conservan `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS` y
+`RESOLVE_NO_XDEV` dentro del disco invitado.
+
+El preparador devuelve al llamador un descriptor de directorio con
+`FD_CLOEXEC`. El lanzador lo conserva hasta ejecutar Bubblewrap y emplea
+`--bind` con su ruta `/proc/self/fd/N`, compatible con la interfaz existente
+de Bubblewrap. El directorio padre del disco queda fuera del montaje
+invitado. Un fallo de preparación cancela el arranque y conserva los
+archivos existentes para el siguiente intento.
+
+Los valores siguen las carpetas por usuario documentadas en
+[KNOWNFOLDERID](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid).
+La elección del directorio Linux sigue la
+[especificación XDG 0.8](https://specifications.freedesktop.org/basedir/latest/).
 
 ### Fuera de alcance y riesgos pendientes
 

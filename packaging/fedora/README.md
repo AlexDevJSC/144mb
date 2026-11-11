@@ -25,6 +25,12 @@ bash packaging/fedora/install.sh "$(git rev-parse HEAD)" "$HOME/Descargas/mines.
 "$HOME/.local/bin/pe-isolated-run" "$HOME/Descargas/mines.exe"
 ```
 
+Las aplicaciones comparten un disco C: persistente del usuario en
+`$XDG_STATE_HOME/nt-native-linux/drive-c`, con
+`$HOME/.local/state/nt-native-linux/drive-c` como ubicación predeterminada.
+El lanzador proporciona las rutas de perfil y datos de aplicación para
+guardar y recuperar preferencias entre sesiones.
+
 ## Construcción del RPM
 
 El paquete instala los comandos ELF `nt-native-probe` y `pe-isolated-run` y documentación. Para ejecutar PE ajenos, el segundo requiere Bubblewrap y no permite omitir el sandbox. El

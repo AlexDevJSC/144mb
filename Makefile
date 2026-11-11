@@ -73,6 +73,10 @@ $(BUILD_DIR)/guest-thread-test: tests/guest_thread_test.c src/runtime/guest_thre
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    tests/guest_thread_test.c src/runtime/guest_thread.c -pthread $(LDLIBS) -o "$@"
 
+$(BUILD_DIR)/guest-profile-test: tests/guest_profile_test.c src/tools/guest_profile.c src/tools/guest_profile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/tools $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_profile_test.c src/tools/guest_profile.c $(LDLIBS) -o "$@"
+
 $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -105,7 +109,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test \
-       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test $(BUILD_DIR)/guest-thread-test
+       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test
 	$(BUILD_DIR)/counter-test
 	$(BUILD_DIR)/nt-native-probe
 	$(BUILD_DIR)/runtime-test
@@ -113,6 +117,7 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	$(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test
 	$(BUILD_DIR)/guest-thread-test
+	$(BUILD_DIR)/guest-profile-test
 
 # These explicit flags keep the fixture freestanding, position independent
 # within .text, and free of host sanitizer and library dependencies.
@@ -159,13 +164,13 @@ check-pe-external: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
 
-check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe
-	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe
+check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixture.exe
+	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixture.exe
 
-$(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) \
-    $(PE_IMAGE_HEADERS) src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h include/ntnative/guest_thread.h | $(BUILD_DIR)
+$(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) \
+    $(PE_IMAGE_HEADERS) src/tools/guest_profile.h src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    src/tools/pe_isolated_run.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+	    src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
 
 $(BUILD_DIR)/nt-counter-import.exe: tests/pe/import_fixture.c include/ntnative/counter.h | $(BUILD_DIR)
@@ -175,6 +180,10 @@ $(BUILD_DIR)/nt-counter-import.exe: tests/pe/import_fixture.c include/ntnative/c
 $(BUILD_DIR)/win32-counter-import.exe: tests/pe/win32_counter_fixture.c | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
 	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
+
+$(BUILD_DIR)/profile-fixture.exe: tests/pe/profile_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lucrt
 
 $(BUILD_DIR)/fixture-comctl32.a: tests/pe/comctl32.def | $(BUILD_DIR)
 	$(MINGW_DLLTOOL) -d "$<" -l "$@"

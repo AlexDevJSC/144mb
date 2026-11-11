@@ -29,6 +29,9 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
   La revisión posterior amplía los diálogos y los menús a partir de los fallos
   comunicados. El alcance probado se detalla en `docs/mines-compatibility.md`.
   Siguen pendientes TLS con datos, TEB/PEB completos y semántica NT general de procesos.
+- El lanzador proporciona un perfil persistente de usuario para las variables
+  `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, `TEMP` y `TMP`. Se verificó el
+  guardado y la recuperación de preferencias de Mines y de un PE independiente.
 
 ## Compilar y probar
 

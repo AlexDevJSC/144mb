@@ -302,3 +302,41 @@ Contratos consultados de Microsoft Learn para
 y [WM_UNINITMENUPOPUP](https://learn.microsoft.com/en-us/windows/win32/menurc/wm-uninitmenupopup).
 La revisión de límites contrastó también el tratamiento de índices inválidos
 de las [pruebas de ventanas de Wine 11.0](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/user32/tests/win.c).
+
+## Preferencias persistentes del 11 de noviembre de 2026
+
+El usuario informó del aviso `Error saving preferences` con el detalle
+`Could not determine pathname for configuration files`. El ejecutable
+original consulta `APPDATA` mediante `getenv`. El lanzador anterior limpiaba
+el entorno y mantenía un disco C: temporal. La prueba reprodujo el aviso al
+abrir `Preferences` y confirmar con Intro.
+
+El lanzador proporciona ahora un perfil persistente compartido por usuario
+y las variables estándar descritas en el
+[contrato del cargador](isolated-loader.md#perfil-persistente-del-usuario).
+El código del perfil se aplica a todos los ejecutables lanzados por esta
+entrada. El aislamiento conserva las comprobaciones de rutas y los permisos
+del EXE y cierra los descriptores de preparación antes de ejecutar el PE.
+
+En Linux fuera de pantalla, el Mines original abrió `Preferences`, confirmó
+la selección y guardó un archivo `mines.conf` de 69 bytes en el directorio
+de datos de Simon Tatham. Después se cambió `highlight-flags` a `true` en
+ese archivo de prueba. Un proceso nuevo abrió las preferencias y volvió a
+guardarlas conservando ese valor. Ambos procesos terminaron con estado 0
+después del cierre explícito de la ventana principal. El aviso de error
+desapareció en estos recorridos.
+
+Un PE independiente generado por MinGW-w64 importa `getenv`, `fopen`,
+`fread`, `fwrite` y `fclose`. Dos lanzamientos aislados guardaron primero
+`P` y después `PP` en su archivo de estado. Se usó el mismo lanzador y las
+mismas implementaciones del runtime. Las pruebas nativas verificaron la
+reapertura del perfil, cuatro preparaciones concurrentes, el fallback XDG y
+el rechazo de enlaces y permisos no privados.
+
+Se mantuvo el entorno Linux, SDL y compiladores de la revisión de menús.
+Pasaron `make -j2 all check check-pe check-pe-import check-pe-image
+check-desktop` y las suites con UBSan. La restricción `NETLINK_ROUTE` hizo
+que `check-pe-isolated` declarase `SKIP` en este host. Para los dos PE y
+las comprobaciones de Mines se utilizó el arnés aislado con seccomp descrito
+en la sección anterior, atravesando la entrada normal del lanzador.
+La prueba física del guardado en Fedora queda pendiente.
