@@ -2,6 +2,7 @@
 #include "ntnative/vulkan_probe.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 int main(void)
 {
@@ -14,6 +15,15 @@ int main(void)
     assert(probe.state >= NT_VULKAN_LOADER_MISSING &&
            probe.state <= NT_VULKAN_PRELIMINARY_READY);
     assert(nt_vulkan_state_name(probe.state)[0] != 0);
+    const char *expected = getenv("NT_VULKAN_EXPECT_STATE");
+    if (expected != NULL) {
+        const int wanted = atoi(expected);
+        if ((int)probe.state != wanted) {
+            fprintf(stderr, "Expected Vulkan state %d, obtained %d\n",
+                    wanted, (int)probe.state);
+            return 1;
+        }
+    }
     if (probe.state == NT_VULKAN_PRELIMINARY_READY) {
         assert(nt_vulkan_version_at_least(probe.loader_api_version, 1, 3));
         assert(probe.physical_devices != 0);
