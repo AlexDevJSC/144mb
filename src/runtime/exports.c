@@ -331,6 +331,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetCommandLineA),
     WIN_EXPORT(GetCommandLineW),
     WIN_EXPORT(GetConsoleMode),
+    WIN_EXPORT(ReadConsoleW),
+    WIN_EXPORT(SetConsoleTitleA),
     WIN_EXPORT(GetConsoleOutputCP),
     WIN_EXPORT(GetCurrentDirectoryW),
     WIN_EXPORT(GetCurrentThread),
