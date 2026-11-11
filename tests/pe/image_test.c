@@ -101,17 +101,24 @@ static void make_tls_pe(unsigned char *bytes)
     unsigned char *reloc = bytes + 0x600;
     w32(opt + 112 + 9 * 8, 0x2100);  /* IMAGE_DIRECTORY_ENTRY_TLS */
     w32(opt + 112 + 9 * 8 + 4, 40);
-    w32(opt + 112 + 5 * 8 + 4, 16);
-    /* IMAGE_TLS_DIRECTORY64 with no static TLS bytes. */
+    w32(opt + 112 + 5 * 8 + 4, 20);
+    /* IMAGE_TLS_DIRECTORY64 with initialized bytes and zero fill. */
+    w64(idata + 0x100, preferred + 0x2158);
+    w64(idata + 0x108, preferred + 0x2160);
+    w32(idata + 0x120, 8);
+    w32(idata + 0x124, 0x00500000);
+    memcpy(idata + 0x158, "template", 8);
     w64(idata + 0x110, preferred + 0x2150); /* AddressOfIndex */
     w64(idata + 0x118, preferred + 0x2140); /* AddressOfCallbacks */
     w64(idata + 0x140, preferred + 0x1100); /* one callback */
     bytes[0x200 + 0x100] = 0xc3; /* guest callback: ret */
-    w32(reloc + 4, 16);
+    w32(reloc + 4, 20);
     w16(reloc + 8, 0xa0c0);
-    w16(reloc + 10, 0xa110);
-    w16(reloc + 12, 0xa118);
-    w16(reloc + 14, 0xa140);
+    w16(reloc + 10, 0xa100);
+    w16(reloc + 12, 0xa108);
+    w16(reloc + 14, 0xa110);
+    w16(reloc + 16, 0xa118);
+    w16(reloc + 18, 0xa140);
 }
 
 static void rejected(unsigned char *bytes, const char *what)
@@ -159,7 +166,9 @@ int main(void)
 
     make_tls_pe(bytes);
     assert(pe_image_load(bytes, sizeof(bytes), resolver, NULL, &image, reason, sizeof(reason)));
-    assert(image.tls_callbacks_rva == 0x2140 && image.tls_callback_count == 1);
+    assert(image.tls.callbacks_rva == 0x2140 && image.tls.callback_count == 1);
+    assert(image.tls.data_rva == 0x2158 && image.tls.bytes == 8 && image.tls.zero_fill == 8);
+    assert(memcmp(image.base + image.tls.data_rva, "template", 8) == 0);
     assert(read_u32(image.base + 0x2150) == 0);
     assert(read_u64(image.base + 0x2140) == (uintptr_t)image.base + 0x1100);
     const uint64_t tls_address = read_u64(image.base + 0x2140);
@@ -167,12 +176,14 @@ int main(void)
     memcpy(&tls_callback, &tls_address, sizeof(tls_callback));
     tls_callback(image.base, 1, NULL);
     pe_image_unload(&image);
-    puts("PASS TLS callback mapping and MS x64 process-attach call");
+    puts("PASS static TLS template, callback mapping and MS x64 process-attach call");
 
     make_tls_pe(bytes);
-    w64(bytes + 0x400 + 0x100, UINT64_C(0x140002158));
-    w64(bytes + 0x400 + 0x108, UINT64_C(0x140002160));
-    rejected(bytes, "static TLS data without a TEB implementation");
+    w32(bytes + 0x400 + 0x120, 4096);
+    rejected(bytes, "oversized static TLS");
+    make_tls_pe(bytes);
+    w64(bytes + 0x400 + 0x108, UINT64_C(0x140002157));
+    rejected(bytes, "reversed TLS range");
 
     make_pe(bytes);
     w32(bytes + 0x98 + 240 + 36, 0xe0000020);

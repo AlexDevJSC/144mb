@@ -2,12 +2,13 @@
 #define _GNU_SOURCE
 #include "image.h"
 #include "ntnative/guest_thread.h"
-#include "pe_bytes.h"
 #include "ntnative/runtime.h"
 #include "compat.h"
 #include "desktop.h"
 #include "desktop_resources.h"
 #include "guest_profile.h"
+#include "winbase.h"
+#include "sync.h"
 #include "user_folders.h"
 
 #include <errno.h>
@@ -15,6 +16,7 @@
 #include <limits.h>
 #include <linux/magic.h>
 #include <stdint.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,9 +38,12 @@ static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal,
     uintptr_t target = 0;
     _Static_assert(sizeof(target) == sizeof(proc), "AMD64 pointer ABI");
     memcpy(&target, &proc, sizeof(target));
-    if (proc == NULL)
-        fprintf(stderr, "Unsupported guest import %s!%s%u\n", module,
-                name != NULL ? name : "#", name == NULL ? ordinal : 0);
+    if (proc == NULL) {
+        if (name != NULL)
+            fprintf(stderr, "Unsupported guest import %s!%s\n", module, name);
+        else
+            fprintf(stderr, "Unsupported guest import %s!#%u\n", module, ordinal);
+    }
     return target;
 }
 
@@ -60,6 +65,9 @@ static int NT_MS_ABI guest_entry(void)
         return 119;
     if (!nt_runtime_set_guest_image((uintptr_t)active.base, active_dos_path, command))
         return 120;
+    nt_runtime_set_guest_image_extent(active.size);
+    const struct nt_guest_tls initial = {active.base + active.tls.data_rva, active.tls.bytes, active.tls.zero_fill};
+    nt_runtime_set_guest_tls(&initial, active.base + active.tls.callbacks_rva, active.tls.callback_count);
     if (!nt_runtime_set_standard_streams(STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO))
         return 121;
     if (!nt_runtime_open_desktop())
@@ -81,27 +89,17 @@ static int NT_MS_ABI guest_entry(void)
             active.exception_size / sizeof(struct nt_runtime_function));
     }
     struct nt_guest_thread guest_thread = {0};
-    if (!nt_guest_thread_enter(&guest_thread, (uintptr_t)active.base)) {
+    if (!nt_guest_thread_enter_with_tls(&guest_thread, (uintptr_t)active.base, &initial)) {
         nt_runtime_close_desktop();
         return 125;
     }
-    typedef void (NT_MS_ABI *tls_callback)(void *, uint32_t, void *);
-    for (uint32_t i = 0; i < active.tls_callback_count; ++i) {
-        const uint64_t value = read_u64(active.base + active.tls_callbacks_rva + i * 8);
-        tls_callback callback;
-        memcpy(&callback, &value, sizeof(callback));
-        callback(active.base, 1, NULL); /* DLL_PROCESS_ATTACH */
-    }
+    nt_runtime_notify_tls(1); /* DLL_PROCESS_ATTACH */
     const void *address = active.base + active.entry_rva;
     int (NT_MS_ABI *entry)(void);
     memcpy(&entry, &address, sizeof(entry));
     const int status = entry();
-    for (uint32_t i = 0; i < active.tls_callback_count; ++i) {
-        const uint64_t value = read_u64(active.base + active.tls_callbacks_rva + i * 8);
-        tls_callback callback;
-        memcpy(&callback, &value, sizeof(callback));
-        callback(active.base, 0, NULL); /* DLL_PROCESS_DETACH */
-    }
+    nt_runtime_notify_tls(0); /* DLL_PROCESS_DETACH */
+    nt_runtime_run_fls_cleanup();
     if (!nt_guest_thread_leave(&guest_thread)) {
         nt_runtime_close_desktop();
         return 127;
@@ -118,6 +116,9 @@ static int run_worker(const char *name)
         fputs("Refusing worker outside sandbox; use pe-isolated-run FILE.exe\n", stderr);
         return 125;
     }
+    /* Windows reports a failed pipe write instead of terminating on SIGPIPE. */
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        return 125;
     /* Drop setup descriptors before loading guest code. A host directory fd
      * would otherwise retain access beyond the sandbox's filesystem root.
      */

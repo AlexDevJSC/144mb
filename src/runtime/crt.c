@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
-#include "compat.h"
+#include "winbase.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -162,6 +162,7 @@ void nt_runtime_set_guest_environment(const char *const *environment)
     }
     environment_source = environment;
     atomic_store(&guest_environment, environment);
+    nt_runtime_set_win_environment(environment);
     pthread_mutex_unlock(&environment_lock);
 }
 

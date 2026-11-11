@@ -28,7 +28,8 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
   El usuario ha confirmado también ambos finales en su portátil Fedora KDE.
   La revisión posterior amplía los diálogos y los menús a partir de los fallos
   comunicados. El alcance probado se detalla en `docs/mines-compatibility.md`.
-  Siguen pendientes TLS con datos, TEB/PEB completos y semántica NT general de procesos.
+  El cargador prepara la plantilla TLS del ejecutable en cada hilo
+  invitado. TEB/PEB completos y procesos NT generales siguen pendientes.
 - El lanzador proporciona un perfil persistente de usuario para las variables
   `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, `TEMP` y `TMP`. Se verificó el
   guardado y la recuperación de preferencias de Mines y de un PE independiente.
@@ -41,7 +42,7 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 Para instalar desde GitHub en Fedora x86-64, usa el
 [instalador para tu usuario](packaging/fedora/README.md#instalación-para-tu-usuario).
 
-En Linux x86-64 con GCC, GNU Make, GNU binutils, pkg-config, SDL 2, Cairo y libffi de desarrollo:
+En Linux x86-64 con GCC, GNU Make, GNU binutils, pkg-config, SDL 2, Cairo, libffi y OpenSSL 3 de desarrollo:
 
 ```sh
 make
@@ -84,6 +85,10 @@ Usa el auditor para medir la cobertura de un archivo externo.
 make
 build/pe-import-audit --unresolved /ruta/a/mines.exe
 ```
+
+Squadron121 DX12 tiene 288 de 324 importaciones directas con un equivalente
+registrado cuando FluidSynth está instalado. `make check-pe-native` verifica
+los servicios del sistema en un PE de prueba. [Cobertura y pendientes](docs/squadron-compatibility.md).
 
 El auditor lee una copia del archivo de hasta 128 MiB. Informa sobre
 las importaciones directas y devuelve 0 si todas tienen un equivalente,

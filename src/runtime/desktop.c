@@ -1,11 +1,17 @@
 /* SPDX-License-Identifier: MIT */
-#define _POSIX_C_SOURCE 200809L
-#include "desktop.h"
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include "windesktop.h"
+#include "raw_input.h"
+#include "winbase.h"
 #include "desktop_resources.h"
 #include "dialogs.h"
 #include "menu_view.h"
 
 #include <SDL.h>
+#include <stdio.h>
+#include <unistd.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -26,10 +32,11 @@ _Static_assert(sizeof(struct nt_paint) == 72, "PAINTSTRUCT layout");
 struct window_class {
     struct nt_window_class definition;
     char name[256];
+    bool unicode;
 };
 
 struct window {
-    uintptr_t handle, dc, instance, owner;
+    uintptr_t handle, dc, instance, owner, input_context;
     uintptr_t menu;
     struct nt_menu_popup popups[NT_MENU_DEPTH];
     size_t popup_count;
@@ -38,12 +45,16 @@ struct window {
     SDL_Window *native;
     char *title;
     unsigned char *extra;
-    struct nt_rect dirty;
+    struct nt_rect dirty, normal;
     intptr_t userdata;
     uint16_t default_id;
     uint32_t style, exstyle;
     int width, height;
-    unsigned int dc_users;
+    unsigned int dc_users, input_refs;
+    SDL_Rect input_rect;
+    uint32_t mouse_track, hover_delay;
+    uint64_t hover_due;
+    int32_t hover_x, hover_y;
     bool visible, enabled, destroying, painting, erase, invalidated, dialog_window;
 };
 
@@ -56,7 +67,9 @@ static struct nt_message messages[MAX_MESSAGES];
 static size_t class_count, message_count;
 static bool overflow;
 static uintptr_t next_handle = 0x25000005;
-static unsigned char keyboard[256];
+static unsigned char keyboard[256], async_keys[256];
+static bool dpi_aware;
+static uintptr_t current_cursor;
 static SDL_AudioDeviceID beep_device;
 static uintptr_t capture;
 
@@ -189,19 +202,20 @@ static struct window_class *find_class(const char *name, uintptr_t instance)
     const uintptr_t value = (uintptr_t)name;
     if (value <= UINT16_MAX) {
         if (value >= CLASS_ATOM && value - CLASS_ATOM < class_count &&
+            classes[value - CLASS_ATOM].definition.proc != NULL &&
             classes[value - CLASS_ATOM].definition.instance == instance)
             return &classes[value - CLASS_ATOM];
         return NULL;
     }
     for (size_t i = 0; i < class_count; ++i) {
-        if (classes[i].definition.instance == instance &&
+        if (classes[i].definition.proc != NULL && classes[i].definition.instance == instance &&
             nt_module_name_equal(classes[i].name, name))
             return &classes[i];
     }
     return NULL;
 }
 
-uint16_t NT_MS_ABI nt_RegisterClassA(const struct nt_window_class *definition)
+static uint16_t register_class(const struct nt_window_class *definition, bool unicode)
 {
     if (!desktop_thread || definition == NULL || definition->proc == NULL ||
         definition->name == NULL || (uintptr_t)definition->name <= UINT16_MAX ||
@@ -225,16 +239,90 @@ uint16_t NT_MS_ABI nt_RegisterClassA(const struct nt_window_class *definition)
         return 0;
     }
     const size_t length = strnlen(definition->name, sizeof(classes[0].name));
-    if (length == sizeof(classes[0].name) || class_count == MAX_CLASSES) {
+    size_t index = 0;
+    while (index < class_count && classes[index].definition.proc != NULL)
+        ++index;
+    if (length == sizeof(classes[0].name) || index == MAX_CLASSES) {
         nt_SetLastError(length == sizeof(classes[0].name) ? NT_ERROR_INVALID_PARAMETER :
                        NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
-    struct window_class *type = &classes[class_count];
+    struct window_class *type = &classes[index];
     type->definition = *definition;
     memcpy(type->name, definition->name, length + 1);
     type->definition.name = type->name;
-    return (uint16_t)(CLASS_ATOM + class_count++);
+    type->unicode = unicode;
+    if (index == class_count)
+        ++class_count;
+    return (uint16_t)(CLASS_ATOM + index);
+}
+
+uint16_t NT_MS_ABI nt_RegisterClassA(const struct nt_window_class *definition)
+{
+    return register_class(definition, false);
+}
+
+static char *window_string(const uint16_t *value)
+{
+    const size_t units = nt_runtime_wide_length(value, MAX_TITLE);
+    if (units == MAX_TITLE) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    char *result = nt_runtime_utf16_to_utf8(value, units);
+    if (result == NULL)
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+    return result;
+}
+
+_Static_assert(sizeof(struct nt_window_class_ex) == 80, "WNDCLASSEXW layout");
+
+uint16_t NT_MS_ABI nt_RegisterClassExW(const struct nt_window_class_ex *definition)
+{
+    if (definition == NULL || definition->size != sizeof(*definition) ||
+        (uintptr_t)definition->name <= UINT16_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (definition->small_icon != 0 && nt_runtime_icon(definition->small_icon) == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    char *name = window_string(definition->name);
+    if (name == NULL)
+        return 0;
+    const struct nt_window_class native = {definition->style, definition->proc,
+        definition->class_extra, definition->window_extra, definition->instance,
+        definition->icon != 0 ? definition->icon : definition->small_icon,
+        definition->cursor, definition->background, (const char *)definition->menu, name};
+    const uint16_t result = register_class(&native, true);
+    free(name);
+    return result;
+}
+
+int32_t NT_MS_ABI nt_UnregisterClassW(const uint16_t *name, uintptr_t instance)
+{
+    if (!desktop_thread || name == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    char *decoded = (uintptr_t)name > UINT16_MAX ? window_string(name) : NULL;
+    if ((uintptr_t)name > UINT16_MAX && decoded == NULL)
+        return 0;
+    struct window_class *type = find_class(decoded != NULL ? decoded : (const char *)name, instance);
+    free(decoded);
+    if (type == NULL) {
+        nt_SetLastError(1411); /* ERROR_CLASS_DOES_NOT_EXIST */
+        return 0;
+    }
+    for (size_t i = 0; i < MAX_WINDOWS; ++i) {
+        if (windows[i].handle != 0 && windows[i].type == type) {
+            nt_SetLastError(1412); /* ERROR_CLASS_HAS_WINDOWS */
+            return 0;
+        }
+    }
+    *type = (struct window_class){0};
+    return 1;
 }
 
 static bool valid_dimensions(int width, int height)
@@ -265,6 +353,7 @@ static void release_window(struct window *window)
     nt_runtime_remove_controls(window->handle);
     nt_runtime_remove_window_timers(window->handle);
     nt_runtime_clipboard_window_closed(window->handle);
+    nt_runtime_raw_window_closed(window->handle);
     nt_runtime_detach_menu(window->menu, window->handle, true);
     for (size_t i = 0; i < message_count;) {
         if (messages[i].window != window->handle) {
@@ -286,6 +375,7 @@ void nt_runtime_close_desktop(void)
     if (!desktop_thread)
         return;
     nt_runtime_close_clipboard();
+    nt_runtime_close_raw_input();
     for (size_t i = 0; i < MAX_WINDOWS; ++i) {
         if (windows[i].handle != 0)
             release_window(&windows[i]);
@@ -296,6 +386,9 @@ void nt_runtime_close_desktop(void)
     nt_runtime_close_desktop_resources();
     overflow = false;
     memset(keyboard, 0, sizeof(keyboard));
+    memset(async_keys, 0, sizeof(async_keys));
+    current_cursor = 0;
+    dpi_aware = false;
     pthread_mutex_lock(&desktop_lock);
     if (beep_device != 0) {
         SDL_CloseAudioDevice(beep_device);
@@ -400,10 +493,11 @@ bool nt_runtime_window_pixel(uintptr_t handle, int x, int y, uint32_t *color)
     return true;
 }
 
-uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name, const char *title,
+static uintptr_t create_window(uint32_t exstyle, const char *class_name, const char *title,
                                        uint32_t style, int32_t x, int32_t y, int32_t width,
                                        int32_t height, uintptr_t parent, uintptr_t menu,
-                                       uintptr_t instance, void *parameter)
+                                       uintptr_t instance, void *parameter,
+                                       bool unicode, const uint16_t *wide_name, const uint16_t *wide_title)
 {
     if (!desktop_thread) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
@@ -431,6 +525,10 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
         nt_SetLastError(1407); /* ERROR_CANNOT_FIND_WND_CLASS */
         return 0;
     }
+    if (type->unicode != unicode) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
     struct window *window = NULL;
     for (size_t i = 0; i < MAX_WINDOWS; ++i) {
         if (windows[i].handle == 0) {
@@ -453,18 +551,16 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    char *utf8 = nt_runtime_ansi_to_utf8(title, title_length);
-    char *copy = strdup(title);
+    char *utf8 = unicode ? strdup(title) : nt_runtime_ansi_to_utf8(title, title_length);
     const size_t extra_size = (size_t)type->definition.window_extra;
     unsigned char *extra = extra_size != 0 ? calloc(1, extra_size) : NULL;
-    if (utf8 == NULL || copy == NULL || (extra_size != 0 && extra == NULL)) {
+    if (utf8 == NULL || (extra_size != 0 && extra == NULL)) {
         free(utf8);
-        free(copy);
         free(extra);
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
-    uint32_t flags = SDL_WINDOW_HIDDEN;
+    uint32_t flags = SDL_WINDOW_HIDDEN | (dpi_aware ? SDL_WINDOW_ALLOW_HIGHDPI : 0);
     if ((style & WS_CAPTION) != WS_CAPTION)
         flags |= SDL_WINDOW_BORDERLESS;
     if ((style & WS_THICKFRAME) != 0)
@@ -474,12 +570,11 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
     const int native_x = x == INT32_MIN ? (int)SDL_WINDOWPOS_UNDEFINED : x;
     const int native_y = y == INT32_MIN ? (int)SDL_WINDOWPOS_UNDEFINED : y;
     SDL_Window *native = SDL_CreateWindow(utf8, native_x, native_y, width, height, flags);
-    free(utf8);
     const uintptr_t dc = native != NULL ? nt_runtime_create_surface(width, height) : 0;
     if (native == NULL || dc == 0) {
+        free(utf8);
         if (native != NULL)
             SDL_DestroyWindow(native);
-        free(copy);
         free(extra);
         nt_SetLastError(native == NULL ? NT_ERROR_GEN_FAILURE : NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
@@ -492,12 +587,15 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
     next_handle += 16;
     *window = (struct window){
         .handle = handle, .dc = dc, .instance = instance, .type = type, .owner = parent,
-        .proc = type->definition.proc, .native = native, .title = copy, .extra = extra,
+        .proc = type->definition.proc, .native = native, .title = utf8, .extra = extra,
         .style = style & ~WS_VISIBLE, .exstyle = exstyle, .width = width, .height = height,
         .enabled = (style & WS_DISABLED) == 0
     };
+    nt_GetWindowRect(handle, &window->normal);
     struct nt_create_window create = {parameter, instance, menu, parent, height, width, y, x,
-                                       (int32_t)style, title, type->name, exstyle};
+                                       (int32_t)style,
+                                       unicode ? (const char *)wide_title : title,
+                                       unicode ? (const char *)wide_name : type->name, exstyle};
     const intptr_t accepted = window->proc(handle, NT_WM_NCCREATE, 0, (intptr_t)&create);
     if (accepted == 0 || window->handle != handle) {
         if (window->handle == handle) {
@@ -516,6 +614,31 @@ uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name,
     if ((style & WS_VISIBLE) != 0)
         nt_ShowWindow(handle, 1);
     return window->handle == handle ? handle : 0;
+}
+
+uintptr_t NT_MS_ABI nt_CreateWindowExA(uint32_t exstyle, const char *class_name, const char *title,
+                                       uint32_t style, int32_t x, int32_t y, int32_t width, int32_t height,
+                                       uintptr_t parent, uintptr_t menu, uintptr_t instance, void *parameter)
+{
+    return create_window(exstyle, class_name, title, style, x, y, width, height,
+                         parent, menu, instance, parameter, false, NULL, NULL);
+}
+
+uintptr_t NT_MS_ABI nt_CreateWindowExW(uint32_t exstyle, const uint16_t *class_name, const uint16_t *title,
+                                       uint32_t style, int32_t x, int32_t y, int32_t width, int32_t height,
+                                       uintptr_t parent, uintptr_t menu, uintptr_t instance, void *parameter)
+{
+    const bool named = (uintptr_t)class_name > UINT16_MAX;
+    char *class_utf8 = named ? window_string(class_name) : NULL;
+    char *title_utf8 = title != NULL ? window_string(title) : NULL;
+    uintptr_t result = 0;
+    if ((!named || class_utf8 != NULL) && (title == NULL || title_utf8 != NULL))
+        result = create_window(exstyle, named ? class_utf8 : (const char *)class_name, title_utf8,
+                               style, x, y, width, height, parent, menu, instance, parameter, true,
+                               class_name, title);
+    free(class_utf8);
+    free(title_utf8);
+    return result;
 }
 
 int32_t NT_MS_ABI nt_DestroyWindow(uintptr_t handle)
@@ -547,6 +670,18 @@ intptr_t NT_MS_ABI nt_SendMessageA(uintptr_t handle, uint32_t message, uintptr_t
     return window != NULL ? window->proc(handle, message, wparam, lparam) : 0;
 }
 
+static bool replace_title(struct window *window, char *utf8)
+{
+    if (utf8 == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return false;
+    }
+    SDL_SetWindowTitle(window->native, utf8);
+    free(window->title);
+    window->title = utf8;
+    return true;
+}
+
 static bool change_title(struct window *window, const char *title)
 {
     if (title == NULL)
@@ -556,19 +691,35 @@ static bool change_title(struct window *window, const char *title)
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return false;
     }
-    char *utf8 = nt_runtime_ansi_to_utf8(title, length);
-    char *copy = strdup(title);
-    if (utf8 == NULL || copy == NULL) {
-        free(utf8);
-        free(copy);
-        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
-        return false;
+    return replace_title(window, nt_runtime_ansi_to_utf8(title, length));
+}
+
+static intptr_t get_title(const struct window *window, uintptr_t capacity, intptr_t output, bool unicode)
+{
+    uint16_t *wide = nt_runtime_utf8_to_wide(window->title);
+    if (wide == NULL)
+        return 0;
+    size_t length = nt_runtime_wide_length(wide, MAX_TITLE * 3);
+    if (unicode) {
+        if (output != 0 && capacity != 0) {
+            if (length >= capacity)
+                length = capacity - 1;
+            memcpy((void *)output, wide, length * sizeof(*wide));
+            ((uint16_t *)output)[length] = 0;
+        }
+    } else {
+        char ansi[MAX_TITLE * 3 + 1];
+        const int32_t count = nt_WideCharToMultiByte(1252, 0, wide, -1, ansi, sizeof(ansi), NULL, NULL);
+        length = count > 0 ? (size_t)count - 1 : 0;
+        if (output != 0 && capacity != 0) {
+            if (length >= capacity)
+                length = capacity - 1;
+            memcpy((void *)output, ansi, length);
+            ((char *)output)[length] = '\0';
+        }
     }
-    SDL_SetWindowTitle(window->native, utf8);
-    free(utf8);
-    free(window->title);
-    window->title = copy;
-    return true;
+    free(wide);
+    return (intptr_t)length;
 }
 
 intptr_t NT_MS_ABI nt_DefWindowProcA(uintptr_t handle, uint32_t message,
@@ -586,18 +737,9 @@ intptr_t NT_MS_ABI nt_DefWindowProcA(uintptr_t handle, uint32_t message,
     case NT_WM_SETTEXT:
         return change_title(window, (const char *)lparam);
     case NT_WM_GETTEXTLENGTH:
-        return (intptr_t)strlen(window->title);
+        return get_title(window, 0, 0, false);
     case NT_WM_GETTEXT:
-        if (wparam != 0 && lparam != 0) {
-            size_t length = strlen(window->title);
-            if (length >= wparam)
-                length = wparam - 1;
-            char *output = (char *)lparam;
-            memcpy(output, window->title, length);
-            output[length] = '\0';
-            return (intptr_t)length;
-        }
-        return 0;
+        return wparam != 0 && lparam != 0 ? get_title(window, wparam, lparam, false) : 0;
     case NT_WM_ERASEBKGND:
         if (window->type->definition.background != 0 && wparam == window->dc) {
             const uintptr_t background = window->type->definition.background;
@@ -623,6 +765,23 @@ intptr_t NT_MS_ABI nt_DefWindowProcA(uintptr_t handle, uint32_t message,
     default:
         return 0;
     }
+}
+
+intptr_t NT_MS_ABI nt_DefWindowProcW(uintptr_t handle, uint32_t message,
+                                    uintptr_t wparam, intptr_t lparam)
+{
+    if (message != NT_WM_SETTEXT && message != NT_WM_GETTEXT && message != NT_WM_GETTEXTLENGTH)
+        return nt_DefWindowProcA(handle, message, wparam, lparam);
+    struct window *window = require_window(handle);
+    if (window == NULL)
+        return 0;
+    if (message == NT_WM_SETTEXT) {
+        char *text = lparam != 0 ? window_string((const uint16_t *)lparam) : strdup("");
+        return text != NULL && replace_title(window, text);
+    }
+    if (message == NT_WM_GETTEXTLENGTH)
+        return get_title(window, 0, 0, true);
+    return wparam != 0 && lparam != 0 ? get_title(window, wparam, lparam, true) : 0;
 }
 
 intptr_t NT_MS_ABI nt_DefDlgProcA(uintptr_t handle, uint32_t message, uintptr_t wparam, intptr_t lparam)
@@ -877,13 +1036,17 @@ int32_t NT_MS_ABI nt_ShowWindow(uintptr_t handle, int32_t show)
         return 0;
     }
     const bool was_visible = window->visible;
+    if ((SDL_GetWindowFlags(window->native) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED)) == 0)
+        nt_GetWindowRect(handle, &window->normal);
     window->visible = show != 0;
     if (window->visible) {
         window->style |= WS_VISIBLE;
         SDL_ShowWindow(window->native);
         if (SDL_GetMouseFocus() == window->native) {
-            SDL_Cursor *cursor = nt_runtime_cursor(window->type->definition.cursor);
-            SDL_SetCursor(cursor != NULL ? cursor : SDL_GetDefaultCursor());
+            if (window->type->definition.cursor != 0)
+                nt_SetCursor(window->type->definition.cursor);
+            else
+                SDL_SetCursor(SDL_GetDefaultCursor());
         }
         if (show == 2 || show == 6 || show == 7)
             SDL_MinimizeWindow(window->native);
@@ -988,6 +1151,18 @@ int32_t NT_MS_ABI nt_SetForegroundWindow(uintptr_t handle)
 int32_t NT_MS_ABI nt_SetWindowTextA(uintptr_t handle, const char *title)
 {
     return nt_SendMessageA(handle, NT_WM_SETTEXT, 0, (intptr_t)title) != 0;
+}
+
+int32_t NT_MS_ABI nt_SetWindowTextW(uintptr_t handle, const uint16_t *title)
+{
+    const struct window *window = find_window(handle);
+    if (window != NULL && window->type->unicode)
+        return window->proc(handle, NT_WM_SETTEXT, 0, (intptr_t)title) != 0;
+    if (title == NULL)
+        return nt_SetWindowTextA(handle, NULL);
+    char narrow[MAX_TITLE];
+    return nt_WideCharToMultiByte(1252, 0, title, -1, narrow, sizeof(narrow), NULL, NULL) != 0 &&
+           nt_SetWindowTextA(handle, narrow);
 }
 
 intptr_t NT_MS_ABI nt_GetWindowLongPtrA(uintptr_t handle, int32_t index)
@@ -1334,11 +1509,25 @@ static void translate_event(const SDL_Event *event)
             const int width = event->window.data1, height = event->window.data2 - menu_height(window);
             if (resize_surface(window, width, height))
                 enqueue(window, NT_WM_SIZE, 0, pair(width, height), 0, 0, 0);
+        } else if (event->window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+            if (window->type->unicode) {
+                SDL_SetTextInputRect(&window->input_rect);
+                SDL_StartTextInput();
+            }
         } else if (event->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+            if (window->type->unicode)
+                SDL_StopTextInput();
             memset(keyboard, 0, sizeof(keyboard));
+            memset(async_keys, 0, sizeof(async_keys));
+        } else if (event->window.event == SDL_WINDOWEVENT_LEAVE) {
+            if ((window->mouse_track & 2) != 0)
+                enqueue(window, 0x2a3, 0, 0, 0, 0, 0); /* WM_MOUSELEAVE */
+            window->mouse_track = 0;
         } else if (event->window.event == SDL_WINDOWEVENT_ENTER) {
-            SDL_Cursor *cursor = nt_runtime_cursor(window->type->definition.cursor);
-            SDL_SetCursor(cursor != NULL ? cursor : SDL_GetDefaultCursor());
+            if (window->type->definition.cursor != 0)
+                nt_SetCursor(window->type->definition.cursor);
+            else
+                SDL_SetCursor(SDL_GetDefaultCursor());
         }
         break;
     case SDL_KEYDOWN: case SDL_KEYUP:
@@ -1355,9 +1544,28 @@ static void translate_event(const SDL_Event *event)
             const unsigned int key = virtual_key(event->key.keysym.sym);
             const uint32_t detail = UINT32_C(1) | (uint32_t)(event->key.keysym.scancode & 255) << 16 |
                                     (down ? (uint32_t)(event->key.repeat != 0) << 30 : UINT32_C(3) << 30);
-            if (key != 0)
-                enqueue(window, down ? NT_WM_KEYDOWN : NT_WM_KEYUP, key, (intptr_t)(int32_t)detail,
-                         0, 0, down ? key_character(event->key.keysym.sym, event->key.keysym.mod) : 0);
+            if (key != 0 && key < sizeof(async_keys)) {
+                const bool suppress = nt_runtime_raw_key(window->handle, (uint16_t)event->key.keysym.scancode,
+                                                         (uint16_t)key, down);
+                const unsigned char old = async_keys[key];
+                async_keys[key] = down ? (old & 0x80) == 0 ? 0x81 : old : old & 1;
+                uint32_t character = down ? key_character(event->key.keysym.sym, event->key.keysym.mod) : 0;
+                if (window->type->unicode && character >= 0x20)
+                    character = 0; /* Composed printable text arrives through SDL_TEXTINPUT. */
+                if (!suppress)
+                    enqueue(window, down ? NT_WM_KEYDOWN : NT_WM_KEYUP, key, (intptr_t)(int32_t)detail,
+                             0, 0, character);
+            }
+        }
+        break;
+    case SDL_TEXTINPUT:
+        window = window_from_id(event->text.windowID);
+        if (window != NULL && window->enabled && window->type->unicode) {
+            uint16_t text[SDL_TEXTINPUTEVENT_TEXT_SIZE];
+            const int count = nt_MultiByteToWideChar(65001, 8, event->text.text, -1, text,
+                                                     sizeof(text) / sizeof(*text));
+            for (int i = 0; i + 1 < count; ++i)
+                enqueue(window, NT_WM_CHAR, text[i], 0, 0, 0, 0);
         }
         break;
     case SDL_MOUSEWHEEL:
@@ -1366,7 +1574,10 @@ static void translate_event(const SDL_Event *event)
             int delta = event->wheel.y;
             if (event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED)
                 delta = delta == INT_MIN ? INT_MAX : -delta;
-            scroll_popup(window, delta);
+            const int64_t step = (int64_t)delta * 120;
+            const int16_t wheel = step < INT16_MIN ? INT16_MIN : step > INT16_MAX ? INT16_MAX : (int16_t)step;
+            if (!nt_runtime_raw_mouse(window->handle, 0, 0, 0x400, (uint16_t)wheel))
+                scroll_popup(window, delta);
         }
         break;
     case SDL_MOUSEMOTION: {
@@ -1375,8 +1586,14 @@ static void translate_event(const SDL_Event *event)
         if (window != NULL && window->enabled &&
             (capture != 0 || (y >= menu_height(window) && window->popup_count == 0))) {
             y -= menu_height(window);
-            enqueue(window, NT_WM_MOUSEMOVE, mouse_keys(event->motion.state),
-                     pair(x, y), x, y, 0);
+            if ((window->mouse_track & 1) != 0 && (x != window->hover_x || y != window->hover_y)) {
+                window->hover_x = x;
+                window->hover_y = y;
+                window->hover_due = nt_GetTickCount64() + window->hover_delay;
+            }
+            if (!nt_runtime_raw_mouse(window->handle, event->motion.xrel, event->motion.yrel, 0, 0))
+                enqueue(window, NT_WM_MOUSEMOVE, mouse_keys(event->motion.state),
+                         pair(x, y), x, y, 0);
         }
         break;
     }
@@ -1388,6 +1605,10 @@ static void translate_event(const SDL_Event *event)
             const uint32_t base = event->button.button == SDL_BUTTON_LEFT ? NT_WM_LBUTTONDOWN :
                                   (event->button.button == SDL_BUTTON_RIGHT ? NT_WM_RBUTTONDOWN : NT_WM_MBUTTONDOWN);
             const bool down = event->type == SDL_MOUSEBUTTONDOWN;
+            const unsigned int shift = event->button.button == SDL_BUTTON_LEFT ? 0 :
+                                       event->button.button == SDL_BUTTON_RIGHT ? 2 : 4;
+            if (nt_runtime_raw_mouse(window->handle, 0, 0, (uint16_t)(1u << (shift + !down)), 0))
+                break;
             if (capture == 0 && event->button.button == SDL_BUTTON_LEFT &&
                 menu_pointer(window, x, y, !down))
                 break;
@@ -1411,7 +1632,7 @@ static void translate_event(const SDL_Event *event)
 
 static bool matches(uintptr_t handle, uint32_t type, uintptr_t filter, uint32_t first, uint32_t last)
 {
-    return (filter == 0 || filter == handle) &&
+    return (filter == 0 || (filter == UINTPTR_MAX ? handle == 0 : filter == handle)) &&
            ((first == 0 && last == 0) || (type >= first && type <= last));
 }
 
@@ -1433,14 +1654,24 @@ static void update_key(const struct nt_message *message)
     }
 }
 
-int nt_runtime_take_window_message(struct nt_message *message, uintptr_t filter,
-                                   uint32_t first, uint32_t last)
+int nt_runtime_peek_window_message(struct nt_message *message, uintptr_t filter,
+                                   uint32_t first, uint32_t last, bool remove)
 {
     if (!desktop_thread)
         return 0;
     SDL_Event event;
     for (size_t i = 0; i < MAX_MESSAGES && SDL_PollEvent(&event) != 0; ++i)
         translate_event(&event);
+    const uint64_t now = nt_GetTickCount64();
+    for (size_t i = 0; i < MAX_WINDOWS; ++i) {
+        struct window *window = &windows[i];
+        if ((window->mouse_track & 1) != 0 && now >= window->hover_due) {
+            window->mouse_track &= ~1u;
+            if (SDL_GetMouseFocus() == window->native)
+                enqueue(window, 0x2a1, mouse_keys(SDL_GetMouseState(NULL, NULL)),
+                        pair(window->hover_x, window->hover_y), window->hover_x, window->hover_y, 0);
+        }
+    }
     if (overflow) {
         overflow = false;
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
@@ -1449,9 +1680,11 @@ int nt_runtime_take_window_message(struct nt_message *message, uintptr_t filter,
     for (size_t i = 0; i < message_count; ++i) {
         if (matches(messages[i].window, messages[i].message, filter, first, last)) {
             *message = messages[i];
-            --message_count;
-            memmove(messages + i, messages + i + 1, (message_count - i) * sizeof(messages[0]));
-            update_key(message);
+            if (remove) {
+                --message_count;
+                memmove(messages + i, messages + i + 1, (message_count - i) * sizeof(messages[0]));
+                update_key(message);
+            }
             return 1;
         }
     }
@@ -1465,6 +1698,29 @@ int nt_runtime_take_window_message(struct nt_message *message, uintptr_t filter,
         }
     }
     return 0;
+}
+
+int nt_runtime_take_window_message(struct nt_message *message, uintptr_t window,
+                                   uint32_t first, uint32_t last)
+{
+    return nt_runtime_peek_window_message(message, window, first, last, true);
+}
+
+bool nt_runtime_post_window_message(uintptr_t handle, uint32_t message, uintptr_t wparam, intptr_t lparam)
+{
+    struct window *window = handle != 0 ? require_window(handle) : NULL;
+    if (!desktop_thread || (handle != 0 && window == NULL))
+        return false;
+    if (message_count == MAX_MESSAGES) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return false;
+    }
+    if (window != NULL)
+        enqueue(window, message, wparam, lparam, 0, 0, 0);
+    else
+        messages[message_count++] = (struct nt_message){.message = message, .wparam = wparam,
+                                                        .lparam = lparam, .time = nt_GetTickCount()};
+    return true;
 }
 
 void nt_runtime_desktop_wait(int milliseconds)
@@ -1510,4 +1766,429 @@ int32_t NT_MS_ABI nt_SystemParametersInfoA(uint32_t action, uint32_t parameter,
     }
     *(struct nt_rect *)result = (struct nt_rect){area.x, area.y, area.x + area.w, area.y + area.h};
     return 1;
+}
+
+_Static_assert(sizeof(struct nt_window_placement) == 44, "WINDOWPLACEMENT layout");
+_Static_assert(sizeof(struct nt_monitor_info) == 40, "MONITORINFO layout");
+_Static_assert(sizeof(struct nt_track_mouse) == 24, "TRACKMOUSEEVENT layout");
+
+int32_t NT_MS_ABI nt_IsWindowUnicode(uintptr_t handle)
+{
+    const struct window *window = find_window(handle);
+    return window != NULL && window->type->unicode;
+}
+
+int32_t NT_MS_ABI nt_IsWindowVisible(uintptr_t handle)
+{
+    const struct window *window = find_window(handle);
+    return window != NULL && window->visible;
+}
+
+int32_t NT_MS_ABI nt_IsIconic(uintptr_t handle)
+{
+    const struct window *window = find_window(handle);
+    return window != NULL && (SDL_GetWindowFlags(window->native) & SDL_WINDOW_MINIMIZED) != 0;
+}
+
+int32_t NT_MS_ABI nt_GetWindowPlacement(uintptr_t handle, struct nt_window_placement *placement)
+{
+    const struct window *window = require_window(handle);
+    if (window == NULL || placement == NULL || placement->length != sizeof(*placement)) {
+        if (window != NULL)
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const uint32_t flags = SDL_GetWindowFlags(window->native);
+    struct nt_rect normal = window->normal;
+    if ((flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED)) == 0)
+        nt_GetWindowRect(handle, &normal);
+    *placement = (struct nt_window_placement){.length = sizeof(*placement),
+        .show = (flags & SDL_WINDOW_MINIMIZED) != 0 ? 2 : (flags & SDL_WINDOW_MAXIMIZED) != 0 ? 3 :
+                window->visible ? 1 : 0,
+        .minimum = {-1, -1}, .maximum = {-1, -1}, .normal = normal};
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_SetWindowPlacement(uintptr_t handle, const struct nt_window_placement *placement)
+{
+    struct window *window = require_window(handle);
+    if (window == NULL)
+        return 0;
+    if (placement == NULL || placement->length != sizeof(*placement) ||
+        placement->flags != 0 || placement->show > 10) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const struct nt_rect rect = placement->normal;
+    int top = 0, left = 0, bottom = 0, right = 0;
+    SDL_GetWindowBordersSize(window->native, &top, &left, &bottom, &right);
+    const int64_t width = (int64_t)rect.right - rect.left - left - right;
+    const int64_t height = (int64_t)rect.bottom - rect.top - top - bottom - menu_height(window);
+    const int64_t x = (int64_t)rect.left + left, y = (int64_t)rect.top + top;
+    if (width <= 0 || width > MAX_SIZE || height <= 0 || height > MAX_SIZE ||
+        x > INT32_MAX || x < INT32_MIN || y > INT32_MAX || y < INT32_MIN) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    SDL_RestoreWindow(window->native);
+    if (!nt_SetWindowPos(handle, 0, (int)x, (int)y, (int)width, (int)height, 0x14))
+        return 0;
+    window->normal = rect;
+    nt_ShowWindow(handle, (int32_t)placement->show);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_UpdateWindow(uintptr_t handle)
+{
+    struct window *window = require_window(handle);
+    if (window == NULL)
+        return 0;
+    if (window->visible && window->invalidated && !window->painting)
+        window->proc(handle, NT_WM_PAINT, 0, 0);
+    return 1;
+}
+
+uintptr_t NT_MS_ABI nt_GetActiveWindow(void)
+{
+    SDL_Window *native = desktop_thread ? SDL_GetKeyboardFocus() : NULL;
+    const struct window *window = native != NULL ? window_from_id(SDL_GetWindowID(native)) : NULL;
+    return window != NULL ? window->handle : 0;
+}
+
+uintptr_t NT_MS_ABI nt_GetForegroundWindow(void) { return nt_GetActiveWindow(); }
+uintptr_t NT_MS_ABI nt_GetCapture(void) { return desktop_thread ? capture : 0; }
+
+uint32_t NT_MS_ABI nt_GetWindowThreadProcessId(uintptr_t handle, uint32_t *process)
+{
+    if (require_window(handle) == NULL)
+        return 0;
+    if (process != NULL)
+        *process = (uint32_t)getpid();
+    return (uint32_t)gettid();
+}
+
+static int32_t convert_point(uintptr_t handle, struct nt_point *point, int direction)
+{
+    if (point == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    int x, y;
+    if (nt_runtime_control_valid(handle)) {
+        struct nt_rect rect;
+        if (!nt_runtime_control_rect(handle, &rect, true))
+            return 0;
+        x = rect.left;
+        y = rect.top;
+    } else {
+        const struct window *window = require_window(handle);
+        if (window == NULL)
+            return 0;
+        SDL_GetWindowPosition(window->native, &x, &y);
+        y = (int32_t)((uint32_t)y + (uint32_t)menu_height(window));
+    }
+    const int64_t px = (int64_t)point->x + (int64_t)direction * x;
+    const int64_t py = (int64_t)point->y + (int64_t)direction * y;
+    if (px < INT32_MIN || px > INT32_MAX || py < INT32_MIN || py > INT32_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *point = (struct nt_point){(int32_t)px, (int32_t)py};
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_ClientToScreen(uintptr_t window, struct nt_point *point) { return convert_point(window, point, 1); }
+int32_t NT_MS_ABI nt_ScreenToClient(uintptr_t window, struct nt_point *point) { return convert_point(window, point, -1); }
+
+int32_t NT_MS_ABI nt_GetCursorPos(struct nt_point *point)
+{
+    if (point == NULL || !desktop_thread) {
+        nt_SetLastError(point == NULL ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    int x, y;
+    SDL_GetGlobalMouseState(&x, &y);
+    *point = (struct nt_point){x, y};
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_SetCursorPos(int32_t x, int32_t y)
+{
+    if (desktop_thread && SDL_WarpMouseGlobal(x, y) == 0)
+        return 1;
+    nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    return 0;
+}
+
+uintptr_t NT_MS_ABI nt_SetCursor(uintptr_t handle)
+{
+    SDL_Cursor *native = nt_runtime_cursor(handle);
+    if (!desktop_thread || (handle != 0 && native == NULL)) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    const uintptr_t previous = current_cursor;
+    if (native != NULL)
+        SDL_SetCursor(native);
+    SDL_ShowCursor(native != NULL ? SDL_ENABLE : SDL_DISABLE);
+    current_cursor = handle;
+    return previous;
+}
+
+int32_t NT_MS_ABI nt_TrackMouseEvent(struct nt_track_mouse *track)
+{
+    const uint32_t query = 0x40000000u, cancel = 0x80000000u;
+    if (track == NULL || track->size != sizeof(*track) || (track->flags & ~(query | cancel | 3)) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct window *window = require_window(track->window);
+    if (window == NULL)
+        return 0;
+    if ((track->flags & query) != 0) {
+        track->flags = window->mouse_track;
+        track->milliseconds = window->hover_delay;
+    } else if ((track->flags & cancel) != 0) {
+        window->mouse_track &= ~(track->flags & 3);
+    } else {
+        window->mouse_track |= track->flags;
+        if ((track->flags & 1) != 0) {
+            window->hover_delay = track->milliseconds == UINT32_MAX ? 400 : track->milliseconds;
+            window->hover_due = nt_GetTickCount64() + window->hover_delay;
+            SDL_GetMouseState(&window->hover_x, &window->hover_y);
+            window->hover_y -= menu_height(window);
+        }
+    }
+    return 1;
+}
+
+int16_t NT_MS_ABI nt_GetKeyState(int32_t key)
+{
+    if (!desktop_thread || key < 0 || key >= (int32_t)sizeof(keyboard))
+        return 0;
+    return (int16_t)(((keyboard[key] & 0x80) != 0 ? 0x8000 : 0) | (keyboard[key] & 1));
+}
+
+int16_t NT_MS_ABI nt_GetAsyncKeyState(int32_t key)
+{
+    if (!desktop_thread || key < 0 || key >= (int32_t)sizeof(async_keys))
+        return 0;
+    SDL_Event event;
+    for (size_t i = 0; i < MAX_MESSAGES && SDL_PollEvent(&event) != 0; ++i)
+        translate_event(&event);
+    const unsigned char value = async_keys[key];
+    async_keys[key] &= 0x80;
+    return (int16_t)(((value & 0x80) != 0 ? 0x8000 : 0) | (value & 1));
+}
+
+uintptr_t NT_MS_ABI nt_GetKeyboardLayout(uint32_t thread)
+{
+    if (thread != 0 && thread != (uint32_t)gettid()) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    /* The guest's virtual keyboard layout is English (US). */
+    return 0x04090409;
+}
+
+enum { MONITOR_BASE = 0x79000001 };
+
+uintptr_t NT_MS_ABI nt_MonitorFromPoint(struct nt_point point, uint32_t flags)
+{
+    if (!desktop_thread || flags > 2)
+        return 0;
+    const int count = SDL_GetNumVideoDisplays();
+    int nearest = -1;
+    double distance = 0;
+    for (int i = 0; i < count; ++i) {
+        SDL_Rect bounds;
+        if (SDL_GetDisplayBounds(i, &bounds) != 0)
+            continue;
+        const int64_t right = (int64_t)bounds.x + bounds.w, bottom = (int64_t)bounds.y + bounds.h;
+        const double dx = point.x < bounds.x ? (double)bounds.x - point.x :
+                          point.x >= right ? (double)point.x - right + 1 : 0;
+        const double dy = point.y < bounds.y ? (double)bounds.y - point.y :
+                          point.y >= bottom ? (double)point.y - bottom + 1 : 0;
+        const double squared = dx * dx + dy * dy;
+        if (squared == 0)
+            return (uintptr_t)MONITOR_BASE + (unsigned int)i;
+        if (nearest < 0 || squared < distance) {
+            nearest = i;
+            distance = squared;
+        }
+    }
+    if (nearest < 0 || flags == 0)
+        return 0;
+    return (uintptr_t)MONITOR_BASE + (flags == 1 ? 0u : (unsigned int)nearest);
+}
+
+uintptr_t NT_MS_ABI nt_MonitorFromWindow(uintptr_t handle, uint32_t flags)
+{
+    if (!desktop_thread || flags > 2)
+        return 0;
+    const struct window *window = find_window(handle);
+    if (window == NULL)
+        return flags != 0 && SDL_GetNumVideoDisplays() > 0 ? MONITOR_BASE : 0;
+    const int index = SDL_GetWindowDisplayIndex(window->native);
+    if (index >= 0)
+        return (uintptr_t)MONITOR_BASE + (unsigned int)index;
+    return flags != 0 && SDL_GetNumVideoDisplays() > 0 ? MONITOR_BASE : 0;
+}
+
+static int32_t offset_display(int32_t coordinate, int32_t extent)
+{
+    const int64_t result = (int64_t)coordinate + extent;
+    return result > INT32_MAX ? INT32_MAX : result < INT32_MIN ? INT32_MIN : (int32_t)result;
+}
+
+static struct nt_rect display_rect(SDL_Rect rect)
+{
+    return (struct nt_rect){rect.x, rect.y, offset_display(rect.x, rect.w), offset_display(rect.y, rect.h)};
+}
+
+int32_t NT_MS_ABI nt_GetMonitorInfoW(uintptr_t monitor, struct nt_monitor_info *info)
+{
+    if (!desktop_thread || monitor < MONITOR_BASE || monitor - MONITOR_BASE > INT_MAX ||
+        info == NULL || (info->size != sizeof(*info) && info->size != sizeof(*info) + 64)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int index = (int)(monitor - MONITOR_BASE);
+    SDL_Rect bounds, work;
+    if (SDL_GetDisplayBounds(index, &bounds) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if (SDL_GetDisplayUsableBounds(index, &work) != 0)
+        work = bounds;
+    info->bounds = display_rect(bounds);
+    info->work = display_rect(work);
+    info->flags = index == 0;
+    if (info->size > sizeof(*info)) {
+        char name[32];
+        snprintf(name, sizeof(name), "\\\\.\\DISPLAY%d", index + 1);
+        nt_MultiByteToWideChar(1252, 0, name, -1, (uint16_t *)(info + 1), 32);
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetSystemMetrics(int32_t index)
+{
+    if (!desktop_thread)
+        return 0;
+    const int count = SDL_GetNumVideoDisplays();
+    SDL_Rect bounds;
+    if (index == 80)
+        return count > 0 ? count : 0;
+    if (index == 19)
+        return 1; /* SDL supplies a mouse pointer. */
+    if (index == 43)
+        return 3;
+    if (SDL_GetDisplayBounds(0, &bounds) != 0)
+        return 0;
+    if (index == 0 || index == 1)
+        return index == 0 ? bounds.w : bounds.h;
+    if (index >= 76 && index <= 79) {
+        struct nt_rect total = display_rect(bounds);
+        for (int i = 1; i < count; ++i) {
+            if (SDL_GetDisplayBounds(i, &bounds) == 0) {
+                const struct nt_rect other = display_rect(bounds);
+                nt_UnionRect(&total, &total, &other);
+            }
+        }
+        const int64_t width = (int64_t)total.right - total.left, height = (int64_t)total.bottom - total.top;
+        if (index == 76 || index == 77)
+            return index == 76 ? total.left : total.top;
+        const int64_t result = index == 78 ? width : height;
+        return result <= INT32_MAX ? (int32_t)result : INT32_MAX;
+    }
+    return 0;
+}
+
+int32_t NT_MS_ABI nt_SetProcessDPIAware(void)
+{
+    if (!desktop_thread) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    dpi_aware = true;
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_AdjustWindowRect(struct nt_rect *rect, uint32_t style, int32_t menu)
+{
+    return nt_AdjustWindowRectEx(rect, style, menu, 0);
+}
+
+uintptr_t NT_MS_ABI nt_ImmGetContext(uintptr_t handle)
+{
+    struct window *window = require_window(handle);
+    if (window == NULL || window->input_refs == UINT_MAX)
+        return 0;
+    if (window->input_context == 0)
+        window->input_context = handle ^ (uintptr_t)UINT32_C(0x5c000000);
+    ++window->input_refs;
+    return window->input_context;
+}
+
+int32_t NT_MS_ABI nt_ImmReleaseContext(uintptr_t handle, uintptr_t context)
+{
+    struct window *window = require_window(handle);
+    if (window == NULL || window->input_context != context || window->input_refs == 0)
+        return 0;
+    --window->input_refs;
+    return 1;
+}
+
+static int32_t set_ime_rectangle(uintptr_t context, uint32_t style, struct nt_point point,
+                                 struct nt_rect area, bool candidate)
+{
+    struct window *window = NULL;
+    if (desktop_thread && context != 0)
+        window = find_window(context ^ (uintptr_t)UINT32_C(0x5c000000));
+    if (window == NULL || window->input_context != context || window->input_refs == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    const bool point_only = candidate ? style == 0x40 : style == 2 || style == 0x20;
+    const bool rectangle = candidate ? style == 0x80 : style == 1;
+    if (style != 0 && !point_only && !rectangle) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    SDL_Rect rect = {0, 0, 1, 1};
+    if (point_only) {
+        rect.x = point.x;
+        rect.y = point.y;
+    } else if (rectangle) {
+        const int64_t width = (int64_t)area.right - area.left, height = (int64_t)area.bottom - area.top;
+        if (width <= 0 || width > INT_MAX || height <= 0 || height > INT_MAX) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        rect = (SDL_Rect){area.left, area.top, (int)width, (int)height};
+    }
+    rect.y = offset_display(rect.y, menu_height(window));
+    window->input_rect = rect;
+    if (SDL_GetKeyboardFocus() == window->native)
+        SDL_SetTextInputRect(&window->input_rect);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_ImmSetCompositionWindow(uintptr_t context, const struct nt_composition_form *form)
+{
+    if (form == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return set_ime_rectangle(context, form->style, form->point, form->area, false);
+}
+
+int32_t NT_MS_ABI nt_ImmSetCandidateWindow(uintptr_t context, const struct nt_candidate_form *form)
+{
+    if (form == NULL || form->index != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return set_ime_rectangle(context, form->style, form->point, form->area, true);
 }

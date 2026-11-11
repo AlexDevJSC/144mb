@@ -15,22 +15,29 @@ enum {
     NT_ERROR_INVALID_HANDLE = 6,
     NT_ERROR_NOT_ENOUGH_MEMORY = 8,
     NT_ERROR_NOT_SAME_DEVICE = 17,
+    NT_ERROR_NO_MORE_FILES = 18,
     NT_ERROR_GEN_FAILURE = 31,
     NT_ERROR_SHARING_VIOLATION = 32,
     NT_ERROR_NOT_SUPPORTED = 50,
     NT_ERROR_FILE_EXISTS = 80,
     NT_ERROR_INVALID_PARAMETER = 87,
+    NT_ERROR_BROKEN_PIPE = 109,
     NT_ERROR_INSUFFICIENT_BUFFER = 122,
+    NT_ERROR_INVALID_NAME = 123,
     NT_ERROR_MOD_NOT_FOUND = 126,
     NT_ERROR_PROC_NOT_FOUND = 127,
+    NT_ERROR_NEGATIVE_SEEK = 131,
     NT_ERROR_DIR_NOT_EMPTY = 145,
     NT_ERROR_DISCARDED = 157,
     NT_ERROR_NOT_LOCKED = 158,
     NT_ERROR_LOCK_FAILED = 167,
+    NT_ERROR_ENVVAR_NOT_FOUND = 203,
     NT_ERROR_ALREADY_EXISTS = 183,
     NT_ERROR_MR_MID_NOT_FOUND = 317,
     NT_ERROR_INVALID_FLAGS = 1004,
+    NT_ERROR_OPERATION_ABORTED = 995,
     NT_ERROR_NO_UNICODE_TRANSLATION = 1113,
+    NT_ERROR_TIMEOUT = 1460,
     NT_ERROR_INVALID_INDEX = 1413
 };
 
@@ -78,6 +85,16 @@ int32_t NT_MS_ABI nt_UnionRect(struct nt_rect *result, const struct nt_rect *a,
 int32_t NT_MS_ABI nt_MultiByteToWideChar(uint32_t code_page, uint32_t flags,
                                       const char *input, int32_t input_length,
                                       uint16_t *output, int32_t capacity);
+int32_t NT_MS_ABI nt_WideCharToMultiByte(uint32_t code_page, uint32_t flags,
+                                       const uint16_t *input, int32_t input_length,
+                                       char *output, int32_t capacity,
+                                       const char *default_character, int32_t *used_default);
+uint32_t NT_MS_ABI nt_GetACP(void);
+uint32_t NT_MS_ABI nt_GetOEMCP(void);
+int32_t NT_MS_ABI nt_IsValidCodePage(uint32_t page);
+int32_t NT_MS_ABI nt_IsDBCSLeadByte(uint8_t byte);
+size_t nt_runtime_wide_length(const uint16_t *text, size_t limit);
+uint16_t *nt_runtime_utf8_to_wide(const char *text);
 
 uintptr_t NT_MS_ABI nt_GlobalAlloc(uint32_t flags, size_t size);
 uintptr_t NT_MS_ABI nt_GlobalFree(uintptr_t handle);

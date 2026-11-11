@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
-#include "compat.h"
+#include "gdi_ext.h"
+#include "desktop.h"
 
 #include <cairo-pdf.h>
 #include <cairo.h>
@@ -45,6 +46,7 @@ struct bitmap {
     bool mono;
     uint32_t *pixels;
     struct gdi_object *owner;
+    bool dib, bottom_up;
 };
 
 struct ink {
@@ -176,7 +178,7 @@ static struct gdi_object *allocate_bitmap(int32_t width, int32_t height, bool mo
         return NULL;
     }
     bitmap_bytes += bytes;
-    object->value.bitmap = (struct bitmap){width, height, mono, pixels, NULL};
+    object->value.bitmap = (struct bitmap){.width = width, .height = height, .mono = mono, .pixels = pixels};
     return object;
 }
 
@@ -222,16 +224,16 @@ static cairo_scaled_font_t *scale_font(cairo_font_face_t *face, double width, do
     return font;
 }
 
-static struct font native_font(const struct nt_logfont *definition)
+static struct font native_font(const struct nt_logfont *definition, const char *utf8)
 {
     const size_t length = strnlen(definition->face, sizeof(definition->face));
-    char *family = nt_runtime_ansi_to_utf8(definition->face, length);
+    char *family = utf8 != NULL ? strdup(utf8) : nt_runtime_ansi_to_utf8(definition->face, length);
     if (family == NULL)
         return (struct font){0};
     const bool fixed = (definition->pitch & 3) == 1;
     const int32_t weight = definition->weight != 0 ? definition->weight : 400;
     const char *fallback = fixed ? "monospace" : ((definition->pitch & 0xf0) == 0x10 ? "serif" : "sans-serif");
-    cairo_font_face_t *face = cairo_toy_font_face_create(length != 0 ? family : fallback,
+    cairo_font_face_t *face = cairo_toy_font_face_create(family[0] != '\0' ? family : fallback,
         definition->italic ? CAIRO_FONT_SLANT_ITALIC : CAIRO_FONT_SLANT_NORMAL,
         weight >= 600 ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
     free(family);
@@ -262,7 +264,7 @@ static bool initialize_stock_fonts(void)
     if (stock[SYSTEM_FONT].value.font.scaled != NULL)
         return true;
     const struct nt_logfont definition = {.height = -13, .weight = 400, .charset = 1};
-    struct font font = native_font(&definition);
+    struct font font = native_font(&definition, NULL);
     if (font.scaled == NULL)
         return false;
     stock[SYSTEM_FONT].value.font = font;
@@ -564,7 +566,24 @@ static bool contains(struct nt_rect rect, int32_t x, int32_t y)
 
 static uint32_t *pixel_at(const struct bitmap *bitmap, int32_t x, int32_t y)
 {
-    return &bitmap->pixels[(size_t)y * (size_t)bitmap->width + (size_t)x];
+    const int32_t row = bitmap->bottom_up ? bitmap->height - 1 - y : y;
+    return &bitmap->pixels[(size_t)row * (size_t)bitmap->width + (size_t)x];
+}
+
+static uint32_t swap_channels(uint32_t color)
+{
+    return (color & UINT32_C(0xff00ff00)) | ((color & 255u) << 16) | ((color >> 16) & 255u);
+}
+
+static uint32_t get_pixel(const struct bitmap *bitmap, int32_t x, int32_t y)
+{
+    const uint32_t color = *pixel_at(bitmap, x, y);
+    return bitmap->dib ? swap_channels(color) : color;
+}
+
+static void store_pixel(const struct bitmap *bitmap, int32_t x, int32_t y, uint32_t color)
+{
+    *pixel_at(bitmap, x, y) = bitmap->dib ? swap_channels(color) : color;
 }
 
 uint32_t nt_runtime_read_pixel(uintptr_t handle, int32_t x, int32_t y)
@@ -575,7 +594,7 @@ uint32_t nt_runtime_read_pixel(uintptr_t handle, int32_t x, int32_t y)
     if (dc != NULL) {
         const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
         if (contains((struct nt_rect){0, 0, bitmap->width, bitmap->height}, x, y))
-            color = *pixel_at(bitmap, x, y);
+            color = get_pixel(bitmap, x, y) & 0xffffffu;
     }
     finish(NT_ERROR_SUCCESS);
     return color;
@@ -588,7 +607,20 @@ bool nt_runtime_read_surface(uintptr_t handle, nt_surface_reader reader, void *c
     bool result = false;
     if (dc != NULL) {
         const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
-        result = reader(bitmap->pixels, bitmap->width, bitmap->height, context);
+        if (!bitmap->dib) {
+            result = reader(bitmap->pixels, bitmap->width, bitmap->height, context);
+        } else {
+            const size_t pixels = (size_t)bitmap->width * (size_t)bitmap->height;
+            uint32_t *copy = malloc(pixels * sizeof(*copy));
+            if (copy != NULL) {
+                for (int32_t y = 0; y < bitmap->height; ++y)
+                    for (int32_t x = 0; x < bitmap->width; ++x)
+                        copy[(size_t)y * (size_t)bitmap->width + (size_t)x] =
+                            get_pixel(bitmap, x, y) & 0xffffffu;
+                result = reader(copy, bitmap->width, bitmap->height, context);
+                free(copy);
+            }
+        }
     }
     pthread_mutex_unlock(&gdi_lock);
     return result;
@@ -612,7 +644,7 @@ uint32_t NT_MS_ABI nt_SetPixel(uintptr_t handle, int32_t x, int32_t y, uint32_t 
     }
     const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
     const uint32_t value = display_color(bitmap, color);
-    *pixel_at(bitmap, x, y) = value;
+    store_pixel(bitmap, x, y, value);
     finish(NT_ERROR_SUCCESS);
     return value;
 }
@@ -667,9 +699,9 @@ static void paint_brush(const struct context *dc, int32_t x, int32_t y)
         return;
     const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
     if (hatch_pixel(brush.pattern, x, y))
-        *pixel_at(bitmap, x, y) = display_color(bitmap, brush.color);
+        store_pixel(bitmap, x, y, display_color(bitmap, brush.color));
     else if (dc->background_mode == OPAQUE)
-        *pixel_at(bitmap, x, y) = WHITE;
+        store_pixel(bitmap, x, y, WHITE);
 }
 
 int32_t NT_MS_ABI nt_Rectangle(uintptr_t handle, int32_t left, int32_t top,
@@ -701,7 +733,7 @@ int32_t NT_MS_ABI nt_Rectangle(uintptr_t handle, int32_t left, int32_t top,
             for (int32_t y = visible.top; y < visible.bottom; ++y) {
                 for (int32_t x = visible.left; x < visible.right; ++x) {
                     if (outline && (x == left || x == right - 1 || y == top || y == bottom - 1))
-                        *pixel_at(bitmap, x, y) = display_color(bitmap, pen.color);
+                        store_pixel(bitmap, x, y, display_color(bitmap, pen.color));
                     else
                         paint_brush(dc, x, y);
                 }
@@ -741,13 +773,17 @@ static bool copy_pixels(const struct context *dest, struct nt_rect rect,
         const int32_t offset = backwards ? height - row - 1 : row;
         const uint32_t *input = pixel_at(src, (int32_t)source_x, (int32_t)source_y + offset);
         uint32_t *output = pixel_at(dst, rect.left, rect.top + offset);
-        if (src->mono == dst->mono) {
+        if (src->mono == dst->mono && src->dib == dst->dib) {
             memmove(output, input, (size_t)width * sizeof(*output));
         } else {
             for (int32_t col = 0; col < width; ++col) {
-                /* The background color of this profile is white. */
-                output[col] = src->mono ? (input[col] == WHITE ? WHITE : dest->text_color) :
-                              (input[col] == WHITE ? WHITE : BLACK);
+                uint32_t color = src->dib ? swap_channels(input[col]) : input[col];
+                if (src->mono != dst->mono) {
+                    /* The background color of this profile is white. */
+                    const uint32_t rgb = color & 0xffffffu;
+                    color = rgb == WHITE ? WHITE : src->mono ? dest->text_color : BLACK;
+                }
+                output[col] = dst->dib ? swap_channels(color) : color;
             }
         }
     }
@@ -788,7 +824,7 @@ int32_t NT_MS_ABI nt_BitBlt(uintptr_t dest_handle, int32_t x, int32_t y,
                     if (rop == PATCOPY)
                         paint_brush(dest, col, row);
                     else
-                        *pixel_at(bitmap, col, row) = rop == BLACKNESS ? BLACK : WHITE;
+                        store_pixel(bitmap, col, row, rop == BLACKNESS ? BLACK : WHITE);
                 }
             }
         }
@@ -797,7 +833,7 @@ int32_t NT_MS_ABI nt_BitBlt(uintptr_t dest_handle, int32_t x, int32_t y,
     return 1;
 }
 
-uintptr_t NT_MS_ABI nt_CreateFontIndirectA(const struct nt_logfont *definition)
+static uintptr_t create_font(const struct nt_logfont *definition, const char *utf8)
 {
     if (definition == NULL || definition->height < -1024 || definition->height > 1024 ||
         definition->width < 0 || definition->width > 1024 ||
@@ -810,7 +846,7 @@ uintptr_t NT_MS_ABI nt_CreateFontIndirectA(const struct nt_logfont *definition)
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
-    struct font font = native_font(definition);
+    struct font font = native_font(definition, utf8);
     if (font.scaled == NULL) {
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
@@ -826,6 +862,11 @@ uintptr_t NT_MS_ABI nt_CreateFontIndirectA(const struct nt_logfont *definition)
     const uintptr_t handle = object->handle;
     finish(NT_ERROR_SUCCESS);
     return handle;
+}
+
+uintptr_t NT_MS_ABI nt_CreateFontIndirectA(const struct nt_logfont *definition)
+{
+    return create_font(definition, NULL);
 }
 
 uintptr_t NT_MS_ABI nt_CreateFontA(int32_t height, int32_t width, int32_t escapement,
@@ -997,7 +1038,7 @@ static void apply_mask(const struct context *dc, struct draw_mask mask, bool bru
                 if (brush)
                     paint_brush(dc, x, y);
                 else
-                    *pixel_at(bitmap, x, y) = pixel;
+                    store_pixel(bitmap, x, y, pixel);
             }
         }
     }
@@ -1154,7 +1195,7 @@ int32_t NT_MS_ABI nt_ExtTextOutW(uintptr_t handle, int32_t x, int32_t y, uint32_
             const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
             for (int row = background.top; row < background.bottom; ++row) {
                 for (int col = background.left; col < background.right; ++col)
-                    *pixel_at(bitmap, col, row) = WHITE;
+                    store_pixel(bitmap, col, row, WHITE);
             }
         }
     }
@@ -1286,7 +1327,7 @@ int32_t NT_MS_ABI nt_EndPage(uintptr_t handle)
         for (int y = 0; y < bitmap->height; ++y) {
             uint32_t *row = (uint32_t *)(bytes + y * stride);
             for (int x = 0; x < bitmap->width; ++x) {
-                const uint32_t color = *pixel_at(bitmap, x, y);
+                const uint32_t color = get_pixel(bitmap, x, y) & 0xffffffu;
                 row[x] = (color & 255) << 16 | (color & 0xff00) | (color >> 16 & 255);
             }
         }
@@ -1347,4 +1388,235 @@ int32_t NT_MS_ABI nt_EndDoc(uintptr_t handle)
     printer->spool = NULL;
     finish(printed ? NT_ERROR_SUCCESS : NT_ERROR_GEN_FAILURE);
     return printed ? 1 : -1;
+}
+
+uintptr_t NT_MS_ABI nt_CreateFontW(int32_t height, int32_t width, int32_t escapement, int32_t orientation,
+                                  int32_t weight, uint32_t italic, uint32_t underline, uint32_t strike,
+                                  uint32_t charset, uint32_t output_precision, uint32_t clip_precision,
+                                  uint32_t quality, uint32_t pitch, const uint16_t *face)
+{
+    if (charset > UINT8_MAX || output_precision > UINT8_MAX || clip_precision > UINT8_MAX ||
+        quality > UINT8_MAX || pitch > UINT8_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const struct nt_logfont definition = {
+        height, width, escapement, orientation, weight, italic != 0, underline != 0, strike != 0,
+        (uint8_t)charset, (uint8_t)output_precision, (uint8_t)clip_precision, (uint8_t)quality, (uint8_t)pitch, {0}
+    };
+    char *utf8 = face != NULL ? nt_runtime_utf16_to_utf8(face, nt_runtime_wide_length(face, 31)) : NULL;
+    if (face != NULL && utf8 == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    const uintptr_t handle = create_font(&definition, utf8);
+    free(utf8);
+    return handle;
+}
+
+uintptr_t NT_MS_ABI nt_CreateDIBSection(uintptr_t handle, const struct nt_bitmap_info_header *info,
+                                        uint32_t usage, void **pixels, uintptr_t section, uint32_t offset)
+{
+    _Static_assert(sizeof(struct nt_bitmap_info_header) == 40, "BITMAPINFOHEADER layout");
+    if (pixels != NULL)
+        *pixels = NULL;
+    if (info == NULL || pixels == NULL || info->size < sizeof(*info) || info->height == INT32_MIN ||
+        info->height == 0 || info->width <= 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int32_t height = info->height < 0 ? -info->height : info->height;
+    if (usage != 0 || section != 0 || offset != 0 || info->planes != 1 ||
+        info->bits != 32 || info->compression != 0 || !valid_size(info->width, height)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    pthread_mutex_lock(&gdi_lock);
+    if (handle != 0 && find_context(handle) == NULL) {
+        finish(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    struct gdi_object *bitmap = allocate_bitmap(info->width, height, false);
+    if (bitmap == NULL) {
+        finish(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    bitmap->value.bitmap.dib = true;
+    bitmap->value.bitmap.bottom_up = info->height > 0;
+    *pixels = bitmap->value.bitmap.pixels;
+    const uintptr_t result = bitmap->handle;
+    finish(NT_ERROR_SUCCESS);
+    return result;
+}
+
+int32_t NT_MS_ABI nt_GdiFlush(void)
+{
+    /* Raster operations have completed when their lock is released. */
+    pthread_mutex_lock(&gdi_lock);
+    finish(NT_ERROR_SUCCESS);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_FillRect(uintptr_t handle, const struct nt_rect *rect, uintptr_t brush)
+{
+    if (rect == NULL || brush == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const bool system = brush <= 32;
+    const uint32_t color = system ? nt_GetSysColor((int32_t)brush - 1) : 0;
+    pthread_mutex_lock(&gdi_lock);
+    const struct context *dc = find_context(handle);
+    const struct gdi_object *object = system ? NULL : find(brush);
+    if (dc == NULL || (!system && (object == NULL || object->kind != BRUSH))) {
+        finish(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    const struct ink ink = system ? (struct ink){color, INK_SOLID} : object->value.ink;
+    struct nt_rect visible = bounds(dc);
+    if (nt_IntersectRect(&visible, &visible, rect) && ink.pattern != INK_NONE) {
+        const struct bitmap *bitmap = &dc->bitmap->value.bitmap;
+        for (int32_t y = visible.top; y < visible.bottom; ++y) {
+            for (int32_t x = visible.left; x < visible.right; ++x) {
+                const bool inked = hatch_pixel(ink.pattern, x, y);
+                if (inked || dc->background_mode == OPAQUE)
+                    store_pixel(bitmap, x, y, display_color(bitmap, inked ? ink.color : WHITE));
+            }
+        }
+    }
+    finish(NT_ERROR_SUCCESS);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_DrawTextW(uintptr_t dc, uint16_t *text, int32_t count, struct nt_rect *rect, uint32_t flags)
+{
+    enum { CENTER = 1, RIGHT = 2, VCENTER = 4, BOTTOM = 8, SINGLE = 32, NOCLIP = 256,
+           CALCULATE = 1024, NOPREFIX = 2048 };
+    const uint32_t allowed = CENTER | RIGHT | VCENTER | BOTTOM | SINGLE | NOCLIP | CALCULATE | NOPREFIX;
+    if (text == NULL || rect == NULL || count < -1 || count > MAX_TEXT || (flags & ~allowed) != 0 ||
+        ((flags & (VCENTER | BOTTOM)) != 0 && (flags & SINGLE) == 0)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    const size_t length = count < 0 ? nt_runtime_wide_length(text, MAX_TEXT) : (size_t)count;
+    uint16_t *processed = malloc((length + 1) * sizeof(*processed));
+    if (processed == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    size_t units = 0;
+    for (size_t i = 0; i < length && text[i] != 0; ++i) {
+        uint16_t ch = text[i];
+        if (ch == '&' && (flags & NOPREFIX) == 0) {
+            if (i + 1 == length || text[i + 1] != '&')
+                continue;
+            ++i;
+        }
+        if (ch == '\r' && i + 1 < length && text[i + 1] == '\n')
+            continue;
+        if (ch == '\r')
+            ch = '\n';
+        processed[units++] = ch == '\n' && (flags & SINGLE) != 0 ? ' ' : ch;
+    }
+    int32_t height = 0, max_width = 0;
+    bool ok = true;
+    size_t start = 0;
+    while (start < units) {
+        size_t end = start;
+        while (end < units && processed[end] != '\n')
+            ++end;
+        struct nt_size size;
+        const uint16_t sample = ' ';
+        if (!nt_GetTextExtentPoint32W(dc, start != end ? processed + start : &sample,
+                                     start != end ? (int32_t)(end - start) : 1, &size)) {
+            ok = false;
+            break;
+        }
+        if (start == end)
+            size.width = 0;
+        if (size.width > max_width)
+            max_width = size.width;
+        int64_t x = rect->left, y = (int64_t)rect->top + height;
+        const int64_t width = (int64_t)rect->right - rect->left, available = (int64_t)rect->bottom - rect->top;
+        if ((flags & CENTER) != 0)
+            x += (width - size.width) / 2;
+        else if ((flags & RIGHT) != 0)
+            x += width - size.width;
+        if ((flags & VCENTER) != 0)
+            y += (available - size.height) / 2;
+        else if ((flags & BOTTOM) != 0)
+            y += available - size.height;
+        if (height > INT32_MAX - size.height || x < INT32_MIN || x > INT32_MAX || y < INT32_MIN || y > INT32_MAX ||
+            ((flags & CALCULATE) == 0 && !nt_ExtTextOutW(dc, (int32_t)x, (int32_t)y,
+                (flags & NOCLIP) == 0 ? 4 : 0, rect, processed + start, (uint32_t)(end - start), NULL))) {
+            ok = false;
+            break;
+        }
+        height += size.height;
+        start = end + 1;
+    }
+    free(processed);
+    if (ok && (flags & CALCULATE) != 0) {
+        const int64_t right = (int64_t)rect->left + max_width, bottom = (int64_t)rect->top + height;
+        if (right > INT32_MAX || bottom > INT32_MAX) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        rect->right = (int32_t)right;
+        rect->bottom = (int32_t)bottom;
+    }
+    return ok ? height : 0;
+}
+
+static uint32_t blend_pixel(uint32_t dst, uint32_t src, unsigned int global, bool per_pixel)
+{
+    const unsigned int source_alpha = per_pixel ? src >> 24 : 255;
+    const unsigned int alpha = (source_alpha * global + 127) / 255;
+    const unsigned int remainder = 255 - alpha;
+    uint32_t result = (alpha + ((dst >> 24) * remainder + 127) / 255) << 24;
+    for (unsigned int shift = 0; shift < 24; shift += 8) {
+        const unsigned int value = (((src >> shift) & 255) * global +
+                                    ((dst >> shift) & 255) * remainder + 127) / 255;
+        result |= (value < 255 ? value : 255) << shift;
+    }
+    return result;
+}
+
+int32_t NT_MS_ABI nt_AlphaBlend(uintptr_t destination, int32_t x, int32_t y, int32_t width, int32_t height,
+                                uintptr_t source, int32_t sx, int32_t sy, int32_t sw, int32_t sh, uint32_t blend)
+{
+    const bool per_pixel = (blend >> 24) != 0;
+    if (width <= 0 || height <= 0 || sw <= 0 || sh <= 0 || sx < 0 || sy < 0 ||
+        (blend & UINT32_C(0xfe00ffff)) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const unsigned int alpha = (blend >> 16) & 255;
+    pthread_mutex_lock(&gdi_lock);
+    const struct context *dest = find_context(destination), *src = find_context(source);
+    if (dest == NULL || src == NULL) {
+        finish(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    const struct bitmap *input = &src->bitmap->value.bitmap, *output = &dest->bitmap->value.bitmap;
+    const int64_t sr = (int64_t)sx + sw, sb = (int64_t)sy + sh;
+    if (sr > input->width || sb > input->height || (per_pixel && !input->dib) ||
+        (input == output && (int64_t)x + width > sx && sr > x && (int64_t)y + height > sy && sb > y)) {
+        finish(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_rect visible = bounds(dest);
+    if (clip_transfer(&visible, x, y, width, height)) {
+        for (int32_t row = visible.top; row < visible.bottom; ++row) {
+            const int32_t source_y = sy + (int32_t)(((int64_t)row - y) * sh / height);
+            for (int32_t col = visible.left; col < visible.right; ++col) {
+                const int32_t source_x = sx + (int32_t)(((int64_t)col - x) * sw / width);
+                const uint32_t value = blend_pixel(get_pixel(output, col, row),
+                    get_pixel(input, source_x, source_y), alpha, per_pixel);
+                store_pixel(output, col, row, output->dib ? value : display_color(output, value & 0xffffffu));
+            }
+        }
+    }
+    finish(NT_ERROR_SUCCESS);
+    return 1;
 }

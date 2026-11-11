@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
-#include "compat.h"
+#include "winbase.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -17,7 +18,7 @@ uintptr_t NT_MS_ABI nt_GetCurrentProcess(void)
     return UINTPTR_MAX;
 }
 
-void NT_MS_ABI nt_GetLocalTime(struct nt_system_time *result)
+static void get_system_time(struct nt_system_time *result, bool local_time)
 {
     if (result == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
@@ -26,7 +27,7 @@ void NT_MS_ABI nt_GetLocalTime(struct nt_system_time *result)
     struct timespec now;
     struct tm local;
     if (clock_gettime(CLOCK_REALTIME, &now) != 0 ||
-        localtime_r(&now.tv_sec, &local) == NULL ||
+        (local_time ? localtime_r(&now.tv_sec, &local) : gmtime_r(&now.tv_sec, &local)) == NULL ||
         local.tm_year < -1900 || local.tm_year > UINT16_MAX - 1900) {
         nt_SetLastError(NT_ERROR_GEN_FAILURE);
         return;
@@ -37,6 +38,9 @@ void NT_MS_ABI nt_GetLocalTime(struct nt_system_time *result)
         (uint16_t)local.tm_min, (uint16_t)local.tm_sec, (uint16_t)(now.tv_nsec / 1000000)
     };
 }
+
+void NT_MS_ABI nt_GetLocalTime(struct nt_system_time *result) { get_system_time(result, true); }
+void NT_MS_ABI nt_GetSystemTime(struct nt_system_time *result) { get_system_time(result, false); }
 
 void NT_MS_ABI nt_GetSystemTimeAsFileTime(struct nt_file_time *result)
 {
@@ -62,14 +66,27 @@ void NT_MS_ABI nt_GetSystemTimeAsFileTime(struct nt_file_time *result)
     *result = (struct nt_file_time){(uint32_t)ticks, (uint32_t)(ticks >> 32)};
 }
 
-uint32_t NT_MS_ABI nt_GetTickCount(void)
+uint64_t NT_MS_ABI nt_GetTickCount64(void)
 {
     struct timespec now;
     if (clock_gettime(CLOCK_BOOTTIME, &now) != 0 || now.tv_sec < 0) {
         nt_SetLastError(NT_ERROR_GEN_FAILURE);
         return 0;
     }
-    return (uint32_t)((uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000);
+    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
+
+uint32_t NT_MS_ABI nt_GetTickCount(void) { return (uint32_t)nt_GetTickCount64(); }
+
+void NT_MS_ABI nt_Sleep(uint32_t milliseconds)
+{
+    if (milliseconds == UINT32_MAX) {
+        const struct timespec interval = {3600, 0};
+        for (;;)
+            (void)nanosleep(&interval, NULL);
+    }
+    struct timespec remaining = {milliseconds / 1000, (milliseconds % 1000) * 1000000};
+    while (nanosleep(&remaining, &remaining) < 0 && errno == EINTR) {}
 }
 
 void NT_MS_ABI nt_GetStartupInfoW(struct nt_startup_info_w *result)

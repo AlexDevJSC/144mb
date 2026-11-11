@@ -1,9 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
-#include "compat.h"
+#include "winbase.h"
+#include "winfile.h"
+#include "sync.h"
 #include "user_folders.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <fnmatch.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/fs.h>
@@ -16,10 +20,12 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <termios.h>
 #include <unistd.h>
 
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 static int drive_root = -1;
+static char guest_cwd[PATH_MAX];
 static struct { int fd; bool active; } folder_roots[NT_USER_FOLDER_COUNT];
 
 bool nt_runtime_set_file_root(const char *directory)
@@ -30,6 +36,7 @@ bool nt_runtime_set_file_root(const char *directory)
     pthread_mutex_lock(&root_lock);
     const int previous = drive_root;
     drive_root = next;
+    guest_cwd[0] = '\0';
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         if (folder_roots[i].active) {
             close(folder_roots[i].fd);
@@ -125,12 +132,21 @@ static bool device_name(const char *name, size_t size)
             (memcmp(stem, "COM", 3) == 0 || memcmp(stem, "LPT", 3) == 0));
 }
 
-static bool guest_path(const char *input, char output[PATH_MAX])
+static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_root)
 {
     if (input == NULL || *input == '\0') {
         errno = EINVAL;
         return false;
     }
+    if (strnlen(input, PATH_MAX) == PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    if (nt_MultiByteToWideChar(65001, 8, input, -1, NULL, 0) == 0) {
+        errno = EINVAL;
+        return false;
+    }
+    const bool absolute = input[1] == ':' || separator(input[0]);
     if (input[1] == ':') {
         if ((*input != 'C' && *input != 'c') || !separator(input[2])) {
             errno = EINVAL;
@@ -143,13 +159,19 @@ static bool guest_path(const char *input, char output[PATH_MAX])
     }
 
     size_t used = 0;
+    if (!absolute) {
+        pthread_mutex_lock(&root_lock);
+        used = strlen(guest_cwd);
+        memcpy(output, guest_cwd, used);
+        pthread_mutex_unlock(&root_lock);
+    }
     while (*input != '\0') {
         while (separator(*input))
             ++input;
         const char *component = input;
         while (*input != '\0' && !separator(*input)) {
             const unsigned char byte = (unsigned char)*input;
-            if (byte < 0x20 || byte > 0x7e || strchr("<>:\"|?*", byte) != NULL) {
+            if (byte < 0x20 || byte == 0x7f || strchr("<>:\"|?*", byte) != NULL) {
                 errno = EINVAL;
                 return false;
             }
@@ -176,12 +198,17 @@ static bool guest_path(const char *input, char output[PATH_MAX])
         memcpy(output + used, component, length);
         used += length;
     }
-    if (used == 0) {
+    if (used == 0 && !allow_root) {
         errno = EINVAL;
         return false;
     }
     output[used] = '\0';
     return true;
+}
+
+static bool guest_path(const char *input, char output[PATH_MAX])
+{
+    return normalize_path(input, output, false);
 }
 
 static int confined_open(int root, const char *path, int flags, unsigned int mode)
@@ -233,6 +260,23 @@ static int open_regular(int root, const char *path, int flags, bool *created)
     return -1;
 }
 
+int nt_runtime_open_guest_file_readonly(const char *input)
+{
+    char path[PATH_MAX];
+    if (!guest_path(input, path))
+        return -1;
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0)
+        return -1;
+    bool created;
+    const int fd = open_regular(root, relative, O_RDONLY, &created);
+    const int error = errno;
+    close(root);
+    errno = error;
+    return fd;
+}
+
 static int open_parent(int root, const char *path, const char **leaf)
 {
     const char *slash = strrchr(path, '/');
@@ -264,10 +308,7 @@ static bool copy_dos_path(const char *relative, char *output, size_t capacity)
 int nt_runtime_open_guest_directory(const char *path, char *output, size_t capacity)
 {
     char relative[PATH_MAX];
-    if (path == NULL || strcmp(path, ".") == 0 || nt_module_name_equal(path, "C:\\") ||
-        nt_module_name_equal(path, "C:/") || strcmp(path, "\\") == 0 || strcmp(path, "/") == 0)
-        relative[0] = '\0';
-    else if (!guest_path(path, relative))
+    if (!normalize_path(path != NULL ? path : "C:\\", relative, true))
         return -1;
     const char *resolved = relative[0] != '\0' ? relative : ".";
     const int root = duplicate_root(&resolved);
@@ -287,8 +328,9 @@ int nt_runtime_open_guest_directory(const char *path, char *output, size_t capac
 
 bool nt_runtime_guest_directory_entry(int directory, const char *name, bool *is_directory)
 {
-    char relative[PATH_MAX];
-    if (!guest_path(name, relative) || strcmp(name, relative) != 0 || strchr(relative, '/') != NULL)
+    char relative[PATH_MAX], rooted[PATH_MAX];
+    if (snprintf(rooted, sizeof(rooted), "/%s", name) >= (int)sizeof(rooted) ||
+        !guest_path(rooted, relative) || strcmp(name, relative) != 0 || strchr(relative, '/') != NULL)
         return false;
     const int fd = confined_open(directory, relative, O_PATH, 0);
     if (fd < 0)
@@ -347,6 +389,10 @@ static uint32_t path_error(int error, bool parent)
         return NT_ERROR_DIR_NOT_EMPTY;
     case EINVAL: case ENAMETOOLONG:
         return NT_ERROR_INVALID_PARAMETER;
+    case EBADF:
+        return NT_ERROR_INVALID_HANDLE;
+    case EPIPE:
+        return NT_ERROR_BROKEN_PIPE;
     case ENOMEM:
         return NT_ERROR_NOT_ENOUGH_MEMORY;
     case EBUSY:
@@ -372,11 +418,13 @@ struct guest_file {
     dev_t device;
     ino_t inode;
     bool text;
+    char *path;
 };
 
 static pthread_mutex_t file_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct guest_file files[FILE_TABLE_SIZE];
 static uintptr_t next_handle = 0x24000004;
+static uintptr_t standard_handles[3], initial_handles[3];
 
 static bool same_file(const struct guest_file *file, const struct stat *info)
 {
@@ -456,7 +504,8 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return UINTPTR_MAX;
     }
-    if ((!read_access && !write_access) || (desired & ~(generic_read | generic_write)) != 0 ||
+    if ((desired & ~(generic_read | generic_write)) != 0 ||
+        (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
         template_file != 0 || (attributes != NULL &&
                               (attributes->descriptor != NULL || attributes->inherit != 0))) {
@@ -488,7 +537,13 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
         return UINTPTR_MAX;
     }
 
-    int options = read_access ? (write_access ? O_RDWR : O_RDONLY) : O_WRONLY;
+    char *saved_path = strdup(path);
+    if (saved_path == NULL) {
+        close(parent);
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return UINTPTR_MAX;
+    }
+    int options = write_access ? (read_access ? O_RDWR : O_WRONLY) : O_RDONLY;
     if (disposition == CREATE_NEW || disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
         options |= O_CREAT;
     if (disposition == CREATE_NEW)
@@ -511,11 +566,14 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
                 next_handle += 16;
                 slot->owner = WIN_HANDLE;
                 slot->handle = result;
+                slot->path = saved_path;
+                saved_path = NULL;
             }
         }
     }
     pthread_mutex_unlock(&file_lock);
     close(parent);
+    free(saved_path);
     if (result == UINTPTR_MAX)
         nt_SetLastError(error == EEXIST ? NT_ERROR_FILE_EXISTS : path_error(error, false));
     else if (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
@@ -526,6 +584,8 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
 static int close_file(struct guest_file *file)
 {
     const int result = close(file->fd);
+    free(file->path);
+    file->path = NULL;
     file->owner = FREE_FILE;
     return result;
 }
@@ -536,6 +596,8 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
     struct guest_file *file = find_handle(handle);
     const int result = file != NULL ? close_file(file) : -1;
     pthread_mutex_unlock(&file_lock);
+    if (file == NULL && nt_runtime_close_waitable(handle))
+        return 1;
     if (result != 0)
         nt_SetLastError(file != NULL ? path_error(errno, false) : NT_ERROR_INVALID_HANDLE);
     return result == 0;
@@ -752,6 +814,52 @@ void *NT_MS_ABI nt_acrt_iob_func(uint32_t index)
     return &standard[index];
 }
 
+static bool set_win_standard_handles(const int fd[3])
+{
+    uintptr_t prepared[3] = {0};
+    bool ok = true;
+    pthread_mutex_lock(&file_lock);
+    for (size_t i = 0; i < 3; ++i) {
+        if (fd[i] < 0)
+            continue;
+        struct guest_file *slot = new_file();
+        if (slot == NULL || next_handle > UINTPTR_MAX - 16) {
+            errno = ENOMEM;
+            ok = false;
+            break;
+        }
+        const int duplicate = fcntl(fd[i], F_DUPFD_CLOEXEC, 3);
+        if (duplicate < 0) {
+            ok = false;
+            break;
+        }
+        struct stat info;
+        if (fstat(duplicate, &info) != 0) {
+            const int error = errno;
+            close(duplicate);
+            errno = error;
+            ok = false;
+            break;
+        }
+        prepared[i] = next_handle;
+        next_handle += 16;
+        *slot = (struct guest_file){.owner = WIN_HANDLE, .handle = prepared[i], .fd = duplicate,
+            .access = i == 0 ? FILE_READ : FILE_WRITE, .share = FILE_READ | FILE_WRITE,
+            .device = info.st_dev, .inode = info.st_ino};
+    }
+    const int error = errno;
+    for (size_t i = 0; i < 3; ++i) {
+        struct guest_file *file = find_handle(ok ? initial_handles[i] : prepared[i]);
+        if (file != NULL)
+            close_file(file);
+        if (ok)
+            initial_handles[i] = standard_handles[i] = prepared[i];
+    }
+    pthread_mutex_unlock(&file_lock);
+    errno = error;
+    return ok;
+}
+
 bool nt_runtime_set_standard_streams(int input, int output, int error)
 {
     const int fd[] = {input, output, error};
@@ -759,21 +867,19 @@ bool nt_runtime_set_standard_streams(int input, int output, int error)
     for (size_t i = 0; i < 3; ++i) {
         if (fd[i] < 0)
             continue;
-        const int duplicate = fcntl(fd[i], F_DUPFD_CLOEXEC, 0);
+        const int duplicate = fcntl(fd[i], F_DUPFD_CLOEXEC, 3);
         if (duplicate >= 0)
             files_to_attach[i] = fdopen(duplicate, i == 0 ? "r" : "w");
         if (files_to_attach[i] == NULL) {
             const int cause = errno;
             if (duplicate >= 0)
                 close(duplicate);
-            for (size_t j = 0; j < i; ++j) {
-                if (files_to_attach[j] != NULL)
-                    fclose(files_to_attach[j]);
-            }
             errno = cause;
-            return false;
+            goto failed;
         }
     }
+    if (!set_win_standard_handles(fd))
+        goto failed;
     pthread_mutex_lock(&stream_lock);
     for (size_t i = 0; i < 3; ++i) {
         struct guest_stream *stream = &standard[i];
@@ -791,6 +897,15 @@ bool nt_runtime_set_standard_streams(int input, int output, int error)
     }
     pthread_mutex_unlock(&stream_lock);
     return true;
+failed: {
+        const int cause = errno;
+        for (size_t i = 0; i < 3; ++i) {
+            if (files_to_attach[i] != NULL)
+                fclose(files_to_attach[i]);
+        }
+        errno = cause;
+        return false;
+    }
 }
 
 static unsigned int mode_access(struct stream_mode mode)
@@ -961,6 +1076,8 @@ int NT_MS_ABI nt_fclose(void *handle)
     }
     if (fclose(stream->file) != 0)
         result = EOF;
+    free(stream->opened->path);
+    stream->opened->path = NULL;
     stream->opened->owner = FREE_FILE;
     pthread_mutex_unlock(&file_lock);
     free(stream);
@@ -1050,4 +1167,713 @@ void nt_runtime_flush_streams(void)
             fdatasync(fileno(stream->file));
     }
     pthread_mutex_unlock(&stream_lock);
+}
+
+_Static_assert(sizeof(struct nt_createfile2_params) == 32, "CREATEFILE2_EXTENDED_PARAMETERS layout");
+_Static_assert(sizeof(struct nt_file_attribute_data) == 36, "WIN32_FILE_ATTRIBUTE_DATA layout");
+_Static_assert(sizeof(struct nt_find_data_w) == 592, "WIN32_FIND_DATAW layout");
+
+static bool wide_path(const uint16_t *input, char output[PATH_MAX])
+{
+    if (input == NULL || nt_runtime_wide_length(input, PATH_MAX) == PATH_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    if (nt_WideCharToMultiByte(65001, 0x80, input, -1, output, PATH_MAX, NULL, NULL) == 0)
+        return false;
+    if (strncmp(output, "\\\\?\\", 4) == 0 &&
+        (output[4] == 'C' || output[4] == 'c') && output[5] == ':' && separator(output[6]))
+        memmove(output, output + 4, strlen(output + 4) + 1);
+    return true;
+}
+
+static uint32_t path_result(const char *path, uint32_t size, uint16_t *buffer)
+{
+    const int32_t required = nt_MultiByteToWideChar(65001, 8, path, -1, NULL, 0);
+    if (required == 0 || (uint32_t)required > size)
+        return (uint32_t)required;
+    if (buffer == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return (uint32_t)(nt_MultiByteToWideChar(65001, 8, path, -1, buffer, required) - 1);
+}
+
+uintptr_t NT_MS_ABI nt_CreateFileW(const uint16_t *path, uint32_t access, uint32_t share,
+                                  const void *security, uint32_t disposition, uint32_t flags,
+                                  uintptr_t template_file)
+{
+    char narrow[PATH_MAX];
+    return wide_path(path, narrow) ?
+           nt_CreateFileA(narrow, access, share, security, disposition, flags, template_file) : UINTPTR_MAX;
+}
+
+uintptr_t NT_MS_ABI nt_CreateFile2(const uint16_t *path, uint32_t access, uint32_t share,
+                                  uint32_t disposition, const struct nt_createfile2_params *params)
+{
+    if (params != NULL && (params->size != sizeof(*params) || params->security_qos != 0)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return UINTPTR_MAX;
+    }
+    return nt_CreateFileW(path, access, share, params != NULL ? params->security : NULL, disposition,
+                          params != NULL ? params->attributes | params->flags : 0,
+                          params != NULL ? params->template_file : 0);
+}
+
+int32_t NT_MS_ABI nt_CreateDirectoryW(const uint16_t *path, const void *security)
+{
+    char narrow[PATH_MAX];
+    return wide_path(path, narrow) && nt_CreateDirectoryA(narrow, security);
+}
+
+int32_t NT_MS_ABI nt_RemoveDirectoryW(const uint16_t *path)
+{
+    char narrow[PATH_MAX];
+    return wide_path(path, narrow) && nt_RemoveDirectoryA(narrow);
+}
+
+int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path)
+{
+    char narrow[PATH_MAX];
+    return wide_path(path, narrow) && nt_DeleteFileA(narrow);
+}
+
+int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags)
+{
+    char from[PATH_MAX], to[PATH_MAX];
+    return wide_path(source, from) && wide_path(destination, to) && nt_MoveFileExA(from, to, flags);
+}
+
+uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer)
+{
+    char path[PATH_MAX + 3];
+    pthread_mutex_lock(&root_lock);
+    copy_dos_path(guest_cwd, path, sizeof(path));
+    pthread_mutex_unlock(&root_lock);
+    return path_result(path, size, buffer);
+}
+
+int32_t NT_MS_ABI nt_SetCurrentDirectoryW(const uint16_t *path)
+{
+    char narrow[PATH_MAX], canonical[PATH_MAX + 3], relative[PATH_MAX];
+    if (!wide_path(path, narrow))
+        return 0;
+    const int fd = nt_runtime_open_guest_directory(narrow, canonical, sizeof(canonical));
+    if (fd < 0 || !normalize_path(canonical, relative, true)) {
+        const int error = errno;
+        if (fd >= 0)
+            close(fd);
+        nt_SetLastError(path_error(error, true));
+        return 0;
+    }
+    pthread_mutex_lock(&root_lock);
+    strcpy(guest_cwd, relative);
+    pthread_mutex_unlock(&root_lock);
+    close(fd);
+    return 1;
+}
+
+uint32_t NT_MS_ABI nt_GetFullPathNameW(const uint16_t *path, uint32_t size, uint16_t *buffer,
+                                      uint16_t **leaf)
+{
+    char narrow[PATH_MAX], relative[PATH_MAX], absolute[PATH_MAX + 3];
+    if (leaf != NULL)
+        *leaf = NULL;
+    if (!wide_path(path, narrow))
+        return 0;
+    if (!normalize_path(narrow, relative, true) || !copy_dos_path(relative, absolute, sizeof(absolute))) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const uint32_t length = path_result(absolute, size, buffer);
+    if (length != 0 && length < size && leaf != NULL && relative[0] != '\0') {
+        size_t index = length;
+        while (index > 0 && buffer[index - 1] != '\\')
+            --index;
+        *leaf = buffer + index;
+    }
+    return length;
+}
+
+static int duplicate_handle(uintptr_t handle, unsigned int access)
+{
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    int fd = -1;
+    if (file == NULL)
+        errno = EBADF;
+    else if ((access & ~file->access) != 0)
+        errno = EACCES;
+    else
+        fd = fcntl(file->fd, F_DUPFD_CLOEXEC, 3);
+    const int error = errno;
+    pthread_mutex_unlock(&file_lock);
+    errno = error;
+    return fd;
+}
+
+static int32_t file_result(int fd, bool success)
+{
+    const int error = errno;
+    if (fd >= 0)
+        close(fd);
+    if (!success)
+        nt_SetLastError(path_error(error, false));
+    return success;
+}
+
+int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size, uint32_t *done, void *overlap)
+{
+    if (done != NULL)
+        *done = 0;
+    if (done == NULL || (size != 0 && buffer == NULL) || overlap != NULL) {
+        nt_SetLastError(overlap != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, FILE_READ);
+    if (fd < 0)
+        return file_result(fd, false);
+    ssize_t received;
+    do {
+        received = read(fd, buffer, size);
+    } while (received < 0 && errno == EINTR);
+    if (received == 0 && size != 0) {
+        struct stat info;
+        if (fstat(fd, &info) == 0 && S_ISFIFO(info.st_mode)) {
+            errno = EPIPE;
+            received = -1;
+        }
+    }
+    if (received >= 0)
+        *done = (uint32_t)received;
+    return file_result(fd, received >= 0);
+}
+
+int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t size, uint32_t *done, void *overlap)
+{
+    if (done != NULL)
+        *done = 0;
+    if (done == NULL || (size != 0 && buffer == NULL) || overlap != NULL) {
+        nt_SetLastError(overlap != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, FILE_WRITE);
+    if (fd < 0)
+        return file_result(fd, false);
+    ssize_t written;
+    do {
+        written = write(fd, buffer, size);
+    } while (written < 0 && errno == EINTR);
+    if (written >= 0)
+        *done = (uint32_t)written;
+    return file_result(fd, written >= 0);
+}
+
+int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle)
+{
+    const int fd = duplicate_handle(handle, FILE_WRITE);
+    return file_result(fd, fd >= 0 && fsync(fd) == 0);
+}
+
+int32_t NT_MS_ABI nt_GetFileSizeEx(uintptr_t handle, int64_t *size)
+{
+    if (size == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
+    struct stat info;
+    const bool ok = fd >= 0 && fstat(fd, &info) == 0;
+    if (ok)
+        *size = info.st_size;
+    return file_result(fd, ok);
+}
+
+int32_t NT_MS_ABI nt_SetFilePointerEx(uintptr_t handle, int64_t offset, int64_t *position, uint32_t method)
+{
+    const int whence[] = {SEEK_SET, SEEK_CUR, SEEK_END};
+    if (method >= sizeof(whence) / sizeof(whence[0]) || (method == 0 && offset < 0)) {
+        nt_SetLastError(method == 0 ? NT_ERROR_NEGATIVE_SEEK : NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
+    const off_t result = fd >= 0 ? lseek(fd, offset, whence[method]) : -1;
+    if (result >= 0 && position != NULL)
+        *position = result;
+    if (result < 0 && fd >= 0 && errno == EINVAL) {
+        close(fd);
+        nt_SetLastError(NT_ERROR_NEGATIVE_SEEK);
+        return 0;
+    }
+    return file_result(fd, result >= 0);
+}
+
+int32_t NT_MS_ABI nt_SetEndOfFile(uintptr_t handle)
+{
+    const int fd = duplicate_handle(handle, FILE_WRITE);
+    const off_t position = fd >= 0 ? lseek(fd, 0, SEEK_CUR) : -1;
+    return file_result(fd, position >= 0 && ftruncate(fd, position) == 0);
+}
+
+uint32_t NT_MS_ABI nt_GetFileType(uintptr_t handle)
+{
+    const int fd = duplicate_handle(handle, 0);
+    struct stat info;
+    if (!file_result(fd, fd >= 0 && fstat(fd, &info) == 0))
+        return 0;
+    if (S_ISREG(info.st_mode) || S_ISDIR(info.st_mode))
+        return 1;
+    if (S_ISCHR(info.st_mode))
+        return 2;
+    if (S_ISFIFO(info.st_mode) || S_ISSOCK(info.st_mode))
+        return 3;
+    nt_SetLastError(NT_ERROR_SUCCESS);
+    return 0;
+}
+
+static struct nt_file_time file_time(struct timespec time)
+{
+    if (time.tv_sec < -INT64_C(11644473600) ||
+        time.tv_sec > INT64_C(1833029933770))
+        return (struct nt_file_time){0};
+    const uint64_t ticks = (uint64_t)(time.tv_sec + INT64_C(11644473600)) * UINT64_C(10000000) +
+                           (uint64_t)time.tv_nsec / 100;
+    return (struct nt_file_time){(uint32_t)ticks, (uint32_t)(ticks >> 32)};
+}
+
+static uint64_t ticks(struct nt_file_time time)
+{
+    return (uint64_t)time.high << 32 | time.low;
+}
+
+static struct nt_file_attribute_data file_attributes(int fd, const struct stat *stat_info)
+{
+    struct timespec created = stat_info->st_ctim;
+    struct statx extended;
+    if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_BTIME, &extended) == 0 &&
+        (extended.stx_mask & STATX_BTIME) != 0)
+        created = (struct timespec){extended.stx_btime.tv_sec, extended.stx_btime.tv_nsec};
+    uint32_t attributes = S_ISDIR(stat_info->st_mode) ? 0x10u : 0;
+    if ((stat_info->st_mode & 0222) == 0)
+        attributes |= 1;
+    const uint64_t size = S_ISDIR(stat_info->st_mode) ? 0 : (uint64_t)stat_info->st_size;
+    return (struct nt_file_attribute_data){attributes != 0 ? attributes : FILE_ATTRIBUTE_NORMAL,
+        file_time(created), file_time(stat_info->st_atim), file_time(stat_info->st_mtim),
+        (uint32_t)(size >> 32), (uint32_t)size};
+}
+
+int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
+                                         struct nt_file_attribute_data *info)
+{
+    if (level != 0 || info == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    char narrow[PATH_MAX], relative[PATH_MAX];
+    if (!wide_path(path, narrow))
+        return 0;
+    if (!normalize_path(narrow, relative, true)) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const char *resolved = relative[0] != '\0' ? relative : ".";
+    const int root = duplicate_root(&resolved);
+    const int fd = root >= 0 ? confined_open(root, resolved, O_PATH, 0) : -1;
+    const int error = errno;
+    if (root >= 0)
+        close(root);
+    errno = error;
+    struct stat stat_info;
+    if (fd < 0 || fstat(fd, &stat_info) != 0)
+        return file_result(fd, false);
+    if (!S_ISREG(stat_info.st_mode) && !S_ISDIR(stat_info.st_mode)) {
+        errno = EACCES;
+        return file_result(fd, false);
+    }
+    *info = file_attributes(fd, &stat_info);
+    return file_result(fd, true);
+}
+
+uint32_t NT_MS_ABI nt_GetFileAttributesW(const uint16_t *path)
+{
+    struct nt_file_attribute_data attributes;
+    return nt_GetFileAttributesExW(path, 0, &attributes) ? attributes.attributes : UINT32_MAX;
+}
+
+int32_t NT_MS_ABI nt_AreFileApisANSI(void)
+{
+    /* File APIs in this process keep their ANSI mode. */
+    return 1;
+}
+
+enum { FIND_LIMIT = 64 };
+struct directory_search {
+    uintptr_t handle;
+    DIR *directory;
+    char pattern[PATH_MAX];
+};
+static struct directory_search searches[FIND_LIMIT];
+static uintptr_t next_search = 0x75000001;
+static pthread_mutex_t search_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct directory_search *find_search(uintptr_t handle)
+{
+    for (size_t i = 0; i < FIND_LIMIT; ++i) {
+        if (searches[i].handle == handle)
+            return &searches[i];
+    }
+    return NULL;
+}
+
+static int next_entry(const struct directory_search *search, struct nt_find_data_w *data)
+{
+    const char *pattern = strcmp(search->pattern, "*.*") == 0 ? "*" : search->pattern;
+    for (;;) {
+        errno = 0;
+        const struct dirent *entry = readdir(search->directory);
+        if (entry == NULL)
+            return errno;
+        char normalized[PATH_MAX];
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
+            fnmatch(pattern, entry->d_name, FNM_CASEFOLD) != 0)
+            continue;
+        /* Add a rooted prefix to validate the entry independently of CWD. */
+        char rooted[PATH_MAX];
+        if (snprintf(rooted, sizeof(rooted), "/%s", entry->d_name) >= (int)sizeof(rooted) ||
+            !guest_path(rooted, normalized) || strcmp(normalized, entry->d_name) != 0)
+            continue;
+        struct nt_find_data_w result = {0};
+        if (nt_MultiByteToWideChar(65001, 8, entry->d_name, -1, result.name, 260) == 0)
+            continue;
+        const int fd = confined_open(dirfd(search->directory), entry->d_name, O_PATH, 0);
+        if (fd < 0)
+            continue;
+        struct stat stat_info;
+        const bool valid = fstat(fd, &stat_info) == 0 &&
+                           (S_ISREG(stat_info.st_mode) || S_ISDIR(stat_info.st_mode));
+        if (valid)
+            result.info = file_attributes(fd, &stat_info);
+        close(fd);
+        if (valid) {
+            *data = result;
+            return -1;
+        }
+    }
+}
+
+uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, struct nt_find_data_w *data,
+                                       int32_t operation, void *filter, uint32_t flags)
+{
+    if (data == NULL || (level != 0 && level != 1) || operation != 0 ||
+        filter != NULL || (flags & ~2u) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return UINTPTR_MAX;
+    }
+    char narrow[PATH_MAX], canonical[PATH_MAX + 3];
+    if (!wide_path(path, narrow))
+        return UINTPTR_MAX;
+    char *pattern = narrow;
+    for (char *cursor = narrow; *cursor != '\0'; ++cursor) {
+        if (separator(*cursor))
+            pattern = cursor + 1;
+    }
+    if (*pattern == '\0' || strchr(pattern, ':') != NULL || strchr(pattern, '[') != NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_NAME);
+        return UINTPTR_MAX;
+    }
+    struct directory_search search = {0};
+    strcpy(search.pattern, pattern);
+    if (pattern != narrow)
+        *pattern = '\0';
+    const int fd = nt_runtime_open_guest_directory(pattern == narrow ? "." : narrow,
+                                                    canonical, sizeof(canonical));
+    if (fd < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return UINTPTR_MAX;
+    }
+    search.directory = fdopendir(fd);
+    if (search.directory == NULL) {
+        file_result(fd, false);
+        return UINTPTR_MAX;
+    }
+    struct nt_find_data_w first;
+    const int result = next_entry(&search, &first);
+    if (result != -1) {
+        closedir(search.directory);
+        nt_SetLastError(result == 0 ? NT_ERROR_FILE_NOT_FOUND : path_error(result, false));
+        return UINTPTR_MAX;
+    }
+    pthread_mutex_lock(&search_lock);
+    struct directory_search *slot = find_search(0);
+    uintptr_t handle = UINTPTR_MAX;
+    if (slot != NULL && next_search != UINTPTR_MAX) {
+        handle = next_search++;
+        search.handle = handle;
+        *slot = search;
+        *data = first;
+    }
+    pthread_mutex_unlock(&search_lock);
+    if (handle == UINTPTR_MAX) {
+        closedir(search.directory);
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+    }
+    return handle;
+}
+
+uintptr_t NT_MS_ABI nt_FindFirstFileW(const uint16_t *path, struct nt_find_data_w *data)
+{
+    return nt_FindFirstFileExW(path, 0, data, 0, NULL, 0);
+}
+
+int32_t NT_MS_ABI nt_FindNextFileW(uintptr_t handle, struct nt_find_data_w *data)
+{
+    if (data == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&search_lock);
+    const struct directory_search *search = handle != 0 ? find_search(handle) : NULL;
+    const int result = search != NULL ? next_entry(search, data) : EBADF;
+    pthread_mutex_unlock(&search_lock);
+    if (result != -1)
+        nt_SetLastError(result == 0 ? NT_ERROR_NO_MORE_FILES : path_error(result, false));
+    return result == -1;
+}
+
+int32_t NT_MS_ABI nt_FindClose(uintptr_t handle)
+{
+    pthread_mutex_lock(&search_lock);
+    struct directory_search *search = handle != 0 ? find_search(handle) : NULL;
+    DIR *directory = search != NULL ? search->directory : NULL;
+    if (search != NULL)
+        search->handle = 0;
+    pthread_mutex_unlock(&search_lock);
+    if (directory == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    return closedir(directory) == 0;
+}
+
+static bool open_path_name(uintptr_t handle, char path[PATH_MAX + 3])
+{
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    const bool success = file != NULL && file->path != NULL &&
+                         copy_dos_path(file->path, path, PATH_MAX + 3);
+    pthread_mutex_unlock(&file_lock);
+    if (!success)
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return success;
+}
+
+uint32_t NT_MS_ABI nt_GetFinalPathNameByHandleW(uintptr_t handle, uint16_t *buffer, uint32_t size, uint32_t flags)
+{
+    if ((flags & ~12u) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_FLAGS);
+        return 0;
+    }
+    char path[PATH_MAX + 7] = "\\\\?\\";
+    if (!open_path_name(handle, path + 4))
+        return 0;
+    return path_result(path + ((flags & 4) != 0 ? 6 : 0), size, buffer);
+}
+
+struct basic_file_info { uint64_t created, accessed, written, changed; uint32_t attributes; };
+struct standard_file_info { int64_t allocation, size; uint32_t links; uint8_t pending, directory; };
+_Static_assert(sizeof(struct basic_file_info) == 40, "FILE_BASIC_INFO layout");
+_Static_assert(sizeof(struct standard_file_info) == 24, "FILE_STANDARD_INFO layout");
+
+int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind, void *info, uint32_t size)
+{
+    if (info == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (kind == 2) {
+        char path[PATH_MAX + 3];
+        if (!open_path_name(handle, path))
+            return 0;
+        uint16_t *name = nt_runtime_utf8_to_wide(path + 2);
+        if (name == NULL) {
+            nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
+        const uint32_t bytes = (uint32_t)(nt_runtime_wide_length(name, PATH_MAX) * sizeof(*name));
+        const bool fits = size >= sizeof(bytes) && size - sizeof(bytes) >= bytes;
+        if (fits) {
+            memcpy(info, &bytes, sizeof(bytes));
+            memcpy((char *)info + sizeof(bytes), name, bytes);
+        } else {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        }
+        free(name);
+        return fits;
+    }
+    const size_t needed = kind == 0 ? sizeof(struct basic_file_info) :
+                          kind == 1 ? sizeof(struct standard_file_info) : kind == 9 ? 8 : 0;
+    if (needed == 0 || size < needed) {
+        nt_SetLastError(needed == 0 ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
+    struct stat stat_info;
+    if (fd < 0 || fstat(fd, &stat_info) != 0)
+        return file_result(fd, false);
+    const struct nt_file_attribute_data attr = file_attributes(fd, &stat_info);
+    if (kind == 0) {
+        const struct basic_file_info basic = {ticks(attr.created), ticks(attr.accessed), ticks(attr.written),
+                                              ticks(file_time(stat_info.st_ctim)), attr.attributes};
+        memcpy(info, &basic, sizeof(basic));
+    } else if (kind == 1) {
+        const struct standard_file_info standard_info = {
+            (int64_t)((uint64_t)stat_info.st_blocks * 512), stat_info.st_size,
+            (uint32_t)stat_info.st_nlink, stat_info.st_nlink == 0, S_ISDIR(stat_info.st_mode) != 0
+        };
+        memcpy(info, &standard_info, sizeof(standard_info));
+    } else {
+        const uint32_t data[] = {attr.attributes, 0};
+        memcpy(info, data, sizeof(data));
+    }
+    return file_result(fd, true);
+}
+
+static struct timespec to_timespec(uint64_t ticks_value)
+{
+    if (ticks_value == 0)
+        return (struct timespec){0, UTIME_OMIT};
+    return (struct timespec){(int64_t)(ticks_value / UINT64_C(10000000)) - INT64_C(11644473600),
+                             (long)(ticks_value % UINT64_C(10000000)) * 100};
+}
+
+int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, const void *info, uint32_t size)
+{
+    if (info == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (kind == 6) {
+        int64_t length;
+        if (size < sizeof(length)) {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        memcpy(&length, info, sizeof(length));
+        if (length < 0) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const int fd = duplicate_handle(handle, FILE_WRITE);
+        return file_result(fd, fd >= 0 && ftruncate(fd, length) == 0);
+    }
+    if (kind == 0) {
+        struct basic_file_info basic;
+        if (size < sizeof(basic)) {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        memcpy(&basic, info, sizeof(basic));
+        if (basic.created != 0 || basic.changed != 0 || basic.attributes != 0 ||
+            basic.accessed > INT64_MAX || basic.written > INT64_MAX) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        const struct timespec dates[] = {to_timespec(basic.accessed), to_timespec(basic.written)};
+        const int fd = duplicate_handle(handle, FILE_WRITE);
+        return file_result(fd, fd >= 0 && futimens(fd, dates) == 0);
+    }
+    nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    return 0;
+}
+
+uintptr_t NT_MS_ABI nt_GetStdHandle(uint32_t which)
+{
+    const uint32_t index = (uint32_t)-10 - which;
+    if (index >= 3) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return UINTPTR_MAX;
+    }
+    pthread_mutex_lock(&file_lock);
+    const uintptr_t handle = standard_handles[index];
+    pthread_mutex_unlock(&file_lock);
+    return handle;
+}
+
+int32_t NT_MS_ABI nt_SetStdHandle(uint32_t which, uintptr_t handle)
+{
+    const uint32_t index = (uint32_t)-10 - which;
+    if (index >= 3) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&file_lock);
+    standard_handles[index] = handle;
+    pthread_mutex_unlock(&file_lock);
+    return 1;
+}
+
+uint32_t NT_MS_ABI nt_GetConsoleOutputCP(void)
+{
+    /* The console bridge writes UTF-8 to a Linux terminal. */
+    return 65001;
+}
+
+int32_t NT_MS_ABI nt_GetConsoleMode(uintptr_t handle, uint32_t *mode)
+{
+    if (mode == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
+    struct termios options;
+    const bool ok = fd >= 0 && tcgetattr(fd, &options) == 0;
+    if (ok) {
+        if (handle == nt_GetStdHandle((uint32_t)-10)) {
+            *mode = ((options.c_lflag & ISIG) != 0 ? 1u : 0) |
+                    ((options.c_lflag & ICANON) != 0 ? 2u : 0) |
+                    ((options.c_lflag & ECHO) != 0 ? 4u : 0);
+        } else {
+            *mode = (options.c_oflag & OPOST) != 0 ? 3u : 0;
+        }
+    } else if (fd >= 0) {
+        errno = EBADF;
+    }
+    return file_result(fd, ok);
+}
+
+int32_t NT_MS_ABI nt_WriteConsoleA(uintptr_t handle, const char *buffer, uint32_t count, uint32_t *done, void *reserved)
+{
+    if (reserved != NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    uint32_t mode;
+    return nt_GetConsoleMode(handle, &mode) && nt_WriteFile(handle, buffer, count, done, NULL);
+}
+
+int32_t NT_MS_ABI nt_WriteConsoleW(uintptr_t handle, const uint16_t *buffer, uint32_t count, uint32_t *done, void *reserved)
+{
+    if (reserved != NULL || done == NULL || (count != 0 && buffer == NULL) || count > INT32_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *done = 0;
+    if (count == 0)
+        return nt_WriteConsoleA(handle, NULL, 0, done, NULL);
+    const int32_t bytes = nt_WideCharToMultiByte(65001, 0, buffer, (int32_t)count, NULL, 0, NULL, NULL);
+    if (bytes == 0)
+        return 0;
+    char *utf8 = malloc((size_t)bytes);
+    if (utf8 == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    nt_WideCharToMultiByte(65001, 0, buffer, (int32_t)count, utf8, bytes, NULL, NULL);
+    uint32_t written;
+    const bool ok = nt_WriteConsoleA(handle, utf8, (uint32_t)bytes, &written, NULL) &&
+                    written == (uint32_t)bytes;
+    free(utf8);
+    if (ok)
+        *done = count;
+    return ok;
 }

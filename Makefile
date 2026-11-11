@@ -15,19 +15,19 @@ GDI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags cairo)
 GDI_LIBS ?= $(shell $(PKG_CONFIG) --libs cairo)
 FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
 FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process exceptions \
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process environment sync threads fluid crypto winsock nls registry raw_input exceptions \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
-RUNTIME_LIBS = -lm -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
+RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
-PE_IMAGE_HEADERS = src/pe/image.h src/pe/pe_bytes.h
+PE_IMAGE_HEADERS = src/pe/image.h src/pe/pe_bytes.h include/ntnative/guest_thread.h
 PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-insert-timestamp \
                      -Wl,--disable-reloc-section,--disable-dynamicbase,--strip-all
 PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector \
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run
 
 $(BUILD_DIR):
@@ -56,6 +56,28 @@ $(BUILD_DIR)/runtime-crt_stdio.o: override CPPFLAGS += $(FFI_CFLAGS)
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-user_folders.o \
     $(BUILD_DIR)/runtime-file_dialogs.o: src/runtime/user_folders.h
 
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-crt.o \
+    $(BUILD_DIR)/runtime-process.o $(BUILD_DIR)/runtime-system.o $(BUILD_DIR)/runtime-fluid.o \
+    $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-environment.o $(BUILD_DIR)/runtime-global_memory.o: src/runtime/winbase.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-sync.o \
+    $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
+$(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o: src/runtime/winfile.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-fluid.o: src/runtime/fluid_api.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-crypto.o: src/runtime/crypto.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-winsock.o: src/runtime/winsock.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-nls.o: src/runtime/nls.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-gdi_memory.o: src/runtime/gdi_ext.h
+$(BUILD_DIR)/runtime-gdi_memory.o: src/runtime/desktop.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-registry.o: src/runtime/registry.h
+$(BUILD_DIR)/runtime-registry.o: src/runtime/winbase.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-raw_input.o: src/runtime/raw_input.h
+$(BUILD_DIR)/runtime-raw_input.o: src/runtime/windesktop.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-dialogs.o: src/runtime/task_dialog.h
+
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-desktop.o $(BUILD_DIR)/runtime-desktop_resources.o \
+    $(BUILD_DIR)/runtime-clipboard.o $(BUILD_DIR)/runtime-messages.o: src/runtime/windesktop.h
+
 $(BUILD_DIR)/runtime-context.o: src/runtime/context.S | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -c "$<" -o "$@"
 
@@ -79,6 +101,10 @@ $(BUILD_DIR)/guest-profile-test: tests/guest_profile_test.c src/tools/guest_prof
 	$(CC) $(CPPFLAGS) -Isrc/tools $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    tests/guest_profile_test.c src/tools/guest_profile.c $(LDLIBS) -o "$@"
 
+$(BUILD_DIR)/native-audio-test: tests/native_audio_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
 $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -91,7 +117,7 @@ $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=fdatasync $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
-$(BUILD_DIR)/desktop-test: tests/desktop_test.c $(RUNTIME_OBJECTS) src/runtime/desktop.h | $(BUILD_DIR)
+$(BUILD_DIR)/desktop-test: tests/desktop_test.c $(RUNTIME_OBJECTS) src/runtime/desktop.h src/runtime/raw_input.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(DESKTOP_CFLAGS) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
@@ -111,7 +137,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test \
-       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test
+       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test
 	$(BUILD_DIR)/counter-test
 	$(BUILD_DIR)/nt-native-probe
 	$(BUILD_DIR)/runtime-test
@@ -120,6 +146,7 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	$(BUILD_DIR)/import-scan-test
 	$(BUILD_DIR)/guest-thread-test
 	$(BUILD_DIR)/guest-profile-test
+	$(BUILD_DIR)/native-audio-test
 
 # These explicit flags keep the fixture freestanding, position independent
 # within .text, and free of host sanitizer and library dependencies.
@@ -158,7 +185,7 @@ check-pe-image: $(BUILD_DIR)/pe-image-test
 	$(BUILD_DIR)/pe-image-test
 
 $(BUILD_DIR)/pe-external-host: tests/pe/external_host.c src/pe/image.c $(RUNTIME_OBJECTS) \
-    $(PE_IMAGE_HEADERS) include/ntnative/guest_thread.h | $(BUILD_DIR)
+    $(PE_IMAGE_HEADERS) src/runtime/winbase.h src/runtime/sync.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    tests/pe/external_host.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
@@ -166,13 +193,24 @@ check-pe-external: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
 
+check-pe-native: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/native-services.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/native-services.exe
+
+$(BUILD_DIR)/fixture-ws2_32.a: tests/pe/ws2_32.def | $(BUILD_DIR)
+	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/native-services.exe: tests/pe/native_services_fixture.c $(BUILD_DIR)/fixture-ws2_32.a $(BUILD_DIR)/fixture-comctl32.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lbcrypt -lshell32 -lole32 -luser32 -lgdi32 -lmsimg32 -ladvapi32 -limm32 -lkernel32
+
 check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixture.exe $(BUILD_DIR)/folder-fixture.exe
 	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe \
 	    $(BUILD_DIR)/profile-fixture.exe $(BUILD_DIR)/folder-fixture.exe
 
 $(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/tools/guest_profile.h src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h \
-    src/runtime/user_folders.h include/ntnative/guest_thread.h | $(BUILD_DIR)
+    src/runtime/user_folders.h src/runtime/winbase.h src/runtime/sync.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 

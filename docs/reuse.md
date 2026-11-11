@@ -32,6 +32,13 @@ después de validar y adaptar los argumentos Microsoft x64 del fixture.
 Se usa el paquete del sistema con licencia MIT.
 [libffi 3.4.8](https://github.com/libffi/libffi/tree/v3.4.8).
 
+OpenSSL 3 respalda el subconjunto de BCrypt que procesa hashes y HMAC.
+Se usa la biblioteca libcrypto del sistema con licencia Apache-2.0.
+FluidSynth 2.x, con SONAME 3, proporciona síntesis MIDI mediante su ABI
+C de Linux. La biblioteca del sistema conserva su licencia LGPL-2.1-or-later.
+[OpenSSL](https://openssl-library.org/source/license/) ·
+[FluidSynth](https://github.com/FluidSynth/fluidsynth).
+
 ## Proyectos y dependencias
 
 | Componente | Clasificación | Evidencia, dependencia y restricciones |

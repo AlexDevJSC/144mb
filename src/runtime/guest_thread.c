@@ -13,9 +13,13 @@ static void put_pointer(unsigned char *base, size_t offset, uintptr_t value)
     memcpy(base + offset, &value, sizeof(value));
 }
 
-bool nt_guest_thread_enter(struct nt_guest_thread *state, uintptr_t image_base)
+bool nt_guest_thread_enter_with_tls(struct nt_guest_thread *state, uintptr_t image_base,
+                                    const struct nt_guest_tls *initial)
 {
-    if (state == NULL || state->entered || image_base == 0)
+    if (state == NULL || state->entered || image_base == 0 ||
+        (initial != NULL && (initial->bytes > NT_GUEST_TLS_MAX ||
+          initial->zero_fill > NT_GUEST_TLS_MAX - initial->bytes ||
+          (initial->bytes != 0 && initial->data == NULL))))
         return false;
     memset(state, 0, sizeof(*state));
     pthread_attr_t attr;
@@ -28,6 +32,8 @@ bool nt_guest_thread_enter(struct nt_guest_thread *state, uintptr_t image_base)
     if (stack_result != 0 || stack_low == NULL || stack_size == 0 ||
         (uintptr_t)stack_low > UINTPTR_MAX - stack_size)
         return false;
+    if (initial != NULL && initial->bytes != 0)
+        memcpy(state->tls_block, initial->data, initial->bytes);
     state->tls_vector[0] = (uintptr_t)state->tls_block;
     put_pointer(state->teb, 0x08, (uintptr_t)stack_low + stack_size); /* StackBase */
     put_pointer(state->teb, 0x10, (uintptr_t)stack_low); /* StackLimit */
@@ -43,6 +49,11 @@ bool nt_guest_thread_enter(struct nt_guest_thread *state, uintptr_t image_base)
         return false;
     state->entered = true;
     return true;
+}
+
+bool nt_guest_thread_enter(struct nt_guest_thread *state, uintptr_t image_base)
+{
+    return nt_guest_thread_enter_with_tls(state, image_base, NULL);
 }
 
 bool nt_guest_thread_leave(struct nt_guest_thread *state)

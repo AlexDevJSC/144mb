@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
-#include "desktop.h"
+#include "windesktop.h"
 #include "dialogs.h"
 
 #include <errno.h>
@@ -33,6 +33,7 @@ static pthread_key_t queue_key;
 static int queue_error;
 static _Thread_local bool quit_pending;
 static _Thread_local int32_t quit_code;
+static _Thread_local intptr_t extra_message_info;
 
 static void release_queue(void *ptr)
 {
@@ -153,7 +154,7 @@ void NT_MS_ABI nt_PostQuitMessage(int32_t code)
 }
 
 static int wait_timer(struct timer_queue *queue, struct nt_message *message,
-                      uintptr_t filter, int timeout)
+                      uintptr_t filter, int timeout, bool remove)
 {
     struct pollfd fds[MAX_TIMERS];
     const struct timer *timers[MAX_TIMERS];
@@ -181,15 +182,18 @@ static int wait_timer(struct timer_queue *queue, struct nt_message *message,
             if ((fds[i].revents & POLLIN) == 0)
                 continue;
             uint64_t expirations;
-            ssize_t received;
-            do {
-                received = read(fds[i].fd, &expirations, sizeof(expirations));
-            } while (received < 0 && errno == EINTR);
+            ssize_t received = sizeof(expirations);
+            if (remove) {
+                do {
+                    received = read(fds[i].fd, &expirations, sizeof(expirations));
+                } while (received < 0 && errno == EINTR);
+            }
             if (received == sizeof(expirations)) {
                 *message = (struct nt_message){.window = timers[i]->window, .message = WM_TIMER,
                     .wparam = timers[i]->id, .lparam = (intptr_t)timers[i]->callback,
                     .time = nt_GetTickCount()};
-                queue->next_poll = ((size_t)(timers[i] - queue->timers) + 1) % MAX_TIMERS;
+                if (remove)
+                    queue->next_poll = ((size_t)(timers[i] - queue->timers) + 1) % MAX_TIMERS;
                 return 1;
             }
         }
@@ -226,7 +230,7 @@ int32_t NT_MS_ABI nt_GetMessageA(struct nt_message *message, uintptr_t window,
                 continue;
         }
         if (timer_allowed) {
-            const int received = wait_timer(get_queue(false), message, window, desktop ? 0 : -1);
+            const int received = wait_timer(get_queue(false), message, window, desktop ? 0 : -1, true);
             if (received != 0)
                 return received;
         }
@@ -258,4 +262,63 @@ intptr_t NT_MS_ABI nt_DispatchMessageA(const struct nt_message *message)
         return 0;
     return message->window != 0 ?
            nt_SendMessageA(message->window, message->message, message->wparam, message->lparam) : 0;
+}
+
+int32_t NT_MS_ABI nt_GetMessageW(struct nt_message *message, uintptr_t window, uint32_t first, uint32_t last)
+{
+    return nt_GetMessageA(message, window, first, last);
+}
+
+intptr_t NT_MS_ABI nt_DispatchMessageW(const struct nt_message *message)
+{
+    return nt_DispatchMessageA(message);
+}
+
+int32_t NT_MS_ABI nt_PeekMessageW(struct nt_message *message, uintptr_t window, uint32_t first,
+                                 uint32_t last, uint32_t flags)
+{
+    if (message == NULL || first > last || last > UINT16_MAX || (flags & ~3u) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (window != 0 && window != UINTPTR_MAX && !nt_runtime_window_valid(window)) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    const bool remove = (flags & 1) != 0;
+    if (!quit_pending) {
+        const int result = nt_runtime_peek_window_message(message, window, first, last, remove);
+        if (result != 0)
+            return result > 0;
+    }
+    if (quit_pending) {
+        *message = (struct nt_message){.message = WM_QUIT, .wparam = (uintptr_t)(intptr_t)quit_code,
+                                       .time = nt_GetTickCount()};
+        if (remove)
+            quit_pending = false;
+        return 1;
+    }
+    const bool timer_allowed = (first == 0 && last == 0) || (first <= WM_TIMER && last >= WM_TIMER);
+    return timer_allowed && wait_timer(get_queue(false), message, window, 0, remove) > 0;
+}
+
+int32_t NT_MS_ABI nt_PostMessageW(uintptr_t window, uint32_t message, uintptr_t wparam, intptr_t lparam)
+{
+    if (message == NT_WM_SETTEXT || message == NT_WM_GETTEXT || message == 0x4a) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return nt_runtime_post_window_message(window, message, wparam, lparam);
+}
+
+intptr_t NT_MS_ABI nt_GetMessageExtraInfo(void)
+{
+    return extra_message_info;
+}
+
+intptr_t NT_MS_ABI nt_SetMessageExtraInfo(intptr_t info)
+{
+    const intptr_t previous = extra_message_info;
+    extra_message_info = info;
+    return previous;
 }
