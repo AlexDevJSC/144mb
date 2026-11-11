@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "dialogs.h"
+#include "user_folders.h"
 #include "desktop_resources.h"
 
 #include <SDL.h>
@@ -397,6 +398,22 @@ static void check_files(uintptr_t owner)
     CHECK(strcmp(file, "C:\\games\\inside.min") == 0 && strcmp(title, "inside.min") == 0 &&
           request.file_offset == 9 && request.extension_offset == 16 && request.filter_index == 1);
 
+    char users[128], profile[128], shadow[128];
+    snprintf(users, sizeof(users), "%s/Users", root);
+    snprintf(profile, sizeof(profile), "%s/Users/guest", root);
+    snprintf(shadow, sizeof(shadow), "%s/Users/guest/documents", root);
+    CHECK(mkdir(users, 0700) == 0 && mkdir(profile, 0700) == 0 && mkdir(shadow, 0700) == 0);
+    CHECK(nt_runtime_set_user_folder_root(NT_USER_FOLDER_DOCUMENTS, directory));
+    file[0] = '\0';
+    request.initial_directory = NT_GUEST_USER_PROFILE;
+    const struct script_step open_shared[] = {{"Open fixture", FIRST_FILE}, {"Open fixture", FIRST_FILE}};
+    run_script(owner, open_shared, 2);
+    CHECK(nt_GetOpenFileNameA(&request) && script_position == 2 &&
+          strcmp(file, NT_GUEST_USER_PROFILE "\\Documents\\inside.min") == 0);
+    CHECK(nt_runtime_set_user_folder_root(NT_USER_FOLDER_DOCUMENTS, NULL));
+    CHECK(rmdir(shadow) == 0 && rmdir(profile) == 0 && rmdir(users) == 0);
+    request.initial_directory = "C:\\games";
+
     strcpy(file, "round");
     request.title = "Save fixture";
     request.size = sizeof(request);
@@ -430,7 +447,7 @@ static void check_files(uintptr_t owner)
     CHECK(!nt_GetSaveFileNameA(&request) && nt_CommDlgExtendedError() == 1);
     CHECK(unlink(source) == 0 && unlink(ignored) == 0 && unlink(symlink_path) == 0 &&
           rmdir(directory) == 0 && rmdir(root) == 0 && nt_runtime_set_file_root(NULL));
-    puts("PASS file open/save controls, filters, overwrite, offsets, cancellation and guest-root confinement");
+    puts("PASS file dialogs, shared folders, filters, overwrite, cancellation and guest-root confinement");
 }
 
 int main(void)

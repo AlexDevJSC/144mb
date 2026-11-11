@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "dialogs.h"
+#include "user_folders.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -107,7 +108,16 @@ static void set_control_text(uintptr_t window, int32_t id, const char *text)
     nt_SendDlgItemMessageA(window, id, NT_WM_SETTEXT, 0, (intptr_t)text);
 }
 
-static bool refresh_list(uintptr_t window, struct file_dialog *dialog, int fd)
+static bool is_shared_folder(const char *name, unsigned int shared)
+{
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+        if ((shared & (1u << i)) != 0 && nt_module_name_equal(name, nt_user_folders[i].name))
+            return true;
+    }
+    return false;
+}
+
+static bool refresh_list(uintptr_t window, struct file_dialog *dialog, int fd, const char *path)
 {
     DIR *directory = fdopendir(fd);
     if (directory == NULL) {
@@ -120,6 +130,14 @@ static bool refresh_list(uintptr_t window, struct file_dialog *dialog, int fd)
         return false;
     }
     size_t count = 0;
+    const unsigned int shared = nt_module_name_equal(path, NT_GUEST_USER_PROFILE) ?
+                                nt_runtime_shared_user_folders() : 0;
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+        if ((shared & (1u << i)) != 0) {
+            strcpy(entries[count].name, nt_user_folders[i].name);
+            entries[count++].directory = true;
+        }
+    }
     bool ok = true;
     for (size_t scanned = 0; scanned < MAX_SCAN && count < MAX_ENTRIES; ++scanned) {
         errno = 0;
@@ -129,7 +147,8 @@ static bool refresh_list(uintptr_t window, struct file_dialog *dialog, int fd)
             break;
         }
         bool is_directory;
-        if (!nt_runtime_guest_directory_entry(dirfd(directory), entry->d_name, &is_directory) ||
+        if (is_shared_folder(entry->d_name, shared) ||
+            !nt_runtime_guest_directory_entry(dirfd(directory), entry->d_name, &is_directory) ||
             (!is_directory && !matches_filter(entry->d_name, dialog->patterns[dialog->filter_index])))
             continue;
         const size_t length = strlen(entry->d_name);
@@ -161,7 +180,7 @@ static bool visit(uintptr_t window, struct file_dialog *dialog, const char *name
     const int directory = nt_runtime_open_guest_directory(name, path, sizeof(path));
     if (directory < 0)
         return false;
-    if (!refresh_list(window, dialog, directory)) {
+    if (!refresh_list(window, dialog, directory, path)) {
         dialog->error = CDERR_INITIALIZATION;
         dialog->result = -1;
         return false;

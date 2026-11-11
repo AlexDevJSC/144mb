@@ -8,4 +8,7 @@
  */
 int nt_open_guest_profile(const char *state_home, const char *home);
 
+/* Open an explicitly selected existing Linux folder for sharing. */
+int nt_open_shared_folder(const char *directory, const char *home);
+
 #endif

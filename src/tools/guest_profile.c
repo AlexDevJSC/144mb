@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 #include "guest_profile.h"
 
 #include <errno.h>
@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -124,4 +125,23 @@ int nt_open_guest_profile(const char *state_home, const char *home)
         return -1;
     }
     return drive;
+}
+
+int nt_open_shared_folder(const char *directory, const char *home)
+{
+    if (directory == NULL || directory[0] != '/' || home == NULL || home[0] != '/') {
+        errno = EINVAL;
+        return -1;
+    }
+    char target[PATH_MAX], personal[PATH_MAX];
+    if (realpath(directory, target) == NULL || realpath(home, personal) == NULL)
+        return -1;
+    const size_t length = strlen(target);
+    /* XDG may return the home directory for a disabled user folder. */
+    if (length == 1 || (strncmp(personal, target, length) == 0 &&
+                        (personal[length] == '/' || personal[length] == '\0'))) {
+        errno = EACCES;
+        return -1;
+    }
+    return open(target, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 }

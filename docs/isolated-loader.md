@@ -41,7 +41,7 @@ En Linux x86-64:
 ```sh
 make -j2 all check check-pe check-pe-image check-pe-import
 sudo dnf install bubblewrap
-build/pe-isolated-run /ruta/completa/Mines.exe
+build/pe-isolated-run /ruta/completa/programa.exe
 ```
 
 Usa una sesión Wayland válida. El lanzador publica únicamente el socket
@@ -95,16 +95,69 @@ Las rutas Win32 conservan `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS` y
 `RESOLVE_NO_XDEV` dentro del disco invitado.
 
 El preparador devuelve al llamador un descriptor de directorio con
-`FD_CLOEXEC`. El lanzador lo conserva hasta ejecutar Bubblewrap y emplea
-`--bind` con su ruta `/proc/self/fd/N`, compatible con la interfaz existente
-de Bubblewrap. El directorio padre del disco queda fuera del montaje
-invitado. Un fallo de preparación cancela el arranque y conserva los
-archivos existentes para el siguiente intento.
+`FD_CLOEXEC`. El lanzador lo duplica por encima de los descriptores de
+entrada y salida estándar y emplea `--bind` con su ruta `/proc/self/fd/N`.
+El directorio padre del disco queda fuera del montaje invitado. Un fallo
+de preparación cancela el arranque y conserva los archivos existentes
+para el siguiente intento.
 
 Los valores siguen las carpetas por usuario documentadas en
 [KNOWNFOLDERID](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid).
 La elección del directorio Linux sigue la
 [especificación XDG 0.8](https://specifications.freedesktop.org/basedir/latest/).
+
+### Carpetas de Linux compartidas
+
+Cada `--share Nombre=/ruta/absoluta` da acceso de lectura y escritura a
+una carpeta existente de Linux durante ese lanzamiento. Las operaciones
+sobre la ruta Windows acceden al archivo original en la carpeta elegida.
+Puedes repetir `--share` con distintos nombres.
+
+| Nombre | Ruta del programa Windows | Consulta de la ubicación Linux |
+| --- | --- | --- |
+| `Desktop` | `C:\Users\guest\Desktop` | `xdg-user-dir DESKTOP` |
+| `Documents` | `C:\Users\guest\Documents` | `xdg-user-dir DOCUMENTS` |
+| `Downloads` | `C:\Users\guest\Downloads` | `xdg-user-dir DOWNLOAD` |
+| `Music` | `C:\Users\guest\Music` | `xdg-user-dir MUSIC` |
+| `Pictures` | `C:\Users\guest\Pictures` | `xdg-user-dir PICTURES` |
+| `Videos` | `C:\Users\guest\Videos` | `xdg-user-dir VIDEOS` |
+
+```sh
+build/pe-isolated-run --share "Documents=$(xdg-user-dir DOCUMENTS)" /ruta/al/programa.exe
+```
+
+El lanzador rechaza la carpeta personal completa y sus directorios
+ancestros. Cada carpeta elegida tiene un montaje independiente dentro
+del sandbox. El runtime elige el descriptor según el prefijo de la ruta
+Win32 y aplica las mismas comprobaciones `openat2` dentro de ese
+directorio. Las rutas descendientes conservan las restricciones actuales
+de caracteres ASCII y distinción de mayúsculas del sistema de archivos.
+`MoveFileExA` entre raíces distintas devuelve `ERROR_NOT_SAME_DEVICE`.
+Si la ruta Windows ya existía en el perfil, al lanzar con `--share` se
+usa la carpeta de Linux. En un lanzamiento sin esa opción se vuelve a
+ver el contenido del perfil persistente.
+
+`SHGetKnownFolderPath` admite esas seis carpetas, `Profile`,
+`RoamingAppData` y `LocalAppData`, para el usuario actual. Acepta flags
+`0` (verifica que exista el directorio) y `KF_FLAG_DONT_VERIFY`.
+Devuelve una ruta UTF-16 terminada en cero que se libera mediante
+`CoTaskMemFree`. Las rutas Win32 de los datos de aplicación siguen
+accediendo al perfil persistente. [Contrato de SHGetKnownFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath).
+
+`make check` comprueba la consulta de carpetas, lectura y escritura
+directas, renombrado y límites entre raíces. `make check-pe-isolated`
+genera un PE independiente que consulta `Documents`, lee un archivo
+preparado desde Linux y añade un byte en el original.
+
+En Linux 6.18.57 x86-64 con GCC 14.2, MinGW-w64 GCC 14 y SDL offscreen,
+pasaron `make -j2 all check check-pe check-pe-import check-pe-image
+check-desktop check-pe-external` y su repetición con UBSan. El entorno de
+pruebas impidió configurar `NETLINK_ROUTE` en Bubblewrap. Un arnés local
+con namespaces de usuario, montaje, PID, IPC y UTS y seccomp para bloquear
+sockets ejecutó el PE de carpetas y dos arranques de Mines con preferencias
+persistentes. El auditor registró 197 de 197 importaciones de Mines y 71 de
+324 de `Squadron121_DX12.exe` con un equivalente registrado. La auditoría
+de Squadron121 fue de solo lectura.
 
 ### Fuera de alcance y riesgos pendientes
 

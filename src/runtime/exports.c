@@ -5,6 +5,7 @@
 #include "desktop.h"
 #include "desktop_resources.h"
 #include "dialogs.h"
+#include "user_folders.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -358,6 +359,14 @@ static const struct runtime_export comdlg32_exports[] = {
     WIN_EXPORT(PrintDlgA)
 };
 
+static const struct runtime_export shell32_exports[] = {
+    WIN_EXPORT(SHGetKnownFolderPath)
+};
+
+static const struct runtime_export ole32_exports[] = {
+    EXPORT("CoTaskMemFree", crt_free)
+};
+
 static const struct runtime_export comctl32_exports[] = {
     {"InitCommonControls", (nt_guest_proc)nt_InitCommonControls, 17}
 };
@@ -482,7 +491,9 @@ static const struct {
     MODULE("api-ms-win-crt-stdio-l1-1-0.dll", stdio_exports),
     MODULE("api-ms-win-crt-string-l1-1-0.dll", string_exports),
     MODULE("api-ms-win-crt-utility-l1-1-0.dll", utility_exports),
-    MODULE("comctl32.dll", comctl32_exports)
+    MODULE("comctl32.dll", comctl32_exports),
+    MODULE("shell32.dll", shell32_exports),
+    MODULE("ole32.dll", ole32_exports)
 #undef MODULE
 };
 

@@ -3,8 +3,9 @@
 set -euo pipefail
 
 usage() {
-    printf 'Uso: bash install.sh COMMIT [ruta/a/mines.exe]\n'
+    printf 'Uso: bash install.sh COMMIT [ruta/a/programa.exe]\n'
     printf 'Descarga el repositorio, prueba e instala el runtime en tu usuario.\n'
+    printf 'Después puedes abrir cada EXE con pe-isolated-run. El argumento opcional lo abre al terminar.\n'
 }
 
 fail() {
@@ -22,10 +23,10 @@ if (( $# < 1 || $# > 2 )) || [[ ! ${1-} =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 revision=$1
-game=
+executable=
 if (( $# == 2 )); then
     [[ -f $2 && -r $2 ]] || fail "No puedo leer el ejecutable: $2"
-    game=$(realpath -e -- "$2")
+    executable=$(realpath -e -- "$2")
 fi
 (( EUID != 0 )) || fail 'Ejecuta el instalador con tu usuario habitual.'
 . /etc/os-release
@@ -114,6 +115,6 @@ printf 'Instalación lista (%s).\n' "$revision"
 printf 'Código fuente en %s\n' "$checkout"
 printf 'Lanzador en %s\n' "$bin/pe-isolated-run"
 
-if [[ -n $game ]]; then
-    exec "$version/bin/pe-isolated-run" "$game"
+if [[ -n $executable ]]; then
+    exec "$version/bin/pe-isolated-run" "$executable"
 fi

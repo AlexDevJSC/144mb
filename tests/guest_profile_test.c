@@ -34,6 +34,12 @@ int main(void)
     char state[512], other[512];
     CHECK(snprintf(state, sizeof(state), "%s/state", root) > 0);
     CHECK(snprintf(other, sizeof(other), "%s/other", root) > 0 && mkdir(other, 0700) == 0);
+    int shared = nt_open_shared_folder(other, root);
+    CHECK(shared >= 0 && (fcntl(shared, F_GETFD) & FD_CLOEXEC) != 0 && close(shared) == 0);
+    CHECK(nt_open_shared_folder(root, root) < 0 && errno == EACCES);
+    CHECK(nt_open_shared_folder(root, other) < 0 && errno == EACCES);
+    CHECK(nt_open_shared_folder("/", root) < 0 && errno == EACCES);
+    CHECK(nt_open_shared_folder("other", root) < 0 && errno == EINVAL);
     CHECK(nt_open_guest_profile("relative", NULL) < 0 && errno == EINVAL);
     int drive = nt_open_guest_profile(state, NULL);
     CHECK(drive >= 0);
@@ -77,6 +83,6 @@ int main(void)
     drive = nt_open_guest_profile("relative", root);
     CHECK(drive >= 0 && close(drive) == 0);
     CHECK(nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
-    puts("PASS persistent user profile, XDG fallback, concurrent opens and private directories");
+    puts("PASS persistent user profile, XDG fallback, concurrent opens and explicit shared directories");
     return 0;
 }

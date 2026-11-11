@@ -4,6 +4,7 @@ set -eu
 runner="${1:-build/pe-isolated-run}"
 fixture="${2:-build/win32-desktop.exe}"
 profile_fixture="${3:-build/profile-fixture.exe}"
+folder_fixture="${4:-build/folder-fixture.exe}"
 # A caller-supplied environment flag cannot activate the internal worker.
 status=0
 NT_NATIVE_SANDBOXED=1 "$runner" --worker /game/win32-desktop.exe || status=$?
@@ -34,3 +35,10 @@ for attempt in 1 2; do
   expected="${expected}P"
 done
 echo "PASS PE preferences persist across two isolated processes"
+native_folder="$profile_state/Native documents"
+mkdir -- "$native_folder"
+printf L > "$native_folder/shared.txt"
+XDG_STATE_HOME="$profile_state" SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
+  timeout 30s "$runner" --share "Documents=$native_folder" "$folder_fixture"
+test "$(cat "$native_folder/shared.txt")" = LW
+echo "PASS PE known folder resolves to the original Linux file"
