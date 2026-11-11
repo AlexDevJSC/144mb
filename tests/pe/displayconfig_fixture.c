@@ -9,6 +9,9 @@ _Static_assert(sizeof(DISPLAYCONFIG_MODE_INFO) == 64, "DISPLAYCONFIG_MODE_INFO A
 _Static_assert(sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME) == 84, "SOURCE_DEVICE_NAME ABI");
 _Static_assert(sizeof(DISPLAYCONFIG_TARGET_DEVICE_NAME) == 420, "TARGET_DEVICE_NAME ABI");
 
+static DISPLAYCONFIG_PATH_INFO path[64];
+static DISPLAYCONFIG_MODE_INFO mode[128];
+
 int import_fixture_entry(void)
 {
     UINT32 paths = 0, modes = 0;
@@ -19,8 +22,6 @@ int import_fixture_entry(void)
     if (GetDisplayConfigBufferSizes(0, &paths, &modes) != ERROR_INVALID_PARAMETER)
         return 13;
 
-    DISPLAYCONFIG_PATH_INFO path[64] = {0};
-    DISPLAYCONFIG_MODE_INFO mode[128] = {0};
     UINT32 short_paths = 0, short_modes = 0;
     if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &short_paths, path,
                            &short_modes, mode, NULL) != ERROR_INSUFFICIENT_BUFFER)
