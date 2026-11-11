@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: MIT */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "windesktop.h"
 #include "raw_input.h"
 #include "winbase.h"
