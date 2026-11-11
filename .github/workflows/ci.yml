@@ -35,6 +35,8 @@ jobs:
         run: make check-pe-external check-pe-native
       - name: Execute Win32 display topology fixture on Linux
         run: make check-pe-displayconfig
+      - name: Execute native Win32 console PE fixture on Linux
+        run: make check-pe-console
       - name: Run external PE with native Linux isolation if namespaces permit
         env:
           SDL_VIDEODRIVER: offscreen
@@ -47,7 +49,7 @@ jobs:
         run: >-
           make -j2 BUILD_DIR=build-ubsan
           CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all'
-          check check-pe check-pe-import check-pe-image check-desktop check-pe-native check-pe-displayconfig
+          check check-pe check-pe-import check-pe-image check-desktop check-pe-native check-pe-displayconfig check-pe-console
 
   fedora-rpm:
     runs-on: ubuntu-24.04
