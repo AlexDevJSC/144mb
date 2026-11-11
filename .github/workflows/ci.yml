@@ -27,6 +27,8 @@ jobs:
           x86_64-w64-mingw32-gcc --version
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 all check check-pe check-pe-import check-pe-image
+      - name: Diagnose native Vulkan without claiming D3D12 compatibility
+        run: build/nt-vulkan-probe
       - name: Paint and close a PE fixture under Wayland
         run: sh tests/pe/run_wayland.sh make -j2 check-desktop
       - name: Exercise window messages and clipboard offscreen
@@ -71,6 +73,7 @@ jobs:
           rpm -qpl "$rpm_topdir"/RPMS/x86_64/nt-native-linux-0.1.0-*.rpm > "$rpm_topdir/payload.txt"
           cat "$rpm_topdir/payload.txt"
           grep -Fx /usr/bin/nt-native-probe "$rpm_topdir/payload.txt"
+          grep -Fx /usr/bin/nt-vulkan-probe "$rpm_topdir/payload.txt"
       - name: Install and reinstall the runtime as a Fedora user
         env:
           INSTALL_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}

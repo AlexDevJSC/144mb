@@ -37,6 +37,12 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
   mediante sus rutas de usuario de Windows. El runtime implementa el
   subconjunto de `SHGetKnownFolderPath` que corresponde a esas carpetas.
 
+La primera etapa de diagnóstico D3D12 incorpora el comando nativo
+`nt-vulkan-probe`, que comprueba la disponibilidad del cargador Vulkan y
+los dispositivos físicos **sin** simular un `ID3D12Device`.
+La creación de dispositivos D3D12 para Squadron121 sigue pendiente.
+[Contrato y límites](docs/vulkan-d3d12.md).
+
 ## Compilar y probar
 
 Para instalar desde GitHub en Fedora x86-64, usa el
@@ -49,6 +55,7 @@ make
 make check
 make check-pe
 make check-pe-image
+build/nt-vulkan-probe
 make benchmark
 # Con MinGW-w64: make check-pe-external (PE de escritorio generado)
 
