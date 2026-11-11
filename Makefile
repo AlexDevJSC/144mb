@@ -94,6 +94,10 @@ $(BUILD_DIR)/vulkan-probe-test: tests/vulkan_probe_test.c src/runtime/vulkan_pro
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    tests/vulkan_probe_test.c src/runtime/vulkan_probe.c -ldl $(LDLIBS) -o "$@"
 
+$(BUILD_DIR)/vk-mock/libvulkan.so.1: tests/vulkan_mock_loader.c | $(BUILD_DIR)
+	mkdir -p "$(dir $@)"
+	$(CC) $(CPPFLAGS) $(WARN_CFLAGS) $(CFLAGS) -fPIC -shared "$<" $(LDFLAGS) -o "$@"
+
 $(BUILD_DIR)/nt-native-probe: src/tools/counter_probe.c $(BUILD_DIR)/counter.o | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o "$@"
 
@@ -145,7 +149,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test \
-       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test $(BUILD_DIR)/vulkan-probe-test
+       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1
 	$(BUILD_DIR)/counter-test
 	$(BUILD_DIR)/nt-native-probe
 	$(BUILD_DIR)/runtime-test
@@ -156,6 +160,11 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	$(BUILD_DIR)/guest-profile-test
 	$(BUILD_DIR)/native-audio-test
 	$(BUILD_DIR)/vulkan-probe-test
+
+	NT_VULKAN_MOCK_CASE=ready NT_VULKAN_EXPECT_STATE=6 LD_LIBRARY_PATH="$(abspath $(BUILD_DIR)/vk-mock)" $(BUILD_DIR)/vulkan-probe-test
+	NT_VULKAN_MOCK_CASE=old NT_VULKAN_EXPECT_STATE=5 LD_LIBRARY_PATH="$(abspath $(BUILD_DIR)/vk-mock)" $(BUILD_DIR)/vulkan-probe-test
+	NT_VULKAN_MOCK_CASE=noswap NT_VULKAN_EXPECT_STATE=4 LD_LIBRARY_PATH="$(abspath $(BUILD_DIR)/vk-mock)" $(BUILD_DIR)/vulkan-probe-test
+	NT_VULKAN_MOCK_CASE=empty NT_VULKAN_EXPECT_STATE=3 LD_LIBRARY_PATH="$(abspath $(BUILD_DIR)/vk-mock)" $(BUILD_DIR)/vulkan-probe-test
 
 # These explicit flags keep the fixture freestanding, position independent
 # within .text, and free of host sanitizer and library dependencies.
