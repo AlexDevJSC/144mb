@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "image.h"
+#include "dll_graph.h"
 #include "ntnative/guest_thread.h"
 #include "ntnative/runtime.h"
 #include "compat.h"
@@ -32,23 +33,19 @@
 extern char **environ;
 
 static struct pe_image active;
+static struct pe_dll_graph *active_dll_graph;
 static const char *active_dos_path, *active_command, *active_directory;
 
 static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *context)
 {
-    (void)context;
-    nt_guest_proc proc = name != NULL ? nt_runtime_resolve(module, name) :
-                          nt_runtime_resolve_ordinal(module, ordinal);
-    uintptr_t target = 0;
-    _Static_assert(sizeof(target) == sizeof(proc), "AMD64 pointer ABI");
-    memcpy(&target, &proc, sizeof(target));
-    if (proc == NULL) {
+    const uintptr_t address = pe_dll_graph_resolve(module, name, ordinal, context);
+    if (address == 0) {
         if (name != NULL)
             fprintf(stderr, "Unsupported guest import %s!%s\n", module, name);
         else
             fprintf(stderr, "Unsupported guest import %s!#%u\n", module, ordinal);
     }
-    return target;
+    return address;
 }
 
 static int NT_MS_ABI guest_entry(void)
@@ -104,12 +101,19 @@ static int NT_MS_ABI guest_entry(void)
         nt_runtime_close_desktop();
         return 125;
     }
+    if (!pe_dll_graph_attach_all(active_dll_graph)) {
+        fputs("Cannot initialize imported DLLs\n", stderr);
+        (void)nt_guest_thread_leave(&guest_thread);
+        nt_runtime_close_desktop();
+        return 128;
+    }
     nt_runtime_notify_tls(1); /* DLL_PROCESS_ATTACH */
     const void *address = active.base + active.entry_rva;
     int (NT_MS_ABI *entry)(void);
     memcpy(&entry, &address, sizeof(entry));
     const int status = entry();
     nt_runtime_notify_tls(0); /* DLL_PROCESS_DETACH */
+    pe_dll_graph_detach_all(active_dll_graph);
     nt_runtime_run_fls_cleanup();
     if (!nt_guest_thread_leave(&guest_thread)) {
         nt_runtime_close_desktop();
@@ -177,12 +181,23 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
         free(bytes);
         return 2;
     }
+    /* This call is made only after worker_ready confirmed the Linux
+     * sandbox; DLLs cannot be read outside the provisioned /game root. */
+    active_dll_graph = pe_dll_graph_create("/game");
+    if (active_dll_graph == NULL) {
+        free(bytes);
+        return 126;
+    }
+    pe_dll_graph_install(active_dll_graph);
     char error[160];
-    const bool loaded = pe_image_load(bytes, size, resolve, NULL,
+    const bool loaded = pe_image_load(bytes, size, resolve, active_dll_graph,
                                       &active, error, sizeof(error));
     free(bytes);
     if (!loaded) {
         fprintf(stderr, "PE loader: %s\n", error);
+        pe_dll_graph_uninstall();
+        pe_dll_graph_destroy(active_dll_graph);
+        active_dll_graph = NULL;
         return 3;
     }
     active_dos_path = dos_path;
@@ -191,6 +206,9 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
     uint32_t code = 0;
     const bool ran = nt_runtime_run_fixture(guest_entry, &code);
     pe_image_unload(&active);
+    pe_dll_graph_uninstall();
+    pe_dll_graph_destroy(active_dll_graph);
+    active_dll_graph = NULL;
     if (!ran) {
         fputs("Guest terminated abnormally or worker failed\n", stderr);
         return 5;
