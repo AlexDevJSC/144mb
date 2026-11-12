@@ -6,6 +6,7 @@
 #include "../runtime/winbase.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -109,12 +110,62 @@ static void track_dependency(struct pe_dll_graph *graph, struct graph_module *de
         parent->dependencies[parent->dependency_count++] = dependency;
 }
 
+/* Linux filenames are case-sensitive while Windows DLL module names
+ * (under this intentionally ASCII-only contract) are not. Enumerate the
+ * already-opened directory only on ENOENT, require a unique matching name,
+ * and still open the result via O_NOFOLLOW beneath the same directory fd.
+ * Never follow symlinks, escape to a host directory, or guess between two
+ * differently-cased files with the same Windows module name. */
+static int open_dll_case_insensitive(int directory_fd, const char *name)
+{
+    int fd = openat(directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd >= 0 || errno != ENOENT)
+        return fd;
+
+    int listing_fd = openat(directory_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (listing_fd < 0)
+        return -1;
+    DIR *listing = fdopendir(listing_fd);
+    if (listing == NULL) {
+        const int error = errno;
+        close(listing_fd);
+        errno = error;
+        return -1;
+    }
+    char candidate[MAX_DLL_NAME] = {0};
+    bool ambiguous = false;
+    struct dirent *item;
+    while ((item = readdir(listing)) != NULL) {
+        const size_t length = strnlen(item->d_name, MAX_DLL_NAME);
+        if (length == 0 || length >= MAX_DLL_NAME || strcasecmp(item->d_name, name) != 0)
+            continue;
+        char validated[MAX_DLL_NAME];
+        if (!valid_module_name(item->d_name, validated))
+            continue;
+        if (candidate[0] != 0) {
+            ambiguous = true;
+            break;
+        }
+        memcpy(candidate, item->d_name, length + 1);
+    }
+    closedir(listing);
+    if (ambiguous) {
+        errno = EEXIST;
+        return -1;
+    }
+    if (candidate[0] == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+    return openat(directory_fd, candidate, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+}
+
 /* Only a single pre-opened root can supply guest libraries; Windows guest
  * names can never escape into arbitrary host folders or follow symlinks. */
 static bool read_dll(struct pe_dll_graph *graph, const char *name,
                      unsigned char **bytes, size_t *size)
 {
-    const int fd = openat(graph->directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = open_dll_case_insensitive(graph->directory_fd, name);
     if (fd < 0)
         return false;
     struct stat info;
