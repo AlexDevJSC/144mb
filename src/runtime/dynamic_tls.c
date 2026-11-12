@@ -4,25 +4,53 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
-/* The initial implementation deliberately supports only the first 64
- * in-TEB Win64 TLS slots. ExpansionSlots at TEB+0x1780 and FLS have
- * separate semantics and are not silently emulated by these slots. */
+/* The 64 inline Win64 TEB slots and the optional 1024 expansion slots are
+ * process-allocated indices holding thread-private values. FLS and static
+ * PE TLS are different mechanisms and keep their existing implementations. */
 static pthread_mutex_t tls_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool allocated[NT_GUEST_DYNAMIC_TLS_SLOTS];
 static uint64_t generations[NT_GUEST_DYNAMIC_TLS_SLOTS];
 
-_Static_assert(NT_TEB_TLS_SLOTS + NT_GUEST_DYNAMIC_TLS_SLOTS * sizeof(uintptr_t) <=
-               NT_GUEST_TEB_BYTES, "Win64 TEB TLS slot range must be mapped");
+_Static_assert(NT_TEB_TLS_SLOTS + NT_GUEST_DYNAMIC_TLS_INLINE * sizeof(uintptr_t) <=
+               NT_GUEST_TEB_BYTES, "Win64 TEB inline TLS slot range must be mapped");
+_Static_assert(NT_TEB_TLS_EXPANSION + sizeof(uintptr_t) <= NT_GUEST_TEB_BYTES,
+               "Win64 TEB expansion pointer must be mapped");
 
-static void slot_access(struct nt_guest_thread *thread, uint32_t index, void *value, bool write)
+/* The optional expansion array is allocated per guest thread only when the
+ * application first stores a non-NULL value in a slot beyond index 63. */
+static bool slot_access(struct nt_guest_thread *thread, uint32_t index,
+                        uintptr_t *value, bool write)
 {
-    unsigned char *slot = thread->teb + NT_TEB_TLS_SLOTS + (size_t)index * sizeof(uintptr_t);
+    if (index < NT_GUEST_DYNAMIC_TLS_INLINE) {
+        unsigned char *slot = thread->teb + NT_TEB_TLS_SLOTS + (size_t)index * sizeof(*value);
+        if (write)
+            memcpy(slot, value, sizeof(*value));
+        else
+            memcpy(value, slot, sizeof(*value));
+        return true;
+    }
+    if (thread->tls_expansion == NULL) {
+        if (!write || *value == 0) {
+            if (!write)
+                *value = 0;
+            return true;
+        }
+        uintptr_t *slots = calloc(NT_GUEST_DYNAMIC_TLS_EXPANDED, sizeof(*slots));
+        if (slots == NULL)
+            return false;
+        thread->tls_expansion = slots;
+        const uintptr_t pointer = (uintptr_t)slots;
+        memcpy(thread->teb + NT_TEB_TLS_EXPANSION, &pointer, sizeof(pointer));
+    }
+    uintptr_t *slot = thread->tls_expansion + index - NT_GUEST_DYNAMIC_TLS_INLINE;
     if (write)
-        memcpy(slot, value, sizeof(uintptr_t));
+        memcpy(slot, value, sizeof(*value));
     else
-        memcpy(value, slot, sizeof(uintptr_t));
+        memcpy(value, slot, sizeof(*value));
+    return true;
 }
 
 static bool valid_locked(uint32_t index)
@@ -78,11 +106,11 @@ void *NT_MS_ABI nt_TlsGetValue(uint32_t index)
     }
     if (thread->dynamic_tls_epochs[index] != generations[index]) {
         uintptr_t zero = 0;
-        slot_access(thread, index, &zero, true);
+        (void)slot_access(thread, index, &zero, true);
         thread->dynamic_tls_epochs[index] = generations[index];
     }
     uintptr_t raw = 0;
-    slot_access(thread, index, &raw, false);
+    (void)slot_access(thread, index, &raw, false);
     pthread_mutex_unlock(&tls_lock);
     /* Win32 distinguishes an empty slot from a failed TlsGetValue by
      * clearing LastError even when the result is NULL. */
@@ -100,8 +128,11 @@ int32_t NT_MS_ABI nt_TlsSetValue(uint32_t index, void *value)
         return 0;
     }
     uintptr_t raw = (uintptr_t)value;
-    slot_access(thread, index, &raw, true);
-    thread->dynamic_tls_epochs[index] = generations[index];
+    const bool ok = slot_access(thread, index, &raw, true);
+    if (ok)
+        thread->dynamic_tls_epochs[index] = generations[index];
     pthread_mutex_unlock(&tls_lock);
-    return 1;
+    if (!ok)
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+    return ok;
 }
