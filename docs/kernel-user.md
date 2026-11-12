@@ -32,7 +32,19 @@ flowchart TD
   escribibles. Las funciones `Nt*` devuelven `NTSTATUS` y mantienen
   `LastErrorValue`. Los adaptadores Win32 traducen sus propios errores.
 - Los eventos son anónimos y pertenecen al proceso. Se aplican los derechos
-  de espera y modificación del handle. Se pueden esperar hasta 64 objetos
+  de espera y modificación del handle. `NtDuplicateObject` y `DuplicateHandle`
+  crean handles distintos para el mismo estado de evento, hilo o proceso;
+  cerrar el original no invalida el duplicado. Se admiten derechos reducidos
+  para eventos y se comprueba que no superen los del handle original.
+  `GetHandleInformation` expone el indicador de herencia del duplicado.
+  Los handles de archivo se duplican mediante `fcntl(F_DUPFD_CLOEXEC)` y
+  comparten posición de lectura/escritura. Para archivos únicamente se admite
+  `DUPLICATE_SAME_ACCESS`, sin ampliación ni reducción arbitraria de derechos.
+  `DUPLICATE_CLOSE_SOURCE` cierra el origen tras duplicar con éxito.
+  La duplicación se limita a handles dentro del proceso invitado actual:
+  NO hay broker de objetos entre procesos, y el indicador de herencia no
+  implementa todavía herencia real hacia procesos hijos.
+  Se pueden esperar hasta 64 objetos
   de la misma tabla, incluidos eventos, hilos y procesos hijos. La espera
   múltiple solo consume autoeventos si se satisface el conjunto solicitado.
   El cierre concurrente despierta al hilo y devuelve handle inválido.
@@ -52,6 +64,12 @@ flowchart TD
 PE MinGW-w64 de control sobre Linux. El primero combina importaciones
 NTDLL, KERNEL32, KERNELBASE y un API set de sincronización. Comprueba
 relojes, espera múltiple, derechos, hilos y escrituras directas al TEB.
+El primer PE también duplica eventos y hilos con handles independientes,
+comprueba límites de permisos y cierre del original, y duplica un descriptor de
+archivo para verificar que puede seguir usándose después del cierre del
+original. No se prueban aquí objetos con nombre ni handles compartidos
+entre procesos, que siguen fuera del alcance.
+
 El segundo combina USER32, win32u y un API set de escritorio, y prueba
 también el cargador dinámico y los errores de módulo o símbolo ausente.
 Se ejecutaron en Linux 6.18.57 AMD64 con GCC 14.2 y MinGW-w64 GCC 14,
