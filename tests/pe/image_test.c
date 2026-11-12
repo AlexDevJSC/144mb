@@ -235,6 +235,29 @@ int main(void)
     w64(bytes + 0x98 + 24, UINT64_C(0x1000)); /* force an ASLR relocation */
     rejected(bytes, "malformed base-relocation block");
 
+    /* Delay imports are patched lazily by the guest CRT. The image loader
+     * must neither resolve optional DLLs eagerly nor discard the delay IAT. */
+    make_pe(bytes);
+    w32(bytes + 0x98 + 112 + 13 * 8, 0x2100);
+    w32(bytes + 0x98 + 112 + 13 * 8 + 4, 64);
+    w32(bytes + 0x400 + 0x100, 1);   /* dlattrRva */
+    w32(bytes + 0x400 + 0x104, 0x2150); /* szName */
+    w32(bytes + 0x400 + 0x108, 0x2160); /* phmod */
+    w32(bytes + 0x400 + 0x10c, 0x2170); /* pIAT */
+    w32(bytes + 0x400 + 0x110, 0x2180); /* pINT */
+    memcpy(bytes + 0x400 + 0x150, "optional.dll", 13);
+    w64(bytes + 0x400 + 0x170, UINT64_C(0x1100));
+    assert(pe_image_load(bytes, sizeof(bytes), resolver, NULL,
+                         &image, reason, sizeof(reason)));
+    assert(read_u32(image.base + 0x2100) == 1);
+    assert(read_u64(image.base + 0x2170) == UINT64_C(0x1100));
+    pe_image_unload(&image);
+    make_pe(bytes);
+    w32(bytes + 0x98 + 112 + 13 * 8, 0x3ff0);
+    w32(bytes + 0x98 + 112 + 13 * 8 + 4, 64);
+    rejected(bytes, "delay-import directory beyond the image");
+    puts("PASS CRT-owned delay imports are preserved for first-use resolution");
+
     /* The EXE entry point and the DLL loader must not be interchangeable. */
     make_export_dll(bytes);
     rejected(bytes, "DLL passed to the EXE-only loader");
