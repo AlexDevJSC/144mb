@@ -327,9 +327,6 @@ int main(void)
     assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
                                  &image, reason, sizeof(reason)));
     assert(pe_image_resolve_export(&image, NULL, 5, forward_resolver, NULL, &forwarded));
-    nt_guest_proc expected_function = (nt_guest_proc)answer;
-    uintptr_t expected_address = 0;
-    memcpy(&expected_address, &expected_function, sizeof(expected_address));
     assert(forwarded == expected_address);
     pe_image_unload(&image);
 
