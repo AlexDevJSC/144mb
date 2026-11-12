@@ -302,6 +302,25 @@ int main(void)
     pe_image_unload(&image);
     puts("PASS mapped DLL exports by name and base-relative ordinal");
 
+    /* Calling DllMain is a deliberate operation: DLL mapping must not
+     * execute code on its own. A synthetic AMD64 DLL can opt into it
+     * after its imports and guest thread context have been arranged. */
+    make_export_dll(bytes);
+    w32(bytes + 0x98 + 16, 0x1000); /* OptionalHeader.AddressOfEntryPoint */
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(pe_image_run_library_entry(&image, 1));
+    assert(pe_image_run_library_entry(&image, 0));
+    assert(!pe_image_run_library_entry(&image, 2));
+    pe_image_unload(&image);
+    make_export_dll(bytes);
+    w32(bytes + 0x98 + 16, 0x2100); /* Export data is not executable. */
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(!pe_image_run_library_entry(&image, 1));
+    pe_image_unload(&image);
+    puts("PASS explicit DLL_PROCESS_ATTACH/DETACH and guarded entry RVA");
+
     make_export_dll(bytes);
     w32(bytes + 0x400 + 0x130, 0x2180);
     memcpy(bytes + 0x400 + 0x180, "KERNEL32.Sleep", 15);
