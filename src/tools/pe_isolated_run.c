@@ -74,6 +74,7 @@ static int NT_MS_ABI guest_entry(void)
     if (!nt_runtime_set_guest_image((uintptr_t)active.base, active_dos_path, active_command))
         return 120;
     nt_runtime_set_guest_image_extent(active.size);
+    nt_runtime_set_guest_image_entrypoint(active.entry_rva);
     const struct nt_guest_tls initial = {active.base + active.tls.data_rva, active.tls.bytes, active.tls.zero_fill};
     nt_runtime_set_guest_tls(&initial, active.base + active.tls.callbacks_rva, active.tls.callback_count);
     if (!nt_runtime_set_standard_streams(STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO))
