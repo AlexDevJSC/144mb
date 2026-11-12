@@ -42,6 +42,9 @@ nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
                                          uint32_t attributes, uint32_t options,
                                          uintptr_t *target);
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void);
+uint32_t NT_MS_ABI nt_QueueUserAPC(void (NT_MS_ABI *callback)(uintptr_t),
+                                   uintptr_t handle, uintptr_t data);
+uint32_t NT_MS_ABI nt_SleepEx(uint32_t milliseconds, int32_t alertable);
 uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t thread_id);
 nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
