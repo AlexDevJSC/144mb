@@ -20,7 +20,7 @@ IMAGE_LIBS ?= $(shell $(PKG_CONFIG) --libs SDL2_image 2>/dev/null)
 VKD3D_PACKAGES = 'libvkd3d >= 1.2' 'libvkd3d-utils >= 1.2' vulkan
 VKD3D_CFLAGS ?= $(patsubst -I%,-isystem %,$(shell $(PKG_CONFIG) --cflags $(VKD3D_PACKAGES) 2>/dev/null))
 VKD3D_LIBS ?= $(shell $(PKG_CONFIG) --libs $(VKD3D_PACKAGES) 2>/dev/null)
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions \
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
@@ -109,6 +109,7 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o: src/runtime/w
 $(BUILD_DIR)/runtime-process.o: src/runtime/winfile.h include/ntnative/guest_thread.h
 $(BUILD_DIR)/runtime-virtual_memory.o: src/runtime/virtual_memory.h
 $(BUILD_DIR)/runtime-nt_core_information.o: src/runtime/nt_core_information.h src/runtime/virtual_memory.h include/ntnative/guest_thread.h
+$(BUILD_DIR)/runtime-exception_callbacks.o $(BUILD_DIR)/runtime-exceptions.o $(BUILD_DIR)/runtime-exports.o: src/runtime/exception_callbacks.h
 $(BUILD_DIR)/runtime-process.o $(BUILD_DIR)/runtime-exports.o: src/runtime/virtual_memory.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-fluid.o: src/runtime/fluid_api.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-crypto.o: src/runtime/crypto.h
