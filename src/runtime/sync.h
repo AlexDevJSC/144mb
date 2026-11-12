@@ -40,6 +40,7 @@ nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void);
 uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_thread_start start,
                                    void *parameter, uint32_t flags, uint32_t *thread_id);
+uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);
 void NT_MS_ABI nt_ExitThread(uint32_t code);
 void NT_MS_ABI nt_FreeLibraryAndExitThread(uintptr_t module, uint32_t code);
 int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t thread, uint32_t *code);
