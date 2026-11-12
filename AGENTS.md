@@ -24,7 +24,8 @@ de modificar código. Usa una rama corta por tarea.
 ## Verificación y entrega
 
 - Ejecuta todas las pruebas en Linux x86-64, incluidos los PE de laboratorio.
-  Usa `make -j2 check check-pe` con GCC y binutils.
+  Usa `make -j2 check check-pe` con GCC y binutils. Con MinGW-w64
+  disponible, ejecuta también `make check-pe-import`.
   Si no está disponible la herramienta PE, ejecuta `make check` y
   registra la limitación.
 - Para cambios de parser o ABI, repite las pruebas con UBSan y agrega un

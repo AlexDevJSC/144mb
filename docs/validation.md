@@ -41,13 +41,74 @@ el límite de 64 bits, desbordamiento y fallo del anfitrión. Los casos PE
 usan el reloj real a través del puente Microsoft x64. Se comprueban
 resultados y efectos sobre salidas cuando los define este prototipo.
 
+## Importación PE por nombre
+
+Con GCC, binutils y MinGW-w64 AMD64 disponibles en Linux x86-64:
+
+```sh
+make -j2 check check-pe check-pe-import
+make -j2 BUILD_DIR=build-ubsan \
+  CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' check check-pe check-pe-import
+```
+
+`objdump -p build/nt-counter-import.exe` muestra la importación de
+`NtQueryPerformanceCounter` desde `ntdll.dll`. El PE comprueba frecuencia
+positiva y estable, contador no decreciente y frecuencia opcional.
+El resultado se comunica mediante el código de salida. El anfitrión
+también verifica el rechazo de tablas truncadas, RVA fuera de rango,
+ordinales en los perfiles del contador, nombres inválidos e importaciones
+retardadas. El perfil de escritorio admite `COMCTL32.dll #17` y rechaza
+un ordinal distinto, bits reservados activos y una IAT inconsistente.
+Las variantes inválidas solo llegan al parser.
+
+GitHub Actions compila los PE de control con MinGW-w64 y los ejecuta
+con nuestro cargador en Ubuntu. El trabajo de Fedora comprueba el RPM
+y repite las pruebas del runtime.
+
+## Cobertura de Mines
+
+Las pruebas de los 30 equivalentes iniciales y las 74 incorporaciones
+se ejecutan con `make check` en Linux. Las comprobaciones verifican
+el registro y llaman a las funciones mediante el ABI Microsoft x64.
+
+La auditoría de solo lectura encontró equivalentes para las 197 importaciones
+directas del archivo de referencia. `make check-desktop` prueba los perfiles
+de diálogo, recursos, captura y selección de archivos con SDL en Linux.
+Las pruebas y sus límites están en [Compatibilidad de Mines](mines-compatibility.md).
+
+## Reutilización entre ejecutables
+
+Auditoría de los archivos aportados por el usuario, revisada el 11 de
+noviembre de 2026 en Linux x86-64. La tabla registra arquitectura,
+importaciones directas y pruebas realizadas. Un equivalente registrado
+requiere además comprobar su comportamiento para la aplicación concreta.
+
+| Ejecutable | Arquitectura | Importaciones con equivalente | Resultado comprobado |
+| --- | --- | --- | --- |
+| `mines.exe` | AMD64 | 197 de 197 | Victoria y derrota en Linux, confirmadas también por el usuario en Fedora. Guardado y recuperación de preferencias comprobados fuera de pantalla. |
+| PE de prueba del perfil | AMD64 | 5 de 5 | Dos procesos independientes conservan datos usando las funciones de entorno y archivos del runtime. |
+| `Squadron121_DX12.exe` | AMD64 | 69 de 324 | Auditoría de solo lectura con 255 importaciones pendientes, incluidas funciones de sistema, ventanas, bibliotecas externas y gráficos. |
+| Instalador AssaultCube 1.3.0.2 | x86, PE32 | Auditor AMD64 fuera de alcance | Se inspeccionó la arquitectura del instalador. El contenido instalado requiere una comprobación separada. |
+| `Maniaplanet_Setup.exe` | x86, PE32 | Auditor AMD64 fuera de alcance | Se inspeccionó la arquitectura del instalador. |
+
+En Squadron121 quedan 121 entradas de `KERNEL32`, 47 de `USER32`, 22 de
+`libfluidsynth-3`, 18 de `sl.interposer` y 15 de `WS2_32`, además de
+otras bibliotecas. La auditoría usa el registro compartido de equivalentes
+y cuantifica la reutilización existente. Las pruebas funcionales y la
+integración de dependencias siguen teniendo sus propios criterios de cierre.
+El archivo auditado tiene SHA-256
+`cfc4bbeb6948490f72ca63b031c9339c7eb68a9ef40f0b54b78da58cd8355d01`.
+
+Se reproduce con `build/pe-import-audit --unresolved /ruta/Squadron121_DX12.exe`.
+El auditor devuelve estado 1 al encontrar importaciones pendientes.
+
 ## Cobertura pendiente
 
-- RPM e instalación en VM Fedora KDE. El entorno local carece de `rpmbuild`.
+- Instalación y desinstalación del RPM en VM Fedora KDE.
 - Suspensión y reanudación en máquina real. La elección de reloj deriva
   de su contrato documentado.
-- `ntsync` y gráficos. El entorno local carece de `/dev/ntsync` y no se
-  realizaron pruebas de compositor ni GPU.
+- `ntsync`, compositor y GPU. El entorno local carece de `/dev/ntsync`.
+  Las pruebas gráficas de esta etapa usan superficies en memoria.
 - Compatibilidad con aplicaciones externas y errores con punteros
   invitados no nulos. El anfitrión de prueba tiene un alcance acotado.
 
