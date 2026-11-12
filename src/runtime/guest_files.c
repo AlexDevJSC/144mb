@@ -1375,6 +1375,8 @@ static nt_status nt_file_error(uint32_t error)
     case NT_ERROR_FILE_EXISTS: return (nt_status)UINT32_C(0xc0000035);
     case NT_ERROR_SHARING_VIOLATION: return (nt_status)UINT32_C(0xc0000043);
     case NT_ERROR_INVALID_NAME: return (nt_status)UINT32_C(0xc0000033);
+    case NT_ERROR_INVALID_HANDLE: return NT_STATUS_INVALID_HANDLE;
+    case NT_ERROR_BROKEN_PIPE: return (nt_status)UINT32_C(0xc000014b);
     case NT_ERROR_INVALID_PARAMETER: return NT_STATUS_INVALID_PARAMETER;
     case NT_ERROR_NOT_ENOUGH_MEMORY: return NT_STATUS_NO_MEMORY;
     case NT_ERROR_ACCESS_DENIED: return NT_STATUS_ACCESS_DENIED;
@@ -1608,6 +1610,197 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
     if (written >= 0)
         *done = (uint32_t)written;
     return file_result(fd, written >= 0);
+}
+
+/* Native NTDLL file operations use the same guest HANDLE table and the
+ * same underlying Linux open-file description as Win32 ReadFile/WriteFile.
+ * A plain offset uses read/write and therefore updates the shared pointer;
+ * an explicit non-negative offset uses pread/pwrite. The Windows async
+ * event/APC contract is not implemented and must fail explicitly. */
+enum { FILE_STANDARD_INFORMATION_CLASS = 5, FILE_POSITION_INFORMATION_CLASS = 14,
+       FILE_END_OF_FILE_INFORMATION_CLASS = 20 };
+
+struct nt_file_standard_information {
+    int64_t allocation_size, end_of_file;
+    uint32_t number_of_links;
+    uint8_t delete_pending, directory;
+    uint8_t padding[2];
+};
+
+struct nt_file_position_information {
+    int64_t current_byte_offset;
+};
+
+_Static_assert(sizeof(struct nt_file_standard_information) == 24,
+               "FILE_STANDARD_INFORMATION x64 layout");
+_Static_assert(sizeof(struct nt_file_position_information) == 8,
+               "FILE_POSITION_INFORMATION x64 layout");
+
+static nt_status nt_file_complete(struct nt_io_status_block *io, nt_status status, uintptr_t information)
+{
+    if (io != NULL)
+        *io = (struct nt_io_status_block){status, information};
+    return status;
+}
+
+static nt_status nt_file_errno_status(int error)
+{
+    if (error == ESPIPE)
+        return NT_STATUS_NOT_SUPPORTED; /* No seeking on pipes or consoles. */
+    return nt_file_error(path_error(error, false));
+}
+
+static nt_status nt_guest_io(uintptr_t handle, uintptr_t event, void *apc, void *apc_context,
+                             struct nt_io_status_block *io, void *buffer, uint32_t length,
+                             const int64_t *offset, const uint32_t *key, bool write_operation)
+{
+    if (io == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (event != 0 || apc != NULL || apc_context != NULL || key != NULL)
+        return nt_file_complete(io, NT_STATUS_NOT_SUPPORTED, 0);
+    if (length != 0 && buffer == NULL)
+        return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
+    /* The Win32 length is ULONG (32 bits); Linux AMD64 ssize_t is 64 bits,
+     * so every possible length is representable by read/pread/write/pwrite. */
+    if (offset != NULL && *offset < 0)
+        return nt_file_complete(io, NT_STATUS_INVALID_PARAMETER, 0);
+
+    const int fd = duplicate_handle(handle, write_operation ? FILE_WRITE : FILE_READ);
+    if (fd < 0)
+        return nt_file_complete(io, nt_file_errno_status(errno), 0);
+
+    ssize_t transferred;
+    do {
+        if (offset != NULL) {
+            transferred = write_operation ?
+                pwrite(fd, buffer, length, (off_t)*offset) :
+                pread(fd, buffer, length, (off_t)*offset);
+        } else {
+            transferred = write_operation ?
+                write(fd, buffer, length) :
+                read(fd, buffer, length);
+        }
+    } while (transferred < 0 && errno == EINTR);
+
+    const int error = errno;
+    (void)close(fd);
+    if (transferred < 0)
+        return nt_file_complete(io, nt_file_errno_status(error), 0);
+    if (!write_operation && transferred == 0 && length > 0)
+        return nt_file_complete(io, NT_STATUS_END_OF_FILE, 0);
+    return nt_file_complete(io, NT_STATUS_SUCCESS, (uintptr_t)transferred);
+}
+
+nt_status NT_MS_ABI nt_NtReadFile(uintptr_t handle, uintptr_t event, void *apc,
+    void *apc_context, struct nt_io_status_block *io, void *buffer, uint32_t length,
+    const int64_t *offset, const uint32_t *key)
+{
+    return nt_guest_io(handle, event, apc, apc_context, io, buffer, length, offset, key, false);
+}
+
+nt_status NT_MS_ABI nt_NtWriteFile(uintptr_t handle, uintptr_t event, void *apc,
+    void *apc_context, struct nt_io_status_block *io, const void *buffer, uint32_t length,
+    const int64_t *offset, const uint32_t *key)
+{
+    /* The shared POSIX implementation never writes to the caller's buffer. */
+    return nt_guest_io(handle, event, apc, apc_context, io, (void *)buffer,
+                       length, offset, key, true);
+}
+
+nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_status_block *io,
+                                                void *buffer, uint32_t length, uint32_t information_class)
+{
+    if (io == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (information_class != FILE_STANDARD_INFORMATION_CLASS &&
+        information_class != FILE_POSITION_INFORMATION_CLASS)
+        return nt_file_complete(io, NT_STATUS_INVALID_INFO_CLASS, 0);
+    const uint32_t needed = information_class == FILE_STANDARD_INFORMATION_CLASS ?
+                            sizeof(struct nt_file_standard_information) :
+                            sizeof(struct nt_file_position_information);
+    if (buffer == NULL)
+        return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
+    if (length < needed)
+        return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
+
+    const int fd = duplicate_handle(handle, 0);
+    if (fd < 0)
+        return nt_file_complete(io, nt_file_errno_status(errno), 0);
+
+    int error = 0;
+    if (information_class == FILE_STANDARD_INFORMATION_CLASS) {
+        struct stat file;
+        if (fstat(fd, &file) != 0) {
+            error = errno;
+        } else {
+            const struct nt_file_standard_information info = {
+                .allocation_size = (int64_t)file.st_blocks * 512,
+                .end_of_file = file.st_size,
+                .number_of_links = file.st_nlink > UINT32_MAX ? UINT32_MAX : (uint32_t)file.st_nlink,
+                .delete_pending = 0,
+                .directory = S_ISDIR(file.st_mode) != 0
+            };
+            memcpy(buffer, &info, sizeof(info));
+        }
+    } else {
+        const off_t position = lseek(fd, 0, SEEK_CUR);
+        if (position < 0) {
+            error = errno;
+        } else {
+            const struct nt_file_position_information info = {(int64_t)position};
+            memcpy(buffer, &info, sizeof(info));
+        }
+    }
+    (void)close(fd);
+    if (error != 0)
+        return nt_file_complete(io, nt_file_errno_status(error), 0);
+    return nt_file_complete(io, NT_STATUS_SUCCESS, needed);
+}
+
+nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_status_block *io,
+                                              const void *buffer, uint32_t length,
+                                              uint32_t information_class)
+{
+    if (io == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (information_class != FILE_POSITION_INFORMATION_CLASS &&
+        information_class != FILE_END_OF_FILE_INFORMATION_CLASS)
+        return nt_file_complete(io, NT_STATUS_INVALID_INFO_CLASS, 0);
+    if (buffer == NULL)
+        return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
+    if (length < sizeof(struct nt_file_position_information))
+        return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
+
+    struct nt_file_position_information info;
+    memcpy(&info, buffer, sizeof(info));
+    if (info.current_byte_offset < 0)
+        return nt_file_complete(io, NT_STATUS_INVALID_PARAMETER, 0);
+
+    const int fd = duplicate_handle(handle, information_class == FILE_END_OF_FILE_INFORMATION_CLASS ?
+                                    FILE_WRITE : 0);
+    if (fd < 0)
+        return nt_file_complete(io, nt_file_errno_status(errno), 0);
+
+    const bool success = information_class == FILE_POSITION_INFORMATION_CLASS ?
+                         lseek(fd, (off_t)info.current_byte_offset, SEEK_SET) >= 0 :
+                         ftruncate(fd, (off_t)info.current_byte_offset) == 0;
+    const int error = errno;
+    (void)close(fd);
+    return nt_file_complete(io, success ? NT_STATUS_SUCCESS : nt_file_errno_status(error), 0);
+}
+
+nt_status NT_MS_ABI nt_NtFlushBuffersFile(uintptr_t handle, struct nt_io_status_block *io)
+{
+    if (io == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    /* Match Win32 FlushFileBuffers: a read-only guest HANDLE cannot flush. */
+    const int fd = duplicate_handle(handle, FILE_WRITE);
+    if (fd < 0)
+        return nt_file_complete(io, nt_file_errno_status(errno), 0);
+    const bool success = fsync(fd) == 0;
+    const int error = errno;
+    (void)close(fd);
+    return nt_file_complete(io, success ? NT_STATUS_SUCCESS : nt_file_errno_status(error), 0);
 }
 
 int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle)

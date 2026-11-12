@@ -1,7 +1,7 @@
 # Núcleo NT/Win32: estado verificable y criterios de salida
 
 Este informe documenta el alcance **implementado** del prototipo AMD64 de
-`main` y la rama incremental `feature/nt-core-native-process-memory`.
+`main` y la rama incremental `feature/nt-io-sync-bridge` (continuación de PR #61).
 No es una declaración de compatibilidad universal con Windows. Una API
 registrada no se considera compatible sin pruebas de argumentos, efectos,
 errores, vida útil y concurrencia.
@@ -14,7 +14,7 @@ errores, vida útil y concurrencia.
 | 4. Procesos e hilos | Procesos hijo PE acotados, hilos pthread, TLS, FLS, espera, duplicación local; `CREATE_SUSPENDED`, `ResumeThread`, `NtResumeThread` al iniciar un hilo | Suspensión asíncrona de hilos en ejecución, contexto externo, APC, herencia general de handles, tokens, procesos arbitrarios y atributos de seguridad |
 | 5. Memoria virtual | `VirtualAlloc/Free/Protect/Query` en reservas propias y puente `NtAllocate/Free/Protect/QueryVirtualMemory` para proceso actual | Vistas de sección compartidas, acceso a memoria de otros procesos, PAGE_GUARD, MEM_RESET, regiones no gestionadas y semántica NT completa de memoria |
 | 6. SEH | `.pdata/.xdata` AMD64 para las imágenes soportadas; excepciones software, filtros/desenrollado del perfil, registro y eliminación de VEH ordenados para `RaiseException` | Traducción general de SIGSEGV/SIGILL/SIGFPE, encadenamiento completo de unwind, vectored continue handlers, excepciones de DLL externas, SEH universal |
-| 7. API NTDLL/Win32 | Registro compartido API sets/KERNEL32/KERNELBASE/NTDLL y API nuevas de proceso, objetos, memoria, suspensión y VEH | Cobertura funcional completa de bibliotecas Windows, APIs dinámicas no probadas y sus combinaciones, MSI, .NET, drivers Windows |
+| 7. API NTDLL/Win32 | Registro compartido API sets/KERNEL32/KERNELBASE/NTDLL y API nuevas de proceso, objetos, memoria, suspensión, VEH y E/S síncrona: `NtReadFile`, `NtWriteFile`, `NtQueryInformationFile`, `NtSetInformationFile`, `NtFlushBuffersFile` | Cobertura funcional completa de bibliotecas Windows, APIs dinámicas no probadas y sus combinaciones, MSI, .NET, drivers Windows |
 
 ## Pruebas ejecutables
 
@@ -23,7 +23,8 @@ PE32+ AMD64 sobre Linux. Se incluyen en la CI Ubuntu, UBSan y Fedora 45:
 
 ```sh
 make check-pe-image check-pe-native-core check-pe-named-events \
-     check-pe-suspended-thread check-pe-veh check-pe-teb-tls check-pe-memory
+     check-pe-suspended-thread check-pe-veh check-pe-teb-tls check-pe-memory \
+     check-pe-nt-io
 ```
 
 - `check-pe-image`: distingue DLL/EXE, exportaciones y *forwarders*
@@ -34,6 +35,9 @@ make check-pe-image check-pe-native-core check-pe-named-events \
   y destrucción del objeto tras cerrar la última referencia.
 - `check-pe-suspended-thread`: un hilo creado suspendido no ejecuta
   código invitado hasta `ResumeThread`; comprobación de códigos y errores.
+- `check-pe-nt-io`: el mismo HANDLE para funciones NTDLL y Win32,
+  IO_STATUS_BLOCK, EOF, posicionamiento explícito, consulta y cambio de
+  tamaño, flush, derechos insuficientes y conservación de LastError.
 - `check-pe-veh`: orden de los manejadores vectorizados, continuación de
   la excepción software y eliminación sin invalidar otros manejadores.
 

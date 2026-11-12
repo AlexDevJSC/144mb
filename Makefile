@@ -56,7 +56,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -330,6 +330,16 @@ check-pe-native: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/native-services.exe
 $(BUILD_DIR)/fixture-kernel_sync.a $(BUILD_DIR)/fixture-kernel_base.a \
     $(BUILD_DIR)/fixture-user_rect.a $(BUILD_DIR)/fixture-user_native.a: $(BUILD_DIR)/fixture-%.a: tests/pe/%.def | $(BUILD_DIR)
 	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/fixture-nt_file_io.a: tests/pe/nt_file_io.def | $(BUILD_DIR)
+	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/nt-file-io-fixture.exe: tests/pe/nt_file_io_fixture.c $(BUILD_DIR)/fixture-nt_file_io.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-nt_file_io.a -lkernel32
+
+check-pe-nt-io: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/nt-file-io-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/nt-file-io-fixture.exe
 
 $(BUILD_DIR)/kernel-services.exe: tests/pe/kernel_services_fixture.c $(BUILD_DIR)/fixture-kernel_sync.a $(BUILD_DIR)/fixture-kernel_base.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lntdll -lkernel32
