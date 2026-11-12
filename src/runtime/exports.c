@@ -6,6 +6,7 @@
 #include "desktop_resources.h"
 #include "dialogs.h"
 #include "nt_services.h"
+#include "nt_core_information.h"
 #include "user_folders.h"
 #include "crypto.h"
 #include "sync.h"
@@ -260,6 +261,13 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(ResetEvent),
     NT_EXPORT(WaitForSingleObject),
     NT_EXPORT(WaitForMultipleObjects),
+    NT_EXPORT(QueryInformationProcess),
+    NT_EXPORT(QueryInformationThread),
+    NT_EXPORT(AllocateVirtualMemory),
+    NT_EXPORT(FreeVirtualMemory),
+    NT_EXPORT(ProtectVirtualMemory),
+    NT_EXPORT(QueryVirtualMemory),
+    WIN_EXPORT(RtlGetCurrentPeb),
     WIN_EXPORT(RtlCaptureContext),
     WIN_EXPORT(RtlLookupFunctionEntry),
     WIN_EXPORT(RtlVirtualUnwind),
