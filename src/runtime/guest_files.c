@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
+#include "console.h"
 #include "winbase.h"
 #include "winfile.h"
 #include "sync.h"
@@ -1913,6 +1914,8 @@ int32_t NT_MS_ABI nt_ReadConsoleW(uintptr_t handle, uint16_t *buffer, uint32_t c
         pending.ready = false;
     }
     while (*done < count) {
+        if (!nt_runtime_console_wait(fd))
+            return file_result(fd, false);
         char bytes[4];
         ssize_t got;
         do {
@@ -2023,6 +2026,12 @@ int32_t NT_MS_ABI nt_SetConsoleTitleA(const char *title)
             nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
             return 0;
         }
+    }
+    text[4 + needed] = 0;
+    if (nt_runtime_console_title(text + 4)) {
+        free(text);
+        close(fd);
+        return 1;
     }
     memcpy(text, "\x1b]0;", 4);
     text[4 + needed] = '\x07';

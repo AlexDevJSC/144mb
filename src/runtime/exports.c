@@ -11,6 +11,7 @@
 #include "winbase.h"
 #include "winfile.h"
 #include "child_process.h"
+#include "console.h"
 #include "shell.h"
 #include "winsock.h"
 #include "nls.h"
@@ -343,6 +344,10 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetCommandLineA),
     WIN_EXPORT(GetCommandLineW),
     WIN_EXPORT(GetConsoleMode),
+    WIN_EXPORT(AttachConsole),
+    WIN_EXPORT(AllocConsole),
+    WIN_EXPORT(FreeConsole),
+    WIN_EXPORT(GetConsoleWindow),
     WIN_EXPORT(ReadConsoleW),
     WIN_EXPORT(SetConsoleTitleA),
     WIN_EXPORT(GetConsoleOutputCP),

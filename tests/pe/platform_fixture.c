@@ -3,6 +3,31 @@
 #include <shlobj.h>
 #include <shellapi.h>
 
+static int test_console(void)
+{
+    if (AttachConsole(0x7fffffffu) || GetLastError() != ERROR_INVALID_PARAMETER)
+        return 11;
+    if (!AllocConsole())
+        return 12;
+    HWND console = GetConsoleWindow();
+    if (!console || !GetWindowLongPtrA(console, GWLP_WNDPROC) ||
+        AllocConsole() || GetLastError() != ERROR_ACCESS_DENIED)
+        return 13;
+    DWORD done = 0;
+    if (!SetConsoleTitleA("PE console") ||
+        !WriteConsoleA(GetStdHandle(STD_OUTPUT_HANDLE), "output\n", 7, &done, NULL) || done != 7)
+        return 14;
+    SendDlgItemMessageA(console, 101, WM_SETTEXT, 0, (LPARAM)"input");
+    SendMessageA(console, WM_COMMAND, IDOK, 0);
+    WCHAR wide[16];
+    if (!ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), wide, 16, &done, NULL) ||
+        done != 6 || wide[0] != L'i' || wide[4] != L't' || wide[5] != L'\n')
+        return 15;
+    if (!FreeConsole() || GetConsoleWindow() || GetWindowLongPtrA(console, GWLP_WNDPROC))
+        return 16;
+    return 0;
+}
+
 static int test_shell(void)
 {
     const WCHAR path[] = L"C:\\test-file.txt";
@@ -32,5 +57,6 @@ static int test_shell(void)
 
 int import_fixture_entry(void)
 {
-    return test_shell();
+    int code = test_console();
+    return code ? code : test_shell();
 }

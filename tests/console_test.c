@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "compat.h"
+#include "console.h"
+#include "winbase.h"
 #include "winfile.h"
 
 #include <errno.h>
@@ -61,6 +63,10 @@ int main(void)
         return 9;
     if (nt_ReadConsoleW(input, wide, 1, &done, (void *)1) != 0)
         return 10;
+    if (!nt_AttachConsole(UINT32_MAX) || nt_GetConsoleWindow() != 0 ||
+        nt_AttachConsole(UINT32_MAX) || nt_GetLastError() != NT_ERROR_ACCESS_DENIED ||
+        !nt_FreeConsole())
+        return 11;
     close(master);
     puts("PASS ReadConsoleW UTF-8, SetConsoleTitleA and error contracts over a Linux PTY");
     return 0;

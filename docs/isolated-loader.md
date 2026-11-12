@@ -222,6 +222,15 @@ de un elemento y `ShellExecuteW` admite abrir carpetas y ejecutar un PE
 con el mismo mecanismo de procesos hijos. Los verbos y asociaciones del
 escritorio anfitrión quedan fuera de este perfil.
 
-`make check-pe-platform` verifica el shell desde MinGW-w64. El caso de
+`make check-pe-platform` verifica el shell desde un PE generado con MinGW-w64. El caso de
 procesos hijos de `make check-pe-isolated` prueba argumentos Unicode,
 directorio de trabajo y código de salida superior a 255.
+
+### Consola
+
+`AttachConsole` admite el terminal Linux heredado del padre. `AllocConsole`
+crea un seudoterminal Linux y una ventana SDL con salida y entrada de texto.
+`GetConsoleWindow` devuelve el HWND de esa ventana. Un terminal heredado
+carece de HWND invitado. `make check-pe-platform` prueba apertura, título,
+entrada, salida y cierre desde un PE. `make check` comprueba UTF-8 y título
+en un terminal heredado.
