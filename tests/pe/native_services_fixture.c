@@ -2,6 +2,7 @@
 #define _WIN32_WINNT 0x0a00
 #include <winsock2.h>
 #include <windows.h>
+#include <winternl.h>
 #include <bcrypt.h>
 #include <commdlg.h>
 #include <commctrl.h>
@@ -154,7 +155,27 @@ struct thread_fixture {
     HANDLE event;
     DWORD fls;
     LONG cleanup;
+    const PEB *process;
 };
+
+static const PEB *current_peb(void)
+{
+    const PEB *peb;
+    __asm__ volatile("movq %%gs:0x60, %0" : "=r"(peb));
+    return peb;
+}
+
+static int check_process_parameters(void)
+{
+    const PEB *peb = current_peb();
+    const RTL_USER_PROCESS_PARAMETERS *parameters = peb ? peb->ProcessParameters : NULL;
+    if (!parameters || !(parameters->Reserved1[8] & 1) ||
+        parameters->CommandLine.Buffer != GetCommandLineW() ||
+        !equals(parameters->ImagePathName.Buffer, L"C:\\fixture.exe") ||
+        parameters->ImagePathName.Length != 14 * sizeof(WCHAR))
+        return 4;
+    return 0;
+}
 static VOID CALLBACK fls_exit(void *context)
 {
     struct thread_fixture *fixture = context;
@@ -164,7 +185,8 @@ static VOID CALLBACK fls_exit(void *context)
 static DWORD WINAPI worker(void *context)
 {
     struct thread_fixture *fixture = context;
-    if (thread_tls != 1 || !FlsSetValue(fixture->fls, fixture) || FlsGetValue(fixture->fls) != fixture ||
+    if (current_peb() != fixture->process || thread_tls != 1 ||
+        !FlsSetValue(fixture->fls, fixture) || FlsGetValue(fixture->fls) != fixture ||
         !SetEvent(fixture->event))
         return 99;
     ExitThread(37);
@@ -173,7 +195,7 @@ static DWORD WINAPI worker(void *context)
 static int check_threads(void)
 {
     struct thread_fixture fixture = {.event = CreateEventW(NULL, FALSE, FALSE, NULL),
-                                     .fls = FlsAlloc(fls_exit)};
+                                     .fls = FlsAlloc(fls_exit), .process = current_peb()};
     if (fixture.event == NULL || fixture.fls == FLS_OUT_OF_INDEXES ||
         WaitForSingleObject(fixture.event, 0) != WAIT_TIMEOUT)
         return 31;
@@ -447,7 +469,9 @@ int import_fixture_entry(void)
     if (process_tls != 1 || tls == NULL || tls[0] != 41)
         return 3;
     tls[0] = 92;
-    int result = check_files();
+    int result = check_process_parameters();
+    if (result == 0)
+        result = check_files();
     if (result == 0)
         result = check_memory_environment();
     if (result == 0)

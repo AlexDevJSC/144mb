@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "winbase.h"
+#include "winfile.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <sys/mman.h>
@@ -23,7 +25,12 @@ static struct {
     char **argv;
     char *arguments;
     int argc;
+    struct nt_guest_process process;
+    uint16_t initial_directory[PATH_MAX];
+    uint16_t *initial_environment;
+    bool process_ready;
 } guest;
+static pthread_mutex_t guest_process_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void clear_argv(void)
 {
@@ -48,6 +55,9 @@ bool nt_runtime_set_guest_image(uintptr_t module, const char *path, const char *
         return false;
     }
     clear_argv();
+    free(guest.initial_environment);
+    guest.initial_environment = NULL;
+    guest.process_ready = false;
     free(guest.wide_path);
     free(guest.wide_line);
     guest.module = module;
@@ -60,6 +70,46 @@ bool nt_runtime_set_guest_image(uintptr_t module, const char *path, const char *
     guest.tls_callbacks = NULL;
     guest.tls_callback_count = 0;
     return true;
+}
+
+static struct nt_guest_unicode_string process_string(uint16_t *buffer)
+{
+    if (!buffer)
+        return (struct nt_guest_unicode_string){0};
+    size_t length = nt_runtime_wide_length(buffer, UINT16_MAX / sizeof(*buffer) - 1);
+    return (struct nt_guest_unicode_string){
+        (uint16_t)(length * sizeof(*buffer)), (uint16_t)((length + 1) * sizeof(*buffer)), buffer,
+    };
+}
+
+bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t module,
+                                   const struct nt_guest_tls *initial)
+{
+    /* The worker configures the guest image before starting any PE thread. */
+    if (!module || module != guest.module)
+        return false;
+    pthread_mutex_lock(&guest_process_lock);
+    if (!guest.process_ready) {
+        guest.initial_environment = nt_GetEnvironmentStringsW();
+        if (!guest.initial_environment) {
+            pthread_mutex_unlock(&guest_process_lock);
+            return false;
+        }
+        nt_guest_process_init(&guest.process, module, nt_GetProcessHeap());
+        struct nt_guest_process_parameters *parameters = &guest.process.parameters;
+        parameters->input = nt_GetStdHandle((uint32_t)-10);
+        parameters->output = nt_GetStdHandle((uint32_t)-11);
+        parameters->error = nt_GetStdHandle((uint32_t)-12);
+        uint32_t length = nt_GetCurrentDirectoryW(PATH_MAX, guest.initial_directory);
+        if (length && length < PATH_MAX)
+            parameters->current_directory = process_string(guest.initial_directory);
+        parameters->image_path = process_string(guest.wide_path);
+        parameters->command_line = process_string(guest.wide_line);
+        parameters->environment = guest.initial_environment;
+        guest.process_ready = true;
+    }
+    pthread_mutex_unlock(&guest_process_lock);
+    return nt_guest_thread_enter_in_process(thread, module, initial, &guest.process);
 }
 
 void nt_runtime_set_guest_image_extent(size_t size) { guest.image_size = size; }

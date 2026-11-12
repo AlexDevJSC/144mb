@@ -63,6 +63,7 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runti
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o: src/runtime/winfile.h
+$(BUILD_DIR)/runtime-process.o: src/runtime/winfile.h include/ntnative/guest_thread.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-fluid.o: src/runtime/fluid_api.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-crypto.o: src/runtime/crypto.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-winsock.o: src/runtime/winsock.h

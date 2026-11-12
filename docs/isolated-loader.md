@@ -28,7 +28,11 @@ alcance funcional están en [Compatibilidad de Mines](mines-compatibility.md).
 - Importación por nombre u ordinal, enlazada al registro propio de
   equivalentes Win32. Rechazo explícito de funciones no soportadas.
 - Preparación de un TEB mínimo por hilo mediante GS de Linux y un PEB
-  con la base de la imagen. Se copia la plantilla TLS del ejecutable
+  compartido que contiene la base de la imagen y los parámetros iniciales
+  del proceso. Los parámetros AMD64 normalizados incluyen rutas UTF-16,
+  línea de comandos, directorio, entorno inicial y manejadores estándar.
+  El PE de pruebas verifica los offsets de Win32 y que dos hilos
+  observan el mismo PEB. Se copia la plantilla TLS del ejecutable
   al slot 0 de cada hilo, con hasta 4 KiB de datos y relleno y alineación
   de hasta 16 bytes. Se validan las direcciones de callbacks antes de
   su entrega. Se restaura el GS anterior al salir del código invitado.

@@ -116,7 +116,7 @@ int main(int argc, char **argv)
         return 6;
     }
     struct nt_guest_thread thread = {0};
-    if (!nt_guest_thread_enter_with_tls(&thread, (uintptr_t)image.base, &initial)) {
+    if (!nt_runtime_enter_guest_thread(&thread, (uintptr_t)image.base, &initial)) {
         fputs("Cannot initialize guest thread GS/TEB\n", stderr);
         nt_runtime_close_desktop();
         pe_image_unload(&image);

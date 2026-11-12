@@ -89,7 +89,7 @@ static int NT_MS_ABI guest_entry(void)
             active.exception_size / sizeof(struct nt_runtime_function));
     }
     struct nt_guest_thread guest_thread = {0};
-    if (!nt_guest_thread_enter_with_tls(&guest_thread, (uintptr_t)active.base, &initial)) {
+    if (!nt_runtime_enter_guest_thread(&guest_thread, (uintptr_t)active.base, &initial)) {
         nt_runtime_close_desktop();
         return 125;
     }

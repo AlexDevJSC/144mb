@@ -5,6 +5,9 @@
 #include "compat.h"
 #include "ntnative/guest_thread.h"
 
+bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t module,
+                                   const struct nt_guest_tls *initial);
+
 void NT_MS_ABI nt_GetSystemTime(struct nt_system_time *result);
 uint64_t NT_MS_ABI nt_GetTickCount64(void);
 void NT_MS_ABI nt_Sleep(uint32_t milliseconds);

@@ -177,7 +177,7 @@ static void *thread_main(void *context)
     running_thread = context;
     struct nt_guest_thread guest = {0};
     const uintptr_t image = nt_runtime_guest_module();
-    const bool ready = image == 0 || nt_guest_thread_enter_with_tls(&guest, image, nt_runtime_guest_tls());
+    const bool ready = image == 0 || nt_runtime_enter_guest_thread(&guest, image, nt_runtime_guest_tls());
     pthread_mutex_lock(&wait_lock);
     running_thread->thread_id = (uint32_t)gettid();
     running_thread->started = true;
