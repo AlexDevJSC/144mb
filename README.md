@@ -30,6 +30,13 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
   comunicados. El alcance probado se detalla en `docs/mines-compatibility.md`.
   El cargador prepara la plantilla TLS del ejecutable en cada hilo
   invitado. TEB/PEB completos y procesos NT generales siguen pendientes.
+- El cargador de DLL externas dispone de un perfil acotado a archivos PE
+  AMD64 sin TLS en el directorio `/game` del sandbox: importaciones
+  transitivas, `LoadLibrary`/`GetProcAddress`, llamadas a `DllMain`
+  y registro de módulos en `PEB->Ldr`. El test
+  `make check-pe-dll-graph` verifica DLL Win64 reales.
+  No admite todavía el universo completo de bibliotecas Windows;
+  véanse [los límites del cargador](docs/isolated-loader.md).
 - El lanzador proporciona un perfil persistente de usuario para las variables
   `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`, `TEMP` y `TMP`. Se verificó el
   guardado y la recuperación de preferencias de Mines y de un PE independiente.
