@@ -1793,7 +1793,8 @@ nt_status NT_MS_ABI nt_NtFlushBuffersFile(uintptr_t handle, struct nt_io_status_
 {
     if (io == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
-    const int fd = duplicate_handle(handle, 0);
+    /* Match Win32 FlushFileBuffers: a read-only guest HANDLE cannot flush. */
+    const int fd = duplicate_handle(handle, FILE_WRITE);
     if (fd < 0)
         return nt_file_complete(io, nt_file_errno_status(errno), 0);
     const bool success = fsync(fd) == 0;
