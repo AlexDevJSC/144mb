@@ -92,6 +92,7 @@ int main(int argc, char **argv)
     const char *root = mkdtemp(temp);
     const char *guest_env[] = {"PATH=C:\\", NULL};
     if (root == NULL || !nt_runtime_set_file_root(root) ||
+        !nt_runtime_set_standard_streams(STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO) ||
         !nt_runtime_set_guest_image((uintptr_t)image.base,
                                     "C:\\fixture.exe", "\"C:\\fixture.exe\"")) {
         fputs("Cannot configure trusted PE fixture\n", stderr);
