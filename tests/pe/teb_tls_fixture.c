@@ -36,9 +36,12 @@ static DWORD WINAPI worker(void *parameter)
     return 0x144;
 }
 
+/* This freestanding fixture uses -nostdlib: avoid a Windows stack-probe
+ * import (__chkstk_ms) for its large index table. */
+static DWORD slots[1088];
+
 int import_fixture_entry(void)
 {
-    DWORD slots[1088];
     slots[0] = TlsAlloc();
     if (slots[0] != 0 || TlsGetValue(slots[0]) != NULL ||
         GetLastError() != ERROR_SUCCESS || teb_slot(slots[0]) != 0)
