@@ -91,7 +91,7 @@ int import_fixture_entry(void)
         NtQueueApcThread(thread, native_apc, (void *)(uintptr_t)0x144u,
                          (void *)(uintptr_t)0x145u, (void *)(uintptr_t)0x146u) != STATUS_OK)
         return 14;
-    if (NtQueueApcThread(thread, NULL, NULL, NULL, NULL) != STATUS_INVALID_PARAMETER ||
+    if ((DWORD)NtQueueApcThread(thread, NULL, NULL, NULL, NULL) != STATUS_INVALID_PARAMETER ||
         ResumeThread(thread) != 1)
         return 15;
     DWORD code = 0;
