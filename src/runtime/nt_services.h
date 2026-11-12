@@ -7,6 +7,8 @@
 
 #include <time.h>
 
+#define NT_STATUS_USER_APC INT32_C(0x000000c0)
+#define NT_STATUS_THREAD_IS_TERMINATING ((nt_status)UINT32_C(0xc000004b))
 #define NT_STATUS_TIMEOUT INT32_C(0x00000102)
 #define NT_STATUS_INVALID_INFO_CLASS ((nt_status)UINT32_C(0xc0000003))
 #define NT_STATUS_INFO_LENGTH_MISMATCH ((nt_status)UINT32_C(0xc0000004))
@@ -67,6 +69,11 @@ struct nt_wait_deadline {
 nt_status nt_runtime_wait_deadline(int64_t ticks, struct nt_wait_deadline *deadline);
 nt_status NT_MS_ABI nt_NtQuerySystemTime(int64_t *ticks);
 nt_status NT_MS_ABI nt_NtDelayExecution(uint8_t alertable, const int64_t *interval);
+nt_status nt_runtime_alertable_delay(const struct nt_wait_deadline *deadline);
+nt_status NT_MS_ABI nt_NtQueueApcThread(uintptr_t thread,
+    void (NT_MS_ABI *routine)(void *, void *, void *),
+    void *context, void *first, void *second);
+nt_status NT_MS_ABI nt_NtTestAlert(void);
 nt_status NT_MS_ABI nt_NtClose(uintptr_t handle);
 nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t source,
                                         uintptr_t target_process, uintptr_t *target,
