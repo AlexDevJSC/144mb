@@ -115,8 +115,20 @@ int main(int argc, char **argv)
         pe_image_unload(&image);
         return 6;
     }
+    if (image.exception_size &&
+        (image.exception_size % sizeof(struct nt_runtime_function) ||
+         !nt_runtime_set_runtime_functions((uintptr_t)image.base, image.size,
+             (const struct nt_runtime_function *)(const void *)(image.base + image.exception_rva),
+             image.exception_size / sizeof(struct nt_runtime_function)) ||
+         !nt_runtime_enable_software_seh(image.code_rva, image.code_rva + image.code_size,
+                                         pe_image_readable, &image))) {
+        fputs("Cannot configure fixture AMD64 unwind metadata\n", stderr);
+        nt_runtime_close_desktop();
+        pe_image_unload(&image);
+        return 6;
+    }
     struct nt_guest_thread thread = {0};
-    if (!nt_guest_thread_enter_with_tls(&thread, (uintptr_t)image.base, &initial)) {
+    if (!nt_runtime_enter_guest_thread(&thread, (uintptr_t)image.base, &initial)) {
         fputs("Cannot initialize guest thread GS/TEB\n", stderr);
         nt_runtime_close_desktop();
         pe_image_unload(&image);

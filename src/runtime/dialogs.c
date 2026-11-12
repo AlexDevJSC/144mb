@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "dialogs.h"
+#include "console.h"
 #include "desktop_resources.h"
 #include "task_dialog.h"
 
@@ -226,6 +227,8 @@ void nt_runtime_close_dialogs(void)
 {
     /* The desktop has already released its windows without dispatching callbacks. */
     help.window = 0;
+    nt_runtime_close_folder_views();
+    nt_runtime_close_console();
     nt_runtime_set_help_document(NULL, NULL, NULL);
     dialog_class_registered = false;
 }

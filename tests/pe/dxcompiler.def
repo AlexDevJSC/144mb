@@ -1,0 +1,3 @@
+LIBRARY dxcompiler.dll
+EXPORTS
+    DxcCreateInstance

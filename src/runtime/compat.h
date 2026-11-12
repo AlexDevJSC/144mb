@@ -42,6 +42,7 @@ enum {
 };
 
 void NT_MS_ABI nt_SetLastError(uint32_t error);
+uint32_t NT_MS_ABI nt_GetLastError(void);
 
 struct nt_file_time {
     uint32_t low;
@@ -218,6 +219,12 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
 
 typedef int32_t (NT_MS_ABI *nt_exception_filter)(struct nt_exception_pointers *);
 void NT_MS_ABI nt_RtlCaptureContext(struct nt_context64 *context);
+void NT_MS_ABI nt_RaiseException(uint32_t code, uint32_t flags, uint32_t count, const uintptr_t *arguments);
+void NT_MS_ABI nt_RtlUnwind(void *frame, void *target, struct nt_exception_record *record, void *value);
+void NT_MS_ABI nt_RtlUnwindEx(void *frame, void *target, struct nt_exception_record *record,
+                            void *value, struct nt_context64 *context, void *history);
+bool nt_runtime_enable_software_seh(uint32_t begin, uint32_t end,
+                                   bool (*readable)(uint32_t, size_t, const void *), const void *opaque);
 bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
                                       const struct nt_runtime_function *table, size_t count);
 const struct nt_runtime_function *NT_MS_ABI nt_RtlLookupFunctionEntry(

@@ -23,7 +23,7 @@ jobs:
       - name: Install Linux build and desktop test dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libcairo2-dev libffi-dev libssl-dev libfluidsynth3 bubblewrap weston fonts-dejavu-core
+          sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libsdl2-image-dev libcairo2-dev libffi-dev libssl-dev libfluidsynth3 libvkd3d-dev libvulkan-dev mesa-vulkan-drivers bubblewrap weston fonts-dejavu-core
           x86_64-w64-mingw32-gcc --version
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 all check check-pe check-pe-import check-pe-image
@@ -35,6 +35,15 @@ jobs:
         run: SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-desktop
       - name: Map and execute trusted external desktop PE on Linux
         run: make check-pe-external check-pe-native
+      - name: Execute Win32 display topology fixture on Linux
+        run: make check-pe-displayconfig
+      - name: Execute native Win32 console PE fixture on Linux
+        run: make check-pe-console
+      - name: Exercise native graphics, WIC, shell and software exceptions
+        run: |
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          VK_DRIVER_FILES="$icd" make -j2 check-pe-graphics check-pe-wic check-pe-platform check-pe-seh
       - name: Run external PE with native Linux isolation if namespaces permit
         env:
           SDL_VIDEODRIVER: offscreen
@@ -44,10 +53,14 @@ jobs:
         env:
           SDL_VIDEODRIVER: offscreen
           SDL_FRAMEBUFFER_ACCELERATION: "0"
-        run: >-
-          make -j2 BUILD_DIR=build-ubsan
-          CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all'
-          check check-pe check-pe-import check-pe-image check-desktop check-pe-native
+        run: |
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          export VK_DRIVER_FILES="$icd"
+          make -j2 BUILD_DIR=build-ubsan \
+          CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
+            check check-pe check-pe-import check-pe-image check-desktop check-pe-native check-pe-displayconfig \
+            check-pe-console check-pe-graphics check-pe-wic check-pe-platform check-pe-seh
 
   fedora-rpm:
     runs-on: ubuntu-24.04
@@ -55,7 +68,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install Fedora build tools in the CI container
-        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip 'pkgconfig(sdl2)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' 'pkgconfig(libcrypto)' fluidsynth-libs dejavu-sans-fonts pkgconf-pkg-config bubblewrap shadow-utils util-linux-core
+        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip /usr/bin/curl /usr/bin/sha256sum 'pkgconfig(sdl2)' 'pkgconfig(SDL2_image)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' 'pkgconfig(libcrypto)' 'pkgconfig(libvkd3d)' 'pkgconfig(libvkd3d-utils)' 'pkgconfig(vulkan)' fluidsynth-libs libstdc++ mesa-vulkan-drivers dejavu-sans-fonts pkgconf-pkg-config bubblewrap shadow-utils util-linux-core mingw64-gcc mingw64-binutils
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -70,6 +83,7 @@ jobs:
           cat "$rpm_topdir/payload.txt"
           grep -Fx /usr/bin/nt-native-probe "$rpm_topdir/payload.txt"
           grep -Fx /usr/bin/nt-vulkan-probe "$rpm_topdir/payload.txt"
+          grep -Fx /usr/bin/pe-import-audit "$rpm_topdir/payload.txt"
       - name: Install and reinstall the runtime as a Fedora user
         env:
           INSTALL_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -82,3 +96,9 @@ jobs:
           test "$(runuser -u nt-installer -- git -C "$install_home/share/nt-native-linux/source" rev-parse HEAD)" = "$INSTALL_REVISION"
           runuser -u nt-installer -- "$install_home/bin/nt-native-probe"
           runuser -u nt-installer -- "$install_home/bin/pe-isolated-run" --help
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          dxc="$install_home/share/nt-native-linux/current/lib/nt-native-linux/dxc/lib"
+          runuser -u nt-installer -- env "VK_DRIVER_FILES=$icd" "LD_LIBRARY_PATH=$dxc" \
+            make -j2 -C "$install_home/share/nt-native-linux/source" "BUILD_DIR=build-fedora-$INSTALL_REVISION" \
+            check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh

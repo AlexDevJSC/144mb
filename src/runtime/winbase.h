@@ -5,6 +5,9 @@
 #include "compat.h"
 #include "ntnative/guest_thread.h"
 
+bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t module,
+                                   const struct nt_guest_tls *initial);
+
 void NT_MS_ABI nt_GetSystemTime(struct nt_system_time *result);
 uint64_t NT_MS_ABI nt_GetTickCount64(void);
 void NT_MS_ABI nt_Sleep(uint32_t milliseconds);
@@ -40,6 +43,7 @@ uint32_t NT_MS_ABI nt_FormatMessageW(uint32_t flags, const void *source, uint32_
 uint16_t **NT_MS_ABI nt_CommandLineToArgvW(const uint16_t *command, int32_t *count);
 int32_t NT_MS_ABI nt_CoInitializeEx(void *reserved, uint32_t mode);
 void NT_MS_ABI nt_CoUninitialize(void);
+bool nt_runtime_com_initialized(void);
 
 void nt_runtime_set_win_environment(const char *const *source);
 uint32_t NT_MS_ABI nt_GetEnvironmentVariableA(const char *name, char *buffer, uint32_t size);
@@ -50,5 +54,6 @@ int32_t NT_MS_ABI nt_FreeEnvironmentStringsW(uint16_t *block);
 uint32_t NT_MS_ABI nt_GetTempPathW(uint32_t capacity, uint16_t *buffer);
 uint32_t NT_MS_ABI nt_GetSystemDirectoryW(uint16_t *buffer, uint32_t capacity);
 int nt_runtime_open_guest_file_readonly(const char *path);
+int nt_runtime_read_guest_file(const char *path, size_t limit, void **data, size_t *size);
 
 #endif

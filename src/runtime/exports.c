@@ -10,6 +10,9 @@
 #include "sync.h"
 #include "winbase.h"
 #include "winfile.h"
+#include "child_process.h"
+#include "console.h"
+#include "shell.h"
 #include "winsock.h"
 #include "nls.h"
 #include "gdi_ext.h"
@@ -17,6 +20,15 @@
 #include "raw_input.h"
 #include "task_dialog.h"
 #include "windesktop.h"
+#ifdef NT_HAVE_WIC
+#include "wic.h"
+#endif
+#ifdef NT_HAVE_VKD3D
+#include "graphics.h"
+#include "shader.h"
+#include "streamline.h"
+#endif
+#include "display_config.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -49,7 +61,7 @@ static uint32_t NT_MS_ABI win_thread_id(void)
     return (uint32_t)gettid();
 }
 
-static uint32_t NT_MS_ABI win_get_last_error(void)
+uint32_t NT_MS_ABI nt_GetLastError(void)
 {
     return last_error;
 }
@@ -255,7 +267,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetCurrentProcess),
     EXPORT("GetCurrentProcessId", win_process_id),
     EXPORT("GetCurrentThreadId", win_thread_id),
-    EXPORT("GetLastError", win_get_last_error),
+    WIN_EXPORT(GetLastError),
     WIN_EXPORT(GetLocalTime),
     WIN_EXPORT(GetModuleFileNameA),
     WIN_EXPORT(GetModuleHandleW),
@@ -279,6 +291,9 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(RemoveDirectoryA),
     WIN_EXPORT(RemoveDirectoryW),
     WIN_EXPORT(RtlCaptureContext),
+    WIN_EXPORT(RaiseException),
+    WIN_EXPORT(RtlUnwind),
+    WIN_EXPORT(RtlUnwindEx),
     WIN_EXPORT(RtlLookupFunctionEntry),
     WIN_EXPORT(RtlVirtualUnwind),
     WIN_EXPORT(SetLastError),
@@ -309,6 +324,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(CreateFile2),
     WIN_EXPORT(CreateFileW),
     WIN_EXPORT(CreateThread),
+    WIN_EXPORT(CreateProcessW),
+    WIN_EXPORT(GetExitCodeProcess),
     WIN_EXPORT(DeleteCriticalSection),
     WIN_EXPORT(DeleteFileW),
     WIN_EXPORT(EnterCriticalSection),
@@ -330,6 +347,12 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetCommandLineA),
     WIN_EXPORT(GetCommandLineW),
     WIN_EXPORT(GetConsoleMode),
+    WIN_EXPORT(AttachConsole),
+    WIN_EXPORT(AllocConsole),
+    WIN_EXPORT(FreeConsole),
+    WIN_EXPORT(GetConsoleWindow),
+    WIN_EXPORT(ReadConsoleW),
+    WIN_EXPORT(SetConsoleTitleA),
     WIN_EXPORT(GetConsoleOutputCP),
     WIN_EXPORT(GetCurrentDirectoryW),
     WIN_EXPORT(GetCurrentThread),
@@ -341,6 +364,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetFileAttributesW),
     WIN_EXPORT(GetFileInformationByHandleEx),
     WIN_EXPORT(GetFileSizeEx),
+    WIN_EXPORT(GetHandleInformation),
     WIN_EXPORT(GetFileType),
     WIN_EXPORT(GetFinalPathNameByHandleW),
     WIN_EXPORT(GetFullPathNameW),
@@ -400,6 +424,9 @@ static const struct runtime_export kernel32_exports[] = {
 };
 
 static const struct runtime_export user32_exports[] = {
+    WIN_EXPORT(GetDisplayConfigBufferSizes),
+    WIN_EXPORT(QueryDisplayConfig),
+    WIN_EXPORT(DisplayConfigGetDeviceInfo),
     WIN_EXPORT(DrawTextW),
     WIN_EXPORT(FillRect),
     WIN_EXPORT(AdjustWindowRect),
@@ -558,11 +585,17 @@ static const struct runtime_export comdlg32_exports[] = {
 };
 
 static const struct runtime_export shell32_exports[] = {
+    EXPORT("SHParseDisplayName", nt_SHParseDisplayName),
+    EXPORT("SHOpenFolderAndSelectItems", nt_SHOpenFolderAndSelectItems),
+    EXPORT("ShellExecuteW", nt_ShellExecuteW),
     WIN_EXPORT(SHGetKnownFolderPath),
     WIN_EXPORT(CommandLineToArgvW)
 };
 
 static const struct runtime_export ole32_exports[] = {
+#ifdef NT_HAVE_WIC
+    EXPORT("CoCreateInstance", nt_CoCreateInstance),
+#endif
     EXPORT("CoTaskMemFree", crt_free),
     WIN_EXPORT(CoInitializeEx),
     WIN_EXPORT(CoUninitialize)
@@ -724,6 +757,45 @@ static const struct runtime_export utility_exports[] = {
     EXPORT("qsort", crt_qsort)
 };
 
+#ifdef NT_HAVE_VKD3D
+static const struct runtime_export d3d12_exports[] = {
+    EXPORT("D3D12CreateDevice", nt_D3D12CreateDevice),
+    EXPORT("D3D12SerializeRootSignature", nt_D3D12SerializeRootSignature),
+    EXPORT("D3D12SerializeVersionedRootSignature", nt_D3D12SerializeVersionedRootSignature),
+};
+static const struct runtime_export dxgi_exports[] = {
+    EXPORT("CreateDXGIFactory", nt_CreateDXGIFactory),
+    EXPORT("CreateDXGIFactory1", nt_CreateDXGIFactory1),
+    EXPORT("CreateDXGIFactory2", nt_CreateDXGIFactory2),
+};
+static const struct runtime_export d3dcompiler_exports[] = {
+    EXPORT("D3DCompile", nt_D3DCompile),
+};
+static const struct runtime_export dxcompiler_exports[] = {
+    EXPORT("DxcCreateInstance", nt_DxcCreateInstance),
+};
+static const struct runtime_export streamline_exports[] = {
+    EXPORT("D3D12CreateDevice", nt_D3D12CreateDevice),
+    EXPORT("D3D12SerializeRootSignature", nt_D3D12SerializeRootSignature),
+    EXPORT("D3D12SerializeVersionedRootSignature", nt_D3D12SerializeVersionedRootSignature),
+    EXPORT("CreateDXGIFactory1", nt_CreateDXGIFactory1),
+    EXPORT("CreateDXGIFactory2", nt_CreateDXGIFactory2),
+    EXPORT("slInit", nt_slInit),
+    EXPORT("slShutdown", nt_slShutdown),
+    EXPORT("slSetD3DDevice", nt_slSetD3DDevice),
+    EXPORT("slGetNativeInterface", nt_slGetNativeInterface),
+    EXPORT("slGetNewFrameToken", nt_slGetNewFrameToken),
+    EXPORT("slSetConstants", nt_slSetConstants),
+    EXPORT("slSetTagForFrame", nt_slSetTagForFrame),
+    EXPORT("slGetFeatureRequirements", nt_slGetFeatureRequirements),
+    EXPORT("slIsFeatureSupported", nt_slIsFeatureSupported),
+    EXPORT("slSetFeatureLoaded", nt_slSetFeatureLoaded),
+    EXPORT("slGetFeatureFunction", nt_slGetFeatureFunction),
+    EXPORT("slFreeResources", nt_slFreeResources),
+    EXPORT("slEvaluateFeature", nt_slEvaluateFeature),
+};
+#endif
+
 static const struct {
     const char *name;
     const struct runtime_export *exports;
@@ -753,7 +825,14 @@ static const struct {
     MODULE("advapi32.dll", advapi32_exports),
     MODULE("imm32.dll", imm32_exports),
     MODULE("ws2_32.dll", ws2_32_exports),
-    MODULE("libfluidsynth-3.dll", fluid_exports)
+    MODULE("libfluidsynth-3.dll", fluid_exports),
+#ifdef NT_HAVE_VKD3D
+    MODULE("d3d12.dll", d3d12_exports),
+    MODULE("dxgi.dll", dxgi_exports),
+    MODULE("d3dcompiler_47.dll", d3dcompiler_exports),
+    MODULE("dxcompiler.dll", dxcompiler_exports),
+    MODULE("sl.interposer.dll", streamline_exports),
+#endif
 #undef MODULE
 };
 
@@ -765,8 +844,17 @@ static pthread_mutex_t module_lock = PTHREAD_MUTEX_INITIALIZER;
 static size_t module_index(const char *name)
 {
     for (size_t i = 0; i < MODULE_COUNT; ++i) {
-        if (nt_module_name_equal(name, modules[i].name))
-            return modules[i].exports != fluid_exports || nt_runtime_fluidsynth_available() ? i : MODULE_COUNT;
+        if (!nt_module_name_equal(name, modules[i].name))
+            continue;
+        if (modules[i].exports == fluid_exports && !nt_runtime_fluidsynth_available())
+            return MODULE_COUNT;
+#ifdef NT_HAVE_VKD3D
+        if (modules[i].exports == d3dcompiler_exports && !nt_runtime_d3dcompiler_available())
+            return MODULE_COUNT;
+        if (modules[i].exports == dxcompiler_exports && !nt_runtime_dxcompiler_available())
+            return MODULE_COUNT;
+#endif
+        return i;
     }
     return MODULE_COUNT;
 }

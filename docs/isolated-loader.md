@@ -28,7 +28,11 @@ alcance funcional están en [Compatibilidad de Mines](mines-compatibility.md).
 - Importación por nombre u ordinal, enlazada al registro propio de
   equivalentes Win32. Rechazo explícito de funciones no soportadas.
 - Preparación de un TEB mínimo por hilo mediante GS de Linux y un PEB
-  con la base de la imagen. Se copia la plantilla TLS del ejecutable
+  compartido que contiene la base de la imagen y los parámetros iniciales
+  del proceso. Los parámetros AMD64 normalizados incluyen rutas UTF-16,
+  línea de comandos, directorio, entorno inicial y manejadores estándar.
+  El PE de pruebas verifica los offsets de Win32 y que dos hilos
+  observan el mismo PEB. Se copia la plantilla TLS del ejecutable
   al slot 0 de cada hilo, con hasta 4 KiB de datos y relleno y alineación
   de hasta 16 bytes. Se validan las direcciones de callbacks antes de
   su entrega. Se restaura el GS anterior al salir del código invitado.
@@ -190,3 +194,62 @@ make -j2 BUILD_DIR=build-ubsan CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize
 El cargador y el lanzador están licenciados bajo MIT. Las dependencias
 SDL2, Cairo, libffi y Bubblewrap son externas y conservan sus licencias.
 No se incorporan DLL ni implementaciones propietarias de Windows.
+
+### COM e imágenes
+
+El perfil WIC de `CoCreateInstance` activa `IWICImagingFactory` con
+SDL2_image. Incluye decodificación desde un archivo invitado, consulta
+del tamaño y conversión de píxeles RGB/BGR y RGBA/BGRA. Respeta la
+inicialización COM por hilo y mantiene los píxeles vivos mientras
+existan referencias al frame o al conversor. La prueba
+`make check-pe-wic` crea, decodifica y convierte un BMP desde un PE AMD64.
+La dependencia [SDL2_image](https://github.com/libsdl-org/SDL_image)
+conserva las licencias de los codecs empaquetados por la distribución.
+
+### Procesos hijos y shell
+
+`CreateProcessW` puede lanzar otro PE AMD64 del disco invitado en el mismo
+sandbox. Admite un ejecutable explícito o el primer argumento de una línea
+de comandos, un directorio de trabajo invitado y el entorno heredado.
+El padre conserva manejadores de espera y el código de salida de 32 bits.
+Las opciones de seguridad, la herencia arbitraria de manejadores, las
+consolas separadas y los bloques de entorno personalizados quedan fuera
+del perfil inicial.
+
+`SHParseDisplayName` genera un PIDL para rutas de archivos o directorios
+invitados. `SHOpenFolderAndSelectItems` muestra una carpeta SDL con selección
+de un elemento y `ShellExecuteW` admite abrir carpetas y ejecutar un PE
+con el mismo mecanismo de procesos hijos. Los verbos y asociaciones del
+escritorio anfitrión quedan fuera de este perfil.
+
+`make check-pe-platform` verifica el shell desde un PE generado con MinGW-w64. El caso de
+procesos hijos de `make check-pe-isolated` prueba argumentos Unicode,
+directorio de trabajo y código de salida superior a 255.
+
+El lanzador pasa los argumentos que siguen al EXE a la línea de comandos
+Win64. Un PE de prueba verifica argumentos vacíos, Unicode, espacios,
+comillas y barras invertidas. `CreateFileW` conserva `HANDLE_FLAG_INHERIT`
+en el manejador invitado cuando recibe un descriptor de seguridad nulo.
+`GetHandleInformation` expone ese bit. Los descriptores Linux siguen
+cerrándose al ejecutar otro proceso.
+
+### Consola
+
+`AttachConsole` admite el terminal Linux heredado del padre. `AllocConsole`
+crea un seudoterminal Linux y una ventana SDL con salida y entrada de texto.
+`GetConsoleWindow` devuelve el HWND de esa ventana. Un terminal heredado
+carece de HWND invitado. `make check-pe-platform` prueba apertura, título,
+entrada, salida y cierre desde un PE. `make check` comprueba UTF-8 y título
+en un terminal heredado.
+
+### Excepciones AMD64
+
+`RaiseException`, `RtlUnwind` y `RtlUnwindEx` usan las tablas AMD64 del PE
+y la pila Linux del hilo invitado. El perfil busca filtros Win64, ejecuta
+bloques de finalización y restaura registros al reanudar o transferir el
+control. Solo recorre código de la sección ejecutable de entrada y aplica
+límites a los marcos, la memoria legible y el anidamiento. Las señales
+síncronas de Linux y los formatos de unwind encadenados quedan fuera de
+este perfil. `make check-pe-seh` comprueba continuación, captura,
+finalización, ambos métodos de unwind y el callback de consolidación de
+excepciones C++ desde un PE AMD64.

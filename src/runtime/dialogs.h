@@ -82,5 +82,7 @@ int32_t NT_MS_ABI nt_GetSaveFileNameA(struct nt_open_file_name *request);
 int32_t NT_MS_ABI nt_GetOpenFileNameW(struct nt_open_file_name *request);
 int32_t NT_MS_ABI nt_GetSaveFileNameW(struct nt_open_file_name *request);
 uint32_t NT_MS_ABI nt_CommDlgExtendedError(void);
+bool nt_runtime_show_folder(const char *path, const char *selection, uintptr_t owner);
+void nt_runtime_close_folder_views(void);
 
 #endif

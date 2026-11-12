@@ -37,11 +37,10 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
   mediante sus rutas de usuario de Windows. El runtime implementa el
   subconjunto de `SHGetKnownFolderPath` que corresponde a esas carpetas.
 
-La primera etapa de diagnóstico D3D12 incorpora el comando nativo
-`nt-vulkan-probe`, que comprueba la disponibilidad del cargador Vulkan y
-los dispositivos físicos **sin** simular un `ID3D12Device`.
-La creación de dispositivos D3D12 para Squadron121 sigue pendiente.
-[Contrato y límites](docs/vulkan-d3d12.md).
+`nt-vulkan-probe` comprueba el cargador y los dispositivos Vulkan.
+El perfil D3D12 crea dispositivos, colas y recursos a través de vkd3d y
+Vulkan. El perfil DXGI enumera adaptadores Vulkan. La presentación de
+fotogramas mediante DXGI queda pendiente.
 
 ## Compilar y probar
 
@@ -93,9 +92,13 @@ make
 build/pe-import-audit --unresolved /ruta/a/mines.exe
 ```
 
-Squadron121 DX12 tiene 288 de 324 importaciones directas con un equivalente
-registrado cuando FluidSynth está instalado. `make check-pe-native` verifica
-los servicios del sistema en un PE de prueba. [Cobertura y pendientes](docs/squadron-compatibility.md).
+Squadron121 DX12 tiene 324 de 324 importaciones directas con un equivalente
+registrado cuando están instalados los backends requeridos. El ejecutable
+original completó la prueba Autoplay Lab en 32 niveles sin gráficos, con
+28 partidas que despejaron el tablero. El modo gráfico en Codex se detuvo
+en la selección de adaptador. El juego requiere Direct3D 12 Feature Level
+12_0 y descarta el único adaptador disponible, Mesa lavapipe.
+[Cobertura y prueba de arranque](docs/squadron-compatibility.md).
 
 El auditor lee una copia del archivo de hasta 128 MiB. Informa sobre
 las importaciones directas y devuelve 0 si todas tienen un equivalente,

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
+#include "console.h"
 #include "winbase.h"
 #include "winfile.h"
 #include "sync.h"
@@ -277,6 +278,48 @@ int nt_runtime_open_guest_file_readonly(const char *input)
     return fd;
 }
 
+int nt_runtime_read_guest_file(const char *path, size_t limit, void **data, size_t *size)
+{
+    *data = NULL;
+    *size = 0;
+    const int fd = nt_runtime_open_guest_file_readonly(path);
+    if (fd < 0)
+        return errno;
+    struct stat info;
+    int error = fstat(fd, &info) != 0 ? errno : 0;
+    if (error == 0 && (info.st_size < 0 || (uintmax_t)info.st_size > limit))
+        error = EFBIG;
+    if (error) {
+        close(fd);
+        return error;
+    }
+    size_t length = (size_t)info.st_size;
+    unsigned char *bytes = malloc(length ? length : 1);
+    if (!bytes) {
+        close(fd);
+        return ENOMEM;
+    }
+    size_t done = 0;
+    while (done < length) {
+        ssize_t got = read(fd, bytes + done, length - done);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0) {
+            error = got == 0 ? EIO : errno;
+            break;
+        }
+        done += (size_t)got;
+    }
+    close(fd);
+    if (error) {
+        free(bytes);
+        return error;
+    }
+    *data = bytes;
+    *size = length;
+    return 0;
+}
+
 static int open_parent(int root, const char *path, const char **leaf)
 {
     const char *slash = strrchr(path, '/');
@@ -404,6 +447,7 @@ static uint32_t path_error(int error, bool parent)
 
 enum {
     FILE_READ = 1, FILE_WRITE = 2, FILE_TABLE_SIZE = 256,
+    HANDLE_FLAG_INHERIT = 1,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
     TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80
 };
@@ -415,6 +459,7 @@ struct guest_file {
     uintptr_t handle;
     int fd;
     unsigned int access, share;
+    uint32_t handle_flags;
     dev_t device;
     ino_t inode;
     bool text;
@@ -507,8 +552,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     if ((desired & ~(generic_read | generic_write)) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
-        template_file != 0 || (attributes != NULL &&
-                              (attributes->descriptor != NULL || attributes->inherit != 0))) {
+        template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return UINTPTR_MAX;
     }
@@ -566,6 +610,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
                 next_handle += 16;
                 slot->owner = WIN_HANDLE;
                 slot->handle = result;
+                slot->handle_flags = attributes && attributes->inherit ? HANDLE_FLAG_INHERIT : 0;
                 slot->path = saved_path;
                 saved_path = NULL;
             }
@@ -588,6 +633,22 @@ static int close_file(struct guest_file *file)
     file->path = NULL;
     file->owner = FREE_FILE;
     return result;
+}
+
+int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
+{
+    if (!flags) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    if (file)
+        *flags = file->handle_flags;
+    pthread_mutex_unlock(&file_lock);
+    if (!file)
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return file != NULL;
 }
 
 int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
@@ -1839,6 +1900,173 @@ int32_t NT_MS_ABI nt_GetConsoleMode(uintptr_t handle, uint32_t *mode)
         errno = EBADF;
     }
     return file_result(fd, ok);
+}
+
+/* Native console operations use the same real Linux TTY descriptors that
+ * GetStdHandle, ReadFile and GetConsoleMode expose to the guest. */
+int32_t NT_MS_ABI nt_ReadConsoleW(uintptr_t handle, uint16_t *buffer, uint32_t count,
+                                  uint32_t *done, const void *control)
+{
+    if (done == NULL || (count != 0 && buffer == NULL) || control != NULL) {
+        nt_SetLastError(control != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *done = 0;
+    const int fd = duplicate_handle(handle, FILE_READ);
+    struct termios term;
+    if (fd < 0 || tcgetattr(fd, &term) != 0) {
+        if (fd >= 0)
+            errno = EBADF;
+        return file_result(fd, false);
+    }
+    static _Thread_local struct {
+        uintptr_t handle;
+        uint16_t low;
+        bool ready;
+    } pending;
+    if (pending.handle != handle)
+        pending.ready = false;
+    pending.handle = handle;
+    if (pending.ready && count != 0) {
+        buffer[(*done)++] = pending.low;
+        pending.ready = false;
+    }
+    while (*done < count) {
+        if (!nt_runtime_console_wait(fd))
+            return file_result(fd, false);
+        char bytes[4];
+        ssize_t got;
+        do {
+            got = read(fd, bytes, 1);
+        } while (got < 0 && errno == EINTR);
+        if (got < 0)
+            return file_result(fd, false);
+        if (got == 0)
+            break;
+        const unsigned char first = (unsigned char)bytes[0];
+        unsigned int length = first < 0x80 ? 1 : first >= 0xc2 && first <= 0xdf ? 2 :
+                              first >= 0xe0 && first <= 0xef ? 3 :
+                              first >= 0xf0 && first <= 0xf4 ? 4 : 0;
+        if (length == 0) {
+            nt_SetLastError(NT_ERROR_NO_UNICODE_TRANSLATION);
+            close(fd);
+            return 0;
+        }
+        for (unsigned int i = 1; i < length; ++i) {
+            do {
+                got = read(fd, bytes + i, 1);
+            } while (got < 0 && errno == EINTR);
+            if (got != 1 || ((unsigned char)bytes[i] & 0xc0u) != 0x80u) {
+                nt_SetLastError(NT_ERROR_NO_UNICODE_TRANSLATION);
+                close(fd);
+                return 0;
+            }
+        }
+        uint16_t wide[2];
+        const int32_t converted = nt_MultiByteToWideChar(65001, 8, bytes,
+                                                          (int32_t)length, wide, 2);
+        if (converted == 0) {
+            close(fd);
+            return 0;
+        }
+        buffer[(*done)++] = wide[0];
+        if (converted == 2) {
+            if (*done < count)
+                buffer[(*done)++] = wide[1];
+            else {
+                pending.low = wide[1];
+                pending.ready = true;
+            }
+        }
+        if (first == '\n')
+            break;
+    }
+    close(fd);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_SetConsoleTitleA(const char *title)
+{
+    if (title == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const size_t length = strnlen(title, 8193);
+    if (length > 8192) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(nt_GetStdHandle((uint32_t)-11), FILE_WRITE);
+    struct termios term;
+    if (fd < 0 || tcgetattr(fd, &term) != 0) {
+        if (fd >= 0)
+            errno = EBADF;
+        return file_result(fd, false);
+    }
+    /* CP1252 is the current Win32 ANSI compatibility profile. Convert to
+     * UTF-8 before sending an OSC 0 terminal title to the Linux console. */
+    const int32_t units = nt_MultiByteToWideChar(1252, 0, title,
+                                                  (int32_t)length, NULL, 0);
+    uint16_t *wide = units >= 0 ? calloc((size_t)units + 1, sizeof(*wide)) : NULL;
+    if (wide == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        close(fd);
+        return 0;
+    }
+    if (length != 0 && nt_MultiByteToWideChar(1252, 0, title,
+                                             (int32_t)length, wide, units) != units) {
+        free(wide);
+        close(fd);
+        return 0;
+    }
+    const int32_t needed = units != 0 ?
+        nt_WideCharToMultiByte(65001, 0, wide, units, NULL, 0, NULL, NULL) : 0;
+    char *text = needed >= 0 ? malloc((size_t)needed + 6) : NULL;
+    if (text == NULL) {
+        free(wide);
+        close(fd);
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    if (needed != 0 && nt_WideCharToMultiByte(65001, 0, wide, units, text + 4,
+                                              needed, NULL, NULL) != needed) {
+        free(wide);
+        free(text);
+        close(fd);
+        return 0;
+    }
+    free(wide);
+    /* Reject controls to prevent terminal escape sequence injection. */
+    for (int32_t i = 0; i < needed; ++i) {
+        if ((unsigned char)text[4 + i] < 0x20 || (unsigned char)text[4 + i] == 0x7f) {
+            free(text);
+            close(fd);
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    }
+    text[4 + needed] = 0;
+    if (nt_runtime_console_title(text + 4)) {
+        free(text);
+        close(fd);
+        return 1;
+    }
+    memcpy(text, "\x1b]0;", 4);
+    text[4 + needed] = '\x07';
+    size_t pos = 0, total = (size_t)needed + 5;
+    while (pos < total) {
+        ssize_t written = write(fd, text + pos, total - pos);
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written <= 0)
+            break;
+        pos += (size_t)written;
+    }
+    free(text);
+    if (pos != total)
+        return file_result(fd, false);
+    close(fd);
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_WriteConsoleA(uintptr_t handle, const char *buffer, uint32_t count, uint32_t *done, void *reserved)

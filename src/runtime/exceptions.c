@@ -1,8 +1,12 @@
 /* SPDX-License-Identifier: MIT */
+#define _GNU_SOURCE
 #include "compat.h"
+#include "winbase.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 
 _Static_assert(sizeof(struct nt_context64) == 1232, "AMD64 CONTEXT size");
@@ -28,6 +32,9 @@ static struct {
     size_t image_size;
     const struct nt_runtime_function *table;
     size_t count;
+    uint32_t code_begin, code_end;
+    bool (*readable)(uint32_t, size_t, const void *);
+    const void *opaque;
 } image;
 
 bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
@@ -36,10 +43,7 @@ bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
     if (base == 0) {
         if (count != 0)
             return false;
-        image.base = 0;
-        image.image_size = 0;
-        image.table = NULL;
-        image.count = 0;
+        memset(&image, 0, sizeof(image));
         nt_runtime_set_seh_dispatch(0, 0, NULL);
         return true;
     }
@@ -58,6 +62,9 @@ bool nt_runtime_set_runtime_functions(uintptr_t base, size_t image_size,
     image.image_size = image_size;
     image.table = table;
     image.count = count;
+    image.code_begin = image.code_end = 0;
+    image.readable = NULL;
+    image.opaque = NULL;
     nt_runtime_set_seh_dispatch(0, 0, NULL);
     return true;
 }
@@ -111,7 +118,8 @@ static bool stack_bytes(uint64_t address, uint64_t offset, void *output, size_t 
 
 static const unsigned char *image_bytes(uint32_t offset, size_t length)
 {
-    return offset <= image.image_size && length <= image.image_size - offset ?
+    return offset <= image.image_size && length <= image.image_size - offset &&
+           (!image.readable || image.readable(offset, length, image.opaque)) ?
            (const unsigned char *)(image.base + offset) : NULL;
 }
 
@@ -266,10 +274,10 @@ static bool unwind_codes(const unsigned char *info, struct nt_context64 *context
     return true;
 }
 
-void *NT_MS_ABI nt_RtlVirtualUnwind(uint32_t type, uint64_t base, uint64_t pc,
-                                   const struct nt_runtime_function *function,
-                                   struct nt_context64 *context, void **handler_data,
-                                   uint64_t *frame, struct nt_unwind_pointers *pointers)
+static void *virtual_unwind(uint32_t type, uint64_t base, uint64_t pc,
+                            const struct nt_runtime_function *function,
+                            struct nt_context64 *context, void **handler_data,
+                            uint64_t *frame, struct nt_unwind_pointers *pointers, bool check_epilogue)
 {
     uint64_t found;
     if (context == NULL || handler_data == NULL || frame == NULL || function == NULL ||
@@ -282,7 +290,7 @@ void *NT_MS_ABI nt_RtlVirtualUnwind(uint32_t type, uint64_t base, uint64_t pc,
     const unsigned char *instruction = image_bytes(rva, function->end - rva);
     const unsigned char *info = image_bytes(function->unwind, 4);
     if (instruction == NULL || info == NULL || (info[0] & 7) != 1 || (info[0] >> 3 & ~3u) != 0 ||
-        begins_epilogue(instruction, function->end - rva)) {
+        (check_epilogue && begins_epilogue(instruction, function->end - rva))) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return NULL;
     }
@@ -317,6 +325,14 @@ void *NT_MS_ABI nt_RtlVirtualUnwind(uint32_t type, uint64_t base, uint64_t pc,
     if (pointers != NULL)
         *pointers = restored;
     return handler;
+}
+
+void *NT_MS_ABI nt_RtlVirtualUnwind(uint32_t type, uint64_t base, uint64_t pc,
+                                   const struct nt_runtime_function *function,
+                                   struct nt_context64 *context, void **handler_data,
+                                   uint64_t *frame, struct nt_unwind_pointers *pointers)
+{
+    return virtual_unwind(type, base, pc, function, context, handler_data, frame, pointers, true);
 }
 
 bool nt_runtime_set_seh_dispatch(uint32_t begin, uint32_t end, nt_seh_transfer transfer)
@@ -423,6 +439,231 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
 invalid:
     nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
     return SEH_CONTINUE_SEARCH;
+}
+
+#define STATUS_NONCONTINUABLE UINT32_C(0xc0000025)
+#define STATUS_UNWIND UINT32_C(0xc0000027)
+#define STATUS_UNWIND_CONSOLIDATE UINT32_C(0x80000029)
+#define STATUS_BAD_STACK UINT32_C(0xc0000028)
+#define STATUS_INVALID_TARGET UINT32_C(0xc0000029)
+enum {
+    SOFTWARE_NONCONTINUABLE = 1, SOFTWARE_UNWINDING = 2, SOFTWARE_EXIT_UNWIND = 4,
+    SOFTWARE_EHANDLER = 1, SOFTWARE_UHANDLER = 2, SOFTWARE_MAX_FRAMES = 256,
+    SOFTWARE_MAX_NESTING = 8
+};
+
+struct software_exception {
+    struct nt_context64 *origin;
+    struct software_exception *previous;
+    unsigned int depth;
+};
+static _Thread_local struct software_exception *active_software;
+
+typedef int32_t (NT_MS_ABI *software_handler)(struct nt_exception_record *, uint64_t,
+                                             struct nt_context64 *, struct nt_dispatcher_context *);
+typedef uint64_t (NT_MS_ABI *consolidate_handler)(struct nt_exception_record *);
+_Noreturn void nt_restore_software_context(const struct nt_context64 *context);
+
+static _Noreturn void software_failure(uint32_t status)
+{
+    nt_ExitProcess(status);
+    _Exit(1);
+}
+
+static _Noreturn void software_unwind(struct nt_context64 *origin, uint64_t frame, uint64_t target,
+                                     struct nt_exception_record *record, uint64_t value,
+                                     struct nt_context64 *output, struct software_exception *previous);
+
+static void selected_software_handler(struct nt_exception_record *record, uint64_t frame,
+                                      uint64_t target, const struct nt_dispatcher_context *dispatch)
+{
+    (void)dispatch;
+    if (!active_software)
+        software_failure(STATUS_INVALID_TARGET);
+    software_unwind(active_software->origin, frame, target, record, record->code, NULL,
+                    active_software->previous);
+}
+
+bool nt_runtime_enable_software_seh(uint32_t begin, uint32_t end,
+                                   bool (*readable)(uint32_t, size_t, const void *), const void *opaque)
+{
+    if (!image.table || !readable || !nt_runtime_set_seh_dispatch(begin, end, selected_software_handler))
+        return false;
+    image.code_begin = begin;
+    image.code_end = end;
+    image.readable = readable;
+    image.opaque = opaque;
+    return true;
+}
+
+static bool prepare_software_stack(void)
+{
+    pthread_attr_t attr;
+    if (!image.code_end || pthread_getattr_np(pthread_self(), &attr) != 0)
+        return false;
+    void *low = NULL;
+    size_t size = 0;
+    const int result = pthread_attr_getstack(&attr, &low, &size);
+    pthread_attr_destroy(&attr);
+    return result == 0 && low && nt_runtime_set_unwind_stack(low, size) &&
+           nt_runtime_set_seh_dispatch(image.code_begin, image.code_end, selected_software_handler);
+}
+
+static bool software_code(uint64_t address)
+{
+    return address >= image.base + image.code_begin && address < image.base + image.code_end;
+}
+
+static bool software_stack_pointer(uint64_t rsp)
+{
+    return stack_low && rsp >= stack_low + 8 && rsp < stack_high && (rsp & 7u) == 0;
+}
+
+static bool software_frame(uint32_t type, struct nt_context64 *next, struct nt_dispatcher_context *dispatch)
+{
+    const uint64_t rsp = next->rsp;
+    /* RIP points after a call. The byte before it belongs to the caller's scope. */
+    const uint64_t pc = next->rip - 1;
+    if (!software_code(pc) || !software_stack_pointer(rsp))
+        return false;
+    *dispatch = (struct nt_dispatcher_context){.pc = pc, .base = image.base, .frame = rsp, .context = next};
+    uint64_t base;
+    dispatch->function = nt_RtlLookupFunctionEntry(pc, &base, NULL);
+    if (!dispatch->function) {
+        if (!stack_bytes(rsp, 0, &next->rip, sizeof(next->rip)))
+            return false;
+        next->rsp += sizeof(next->rip);
+        return true;
+    }
+    void *data = NULL;
+    const uint32_t last_error = nt_GetLastError();
+    dispatch->handler = virtual_unwind(type, base, pc, dispatch->function, next, &data,
+                                       &dispatch->frame, NULL, false);
+    nt_SetLastError(last_error);
+    dispatch->handler_data = data;
+    return next->rsp > rsp && dispatch->frame >= stack_low && dispatch->frame < stack_high &&
+           (!dispatch->handler || software_code((uintptr_t)dispatch->handler));
+}
+
+static int32_t invoke_software_handler(struct nt_dispatcher_context *dispatch, struct nt_exception_record *record,
+                                       struct nt_context64 *context)
+{
+    software_handler handler;
+    memcpy(&handler, &dispatch->handler, sizeof(handler));
+    return handler(record, dispatch->frame, context, dispatch);
+}
+
+static void complete_software_capture(struct nt_context64 *context)
+{
+    memset(context->homes, 0, sizeof(context->homes));
+    memset(context->debug, 0, sizeof(context->debug));
+    const size_t offset = offsetof(struct nt_context64, vectors);
+    memset((unsigned char *)context + offset, 0, sizeof(*context) - offset);
+}
+
+static _Noreturn void resume_software(const struct nt_context64 *context, struct software_exception *previous)
+{
+    if (!software_code(context->rip) || !software_stack_pointer(context->rsp))
+        software_failure(STATUS_INVALID_TARGET);
+    active_software = previous;
+    nt_restore_software_context(context);
+}
+
+_Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint32_t code, uint32_t flags,
+                                             uint32_t count, const uintptr_t *arguments)
+{
+    complete_software_capture(origin);
+    const bool ready = prepare_software_stack();
+    struct nt_exception_record record = {.code = code, .flags = flags & SOFTWARE_NONCONTINUABLE,
+                                         .address = (void *)(uintptr_t)origin->rip};
+    if (arguments) {
+        record.count = count > 15 ? 15 : count;
+        memcpy(record.information, arguments, record.count * sizeof(*arguments));
+    }
+    struct software_exception state = {.origin = origin, .previous = active_software,
+                                        .depth = active_software ? active_software->depth + 1 : 1};
+    if (state.depth > SOFTWARE_MAX_NESTING)
+        software_failure(STATUS_BAD_STACK);
+    active_software = &state;
+    struct nt_context64 next = *origin;
+    if (ready) {
+        for (size_t i = 0; i < SOFTWARE_MAX_FRAMES; ++i) {
+            struct nt_dispatcher_context dispatch;
+            if (!software_frame(SOFTWARE_EHANDLER, &next, &dispatch))
+                break;
+            if (dispatch.handler && invoke_software_handler(&dispatch, &record, origin) == SEH_CONTINUE_EXECUTION) {
+                if (record.flags & SOFTWARE_NONCONTINUABLE)
+                    software_failure(STATUS_NONCONTINUABLE);
+                resume_software(origin, state.previous);
+            }
+        }
+    }
+    struct nt_exception_pointers pointers = {&record, origin};
+    if (nt_UnhandledExceptionFilter(&pointers) == -1 && ready) {
+        if (record.flags & SOFTWARE_NONCONTINUABLE)
+            software_failure(STATUS_NONCONTINUABLE);
+        resume_software(origin, state.previous);
+    }
+    software_failure(code);
+}
+
+static _Noreturn void software_unwind(struct nt_context64 *origin, uint64_t frame, uint64_t target,
+                                     struct nt_exception_record *record, uint64_t value,
+                                     struct nt_context64 *output, struct software_exception *previous)
+{
+    if (frame && (!software_stack_pointer(frame) || frame < origin->rsp || !software_code(target)))
+        software_failure(STATUS_INVALID_TARGET);
+    struct nt_exception_record unwind = {.code = STATUS_UNWIND, .address = (void *)(uintptr_t)origin->rip};
+    if (!record)
+        record = &unwind;
+    record->flags |= SOFTWARE_UNWINDING;
+    if (!frame)
+        record->flags |= SOFTWARE_EXIT_UNWIND;
+    struct nt_context64 next = *origin;
+    for (size_t i = 0; i < SOFTWARE_MAX_FRAMES; ++i) {
+        struct nt_context64 current = next;
+        struct nt_dispatcher_context dispatch;
+        if (!software_frame(SOFTWARE_UHANDLER, &next, &dispatch))
+            break;
+        if (frame && dispatch.frame > frame)
+            software_failure(STATUS_INVALID_TARGET);
+        const bool found = frame && dispatch.frame == frame;
+        if (found)
+            record->flags |= SEH_TARGET_UNWIND;
+        dispatch.target = target;
+        if (dispatch.handler)
+            (void)invoke_software_handler(&dispatch, record, &current);
+        if (found) {
+            current.rip = target;
+            current.rax = value;
+            if (record->code == STATUS_UNWIND_CONSOLIDATE) {
+                if (!record->count || !software_code(record->information[0]))
+                    software_failure(STATUS_INVALID_TARGET);
+                if (output)
+                    *output = current;
+                current.rip = ((consolidate_handler)record->information[0])(record);
+            }
+            if (output)
+                *output = current;
+            resume_software(&current, previous);
+        }
+    }
+    software_failure(frame ? STATUS_INVALID_TARGET : record->code);
+}
+
+_Noreturn void nt_unwind_software_exception(struct nt_context64 *origin, uint64_t frame, uint64_t target,
+                                           struct nt_exception_record *record, uint64_t value,
+                                           struct nt_context64 *output)
+{
+    if (!prepare_software_stack())
+        software_failure(STATUS_BAD_STACK);
+    complete_software_capture(origin);
+    struct software_exception *previous = active_software;
+    if (previous && frame >= previous->origin->rsp) {
+        origin = previous->origin;
+        previous = previous->previous;
+    }
+    software_unwind(origin, frame, target, record, value, output, previous);
 }
 
 static _Atomic(nt_exception_filter) exception_filter;

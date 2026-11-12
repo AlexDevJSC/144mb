@@ -37,11 +37,14 @@ int main(void)
     assert(nt_guest_thread_enter(&thread, image));
     assert(from_gs_30() == (uintptr_t)thread.teb);
     assert(from_gs_58() == (uintptr_t)thread.tls_vector);
-    assert(from_gs_60() == (uintptr_t)thread.peb);
+    assert(from_gs_60() == (uintptr_t)thread.standalone.peb);
     assert(thread.tls_vector[0] == (uintptr_t)thread.tls_block);
     uintptr_t base = 0;
-    __builtin_memcpy(&base, thread.peb + 0x10, sizeof(base));
+    __builtin_memcpy(&base, thread.standalone.peb + 0x10, sizeof(base));
     assert(base == image);
+    uintptr_t parameters = 0;
+    __builtin_memcpy(&parameters, thread.standalone.peb + 0x20, sizeof(parameters));
+    assert(parameters == (uintptr_t)&thread.standalone.parameters && thread.standalone.parameters.flags == 1);
     assert(!nt_guest_thread_enter(&thread, image));
     assert(nt_guest_thread_leave(&thread));
     uintptr_t current = UINTPTR_MAX;
