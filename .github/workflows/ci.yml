@@ -99,6 +99,6 @@ jobs:
           icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
           test -n "$icd"
           dxc="$install_home/share/nt-native-linux/current/lib/nt-native-linux/dxc/lib"
-          runuser -u nt-installer -- env "LC_ALL=C.UTF-8" "VK_DRIVER_FILES=$icd" "LD_LIBRARY_PATH=$dxc" \
+          runuser -u nt-installer -- env "VK_DRIVER_FILES=$icd" "LD_LIBRARY_PATH=$dxc" \
             make -j2 -C "$install_home/share/nt-native-linux/source" "BUILD_DIR=build-fedora-$INSTALL_REVISION" \
             check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-kernel-user
