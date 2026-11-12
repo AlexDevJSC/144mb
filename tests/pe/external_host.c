@@ -100,6 +100,7 @@ int main(int argc, char **argv)
         return 4;
     }
     nt_runtime_set_guest_image_extent(image.size);
+    nt_runtime_set_guest_image_entrypoint(image.entry_rva);
     const struct nt_guest_tls initial = {image.base + image.tls.data_rva, image.tls.bytes, image.tls.zero_fill};
     nt_runtime_set_guest_tls(&initial, image.base + image.tls.callbacks_rva, image.tls.callback_count);
     nt_runtime_set_guest_environment(guest_env);
