@@ -12,6 +12,6 @@ int main(void)
            report.swapchain_devices);
     printf("Status: %s (VkResult %d)\n", nt_vulkan_state_name(report.state),
            report.last_vk_result);
-    puts("D3D12CreateDevice is not available. This diagnostic does not implement COM or Vulkan rendering.");
+    puts("This diagnostic checks Vulkan discovery. Use check-pe-graphics to test D3D12.");
     return 0;
 }

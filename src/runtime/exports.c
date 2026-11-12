@@ -17,6 +17,9 @@
 #include "raw_input.h"
 #include "task_dialog.h"
 #include "windesktop.h"
+#ifdef NT_HAVE_VKD3D
+#include "graphics.h"
+#endif
 #include "display_config.h"
 
 #include <math.h>
@@ -730,6 +733,26 @@ static const struct runtime_export utility_exports[] = {
     EXPORT("qsort", crt_qsort)
 };
 
+#ifdef NT_HAVE_VKD3D
+static const struct runtime_export d3d12_exports[] = {
+    EXPORT("D3D12CreateDevice", nt_D3D12CreateDevice),
+    EXPORT("D3D12SerializeRootSignature", nt_D3D12SerializeRootSignature),
+    EXPORT("D3D12SerializeVersionedRootSignature", nt_D3D12SerializeVersionedRootSignature),
+};
+static const struct runtime_export dxgi_exports[] = {
+    EXPORT("CreateDXGIFactory", nt_CreateDXGIFactory),
+    EXPORT("CreateDXGIFactory1", nt_CreateDXGIFactory1),
+    EXPORT("CreateDXGIFactory2", nt_CreateDXGIFactory2),
+};
+static const struct runtime_export streamline_exports[] = {
+    EXPORT("D3D12CreateDevice", nt_D3D12CreateDevice),
+    EXPORT("D3D12SerializeRootSignature", nt_D3D12SerializeRootSignature),
+    EXPORT("D3D12SerializeVersionedRootSignature", nt_D3D12SerializeVersionedRootSignature),
+    EXPORT("CreateDXGIFactory1", nt_CreateDXGIFactory1),
+    EXPORT("CreateDXGIFactory2", nt_CreateDXGIFactory2),
+};
+#endif
+
 static const struct {
     const char *name;
     const struct runtime_export *exports;
@@ -759,7 +782,12 @@ static const struct {
     MODULE("advapi32.dll", advapi32_exports),
     MODULE("imm32.dll", imm32_exports),
     MODULE("ws2_32.dll", ws2_32_exports),
-    MODULE("libfluidsynth-3.dll", fluid_exports)
+    MODULE("libfluidsynth-3.dll", fluid_exports),
+#ifdef NT_HAVE_VKD3D
+    MODULE("d3d12.dll", d3d12_exports),
+    MODULE("dxgi.dll", dxgi_exports),
+    MODULE("sl.interposer.dll", streamline_exports),
+#endif
 #undef MODULE
 };
 

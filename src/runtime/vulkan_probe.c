@@ -79,7 +79,7 @@ const char *nt_vulkan_state_name(enum nt_vulkan_state state)
     case NT_VULKAN_NO_PHYSICAL_DEVICE: return "No Vulkan physical devices found";
     case NT_VULKAN_NO_SWAPCHAIN: return "No device with VK_KHR_swapchain found";
     case NT_VULKAN_API_BELOW_1_3: return "Vulkan loader version below 1.3";
-    case NT_VULKAN_PRELIMINARY_READY: return "Vulkan preflight complete; D3D12 still unimplemented";
+    case NT_VULKAN_PRELIMINARY_READY: return "Vulkan preflight complete";
     }
     return "Unknown Vulkan probe result";
 }

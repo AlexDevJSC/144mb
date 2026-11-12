@@ -1,0 +1,7 @@
+LIBRARY sl.interposer.dll
+EXPORTS
+    CreateDXGIFactory1
+    CreateDXGIFactory2
+    D3D12CreateDevice
+    D3D12SerializeRootSignature
+    D3D12SerializeVersionedRootSignature

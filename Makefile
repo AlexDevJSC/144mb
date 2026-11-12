@@ -15,11 +15,25 @@ GDI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags cairo)
 GDI_LIBS ?= $(shell $(PKG_CONFIG) --libs cairo)
 FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
 FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
+VKD3D_PACKAGES = 'libvkd3d >= 1.2' 'libvkd3d-utils >= 1.2' vulkan
+VKD3D_CFLAGS ?= $(patsubst -I%,-isystem %,$(shell $(PKG_CONFIG) --cflags $(VKD3D_PACKAGES) 2>/dev/null))
+VKD3D_LIBS ?= $(shell $(PKG_CONFIG) --libs $(VKD3D_PACKAGES) 2>/dev/null)
 RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process environment sync threads fluid crypto winsock nls registry raw_input exceptions \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
+ifneq ($(strip $(VKD3D_LIBS)),)
+RUNTIME_PARTS += d3d12_linux dxgi_linux
+RUNTIME_LIBS += $(VKD3D_LIBS)
+VKD3D_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,d3d12_linux.o dxgi_linux.o)
+$(BUILD_DIR)/runtime-exports.o: override CPPFLAGS += -DNT_HAVE_VKD3D
+$(BUILD_DIR)/runtime-exports.o $(VKD3D_OBJECTS): src/runtime/graphics.h
+$(VKD3D_OBJECTS): src/runtime/graphics_linux.h
+$(VKD3D_OBJECTS): override CPPFLAGS += $(VKD3D_CFLAGS)
+$(BUILD_DIR)/runtime-d3d12_linux.o: src/runtime/sync.h
+$(BUILD_DIR)/runtime-dxgi_linux.o: src/runtime/desktop.h
+endif
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
 PE_IMAGE_HEADERS = src/pe/image.h src/pe/pe_bytes.h include/ntnative/guest_thread.h
 PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-insert-timestamp \
@@ -27,7 +41,8 @@ PE_FIXTURE_LDFLAGS = -Wl,--entry,import_fixture_entry,--subsystem,console,--no-i
 PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector \
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-isolated check-desktop benchmark install
+.DEFAULT_GOAL := all
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -236,6 +251,22 @@ $(BUILD_DIR)/displayconfig-fixture.exe: tests/pe/displayconfig_fixture.c | $(BUI
 check-pe-displayconfig: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/displayconfig-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/displayconfig-fixture.exe
+
+ifneq ($(strip $(VKD3D_LIBS)),)
+$(BUILD_DIR)/fixture-streamline-graphics.a: tests/pe/streamline-graphics.def | $(BUILD_DIR)
+	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/graphics-fixture.exe: tests/pe/graphics_fixture.c $(BUILD_DIR)/fixture-streamline-graphics.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lkernel32
+
+check-pe-graphics: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/graphics-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 30s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/graphics-fixture.exe
+else
+check-pe-graphics:
+	@echo 'check-pe-graphics requires libvkd3d, libvkd3d-utils and Vulkan development files.' >&2
+	@exit 1
+endif
 
 check-pe-native: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/native-services.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
