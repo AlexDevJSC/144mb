@@ -24,6 +24,10 @@ int32_t NT_MS_ABI nt_InitOnceComplete(void *once, uint32_t flags, void *context)
 
 uintptr_t NT_MS_ABI nt_CreateEventW(const void *security, int32_t manual, int32_t initial, const uint16_t *name);
 uintptr_t NT_MS_ABI nt_OpenEventW(uint32_t access, int32_t inherit, const uint16_t *name);
+uintptr_t NT_MS_ABI nt_CreateSemaphoreW(const void *security, int32_t initial,
+                                        int32_t maximum, const uint16_t *name);
+uintptr_t NT_MS_ABI nt_OpenSemaphoreW(uint32_t access, int32_t inherit, const uint16_t *name);
+int32_t NT_MS_ABI nt_ReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous);
 int32_t NT_MS_ABI nt_SetEvent(uintptr_t event);
 int32_t NT_MS_ABI nt_ResetEvent(uintptr_t event);
 uint32_t NT_MS_ABI nt_WaitForSingleObject(uintptr_t handle, uint32_t milliseconds);
