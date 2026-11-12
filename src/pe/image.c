@@ -292,8 +292,11 @@ static bool load_image(const unsigned char *file, size_t length, pe_image_resolv
         if (!dir_read(opt, optional_length, dir_count, i, &directory[i]))
             return fail(error, error_size, "Malformed data directory");
     }
-    if (directory[PE_DELAY_DIR].size)
-        return fail(error, error_size, "Delayed imports are not supported yet");
+    /* Delay-load descriptors belong to the application's CRT helper
+     * (__delayLoadHelper2), not to the operating-system import resolver.
+     * Keep their mapped contents and mutable delay IAT intact. Calls made
+     * later through LoadLibrary/GetProcAddress are resolved at first use.
+     * This does not imply support for arbitrary external guest DLLs. */
     /* A DLL needs its own loader-assigned TLS index. Reusing the EXE's
      * index zero would corrupt TLS and is deliberately prohibited. */
     if (as_library && directory[PE_TLS_DIR].size)
