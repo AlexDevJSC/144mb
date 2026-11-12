@@ -10,4 +10,8 @@ EXPORTS
     NtCreateEvent
     NtOpenEvent
     NtQueryEvent
+    NtCreateSemaphore
+    NtOpenSemaphore
+    NtQuerySemaphore
+    NtReleaseSemaphore
     NtResumeThread
