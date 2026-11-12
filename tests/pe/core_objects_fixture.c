@@ -122,8 +122,11 @@ static int test_semaphores(void)
         return 22;
     if (!CloseHandle(one) || !CloseHandle(two))
         return 23;
-    if (NtCreateSemaphore(&native, 0x1f0003, &attrs, -1, 2) == ST_OK ||
-        GetLastError() != ERROR_FILE_NOT_FOUND)
+    /* Successful Win32 semaphore calls may reset LastError. Native
+     * NTSTATUS calls must preserve its value independently of history. */
+    SetLastError(0x746u);
+    if (NtCreateSemaphore(&native, 0x1f0003, &attrs, -1, 2) != (LONG)0xc000000du ||
+        GetLastError() != 0x746u)
         return 24;
     return 0;
 }
