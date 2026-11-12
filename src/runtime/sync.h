@@ -3,6 +3,7 @@
 #define NTNATIVE_SYNC_H
 
 #include "compat.h"
+#include "ntnative/counter.h"
 
 typedef uint32_t (NT_MS_ABI *nt_thread_start)(void *);
 typedef void (NT_MS_ABI *nt_fls_callback)(void *);
