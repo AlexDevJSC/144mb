@@ -22,6 +22,11 @@ enum waitable_kind { EVENT, THREAD, PROCESS };
 struct waitable {
     uintptr_t handle;
     unsigned int refs;
+    /* Independent handles can refer to one event/thread/process state.
+     * The canonical slot cannot be recycled while an alias references it. */
+    struct waitable *shared;
+    unsigned int links;
+    uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started;
     uint32_t access;
@@ -55,7 +60,7 @@ static struct waitable *new_waitable(enum waitable_kind kind)
     if (next_handle == UINTPTR_MAX)
         return NULL;
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
-        if (waitables[i].refs == 0) {
+        if (waitables[i].refs == 0 && waitables[i].links == 0) {
             waitables[i] = (struct waitable){.handle = next_handle++, .refs = 1, .kind = kind,
                                              .access = SYNCHRONIZE};
             return &waitables[i];
@@ -64,15 +69,38 @@ static struct waitable *new_waitable(enum waitable_kind kind)
     return NULL;
 }
 
+static struct waitable *wait_state(struct waitable *handle)
+{
+    return handle->shared ? handle->shared : handle;
+}
+
+/* Releasing an alias after the final in-flight wait removes its reference
+ * from the canonical slot. All mutations occur under wait_lock. */
+static void release_waitable(struct waitable *object)
+{
+    if (--object->refs == 0 && object->shared)
+        --object->shared->links;
+}
+
 bool nt_runtime_close_waitable(uintptr_t handle)
 {
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = find_waitable(handle);
     if (object != NULL) {
         object->handle = 0;
-        --object->refs;
+        release_waitable(object);
         pthread_cond_broadcast(&wait_changed);
     }
+    pthread_mutex_unlock(&wait_lock);
+    return object != NULL;
+}
+
+bool nt_runtime_get_waitable_flags(uintptr_t handle, uint32_t *flags)
+{
+    pthread_mutex_lock(&wait_lock);
+    const struct waitable *object = find_waitable(handle);
+    if (object && flags)
+        *flags = object->handle_flags;
     pthread_mutex_unlock(&wait_lock);
     return object != NULL;
 }
@@ -92,6 +120,44 @@ static uint32_t event_access(uint32_t access)
     if (access & UINT32_C(0x12000000)) /* GENERIC_ALL or MAXIMUM_ALLOWED */
         rights |= EVENT_ALL_ACCESS;
     return rights;
+}
+
+nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
+                                         uint32_t attributes, uint32_t options,
+                                         uintptr_t *target)
+{
+    if (!target)
+        return NT_STATUS_ACCESS_VIOLATION;
+    *target = 0;
+    if ((options & ~7u) != 0 || (attributes & ~2u) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *original = find_waitable(source);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (!original) {
+        status = NT_STATUS_INVALID_HANDLE;
+    } else {
+        uint32_t rights = (options & 2u) ? original->access :
+                          original->kind == EVENT ? event_access(access) : access;
+        if (rights & ~original->access) {
+            status = NT_STATUS_ACCESS_DENIED;
+        } else {
+            struct waitable *alias = new_waitable(original->kind);
+            if (!alias) {
+                status = NT_STATUS_NO_MEMORY;
+            } else {
+                struct waitable *state = wait_state(original);
+                ++state->links;
+                alias->shared = state;
+                alias->access = rights;
+                alias->handle_flags = (options & 4u) ? original->handle_flags :
+                                      (attributes & 2u) ? 1u : 0u;
+                *target = alias->handle;
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
 }
 
 nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
@@ -144,9 +210,10 @@ static nt_status change_event(uintptr_t handle, bool signaled, int32_t *previous
     } else if (!(event->access & EVENT_MODIFY_STATE)) {
         status = NT_STATUS_ACCESS_DENIED;
     } else {
+        struct waitable *state = wait_state(event);
         if (previous)
-            *previous = event->signaled;
-        event->signaled = signaled;
+            *previous = state->signaled;
+        state->signaled = signaled;
         if (signaled)
             pthread_cond_broadcast(&wait_changed);
     }
@@ -178,7 +245,7 @@ static nt_status acquire_wait_objects(struct waitable **objects, uint32_t count,
         if (!(object->access & SYNCHRONIZE))
             return NT_STATUS_ACCESS_DENIED;
         for (uint32_t j = 0; j < i; ++j) {
-            if (objects[j] == object)
+            if (wait_state(objects[j]) == wait_state(object))
                 return NT_STATUS_INVALID_PARAMETER;
         }
         objects[i] = object;
@@ -194,7 +261,7 @@ static nt_status check_wait_objects(struct waitable *const *objects, uint32_t co
     for (uint32_t i = 0; i < count; ++i) {
         if (!objects[i]->handle)
             return NT_STATUS_INVALID_HANDLE;
-        if (objects[i]->signaled) {
+        if (wait_state(objects[i])->signaled) {
             if (!signaled)
                 first = i;
             ++signaled;
@@ -205,8 +272,8 @@ static nt_status check_wait_objects(struct waitable *const *objects, uint32_t co
     const uint32_t start = all ? 0 : first;
     const uint32_t end = all ? count : first + 1;
     for (uint32_t i = start; i < end; ++i) {
-        if (objects[i]->kind == EVENT && !objects[i]->manual)
-            objects[i]->signaled = false;
+        if (objects[i]->kind == EVENT && !wait_state(objects[i])->manual)
+            wait_state(objects[i])->signaled = false;
     }
     return all ? NT_STATUS_SUCCESS : (nt_status)first;
 }
@@ -240,7 +307,7 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
         if (result == NT_STATUS_TIMEOUT && error != ETIMEDOUT)
             result = NT_STATUS_UNSUCCESSFUL;
         for (uint32_t i = 0; i < count; ++i)
-            --objects[i]->refs;
+            release_waitable(objects[i]);
     }
     pthread_mutex_unlock(&wait_lock);
     return result;
@@ -368,8 +435,10 @@ int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = find_waitable(handle);
     bool valid = object && object->kind == PROCESS;
-    if (valid)
-        *code = object->signaled ? object->exit_code : STILL_ACTIVE;
+    if (valid) {
+        const struct waitable *state = wait_state(object);
+        *code = state->signaled ? state->exit_code : STILL_ACTIVE;
+    }
     pthread_mutex_unlock(&wait_lock);
     if (!valid)
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
@@ -486,8 +555,10 @@ int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t handle, uint32_t *code)
     pthread_mutex_lock(&wait_lock);
     const struct waitable *thread = find_waitable(handle);
     const bool valid = thread != NULL && thread->kind == THREAD;
-    if (valid)
-        *code = thread->signaled ? thread->exit_code : STILL_ACTIVE;
+    if (valid) {
+        const struct waitable *state = wait_state((struct waitable *)thread);
+        *code = state->signaled ? state->exit_code : STILL_ACTIVE;
+    }
     pthread_mutex_unlock(&wait_lock);
     if (!valid)
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
@@ -516,8 +587,9 @@ int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t handle, const uint16_t *desc
     int error = ESRCH;
     if (handle == nt_GetCurrentThread())
         error = pthread_setname_np(pthread_self(), name);
-    else if (thread != NULL && thread->kind == THREAD && !thread->signaled)
-        error = pthread_setname_np(thread->host, name);
+    else if (thread != NULL && thread->kind == THREAD &&
+             !wait_state((struct waitable *)thread)->signaled)
+        error = pthread_setname_np(wait_state((struct waitable *)thread)->host, name);
     pthread_mutex_unlock(&wait_lock);
     free(name);
     return error == 0 ? 0 : (int32_t)UINT32_C(0x80070006);
