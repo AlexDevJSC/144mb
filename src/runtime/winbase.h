@@ -4,6 +4,7 @@
 
 #include "compat.h"
 #include "ntnative/guest_thread.h"
+#include "virtual_memory.h"
 
 bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t module,
                                    const struct nt_guest_tls *initial);
