@@ -145,6 +145,8 @@ static int test_file_io(void)
     if (NtWriteFile(read_only, NULL, NULL, NULL, &io, "Z", 1, NULL, NULL) != NT_ACCESS_DENIED ||
         io.status != NT_ACCESS_DENIED ||
         NtSetInformationFile(read_only, &io, &new_eof, sizeof(new_eof), 20) != NT_ACCESS_DENIED ||
+        NtFlushBuffersFile(read_only, &io) != NT_ACCESS_DENIED ||
+        io.status != NT_ACCESS_DENIED ||
         GetLastError() != 0x1443)
         return 27;
     if (!CloseHandle(read_only) || !DeleteFileW(path))
