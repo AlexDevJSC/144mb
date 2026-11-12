@@ -7,6 +7,7 @@
 #include "ntnative/guest_thread.h"
 
 #include <errno.h>
+#include <ctype.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdlib.h>
@@ -34,6 +35,9 @@ struct waitable {
     uint32_t thread_id, exit_code;
     nt_thread_start start;
     void *parameter;
+    /* Only canonical EVENT entries own a name; aliases reference shared
+     * state, and names vanish after the final handle/reference closes. */
+    char event_name[128];
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
@@ -108,6 +112,79 @@ bool nt_runtime_get_waitable_flags(uintptr_t handle, uint32_t *flags)
 _Static_assert(sizeof(struct nt_object_attributes) == 48 &&
                offsetof(struct nt_object_attributes, name) == 16, "AMD64 OBJECT_ATTRIBUTES layout");
 
+/* Bounded ASCII-only names under the local BaseNamedObjects namespace.
+ * Do not claim global/session, nested directories or Unicode case folding
+ * until a cross-process NT object namespace broker exists. */
+static nt_status event_name(const struct nt_guest_unicode_string *unicode, char output[128])
+{
+    output[0] = 0;
+    if (unicode == NULL)
+        return NT_STATUS_SUCCESS;
+    if (unicode->buffer == NULL || unicode->length == 0 ||
+        unicode->length % 2 != 0 ||
+        unicode->length > unicode->maximum_length ||
+        unicode->length >= 128 * sizeof(uint16_t))
+        return NT_STATUS_INVALID_PARAMETER;
+    const size_t length = unicode->length / sizeof(uint16_t);
+    for (size_t i = 0; i < length; ++i) {
+        const uint16_t code = unicode->buffer[i];
+        if (code < 0x20 || code > 0x7e)
+            return NT_STATUS_NOT_SUPPORTED;
+        output[i] = (char)code;
+    }
+    output[length] = 0;
+    const char *normalized = output;
+    if (strncasecmp(output, "Local\\", 6) == 0)
+        normalized += 6;
+    else if (strncasecmp(output, "\\BaseNamedObjects\\", 18) == 0)
+        normalized += 18;
+    else if (strncasecmp(output, "Global\\", 7) == 0 || strchr(output, '\\') != NULL)
+        return NT_STATUS_NOT_SUPPORTED;
+    if (*normalized == 0 || strchr(normalized, '\\') != NULL)
+        return NT_STATUS_INVALID_PARAMETER;
+    if (normalized != output)
+        memmove(output, normalized, strlen(normalized) + 1);
+    return NT_STATUS_SUCCESS;
+}
+
+static bool event_name_equal(const char *left, const char *right, bool insensitive)
+{
+    if (!insensitive)
+        return strcmp(left, right) == 0;
+    while (*left && *right) {
+        if (tolower((unsigned char)*left) != tolower((unsigned char)*right))
+            return false;
+        ++left;
+        ++right;
+    }
+    return *left == 0 && *right == 0;
+}
+
+static struct waitable *find_named_event(const char *name, bool insensitive)
+{
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+        struct waitable *entry = &waitables[i];
+        if (entry->kind == EVENT && entry->shared == NULL && entry->event_name[0] &&
+            (entry->refs != 0 || entry->links != 0) &&
+            event_name_equal(entry->event_name, name, insensitive))
+            return entry;
+    }
+    return NULL;
+}
+
+/* Allocate an independent handle referring to a named object's state. */
+static struct waitable *open_event_alias(struct waitable *state, uint32_t access, bool inherit)
+{
+    struct waitable *alias = new_waitable(EVENT);
+    if (alias == NULL)
+        return NULL;
+    ++state->links;
+    alias->shared = state;
+    alias->access = access;
+    alias->handle_flags = inherit ? 1u : 0u;
+    return alias;
+}
+
 static uint32_t event_access(uint32_t access)
 {
     uint32_t rights = access & ~UINT32_C(0xf2000000);
@@ -168,34 +245,175 @@ nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
         return NT_STATUS_ACCESS_VIOLATION;
     if (type > 1 || (attributes && attributes->size != sizeof(*attributes)))
         return NT_STATUS_INVALID_PARAMETER;
-    if (attributes && (attributes->name || attributes->root || attributes->security ||
-                       attributes->qos || (attributes->attributes & ~0x40u)))
+    if (attributes && (attributes->root || attributes->security || attributes->qos ||
+                       (attributes->attributes & ~(0x40u | 2u))))
         return NT_STATUS_NOT_SUPPORTED;
+    char normalized[128];
+    const nt_status name_status = event_name(attributes ? attributes->name : NULL, normalized);
+    if (name_status != NT_STATUS_SUCCESS)
+        return name_status;
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
     pthread_mutex_lock(&wait_lock);
-    struct waitable *event = new_waitable(EVENT);
+    nt_status status = NT_STATUS_SUCCESS;
+    struct waitable *event = normalized[0] ?
+        find_named_event(normalized, attributes && (attributes->attributes & 0x40u)) : NULL;
     if (event != NULL) {
-        event->manual = type == 0; /* NotificationEvent */
-        event->signaled = initial_state != 0;
-        event->access = rights;
-        *handle = event->handle;
+        if (rights & ~event->access) {
+            status = NT_STATUS_ACCESS_DENIED;
+        } else {
+            event = open_event_alias(event, rights, attributes && (attributes->attributes & 2u));
+            status = event ? NT_STATUS_OBJECT_NAME_EXISTS : NT_STATUS_NO_MEMORY;
+        }
+    } else {
+        event = new_waitable(EVENT);
+        if (event != NULL) {
+            event->manual = type == 0; /* NotificationEvent */
+            event->signaled = initial_state != 0;
+            event->access = rights;
+            event->handle_flags = attributes && (attributes->attributes & 2u) ? 1u : 0u;
+            if (normalized[0])
+                memcpy(event->event_name, normalized, strlen(normalized) + 1);
+        } else {
+            status = NT_STATUS_NO_MEMORY;
+        }
     }
+    if (status == NT_STATUS_SUCCESS || status == NT_STATUS_OBJECT_NAME_EXISTS)
+        *handle = event->handle;
     pthread_mutex_unlock(&wait_lock);
-    return event ? NT_STATUS_SUCCESS : NT_STATUS_NO_MEMORY;
+    return status;
 }
 
-uintptr_t NT_MS_ABI nt_CreateEventW(const void *security, int32_t manual, int32_t initial, const uint16_t *name)
+nt_status NT_MS_ABI nt_NtOpenEvent(uintptr_t *handle, uint32_t access,
+                                   const struct nt_object_attributes *attributes)
 {
-    if (security || (name && *name)) {
+    if (handle == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (attributes == NULL || attributes->size != sizeof(*attributes) ||
+        attributes->name == NULL)
+        return NT_STATUS_INVALID_PARAMETER;
+    if (attributes->root || attributes->security || attributes->qos ||
+        (attributes->attributes & ~(0x40u | 2u)))
+        return NT_STATUS_NOT_SUPPORTED;
+    char normalized[128];
+    const nt_status name_status = event_name(attributes->name, normalized);
+    if (name_status != NT_STATUS_SUCCESS)
+        return name_status;
+    const uint32_t rights = event_access(access);
+    if (rights & ~EVENT_ALL_ACCESS)
+        return NT_STATUS_ACCESS_DENIED;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *state = find_named_event(normalized, (attributes->attributes & 0x40u) != 0);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (state == NULL) {
+        status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (rights & ~state->access) {
+        status = NT_STATUS_ACCESS_DENIED;
+    } else {
+        struct waitable *alias = open_event_alias(state, rights, (attributes->attributes & 2u) != 0);
+        if (alias == NULL)
+            status = NT_STATUS_NO_MEMORY;
+        else
+            *handle = alias->handle;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+static struct nt_object_attributes win_event_attributes(const struct nt_guest_unicode_string *name,
+                                                         bool inherit)
+{
+    struct nt_object_attributes attributes = {0};
+    attributes.size = sizeof(attributes);
+    attributes.name = name;
+    attributes.attributes = 0x40u | (inherit ? 2u : 0u);
+    return attributes;
+}
+
+static struct nt_guest_unicode_string win_event_string(const uint16_t *name)
+{
+    size_t length = 0;
+    if (name != NULL)
+        while (length < 127 && name[length])
+            ++length;
+    const uint16_t bytes = (uint16_t)(length * sizeof(uint16_t));
+    return (struct nt_guest_unicode_string){bytes, bytes, (uint16_t *)name};
+}
+
+uintptr_t NT_MS_ABI nt_CreateEventW(const void *security, int32_t manual, int32_t initial,
+                                    const uint16_t *name)
+{
+    if (security != NULL) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
+    struct nt_guest_unicode_string unicode = win_event_string(name);
+    if (name != NULL && name[0] != 0 && unicode.length >= 127 * sizeof(uint16_t)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_object_attributes attrs = win_event_attributes(&unicode, false);
     uintptr_t handle = 0;
-    const nt_status status = nt_NtCreateEvent(&handle, EVENT_ALL_ACCESS, NULL, manual ? 0 : 1, initial != 0);
+    const nt_status status = nt_NtCreateEvent(&handle, EVENT_ALL_ACCESS,
+                                               name && *name ? &attrs : NULL,
+                                               manual ? 0 : 1, initial != 0);
     nt_SetLastError(nt_runtime_nt_error(status));
     return handle;
+}
+
+uintptr_t NT_MS_ABI nt_OpenEventW(uint32_t access, int32_t inherit, const uint16_t *name)
+{
+    if (name == NULL || !*name) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_guest_unicode_string unicode = win_event_string(name);
+    if (unicode.length >= 127 * sizeof(uint16_t)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_object_attributes attrs = win_event_attributes(&unicode, inherit != 0);
+    uintptr_t handle = 0;
+    const nt_status status = nt_NtOpenEvent(&handle, access, &attrs);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return handle;
+}
+
+struct nt_event_basic_information {
+    uint32_t type;
+    int32_t state;
+};
+
+nt_status NT_MS_ABI nt_NtQueryEvent(uintptr_t handle, uint32_t information_class,
+                                    void *buffer, uint32_t length, uint32_t *returned_length)
+{
+    if (information_class != 0)
+        return NT_STATUS_INVALID_INFO_CLASS;
+    if (returned_length)
+        *returned_length = sizeof(struct nt_event_basic_information);
+    if (buffer == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (length < sizeof(struct nt_event_basic_information))
+        return NT_STATUS_INFO_LENGTH_MISMATCH;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *entry = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (entry == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (entry->kind != EVENT)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(entry->access & EVENT_QUERY_STATE))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(entry);
+        const struct nt_event_basic_information information =
+            {(uint32_t)(state->manual ? 0 : 1), state->signaled ? 1 : 0};
+        memcpy(buffer, &information, sizeof(information));
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
 }
 
 static nt_status change_event(uintptr_t handle, bool signaled, int32_t *previous)
