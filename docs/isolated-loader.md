@@ -30,9 +30,13 @@ DLL con directorio TLS que necesitarían esos índices.
 o ordinal, comprueba los límites y diferencia direcciones reales de
 *forwarders* (`KERNEL32.Sleep`), que se entregan como texto y **no se
 ejecutan como direcciones**. Las referencias solo son válidas mientras
-la imagen permanece mapeada. El lanzador todavía no incorpora un gestor
-de módulos PE externos con dependencias, `DllMain`, conteo de referencias
-y descarga: esta funcionalidad prepara esa siguiente etapa y no implica
+la imagen permanece mapeada. El lanzador aislado incorpora ahora `pe_dll_graph`, un gestor
+de DLL PE AMD64 sin TLS desde `/game` que carga importaciones
+transitivas, ejecuta `DllMain` bajo GS/TEB, enlaza entradas PEB
+y mantiene referencias explícitas para `LoadLibrary`/`FreeLibrary`.
+El mapeador puro `pe_image_load_library` sigue siendo inerte y
+no ejecuta código por sí mismo. Aún no se implementa el ciclo de vida
+general de DLL arbitrarias: esta funcionalidad prepara esa siguiente etapa y no implica
 que `LoadLibrary` ya soporte DLL arbitrarias.
 
 Las tablas de importación retardada (`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT`)
@@ -202,9 +206,11 @@ de Squadron121 fue de solo lectura.
 
 - TLS de DLL adicionales, plantillas fuera de los límites del cargador,
   PEB/TEB completos (hay solo estructuras mínimas), llamadas dinámicas no incluidas en las 197
-  importaciones directas de Mines y ejecución dinámica de DLL externas.
-  Las tablas de importación retardada se preservan para el ayudante CRT
-  del PE, pero la carga de DLL externas sigue sin soporte completo.
+  importaciones directas de Mines, DLL PE con TLS estático,
+  DLL que requieren SxS/COM/CRT no implementados o dependencias cíclicas.
+  Las tablas de importación retardada se preservan para el ayudante CRT;
+  `LoadLibrary` solo puede cargar DLL sin TLS bajo un directorio de
+  ejecución autorizado, no cualquier biblioteca Windows.
 - Entrega general de SEH y fallos de memoria del código invitado; el
   backend existente solo admite los perfiles descritos en la documentación.
 - Inicialización Win32/CRT completa, identidad de módulos, recursos
