@@ -25,8 +25,11 @@ DIR64, importaciones compatibles con el registro nativo, tamaño limitado
 y permisos de página W^X. El mapeador en sí no ejecuta `DllMain`: el gestor
 `src/pe/dll_graph.c` hace la inicialización separada y ordenada de
 dependencias, con `DLL_PROCESS_ATTACH/DETACH` y
-`DLL_THREAD_ATTACH/DETACH` cuando hay TEB invitado. No crea índices
-TLS estáticos adicionales; se rechazan DLL con directorio TLS.
+`DLL_THREAD_ATTACH/DETACH` cuando hay TEB invitado. Asigna índices
+TLS estáticos 1..63 a DLL importadas antes de crear hilos, copia sus
+plantillas por hilo y ejecuta los callbacks TLS antes de DllMain.
+Las DLL con TLS se mantienen mapeadas mientras exista el proceso.
+Se rechaza cargar DLL nuevas con TLS cuando ya hay hilos invitados.
 
 `pe_image_lookup_export()` consulta la tabla de exportaciones por nombre
 o ordinal, comprueba los límites y diferencia direcciones reales de
@@ -36,7 +39,7 @@ la imagen permanece mapeada. El lanzador incorpora ahora un gestor acotado de DL
 dependencias, `DllMain`, referencias y descarga. Solo carga archivos
 regulares con nombres simples del directorio aislado del programa,
 sin seguir symlinks. Esto **no** implica compatibilidad arbitraria
-con DLL de terceros, especialmente con TLS, rutas de búsqueda generales
+con DLL de terceros, especialmente con TLS cargado dinámicamente, rutas de búsqueda generales
 o inicializaciones cíclicas.
 
 Las tablas de importación retardada (`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT`)
@@ -47,8 +50,9 @@ bibliotecas y API que nuestro registro de módulos ya reconoce. Un directorio
 fuera de los límites del PE sigue rechazándose.
 
 Las pruebas `make check-pe-image` generan DLL sintéticas y comprueban
-exportación por nombre/ordinal, *forwarders*, punteros malformados, TLS no
-compatible y preservación del IAT retardado. No se ejecuta ningún PE
+exportación por nombre/ordinal, *forwarders*, punteros malformados, directorios TLS inválidos y preservación del IAT retardado.
+`check-pe-dll-graph` incluye una DLL compilada con TLS estático real,
+con plantilla independiente en el hilo principal y un hilo secundario. No se ejecuta ningún PE
 externo para validar este componente.
 
 ### Operaciones implementadas
@@ -204,7 +208,8 @@ de Squadron121 fue de solo lectura.
 
 ### Fuera de alcance y riesgos pendientes
 
-- TLS de DLL adicionales, plantillas fuera de los límites del cargador,
+- TLS de DLL cargadas después del inicio de hilos, descarga y reutilización
+  de índices estáticos, plantillas fuera de los límites del cargador,
   PEB/TEB completos (hay solo estructuras mínimas), llamadas dinámicas no incluidas en las 197
   importaciones directas de Mines y ejecución dinámica de DLL externas.
   Las tablas de importación retardada se preservan para el ayudante CRT
