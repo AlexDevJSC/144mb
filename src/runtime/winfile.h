@@ -5,6 +5,9 @@
 #include "compat.h"
 
 int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags);
+int32_t NT_MS_ABI nt_DuplicateHandle(uintptr_t source_process, uintptr_t source,
+                                     uintptr_t target_process, uintptr_t *target,
+                                     uint32_t access, int32_t inherit, uint32_t options);
 
 struct nt_createfile2_params {
     uint32_t size, attributes, flags, security_qos;
