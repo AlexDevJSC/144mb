@@ -1,0 +1,7 @@
+LIBRARY ntdll.dll
+EXPORTS
+    NtReadFile
+    NtWriteFile
+    NtQueryInformationFile
+    NtSetInformationFile
+    NtFlushBuffersFile
