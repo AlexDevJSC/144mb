@@ -73,6 +73,7 @@ int import_fixture_entry(void)
     if (entry == NULL ||
         *(const unsigned char *const *)(entry + 8) != ldr + 0x10 ||
         *(const uintptr_t *)(entry + 0x30) == 0 ||
+        *(const uintptr_t *)(entry + 0x38) <= *(const uintptr_t *)(entry + 0x30) ||
         *(const ULONG *)(entry + 0x40) < 4096 ||
         *(const WCHAR *const *)(entry + 0x50) == NULL ||
         *(const WCHAR *const *)(entry + 0x60) == NULL)
