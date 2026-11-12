@@ -36,6 +36,7 @@ int main(void)
     const uintptr_t image = UINT64_C(0x140000000);
     assert(nt_guest_thread_enter(&thread, image));
     assert(from_gs_30() == (uintptr_t)thread.teb);
+    assert(nt_guest_thread_teb() == thread.teb);
     assert(from_gs_58() == (uintptr_t)thread.tls_vector);
     assert(from_gs_60() == (uintptr_t)thread.standalone.peb);
     assert(thread.tls_vector[0] == (uintptr_t)thread.tls_block);
@@ -46,7 +47,13 @@ int main(void)
     __builtin_memcpy(&parameters, thread.standalone.peb + 0x20, sizeof(parameters));
     assert(parameters == (uintptr_t)&thread.standalone.parameters && thread.standalone.parameters.flags == 1);
     assert(!nt_guest_thread_enter(&thread, image));
+    struct nt_guest_thread nested = {0};
+    assert(nt_guest_thread_enter(&nested, image));
+    assert(nt_guest_thread_teb() == nested.teb && !nt_guest_thread_leave(&thread));
+    assert(nt_guest_thread_leave(&nested));
+    assert(nt_guest_thread_teb() == thread.teb && from_gs_30() == (uintptr_t)thread.teb);
     assert(nt_guest_thread_leave(&thread));
+    assert(nt_guest_thread_teb() == NULL);
     uintptr_t current = UINTPTR_MAX;
     assert(syscall(SYS_arch_prctl, ARCH_GET_GS, &current) == 0);
     assert(current == previous);

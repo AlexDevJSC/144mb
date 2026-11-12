@@ -5,6 +5,7 @@
 #include "desktop.h"
 #include "desktop_resources.h"
 #include "dialogs.h"
+#include "nt_services.h"
 #include "user_folders.h"
 #include "crypto.h"
 #include "sync.h"
@@ -37,6 +38,7 @@
 #include <stdio.h>
 #include <sys/random.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 static _Thread_local uint32_t last_error;
@@ -63,12 +65,21 @@ static uint32_t NT_MS_ABI win_thread_id(void)
 
 uint32_t NT_MS_ABI nt_GetLastError(void)
 {
-    return last_error;
+    const unsigned char *teb = nt_guest_thread_teb();
+    if (!teb)
+        return last_error;
+    uint32_t error;
+    memcpy(&error, teb + NT_TEB_LAST_ERROR, sizeof(error));
+    return error;
 }
 
 void NT_MS_ABI nt_SetLastError(uint32_t error)
 {
-    last_error = error;
+    unsigned char *teb = nt_guest_thread_teb();
+    if (teb)
+        memcpy(teb + NT_TEB_LAST_ERROR, &error, sizeof(error));
+    else
+        last_error = error;
 }
 
 static int32_t NT_MS_ABI win_mul_div(int32_t left, int32_t right, int32_t divisor)
@@ -234,10 +245,29 @@ struct runtime_export {
 
 #define EXPORT(name, function) {name, (nt_guest_proc)function, 0}
 #define WIN_EXPORT(name) EXPORT(#name, nt_##name)
+#define NT_EXPORT(name) EXPORT("Nt" #name, nt_Nt##name), EXPORT("Zw" #name, nt_Nt##name)
 
 static const struct runtime_export ntdll_exports[] = {
-    EXPORT("NtQueryPerformanceCounter", nt_counter)
+    EXPORT("NtQueryPerformanceCounter", nt_counter),
+    EXPORT("ZwQueryPerformanceCounter", nt_counter),
+    NT_EXPORT(QuerySystemTime),
+    NT_EXPORT(DelayExecution),
+    NT_EXPORT(Close),
+    NT_EXPORT(CreateEvent),
+    NT_EXPORT(SetEvent),
+    NT_EXPORT(ResetEvent),
+    NT_EXPORT(WaitForSingleObject),
+    NT_EXPORT(WaitForMultipleObjects),
+    WIN_EXPORT(RtlCaptureContext),
+    WIN_EXPORT(RtlLookupFunctionEntry),
+    WIN_EXPORT(RtlVirtualUnwind),
+    WIN_EXPORT(RtlUnwind),
+    WIN_EXPORT(RtlUnwindEx),
+    WIN_EXPORT(RtlPcToFileHeader),
+    EXPORT("RtlGetLastWin32Error", nt_GetLastError),
+    EXPORT("RtlSetLastWin32Error", nt_SetLastError),
 };
+#undef NT_EXPORT
 
 static uintptr_t NT_MS_ABI win_GetModuleHandleA(const char *name);
 static int32_t NT_MS_ABI win_GetModuleHandleExW(uint32_t flags, const uint16_t *name, uintptr_t *handle);
@@ -405,6 +435,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(TryAcquireSRWLockExclusive),
     WIN_EXPORT(WaitForSingleObject),
     WIN_EXPORT(WaitForSingleObjectEx),
+    WIN_EXPORT(WaitForMultipleObjects),
+    WIN_EXPORT(WaitForMultipleObjectsEx),
     WIN_EXPORT(WakeAllConditionVariable),
     WIN_EXPORT(WakeConditionVariable),
     WIN_EXPORT(WideCharToMultiByte),
@@ -532,6 +564,13 @@ static const struct runtime_export user32_exports[] = {
     WIN_EXPORT(TranslateMessage),
     WIN_EXPORT(UnionRect),
     WIN_EXPORT(WinHelpA)
+};
+
+static const struct runtime_export win32u_exports[] = {
+    EXPORT("NtUserGetAsyncKeyState", nt_GetAsyncKeyState),
+    EXPORT("NtUserGetCursorPos", nt_GetCursorPos),
+    EXPORT("NtUserGetForegroundWindow", nt_GetForegroundWindow),
+    EXPORT("NtUserGetKeyState", nt_GetKeyState),
 };
 
 static const struct runtime_export gdi32_exports[] = {
@@ -826,6 +865,8 @@ static const struct {
     MODULE("imm32.dll", imm32_exports),
     MODULE("ws2_32.dll", ws2_32_exports),
     MODULE("libfluidsynth-3.dll", fluid_exports),
+    MODULE("kernelbase.dll", kernel32_exports),
+    MODULE("win32u.dll", win32u_exports),
 #ifdef NT_HAVE_VKD3D
     MODULE("d3d12.dll", d3d12_exports),
     MODULE("dxgi.dll", dxgi_exports),
@@ -841,8 +882,41 @@ static uint32_t module_references[MODULE_COUNT];
 static bool module_pinned[MODULE_COUNT];
 static pthread_mutex_t module_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* API sets are names in the guest's loader namespace. The host module
+ * supplies the same exports for IAT resolution and dynamic loading. */
+static const char *contract_host(const char *name)
+{
+    static const struct { const char *contract, *host; } aliases[] = {
+#define CORE(contract) {"api-ms-win-core-" contract ".dll", "kernelbase.dll"}
+        CORE("errorhandling-l1-1-0"), CORE("errorhandling-l1-1-1"), CORE("errorhandling-l1-1-3"),
+        CORE("file-l1-1-0"), CORE("file-l1-2-0"), CORE("file-l1-2-2"), CORE("file-l2-1-2"),
+        CORE("handle-l1-1-0"), CORE("heap-l1-1-0"), CORE("heap-l2-1-0"),
+        CORE("libraryloader-l1-1-1"), CORE("libraryloader-l1-2-0"), CORE("libraryloader-l1-2-2"),
+        CORE("memory-l1-1-0"), CORE("memory-l1-1-4"),
+        CORE("processenvironment-l1-1-0"), CORE("processenvironment-l1-2-0"),
+        CORE("profile-l1-1-0"), CORE("synch-l1-1-0"), CORE("synch-l1-2-0"), CORE("synch-l1-2-1"),
+        CORE("sysinfo-l1-1-0"), CORE("sysinfo-l1-2-0"), CORE("sysinfo-l1-2-1"),
+#undef CORE
+        {"api-ms-win-core-processthreads-l1-1-0.dll", "kernel32.dll"},
+        {"api-ms-win-core-processthreads-l1-1-2.dll", "kernel32.dll"},
+        {"api-ms-win-core-processthreads-l1-1-3.dll", "kernel32.dll"},
+        {"api-ms-win-core-rtlsupport-l1-1-0.dll", "ntdll.dll"},
+        {"api-ms-win-core-rtlsupport-l1-2-0.dll", "ntdll.dll"},
+        {"api-ms-win-ntuser-rectangle-l1-1-0.dll", "user32.dll"},
+        {"ext-ms-win-ntuser-window-l1-1-0.dll", "user32.dll"},
+        {"ext-ms-win-ntuser-window-l1-1-4.dll", "user32.dll"},
+        {"ext-ms-win-ntuser-windowclass-l1-1-1.dll", "user32.dll"},
+    };
+    for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); ++i) {
+        if (nt_module_name_equal(name, aliases[i].contract))
+            return aliases[i].host;
+    }
+    return name;
+}
+
 static size_t module_index(const char *name)
 {
+    name = contract_host(name);
     for (size_t i = 0; i < MODULE_COUNT; ++i) {
         if (!nt_module_name_equal(name, modules[i].name))
             continue;
@@ -897,6 +971,9 @@ static size_t requested_module(const char *name)
 {
     if (name == NULL || *name == '\0')
         return MODULE_COUNT;
+    static const char system_path[] = "C:\\Windows\\System32\\";
+    if (strncasecmp(name, system_path, sizeof(system_path) - 1) == 0)
+        name += sizeof(system_path) - 1;
     if (strchr(name, '.') != NULL)
         return module_index(name);
     char with_extension[128];

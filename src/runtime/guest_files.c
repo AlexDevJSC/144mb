@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "console.h"
+#include "nt_services.h"
 #include "winbase.h"
 #include "winfile.h"
 #include "sync.h"
@@ -651,17 +652,34 @@ int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
     return file != NULL;
 }
 
-int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
+static int close_object(uintptr_t handle)
 {
     pthread_mutex_lock(&file_lock);
     struct guest_file *file = find_handle(handle);
-    const int result = file != NULL ? close_file(file) : -1;
+    const int error = !file ? EBADF : close_file(file) == 0 ? 0 : errno;
     pthread_mutex_unlock(&file_lock);
     if (file == NULL && nt_runtime_close_waitable(handle))
-        return 1;
-    if (result != 0)
-        nt_SetLastError(file != NULL ? path_error(errno, false) : NT_ERROR_INVALID_HANDLE);
-    return result == 0;
+        return 0;
+    return error;
+}
+
+nt_status NT_MS_ABI nt_NtClose(uintptr_t handle)
+{
+    const int error = close_object(handle);
+    switch (error) {
+    case 0: return NT_STATUS_SUCCESS;
+    case EBADF: return NT_STATUS_INVALID_HANDLE;
+    case EACCES: case EPERM: return NT_STATUS_ACCESS_DENIED;
+    default: return NT_STATUS_UNSUCCESSFUL;
+    }
+}
+
+int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
+{
+    const int error = close_object(handle);
+    if (error)
+        nt_SetLastError(path_error(error, false));
+    return !error;
 }
 
 enum path_operation { MAKE_DIRECTORY, REMOVE_FILE, REMOVE_DIRECTORY };

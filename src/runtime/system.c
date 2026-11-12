@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
+#include "nt_services.h"
 #include "winbase.h"
 
 #include <errno.h>
+#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -16,6 +18,21 @@ _Static_assert(sizeof(struct nt_rect) == 16, "RECT layout");
 uintptr_t NT_MS_ABI nt_GetCurrentProcess(void)
 {
     return UINTPTR_MAX;
+}
+
+uint32_t nt_runtime_nt_error(nt_status status)
+{
+    switch (status) {
+    case NT_STATUS_SUCCESS: return NT_ERROR_SUCCESS;
+    case NT_STATUS_INVALID_HANDLE:
+    case NT_STATUS_OBJECT_TYPE_MISMATCH: return NT_ERROR_INVALID_HANDLE;
+    case NT_STATUS_INVALID_PARAMETER: return NT_ERROR_INVALID_PARAMETER;
+    case NT_STATUS_ACCESS_DENIED: return NT_ERROR_ACCESS_DENIED;
+    case NT_STATUS_NO_MEMORY: return NT_ERROR_NOT_ENOUGH_MEMORY;
+    case NT_STATUS_NOT_SUPPORTED: return NT_ERROR_NOT_SUPPORTED;
+    case NT_STATUS_ACCESS_VIOLATION: return 998; /* ERROR_NOACCESS */
+    default: return NT_ERROR_GEN_FAILURE;
+    }
 }
 
 static void get_system_time(struct nt_system_time *result, bool local_time)
@@ -42,28 +59,84 @@ static void get_system_time(struct nt_system_time *result, bool local_time)
 void NT_MS_ABI nt_GetLocalTime(struct nt_system_time *result) { get_system_time(result, true); }
 void NT_MS_ABI nt_GetSystemTime(struct nt_system_time *result) { get_system_time(result, false); }
 
+static const int64_t epoch_offset = INT64_C(11644473600);
+static const uint64_t ticks_per_second = UINT64_C(10000000);
+
+static nt_status system_time_ticks(uint64_t *ticks)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0 ||
+        now.tv_sec < -epoch_offset || now.tv_sec > INT64_MAX - epoch_offset)
+        return NT_STATUS_UNSUCCESSFUL;
+    const uint64_t seconds = (uint64_t)(now.tv_sec + epoch_offset);
+    const uint64_t fraction = (uint64_t)now.tv_nsec / 100;
+    if (seconds > (UINT64_MAX - fraction) / ticks_per_second)
+        return NT_STATUS_UNSUCCESSFUL;
+    *ticks = seconds * ticks_per_second + fraction;
+    return NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtQuerySystemTime(int64_t *result)
+{
+    if (!result)
+        return NT_STATUS_ACCESS_VIOLATION;
+    uint64_t ticks;
+    if (system_time_ticks(&ticks) != NT_STATUS_SUCCESS || ticks > INT64_MAX)
+        return NT_STATUS_UNSUCCESSFUL;
+    *result = (int64_t)ticks;
+    return NT_STATUS_SUCCESS;
+}
+
 void NT_MS_ABI nt_GetSystemTimeAsFileTime(struct nt_file_time *result)
 {
-    const int64_t epoch_offset = INT64_C(11644473600);
-    const uint64_t ticks_per_second = UINT64_C(10000000);
-    if (result == NULL) {
+    if (!result) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return;
     }
-    struct timespec now;
-    if (clock_gettime(CLOCK_REALTIME, &now) != 0 ||
-        now.tv_sec < -epoch_offset || now.tv_sec > INT64_MAX - epoch_offset) {
+    uint64_t ticks;
+    if (system_time_ticks(&ticks) != NT_STATUS_SUCCESS) {
         nt_SetLastError(NT_ERROR_GEN_FAILURE);
         return;
     }
-    const uint64_t seconds = (uint64_t)(now.tv_sec + epoch_offset);
-    const uint64_t fraction = (uint64_t)now.tv_nsec / 100;
-    if (seconds > (UINT64_MAX - fraction) / ticks_per_second) {
-        nt_SetLastError(NT_ERROR_GEN_FAILURE);
-        return;
-    }
-    const uint64_t ticks = seconds * ticks_per_second + fraction;
     *result = (struct nt_file_time){(uint32_t)ticks, (uint32_t)(ticks >> 32)};
+}
+
+nt_status nt_runtime_wait_deadline(int64_t ticks, struct nt_wait_deadline *deadline)
+{
+    if (ticks >= 0) {
+        deadline->clock = CLOCK_REALTIME;
+        deadline->time.tv_sec = ticks / (int64_t)ticks_per_second - epoch_offset;
+        deadline->time.tv_nsec = (ticks % (int64_t)ticks_per_second) * 100;
+        return NT_STATUS_SUCCESS;
+    }
+    /* The magnitude of INT64_MIN is representable as uint64_t. */
+    const uint64_t duration = (uint64_t)(-(ticks + 1)) + 1;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return NT_STATUS_UNSUCCESSFUL;
+    const long nanoseconds = now.tv_nsec + (long)(duration % ticks_per_second) * 100;
+    const uint64_t seconds = duration / ticks_per_second + (nanoseconds / 1000000000L);
+    if (now.tv_sec < 0 || seconds > (uint64_t)(INT64_MAX - now.tv_sec))
+        return NT_STATUS_UNSUCCESSFUL;
+    deadline->clock = CLOCK_MONOTONIC;
+    deadline->time = (struct timespec){now.tv_sec + (time_t)seconds, nanoseconds % 1000000000L};
+    return NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtDelayExecution(uint8_t alertable, const int64_t *interval)
+{
+    (void)alertable; /* No guest APC producer is registered. */
+    if (!interval)
+        return NT_STATUS_ACCESS_VIOLATION;
+    struct nt_wait_deadline deadline;
+    const nt_status status = nt_runtime_wait_deadline(*interval, &deadline);
+    if (status != NT_STATUS_SUCCESS || deadline.time.tv_sec < 0)
+        return status;
+    int error;
+    do {
+        error = clock_nanosleep(deadline.clock, TIMER_ABSTIME, &deadline.time, NULL);
+    } while (error == EINTR);
+    return error ? NT_STATUS_UNSUCCESSFUL : NT_STATUS_SUCCESS;
 }
 
 uint64_t NT_MS_ABI nt_GetTickCount64(void)
@@ -80,13 +153,17 @@ uint32_t NT_MS_ABI nt_GetTickCount(void) { return (uint32_t)nt_GetTickCount64();
 
 void NT_MS_ABI nt_Sleep(uint32_t milliseconds)
 {
-    if (milliseconds == UINT32_MAX) {
-        const struct timespec interval = {3600, 0};
-        for (;;)
-            (void)nanosleep(&interval, NULL);
+    if (milliseconds == 0) {
+        sched_yield();
+        return;
     }
-    struct timespec remaining = {milliseconds / 1000, (milliseconds % 1000) * 1000000};
-    while (nanosleep(&remaining, &remaining) < 0 && errno == EINTR) {}
+    if (milliseconds == UINT32_MAX) {
+        const int64_t interval = -INT64_C(3600) * 10000000;
+        for (;;)
+            (void)nt_NtDelayExecution(0, &interval);
+    }
+    const int64_t interval = -(int64_t)milliseconds * 10000;
+    (void)nt_NtDelayExecution(0, &interval);
 }
 
 void NT_MS_ABI nt_GetStartupInfoW(struct nt_startup_info_w *result)

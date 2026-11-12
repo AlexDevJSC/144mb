@@ -42,7 +42,7 @@ incomplete and must not be represented as general Windows compatibility.
 
 %files
 %license LICENSE
-%doc README.md docs/architecture.md docs/validation.md docs/isolated-loader.md docs/vulkan-d3d12.md docs/squadron-compatibility.md
+%doc README.md docs/architecture.md docs/validation.md docs/isolated-loader.md docs/vulkan-d3d12.md docs/squadron-compatibility.md docs/kernel-user.md
 %{_bindir}/nt-native-probe
 %{_bindir}/pe-isolated-run
 %{_bindir}/nt-vulkan-probe

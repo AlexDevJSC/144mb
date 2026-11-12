@@ -51,6 +51,20 @@ static bool dx_container(const void *data, SIZE_T size)
            bytes[2] == 'B' && bytes[3] == 'C';
 }
 
+static void report_dxc_error(struct dxc_interface *result, const struct result_api *methods)
+{
+    struct dxc_interface *errors = NULL;
+    if (FAILED(methods->output(result, 2, &iid_utf8, (void **)&errors, NULL)) || !errors)
+        return;
+    const struct blob_api *blob = errors->vtable;
+    const SIZE_T length = blob->length(errors);
+    if (length && length <= MAXDWORD) {
+        DWORD written;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), blob->string(errors), (DWORD)length, &written, NULL);
+    }
+    IUnknown_Release((IUnknown *)errors);
+}
+
 static int compile_legacy(void)
 {
     ID3DBlob *bytecode = NULL, *errors = NULL;
@@ -92,8 +106,10 @@ static int compile_modern(void)
     HRESULT compilation;
     if (FAILED(result_methods->status(result, &compilation)))
         return 23;
-    if (FAILED(compilation))
+    if (FAILED(compilation)) {
+        report_dxc_error(result, result_methods);
         return 24;
+    }
     if (!result_methods->has_output(result, 1) ||
         FAILED(result_methods->output(result, 1, &iid_blob, (void **)&blob, (void **)&name)) || !blob || !name)
         return 25;

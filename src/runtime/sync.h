@@ -26,6 +26,10 @@ int32_t NT_MS_ABI nt_SetEvent(uintptr_t event);
 int32_t NT_MS_ABI nt_ResetEvent(uintptr_t event);
 uint32_t NT_MS_ABI nt_WaitForSingleObject(uintptr_t handle, uint32_t milliseconds);
 uint32_t NT_MS_ABI nt_WaitForSingleObjectEx(uintptr_t handle, uint32_t milliseconds, int32_t alertable);
+uint32_t NT_MS_ABI nt_WaitForMultipleObjects(uint32_t count, const uintptr_t *handles,
+                                          int32_t all, uint32_t milliseconds);
+uint32_t NT_MS_ABI nt_WaitForMultipleObjectsEx(uint32_t count, const uintptr_t *handles,
+                                            int32_t all, uint32_t milliseconds, int32_t alertable);
 bool nt_runtime_close_waitable(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void);
 uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_thread_start start,
