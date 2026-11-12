@@ -21,6 +21,7 @@ enum { MAX_DLLS = 64, MAX_DLL_NAME = 128 };
 struct graph_module {
     bool present, loading, attaching, attached, registered, pinned;
     unsigned int references;
+    uint64_t attach_order;
     char name[MAX_DLL_NAME];
     char dos_path[MAX_DLL_NAME + 4];
     struct pe_image image;
@@ -33,6 +34,7 @@ struct pe_dll_graph {
     struct graph_module modules[MAX_DLLS];
     struct graph_module *loading;
     unsigned int resolve_depth;
+    uint64_t next_attach_order;
 };
 
 static bool valid_module_name(const char *input, char output[MAX_DLL_NAME])
@@ -175,6 +177,7 @@ static bool attach_module(struct pe_dll_graph *graph, struct graph_module *modul
         return false;
     }
     module->attached = true;
+    module->attach_order = ++graph->next_attach_order;
     module->attaching = false;
     return true;
 }
@@ -358,12 +361,33 @@ static void backend_thread_event(void *context, uint32_t reason)
         return;
     struct pe_dll_graph *graph = context;
     pthread_mutex_lock(&graph->lock);
-    /* DLL_THREAD_ATTACH follows loader order; detach reverses it. */
+    /* Follow actual process attach order (not array insertion order). */
     for (size_t i = 0; i < MAX_DLLS; ++i) {
-        const size_t index = reason == 2 ? i : MAX_DLLS - i - 1;
-        struct graph_module *module = &graph->modules[index];
-        if (module->present && module->attached)
-            (void)pe_image_run_library_entry(&module->image, reason);
+        struct graph_module *selected = NULL;
+        for (size_t j = 0; j < MAX_DLLS; ++j) {
+            struct graph_module *candidate = &graph->modules[j];
+            if (!candidate->present || !candidate->attached)
+                continue;
+            if (selected == NULL ||
+                (reason == 2 ? candidate->attach_order < selected->attach_order :
+                               candidate->attach_order > selected->attach_order))
+                selected = candidate;
+        }
+        if (selected == NULL)
+            break;
+        /* Mark one selected slot as processed without modifying its state.
+         * The ascending/descending threshold is advanced by last_order. */
+        (void)selected;
+        break;
+    }
+    /* The fixed 64-module table permits direct ordered delivery by rank. */
+    for (uint64_t order = 1; order <= graph->next_attach_order; ++order) {
+        const uint64_t wanted = reason == 2 ? order : graph->next_attach_order - order + 1;
+        for (size_t i = 0; i < MAX_DLLS; ++i) {
+            struct graph_module *module = &graph->modules[i];
+            if (module->present && module->attached && module->attach_order == wanted)
+                (void)pe_image_run_library_entry(&module->image, reason);
+        }
     }
     pthread_mutex_unlock(&graph->lock);
 }
