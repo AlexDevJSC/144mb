@@ -70,6 +70,8 @@ static _Thread_local sigjmp_buf thread_exit;
 /* A guest's primary thread is not represented by a waitable. Its own
  * pseudo-handle has a strictly thread-local queue, never a host TID. */
 static _Thread_local struct guest_apc_queue primary_apcs;
+static struct waitable *find_waitable(uintptr_t handle);
+static struct waitable *wait_state(struct waitable *handle);
 
 static struct guest_apc_queue *current_apcs(void)
 {
@@ -96,12 +98,10 @@ static void invoke_apc(struct guest_apc *apc)
 {
     if (apc == NULL)
         return;
-    const uint32_t prior = nt_GetLastError();
     if (apc->native != NULL)
         apc->native((void *)apc->first, (void *)apc->second, (void *)apc->third);
     else
         apc->user(apc->first);
-    nt_SetLastError(prior);
     free(apc);
 }
 
@@ -908,7 +908,6 @@ static nt_status check_wait_objects(struct waitable *const *objects, uint32_t co
 nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t *handles,
                                               uint32_t type, uint8_t alertable, const int64_t *timeout)
 {
-    (void)alertable; /* No guest APC producer is registered. */
     if (!count || count > MAXIMUM_WAIT_OBJECTS || type > 1)
         return NT_STATUS_INVALID_PARAMETER;
     if (!handles)
@@ -922,9 +921,17 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
     struct waitable *objects[MAXIMUM_WAIT_OBJECTS];
     pthread_mutex_lock(&wait_lock);
     nt_status result = acquire_wait_objects(objects, count, handles);
+    struct guest_apc *apc = NULL;
     if (result == NT_STATUS_SUCCESS) {
         int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
         for (;;) {
+            if (alertable != 0) {
+                apc = pop_apc_locked();
+                if (apc != NULL) {
+                    result = NT_STATUS_USER_APC;
+                    break;
+                }
+            }
             result = check_wait_objects(objects, count, type == 0);
             if (result != NT_STATUS_TIMEOUT || error)
                 break;
@@ -937,6 +944,8 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
             release_waitable(objects[i]);
     }
     pthread_mutex_unlock(&wait_lock);
+    if (apc != NULL)
+        invoke_apc(apc);
     return result;
 }
 
@@ -1169,6 +1178,7 @@ static void finish_thread(void *state)
     pthread_mutex_lock(&wait_lock);
     running_thread->exit_code = thread_result;
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
+    clear_apcs_locked(&running_thread->apcs);
     running_thread->signaled = true;
     --running_thread->refs;
     pthread_cond_broadcast(&wait_changed);
