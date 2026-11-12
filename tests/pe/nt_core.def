@@ -7,3 +7,6 @@ EXPORTS
     NtProtectVirtualMemory
     NtQueryVirtualMemory
     RtlGetCurrentPeb
+    NtCreateEvent
+    NtOpenEvent
+    NtQueryEvent
