@@ -19,6 +19,7 @@
 #define NT_STATUS_ACCESS_DENIED ((nt_status)UINT32_C(0xc0000022))
 #define NT_STATUS_OBJECT_TYPE_MISMATCH ((nt_status)UINT32_C(0xc0000024))
 #define NT_STATUS_NOT_SUPPORTED ((nt_status)UINT32_C(0xc00000bb))
+#define NT_STATUS_END_OF_FILE ((nt_status)UINT32_C(0xc0000011))
 
 struct nt_guest_unicode_string;
 struct nt_object_attributes {
@@ -41,6 +42,21 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
 nt_status NT_MS_ABI nt_NtOpenFile(uintptr_t *handle, uint32_t access,
     const struct nt_object_attributes *attributes, struct nt_io_status_block *io,
     uint32_t share, uint32_t options);
+
+/* Synchronous file I/O for handles held by the shared Win32 file table.
+ * These are the native NT argument layouts, with unsupported asynchronous
+ * event/APC requests rejected explicitly. */
+nt_status NT_MS_ABI nt_NtReadFile(uintptr_t handle, uintptr_t event, void *apc,
+    void *apc_context, struct nt_io_status_block *io, void *buffer, uint32_t length,
+    const int64_t *offset, const uint32_t *key);
+nt_status NT_MS_ABI nt_NtWriteFile(uintptr_t handle, uintptr_t event, void *apc,
+    void *apc_context, struct nt_io_status_block *io, const void *buffer, uint32_t length,
+    const int64_t *offset, const uint32_t *key);
+nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle,
+    struct nt_io_status_block *io, void *buffer, uint32_t length, uint32_t information_class);
+nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle,
+    struct nt_io_status_block *io, const void *buffer, uint32_t length, uint32_t information_class);
+nt_status NT_MS_ABI nt_NtFlushBuffersFile(uintptr_t handle, struct nt_io_status_block *io);
 
 struct nt_wait_deadline {
     struct timespec time;
