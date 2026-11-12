@@ -315,8 +315,15 @@ int main(void)
     pe_image_unload(&image);
     make_export_dll(bytes);
     w32(bytes + 0x98 + 16, 0x2100); /* Export data is not executable. */
+    assert(!pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                  &image, reason, sizeof(reason)));
+    /* The loader refuses bad entry metadata before mapping. Also guard
+     * the explicit activation API against invalid state supplied later. */
+    make_export_dll(bytes);
+    w32(bytes + 0x98 + 16, 0x1000);
     assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
                                  &image, reason, sizeof(reason)));
+    image.entry_rva = 0x2100;
     assert(!pe_image_run_library_entry(&image, 1));
     pe_image_unload(&image);
     puts("PASS explicit DLL_PROCESS_ATTACH/DETACH and guarded entry RVA");
