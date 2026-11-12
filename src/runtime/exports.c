@@ -1059,6 +1059,12 @@ void nt_runtime_external_module_thread_event(uint32_t reason)
         external_backend.thread_event(external_backend.context, reason);
 }
 
+bool nt_runtime_external_module_prepare_thread(struct nt_guest_thread *thread)
+{
+    return external_backend.prepare_thread == NULL ||
+           external_backend.prepare_thread(external_backend.context, thread);
+}
+
 uintptr_t NT_MS_ABI nt_LoadLibraryA(const char *name)
 {
     const size_t module = requested_module(name);
