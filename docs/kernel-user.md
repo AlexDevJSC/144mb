@@ -17,7 +17,7 @@ flowchart TD
 
 | Contrato compartido | Implementación Linux |
 | --- | --- |
-| Importación PE por nombre u ordinal y `LoadLibrary`/`GetProcAddress` | Registro de módulos incorporados. Los nombres de API sets reconocidos se resuelven al mismo módulo que sus nombres canónicos. `KERNELBASE` reutiliza los equivalentes Win32 del sistema. |
+| Importación PE por nombre u ordinal y `LoadLibrary`/`GetProcAddress` | Registro de módulos incorporados y grafo acotado de DLL PE externas, cargadas solo desde la carpeta del programa dentro del sandbox. API sets y `KERNELBASE` comparten el registro Win32. |
 | `NtQuerySystemTime` y `GetSystemTimeAsFileTime` | `CLOCK_REALTIME`, época de 1601 y unidades de 100 ns. |
 | `NtDelayExecution`, `Sleep` y esperas de objetos | Plazos relativos monotónicos, plazos absolutos de reloj de pared y esperas de glibc. |
 | Eventos y cierre | NTDLL y Win32 comparten la tabla de objetos. El cierre de archivos usa los mismos descriptores confinados del runtime. |
@@ -162,20 +162,39 @@ el error de fichero ausente y la conservación de LastError.
 
 ## Nuevos contratos del cargador, PEB y objetos NT
 
-**DLL:** `pe_image_run_library_entry()` invoca de manera **explícita**
-`DllMain` de una DLL PE32+ AMD64 ya mapeada y sin directorio TLS.
-Valida que el entry point esté en la sección de código y utiliza el
-ABI Microsoft x64. No la ejecuta al mapear ni gestiona dependencias,
-recursión, TLS de DLL, inicialización de proceso/hilo, refcounts o
-`FreeLibrary` de DLL externas. El llamador debe aportar el contexto
-invitado GS/TEB correcto antes de invocarla.
+**DLL PE externas:** el grafo `src/pe/dll_graph.c` carga, bajo
+`pe_image_load_library`, bibliotecas AMD64 sin directorio TLS desde un
+único directorio abierto por el lanzador de Linux. En Fedora el directorio
+es `/game`, dentro del sandbox; cada DLL se abre con `openat` y
+`O_NOFOLLOW`, rechazando nombres con rutas, ascensos, enlaces simbólicos
+y ficheros no regulares. Las importaciones EXE/DLL se resuelven de forma
+recursiva, con un límite de 64 módulos y detección de ciclos.
 
-**PEB:** `PEB->Ldr` (offset 0x18) apunta a un prefijo válido
-`PEB_LDR_DATA` con anillos de carga, memoria e inicialización.
-Estos contienen por ahora **únicamente la imagen EXE principal**, con
-dirección base, punto de entrada de la imagen, tamaño y nombre
-completo/corto UTF-16. Las DLL adicionales aún no se registran.
-Por tanto no es un PEB/LDR_DATA completo.
+Después de inicializar GS/TEB y PEB del invitado, las dependencias
+reciben `DLL_PROCESS_ATTACH` antes de su importador. `LoadLibraryA/W`,
+`GetProcAddress`, `GetModuleHandle`, `GetModuleFileName` y
+`FreeLibrary` comparten el mismo grafo, que mantiene referencias
+explícitas y fija las DLL exigidas por importaciones estáticas.
+`DLL_THREAD_ATTACH`/`DETACH` se propagan cuando se crean y terminan
+hilos invitados. `LoadLibraryExW` de DLL externas con flags de
+archivo de datos devuelve `ERROR_NOT_SUPPORTED` en vez de ejecutar
+su inicialización.
+
+**Límites todavía pendientes:** bibliotecas con TLS estático, rutas
+Windows generales, DLL de terceros que dependan de contratos no
+implementados, ciclos de inicialización, unload concurrente seguro,
+herencia/compartición entre procesos, `FreeLibrary` durante la ejecución
+de otro hilo, redirección Side-by-Side y política de búsqueda completa
+de Windows. Las cargas que exceden este perfil fallan de forma explícita.
+No se promete compatibilidad universal.
+
+**PEB:** `PEB->Ldr` (offset 0x18) expone los tres anillos de
+carga, memoria e inicialización, con el EXE principal y las DLL
+externas que alcanzan `DLL_PROCESS_ATTACH`. Cada entrada registra
+base, tamaño, punto de entrada, nombre completo y nombre corto UTF-16;
+las entradas de DLL se desvinculan antes de descargarlas. Sigue siendo
+un prefijo parcial de PEB/LDR_DATA, sin política de activación SxS
+ni todos los campos y flags internos de Windows.
 
 **Objetos NT:** `NtCreateSemaphore`, `NtOpenSemaphore`,
 `NtQuerySemaphore`, `NtReleaseSemaphore` y las API Win32
@@ -203,6 +222,12 @@ La CI comprueba estos contratos con `make check-pe-image
 check-pe-native-core check-pe-core-objects check-pe-teb-tls`.
 Siguen siendo **subconjuntos** de los cuatro primeros bloques
 críticos, no una declaración de compatibilidad general.
+
+El test `make check-pe-dll-graph` compila una DLL PE real sin CRT y
+dos ejecutables Win64: uno carga la DLL dinámicamente, comprueba su
+ciclo de referencias y las listas PEB, y otro importa directamente
+su función exportada desde la tabla IAT. Verifica también que la
+entrada de hilo de DLL se notifique desde el hilo invitado.
 
 ## E/S síncrona nativa del mismo handle (continuación de PR #61)
 
