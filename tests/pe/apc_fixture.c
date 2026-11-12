@@ -4,10 +4,7 @@
 #include <stdint.h>
 
 #define STATUS_OK ((LONG)0)
-#define STATUS_USER_APC ((LONG)0xc0)
-#define STATUS_INVALID_PARAMETER ((LONG)0xc000000du)
 #define STATUS_ACCESS_DENIED ((LONG)0xc0000022u)
-#define THREAD_QUERY_LIMITED_INFORMATION 0x800u
 
 __declspec(dllimport) LONG NTAPI NtQueueApcThread(
     HANDLE, void (NTAPI *)(void *, void *, void *), void *, void *, void *);
