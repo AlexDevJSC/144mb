@@ -33,11 +33,14 @@ static uintptr_t forward_resolver(const char *module, const char *name,
                                   uint16_t ordinal, void *context)
 {
     (void)context;
+    nt_guest_proc function = (nt_guest_proc)answer;
+    uintptr_t address = 0;
+    memcpy(&address, &function, sizeof(address));
     if (strcmp(module, "KERNEL32.dll") == 0 && name &&
         strcmp(name, "Sleep") == 0 && ordinal == 0)
-        return (uintptr_t)&answer;
+        return address;
     if (strcmp(module, "NTDLL.dll") == 0 && name == NULL && ordinal == 51)
-        return (uintptr_t)&answer;
+        return address;
     return 0;
 }
 
@@ -309,7 +312,10 @@ int main(void)
            strcmp(by_name.forwarder, "KERNEL32.Sleep") == 0);
     uintptr_t forwarded = 0;
     assert(pe_image_resolve_export(&image, "Return42", 0, forward_resolver, NULL, &forwarded));
-    assert(forwarded == (uintptr_t)&answer);
+    nt_guest_proc expected_function = (nt_guest_proc)answer;
+    uintptr_t expected_address = 0;
+    memcpy(&expected_address, &expected_function, sizeof(expected_address));
+    assert(forwarded == expected_address);
     assert(!pe_image_resolve_export(&image, "Return42", 0, NULL, NULL, &forwarded));
     assert(forwarded == 0);
     pe_image_unload(&image);
@@ -321,7 +327,10 @@ int main(void)
     assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
                                  &image, reason, sizeof(reason)));
     assert(pe_image_resolve_export(&image, NULL, 5, forward_resolver, NULL, &forwarded));
-    assert(forwarded == (uintptr_t)&answer);
+    nt_guest_proc expected_function = (nt_guest_proc)answer;
+    uintptr_t expected_address = 0;
+    memcpy(&expected_address, &expected_function, sizeof(expected_address));
+    assert(forwarded == expected_address);
     pe_image_unload(&image);
 
     make_export_dll(bytes);
