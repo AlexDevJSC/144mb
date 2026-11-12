@@ -70,6 +70,22 @@ int import_fixture_entry(void)
     if (!FreeLibrary(module) || GetModuleHandleA("guest_companion.dll") != NULL ||
         in_loader_list((uintptr_t)module))
         return 16;
+
+    /* Reopen an unloaded companion by a differently-cased name. Linux
+     * must locate the original filename without escaping the sandbox. */
+    HMODULE uppercase = LoadLibraryA("GUEST_COMPANION.DLL");
+    if (uppercase == NULL ||
+        GetModuleHandleA("guest_companion.dll") != uppercase ||
+        !in_loader_list((uintptr_t)uppercase))
+        return 22;
+    FARPROC uppercase_proc = GetProcAddress(uppercase, "GuestAnswer");
+    if (uppercase_proc == NULL)
+        return 23;
+    __builtin_memcpy(&answer, &uppercase_proc, sizeof(answer));
+    if (answer(0) != 42 || !FreeLibrary(uppercase) ||
+        GetModuleHandleA("guest_companion.dll") != NULL)
+        return 24;
+
     if (LoadLibraryA("../escape.dll") != NULL || GetLastError() != ERROR_MOD_NOT_FOUND)
         return 17;
     if (LoadLibraryA("C:\\Windows\\System32\\shady.dll") != NULL ||
