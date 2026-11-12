@@ -188,20 +188,24 @@ esperas no alertables y los derechos limitados.
 
 ## Nuevos contratos del cargador, PEB y objetos NT
 
-**DLL:** `pe_image_run_library_entry()` invoca de manera **explícita**
-`DllMain` de una DLL PE32+ AMD64 ya mapeada y sin directorio TLS.
-Valida que el entry point esté en la sección de código y utiliza el
-ABI Microsoft x64. No la ejecuta al mapear ni gestiona dependencias,
-recursión, TLS de DLL, inicialización de proceso/hilo, refcounts o
-`FreeLibrary` de DLL externas. El llamador debe aportar el contexto
-invitado GS/TEB correcto antes de invocarla.
+**DLL:** `pe_dll_graph` mapea archivos PE32+ AMD64 regulares, de
+nombre simple, desde el directorio aislado proporcionado por el lanzador.
+Resuelve importaciones estáticas y forwarders, adjunta dependencias antes
+que sus importadores y enlaza `LoadLibrary`, `GetProcAddress`,
+`GetModuleHandle` y `FreeLibrary` con el registro común. Distingue
+nombres ASCII de DLL sin importar mayúsculas/minúsculas, rechaza nombres
+ambiguos y no sigue enlaces simbólicos. `DllMain` se invoca con
+`DLL_PROCESS_ATTACH/DETACH` y `DLL_THREAD_ATTACH/DETACH` cuando
+corresponde, con el TEB invitado activo. Se exige una DLL sin directorio
+TLS: su soporte estático/dinámico completo sigue pendiente. `LoadLibraryEx`
+con flags de datos/recursos no ejecuta bibliotecas externas en este perfil.
 
 **PEB:** `PEB->Ldr` (offset 0x18) apunta a un prefijo válido
 `PEB_LDR_DATA` con anillos de carga, memoria e inicialización.
-Estos contienen por ahora **únicamente la imagen EXE principal**, con
-dirección base, punto de entrada de la imagen, tamaño y nombre
-completo/corto UTF-16. Las DLL adicionales aún no se registran.
-Por tanto no es un PEB/LDR_DATA completo.
+Los anillos contienen la imagen EXE principal y las DLL locales ya
+adjuntas, con base, entrada, tamaño y nombre completo/corto UTF-16.
+Se eliminan al descargar la DLL. Esto sigue sin ser un PEB/LDR_DATA
+completo ni expone todos los estados de la carga nativa de Windows.
 
 **Objetos NT:** `NtCreateSemaphore`, `NtOpenSemaphore`,
 `NtQuerySemaphore`, `NtReleaseSemaphore` y las API Win32
