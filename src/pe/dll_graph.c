@@ -352,9 +352,26 @@ static const char *backend_filename(void *context, uintptr_t base)
     return name;
 }
 
+static void backend_thread_event(void *context, uint32_t reason)
+{
+    if (reason != 2 && reason != 3)
+        return;
+    struct pe_dll_graph *graph = context;
+    pthread_mutex_lock(&graph->lock);
+    /* DLL_THREAD_ATTACH follows loader order; detach reverses it. */
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        const size_t index = reason == 2 ? i : MAX_DLLS - i - 1;
+        struct graph_module *module = &graph->modules[index];
+        if (module->present && module->attached)
+            (void)pe_image_run_library_entry(&module->image, reason);
+    }
+    pthread_mutex_unlock(&graph->lock);
+}
+
 static const struct nt_external_module_backend host_module_backend = {
     .load = backend_load, .find = backend_find, .getproc = backend_getproc,
-    .release = backend_release, .at = backend_at, .filename = backend_filename
+    .release = backend_release, .at = backend_at, .filename = backend_filename,
+    .thread_event = backend_thread_event
 };
 
 void pe_dll_graph_install(struct pe_dll_graph *graph)
