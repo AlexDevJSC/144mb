@@ -173,8 +173,8 @@ invitado GS/TEB correcto antes de invocarla.
 **PEB:** `PEB->Ldr` (offset 0x18) apunta a un prefijo válido
 `PEB_LDR_DATA` con anillos de carga, memoria e inicialización.
 Estos contienen por ahora **únicamente la imagen EXE principal**, con
-dirección base, tamaño y nombre completo/corto UTF-16. La dirección
-`EntryPoint` está vacía y las DLL adicionales aún no se registran.
+dirección base, punto de entrada de la imagen, tamaño y nombre
+completo/corto UTF-16. Las DLL adicionales aún no se registran.
 Por tanto no es un PEB/LDR_DATA completo.
 
 **Objetos NT:** `NtCreateSemaphore`, `NtOpenSemaphore`,
