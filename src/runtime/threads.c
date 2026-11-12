@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "sync.h"
 #include "child_process.h"
+#include "nt_services.h"
 #include "winbase.h"
 #include "ntnative/guest_thread.h"
 
@@ -14,13 +15,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-enum { WAITABLE_COUNT = 256, FLS_COUNT = 128, WAIT_TIMEOUT = 258, STILL_ACTIVE = 259 };
+enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128, STILL_ACTIVE = 259 };
+enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
+       SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003 };
 enum waitable_kind { EVENT, THREAD, PROCESS };
 struct waitable {
     uintptr_t handle;
     unsigned int refs;
     enum waitable_kind kind;
     bool manual, signaled, started;
+    uint32_t access;
     pthread_t host;
     uint32_t thread_id, exit_code;
     nt_thread_start start;
@@ -52,7 +56,8 @@ static struct waitable *new_waitable(enum waitable_kind kind)
         return NULL;
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         if (waitables[i].refs == 0) {
-            waitables[i] = (struct waitable){.handle = next_handle++, .refs = 1, .kind = kind};
+            waitables[i] = (struct waitable){.handle = next_handle++, .refs = 1, .kind = kind,
+                                             .access = SYNCHRONIZE};
             return &waitables[i];
         }
     }
@@ -72,83 +77,201 @@ bool nt_runtime_close_waitable(uintptr_t handle)
     return object != NULL;
 }
 
+_Static_assert(sizeof(struct nt_object_attributes) == 48 &&
+               offsetof(struct nt_object_attributes, name) == 16, "AMD64 OBJECT_ATTRIBUTES layout");
+
+static uint32_t event_access(uint32_t access)
+{
+    uint32_t rights = access & ~UINT32_C(0xf2000000);
+    if (access & UINT32_C(0x80000000)) /* GENERIC_READ */
+        rights |= READ_CONTROL | EVENT_QUERY_STATE;
+    if (access & UINT32_C(0x40000000)) /* GENERIC_WRITE */
+        rights |= READ_CONTROL | EVENT_MODIFY_STATE;
+    if (access & UINT32_C(0x20000000)) /* GENERIC_EXECUTE */
+        rights |= READ_CONTROL | SYNCHRONIZE;
+    if (access & UINT32_C(0x12000000)) /* GENERIC_ALL or MAXIMUM_ALLOWED */
+        rights |= EVENT_ALL_ACCESS;
+    return rights;
+}
+
+nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
+                                   const struct nt_object_attributes *attributes,
+                                   uint32_t type, uint8_t initial_state)
+{
+    if (!handle)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (type > 1 || (attributes && attributes->size != sizeof(*attributes)))
+        return NT_STATUS_INVALID_PARAMETER;
+    if (attributes && (attributes->name || attributes->root || attributes->security ||
+                       attributes->qos || (attributes->attributes & ~0x40u)))
+        return NT_STATUS_NOT_SUPPORTED;
+    const uint32_t rights = event_access(access);
+    if (rights & ~EVENT_ALL_ACCESS)
+        return NT_STATUS_ACCESS_DENIED;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *event = new_waitable(EVENT);
+    if (event != NULL) {
+        event->manual = type == 0; /* NotificationEvent */
+        event->signaled = initial_state != 0;
+        event->access = rights;
+        *handle = event->handle;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return event ? NT_STATUS_SUCCESS : NT_STATUS_NO_MEMORY;
+}
+
 uintptr_t NT_MS_ABI nt_CreateEventW(const void *security, int32_t manual, int32_t initial, const uint16_t *name)
 {
-    if (security != NULL || (name != NULL && *name != 0)) {
+    if (security || (name && *name)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
-    pthread_mutex_lock(&wait_lock);
-    struct waitable *event = new_waitable(EVENT);
     uintptr_t handle = 0;
-    if (event != NULL) {
-        event->manual = manual != 0;
-        event->signaled = initial != 0;
-        handle = event->handle;
-    }
-    pthread_mutex_unlock(&wait_lock);
-    nt_SetLastError(handle != 0 ? NT_ERROR_SUCCESS : NT_ERROR_NOT_ENOUGH_MEMORY);
+    const nt_status status = nt_NtCreateEvent(&handle, EVENT_ALL_ACCESS, NULL, manual ? 0 : 1, initial != 0);
+    nt_SetLastError(nt_runtime_nt_error(status));
     return handle;
 }
 
-static int32_t change_event(uintptr_t handle, bool signaled)
+static nt_status change_event(uintptr_t handle, bool signaled, int32_t *previous)
 {
     pthread_mutex_lock(&wait_lock);
     struct waitable *event = find_waitable(handle);
-    const bool valid = event != NULL && event->kind == EVENT;
-    if (valid) {
+    nt_status status = NT_STATUS_SUCCESS;
+    if (!event) {
+        status = NT_STATUS_INVALID_HANDLE;
+    } else if (event->kind != EVENT) {
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    } else if (!(event->access & EVENT_MODIFY_STATE)) {
+        status = NT_STATUS_ACCESS_DENIED;
+    } else {
+        if (previous)
+            *previous = event->signaled;
         event->signaled = signaled;
         if (signaled)
             pthread_cond_broadcast(&wait_changed);
     }
     pthread_mutex_unlock(&wait_lock);
-    if (!valid)
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-    return valid;
+    return status;
 }
 
-int32_t NT_MS_ABI nt_SetEvent(uintptr_t handle) { return change_event(handle, true); }
-int32_t NT_MS_ABI nt_ResetEvent(uintptr_t handle) { return change_event(handle, false); }
+nt_status NT_MS_ABI nt_NtSetEvent(uintptr_t handle, int32_t *previous) { return change_event(handle, true, previous); }
+nt_status NT_MS_ABI nt_NtResetEvent(uintptr_t handle, int32_t *previous) { return change_event(handle, false, previous); }
+
+static int32_t win_change_event(uintptr_t handle, bool signaled)
+{
+    const nt_status status = change_event(handle, signaled, NULL);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
+}
+
+int32_t NT_MS_ABI nt_SetEvent(uintptr_t handle) { return win_change_event(handle, true); }
+int32_t NT_MS_ABI nt_ResetEvent(uintptr_t handle) { return win_change_event(handle, false); }
+
+/* Called with wait_lock held. References keep closed slots from being reused. */
+static nt_status acquire_wait_objects(struct waitable **objects, uint32_t count, const uintptr_t *handles)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        struct waitable *object = find_waitable(handles[i]);
+        if (!object)
+            return NT_STATUS_INVALID_HANDLE;
+        if (!(object->access & SYNCHRONIZE))
+            return NT_STATUS_ACCESS_DENIED;
+        for (uint32_t j = 0; j < i; ++j) {
+            if (objects[j] == object)
+                return NT_STATUS_INVALID_PARAMETER;
+        }
+        objects[i] = object;
+    }
+    for (uint32_t i = 0; i < count; ++i)
+        ++objects[i]->refs;
+    return NT_STATUS_SUCCESS;
+}
+
+static nt_status check_wait_objects(struct waitable *const *objects, uint32_t count, bool all)
+{
+    uint32_t first = count, signaled = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!objects[i]->handle)
+            return NT_STATUS_INVALID_HANDLE;
+        if (objects[i]->signaled) {
+            if (!signaled)
+                first = i;
+            ++signaled;
+        }
+    }
+    if (all ? signaled != count : signaled == 0)
+        return NT_STATUS_TIMEOUT;
+    const uint32_t start = all ? 0 : first;
+    const uint32_t end = all ? count : first + 1;
+    for (uint32_t i = start; i < end; ++i) {
+        if (objects[i]->kind == EVENT && !objects[i]->manual)
+            objects[i]->signaled = false;
+    }
+    return all ? NT_STATUS_SUCCESS : (nt_status)first;
+}
+
+nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t *handles,
+                                              uint32_t type, uint8_t alertable, const int64_t *timeout)
+{
+    (void)alertable; /* No guest APC producer is registered. */
+    if (!count || count > MAXIMUM_WAIT_OBJECTS || type > 1)
+        return NT_STATUS_INVALID_PARAMETER;
+    if (!handles)
+        return NT_STATUS_ACCESS_VIOLATION;
+    struct nt_wait_deadline deadline;
+    if (timeout) {
+        const nt_status status = nt_runtime_wait_deadline(*timeout, &deadline);
+        if (status != NT_STATUS_SUCCESS)
+            return status;
+    }
+    struct waitable *objects[MAXIMUM_WAIT_OBJECTS];
+    pthread_mutex_lock(&wait_lock);
+    nt_status result = acquire_wait_objects(objects, count, handles);
+    if (result == NT_STATUS_SUCCESS) {
+        int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
+        for (;;) {
+            result = check_wait_objects(objects, count, type == 0);
+            if (result != NT_STATUS_TIMEOUT || error)
+                break;
+            error = timeout ? pthread_cond_clockwait(&wait_changed, &wait_lock, deadline.clock, &deadline.time) :
+                              pthread_cond_wait(&wait_changed, &wait_lock);
+        }
+        if (result == NT_STATUS_TIMEOUT && error != ETIMEDOUT)
+            result = NT_STATUS_UNSUCCESSFUL;
+        for (uint32_t i = 0; i < count; ++i)
+            --objects[i]->refs;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return result;
+}
+
+nt_status NT_MS_ABI nt_NtWaitForSingleObject(uintptr_t handle, uint8_t alertable, const int64_t *timeout)
+{
+    return nt_NtWaitForMultipleObjects(1, &handle, 1, alertable, timeout);
+}
+
+uint32_t NT_MS_ABI nt_WaitForMultipleObjectsEx(uint32_t count, const uintptr_t *handles,
+                                            int32_t all, uint32_t milliseconds, int32_t alertable)
+{
+    const int64_t ticks = -(int64_t)milliseconds * 10000;
+    const nt_status status = nt_NtWaitForMultipleObjects(count, handles, all ? 0 : 1, alertable != 0,
+                                                        milliseconds == UINT32_MAX ? NULL : &ticks);
+    if (status >= 0)
+        return (uint32_t)status;
+    nt_SetLastError(nt_runtime_nt_error(status));
+    return UINT32_MAX;
+}
+
+uint32_t NT_MS_ABI nt_WaitForMultipleObjects(uint32_t count, const uintptr_t *handles,
+                                          int32_t all, uint32_t milliseconds)
+{
+    return nt_WaitForMultipleObjectsEx(count, handles, all, milliseconds, 0);
+}
 
 uint32_t NT_MS_ABI nt_WaitForSingleObjectEx(uintptr_t handle, uint32_t milliseconds, int32_t alertable)
 {
-    (void)alertable; /* This runtime has no APC producer. */
-    struct timespec deadline;
-    clock_gettime(CLOCK_MONOTONIC, &deadline);
-    deadline.tv_sec += milliseconds / 1000;
-    deadline.tv_nsec += (long)(milliseconds % 1000) * 1000000;
-    if (deadline.tv_nsec >= 1000000000) {
-        ++deadline.tv_sec;
-        deadline.tv_nsec -= 1000000000;
-    }
-    pthread_mutex_lock(&wait_lock);
-    struct waitable *object = find_waitable(handle);
-    if (object == NULL) {
-        pthread_mutex_unlock(&wait_lock);
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-        return UINT32_MAX;
-    }
-    ++object->refs;
-    int status = 0;
-    while (!object->signaled && object->handle != 0 && status == 0) {
-        status = milliseconds == UINT32_MAX ? pthread_cond_wait(&wait_changed, &wait_lock) :
-                 pthread_cond_clockwait(&wait_changed, &wait_lock, CLOCK_MONOTONIC, &deadline);
-    }
-    uint32_t result = UINT32_MAX;
-    if (object->handle == 0) {
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-    } else if (object->signaled) {
-        if (object->kind == EVENT && !object->manual)
-            object->signaled = false;
-        result = 0;
-    } else if (status == ETIMEDOUT) {
-        result = WAIT_TIMEOUT;
-    } else {
-        nt_SetLastError(NT_ERROR_GEN_FAILURE);
-    }
-    --object->refs;
-    pthread_mutex_unlock(&wait_lock);
-    return result;
+    return nt_WaitForMultipleObjectsEx(1, &handle, 0, milliseconds, alertable);
 }
 
 uint32_t NT_MS_ABI nt_WaitForSingleObject(uintptr_t handle, uint32_t milliseconds)

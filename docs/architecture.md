@@ -24,10 +24,10 @@ el contador NT y un conjunto inicial de contratos Win32 y CRT.
 | Módulo | Espacio y responsabilidad | Estado |
 | --- | --- | --- |
 | Reconocimiento y carga | Usuario. Distinguir ELF y PE por cabeceras. Conservar el camino ELF de Linux. Validar arquitectura y rangos PE, mapear secciones, resolver bibliotecas y preparar la entrada. | Perfiles PE32+ AMD64 de laboratorio y lectura de importaciones directas en archivos externos. |
-| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Contador NT y 197 importaciones directas de Mines con perfiles probados. |
+| NTDLL y Win32 | Usuario. Tipos de ancho fijo, exportaciones con ABI Microsoft, traducción explícita de errores, PEB, TEB, TLS y excepciones. Las bibliotecas Win32 se apoyan en servicios NT con contratos separados. | Relojes, eventos, esperas, cierre y estado del TEB compartidos. [Perfil Kernel/User](kernel-user.md). |
 | Objetos y procesos | Usuario. Tablas de handles por proceso con acceso, herencia, duplicación, nombres y vida útil. Un broker por entorno podrá coordinar recursos compartidos si los casos entre procesos lo requieren. | Compartición local de archivos y salida del proceso de prueba con estado de 32 bits. |
 | Recursos de Linux | Kernel y UAPI existentes. Memoria con `mmap` y `mprotect`, descriptores para recursos y `ntsync` opcional para primitivas de espera. | Relojes Linux, memoria, `openat2` y `timerfd` en uso. |
-| Gráficos | Usuario. USER y win32u gestionan ventanas, eventos, entrada y portapapeles. DXVK y VKD3D-Proton aportan Direct3D sobre Vulkan. RADV usa la UAPI DRM de amdgpu. | Ventanas SDL 2, superficies GDI, teclado, ratón y temporizadores. |
+| Gráficos | Usuario. USER y win32u consultan el mismo estado de ventanas y entrada. Los backends Direct3D enlazan con Vulkan. RADV usa la UAPI DRM de amdgpu. | Ventanas SDL 2, superficies GDI, teclado, ratón, temporizadores y creación de dispositivos D3D12 mediante vkd3d. |
 | Escritorio | Usuario. Lanzador KDE, asociación MIME y estado separado por aplicación. El instalador PE usa la misma política y el mismo entorno que el lanzador. | RPM de diagnóstico preparado. |
 | Pruebas | Usuario y CI en Linux. Contratos documentados, PE sintéticos y mediciones. | Linux y PE controlado comprobados. |
 
@@ -67,9 +67,8 @@ El manejador SEH de C procesa filtros y finalizadores en un rango de código
 entregado por el despachador de confianza. El despachador valida el mapa
 ejecutable y se encarga de la transferencia al handler seleccionado.
 
-Quedan pendientes las relocaciones generales, TLS, la carga de aplicaciones
-externas y el arranque NT de procesos. La ejecución de archivos externos
-requiere su propio diseño de aislamiento.
+El cargador aislado admite relocaciones DIR64, TLS estático y procesos
+hijos AMD64 bajo la misma política de archivos. [Cargador aislado](isolated-loader.md).
 
 Referencias [PE/COFF](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format) ·
 [ABI Microsoft x64](https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention) ·

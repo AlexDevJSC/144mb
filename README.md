@@ -36,6 +36,10 @@ inicial es x86-64 con gráficos AMD mediante amdgpu y Mesa RADV.
 - Las aplicaciones pueden acceder directamente a carpetas elegidas de Linux
   mediante sus rutas de usuario de Windows. El runtime implementa el
   subconjunto de `SHGetKnownFolderPath` que corresponde a esas carpetas.
+- NTDLL, KERNEL32 y KERNELBASE comparten los servicios de reloj y objetos.
+  USER32 y el perfil de win32u consultan el mismo escritorio SDL. La IAT y
+  el cargador dinámico usan un registro común de módulos y API sets.
+  [Capa Kernel/User](docs/kernel-user.md).
 
 `nt-vulkan-probe` comprueba el cargador y los dispositivos Vulkan.
 El perfil D3D12 crea dispositivos, colas y recursos a través de vkd3d y
@@ -117,6 +121,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | [include/ntnative](include/ntnative) y [src/runtime](src/runtime) | ABI interno y código de compatibilidad |
 | [tests](tests) | Contratos, PE controlados y medición en Linux |
 | [Arquitectura](docs/architecture.md) | Límites entre el kernel, el runtime y el escritorio |
+| [Capa Kernel/User](docs/kernel-user.md) | ABI, objetos compartidos y módulos de Windows |
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |
 | [Validación](docs/validation.md) | Pruebas realizadas y plan comparativo |

@@ -8,6 +8,13 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+static _Thread_local unsigned char *current_teb;
+
+unsigned char *nt_guest_thread_teb(void)
+{
+    return current_teb;
+}
+
 static void put_pointer(unsigned char *base, size_t offset, uintptr_t value)
 {
     memcpy(base + offset, &value, sizeof(value));
@@ -65,6 +72,8 @@ bool nt_guest_thread_enter_in_process(struct nt_guest_thread *state, uintptr_t i
         return false;
     if (syscall(SYS_arch_prctl, ARCH_SET_GS, state->teb) != 0)
         return false;
+    state->saved_teb = current_teb;
+    current_teb = state->teb;
     state->entered = true;
     return true;
 }
@@ -82,10 +91,11 @@ bool nt_guest_thread_enter(struct nt_guest_thread *state, uintptr_t image_base)
 
 bool nt_guest_thread_leave(struct nt_guest_thread *state)
 {
-    if (state == NULL || !state->entered)
+    if (state == NULL || !state->entered || current_teb != state->teb)
         return false;
     if (syscall(SYS_arch_prctl, ARCH_SET_GS, state->saved_gs) != 0)
         return false;
+    current_teb = state->saved_teb;
     state->entered = false;
     return true;
 }

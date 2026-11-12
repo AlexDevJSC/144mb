@@ -1,0 +1,3 @@
+LIBRARY api-ms-win-ntuser-rectangle-l1-1-0.dll
+EXPORTS
+    IntersectRect

@@ -9,6 +9,7 @@
  * process environment and must only be installed for the guest worker.
  */
 enum { NT_GUEST_TLS_MAX = 4096, NT_GUEST_TLS_ALIGNMENT = 16 };
+enum { NT_TEB_LAST_ERROR = 0x68 };
 struct nt_guest_tls {
     const unsigned char *data;
     size_t bytes, zero_fill;
@@ -41,6 +42,7 @@ struct nt_guest_thread {
     _Alignas(NT_GUEST_TLS_ALIGNMENT) unsigned char tls_block[NT_GUEST_TLS_MAX];
     uintptr_t tls_vector[64];
     uintptr_t saved_gs;
+    unsigned char *saved_teb;
     bool entered;
 };
 
@@ -51,4 +53,5 @@ bool nt_guest_thread_enter_with_tls(struct nt_guest_thread *state, uintptr_t ima
 bool nt_guest_thread_enter_in_process(struct nt_guest_thread *state, uintptr_t image_base,
         const struct nt_guest_tls *initial, const struct nt_guest_process *process);
 bool nt_guest_thread_leave(struct nt_guest_thread *state);
+unsigned char *nt_guest_thread_teb(void);
 #endif
