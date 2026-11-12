@@ -10,6 +10,8 @@
 #include "sync.h"
 #include "winbase.h"
 #include "winfile.h"
+#include "child_process.h"
+#include "shell.h"
 #include "winsock.h"
 #include "nls.h"
 #include "gdi_ext.h"
@@ -58,7 +60,7 @@ static uint32_t NT_MS_ABI win_thread_id(void)
     return (uint32_t)gettid();
 }
 
-static uint32_t NT_MS_ABI win_get_last_error(void)
+uint32_t NT_MS_ABI nt_GetLastError(void)
 {
     return last_error;
 }
@@ -264,7 +266,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetCurrentProcess),
     EXPORT("GetCurrentProcessId", win_process_id),
     EXPORT("GetCurrentThreadId", win_thread_id),
-    EXPORT("GetLastError", win_get_last_error),
+    WIN_EXPORT(GetLastError),
     WIN_EXPORT(GetLocalTime),
     WIN_EXPORT(GetModuleFileNameA),
     WIN_EXPORT(GetModuleHandleW),
@@ -318,6 +320,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(CreateFile2),
     WIN_EXPORT(CreateFileW),
     WIN_EXPORT(CreateThread),
+    WIN_EXPORT(CreateProcessW),
+    WIN_EXPORT(GetExitCodeProcess),
     WIN_EXPORT(DeleteCriticalSection),
     WIN_EXPORT(DeleteFileW),
     WIN_EXPORT(EnterCriticalSection),
@@ -572,6 +576,9 @@ static const struct runtime_export comdlg32_exports[] = {
 };
 
 static const struct runtime_export shell32_exports[] = {
+    EXPORT("SHParseDisplayName", nt_SHParseDisplayName),
+    EXPORT("SHOpenFolderAndSelectItems", nt_SHOpenFolderAndSelectItems),
+    EXPORT("ShellExecuteW", nt_ShellExecuteW),
     WIN_EXPORT(SHGetKnownFolderPath),
     WIN_EXPORT(CommandLineToArgvW)
 };

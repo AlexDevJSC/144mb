@@ -42,6 +42,7 @@ enum {
 };
 
 void NT_MS_ABI nt_SetLastError(uint32_t error);
+uint32_t NT_MS_ABI nt_GetLastError(void);
 
 struct nt_file_time {
     uint32_t low;

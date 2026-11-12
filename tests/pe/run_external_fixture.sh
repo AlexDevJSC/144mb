@@ -42,3 +42,11 @@ XDG_STATE_HOME="$profile_state" SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELE
   timeout 30s "$runner" --share "Documents=$native_folder" "$folder_fixture"
 test "$(cat "$native_folder/shared.txt")" = LW
 echo "PASS PE known folder resolves to the original Linux file"
+if [ "$#" -ge 6 ]; then
+  drive="$profile_state/nt-native-linux/drive-c"
+  mkdir -- "$drive/ChildDir"
+  cp -- "$6" "$drive/Test child.exe"
+  XDG_STATE_HOME="$profile_state" SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
+    timeout 30s "$runner" "$5"
+  echo "PASS PE child launched inside the same Linux sandbox and returned its full exit code"
+fi

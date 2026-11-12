@@ -39,6 +39,8 @@ struct file_dialog {
     uint32_t error, filter_count, filter_index;
     char directory[MAX_PATH_BYTES], path[MAX_PATH_BYTES], filters[MAX_FILTER_BYTES];
     const char *names[MAX_FILTERS], *patterns[MAX_FILTERS];
+    const char *selection;
+    bool selection_found;
 };
 
 struct file_entry {
@@ -168,6 +170,10 @@ static bool refresh_list(uintptr_t window, struct file_dialog *dialog, int fd, c
                 ok = false;
                 break;
             }
+            if (dialog->selection && !strcmp(entries[i].name, dialog->selection)) {
+                nt_SendDlgItemMessageA(window, ID_LIST, NT_LB_SETCURSEL, i, 0);
+                dialog->selection_found = true;
+            }
         }
     }
     free(entries);
@@ -190,6 +196,69 @@ static bool visit(uintptr_t window, struct file_dialog *dialog, const char *name
     set_control_text(window, ID_EDIT, "");
     set_control_text(window, ID_STATUS, "");
     return true;
+}
+
+enum { FOLDER_VIEWS = 8 };
+static struct folder_view {
+    uintptr_t window;
+    struct file_dialog dialog;
+} folder_views[FOLDER_VIEWS];
+
+static intptr_t NT_MS_ABI folder_view_proc(uintptr_t window, uint32_t message,
+                                          uintptr_t wparam, intptr_t lparam)
+{
+    (void)lparam;
+    struct folder_view *view = (void *)nt_GetWindowLongPtrA(window, NT_DWLP_USER);
+    if (!view)
+        return 0;
+    if (message == NT_WM_CLOSE ||
+        (message == NT_WM_COMMAND && (uint16_t)wparam == NT_IDCANCEL)) {
+        nt_DestroyWindow(window);
+        return 1;
+    }
+    if (message == NT_WM_NCDESTROY)
+        view->window = 0;
+    return 0;
+}
+
+bool nt_runtime_show_folder(const char *path, const char *selection, uintptr_t owner)
+{
+    if (!nt_runtime_desktop_active())
+        return false;
+    struct folder_view *view = NULL;
+    for (size_t i = 0; i < FOLDER_VIEWS; ++i) {
+        if (!folder_views[i].window) {
+            view = &folder_views[i];
+            break;
+        }
+    }
+    if (!view)
+        return false;
+    view->dialog = (struct file_dialog){.patterns = {"*"}, .selection = selection};
+    uintptr_t window = nt_runtime_create_dialog(path, owner, 560, 378, folder_view_proc, (intptr_t)view);
+    if (!window)
+        return false;
+    view->window = window;
+    bool ready =
+        nt_runtime_add_dialog_control(window, "STATIC", path, ID_PATH, 0, 12, 12, 536, 22) &&
+        nt_runtime_add_dialog_control(window, "LISTBOX", "", ID_LIST, NT_WS_TABSTOP, 12, 40, 536, 280) &&
+        nt_runtime_add_dialog_control(window, "BUTTON", "Close", NT_IDCANCEL, NT_WS_TABSTOP, 452, 333, 96, 28) &&
+        visit(window, &view->dialog, path) && (!selection || view->dialog.selection_found);
+    view->dialog.selection = NULL;
+    if (!ready) {
+        nt_DestroyWindow(window);
+        return false;
+    }
+    nt_runtime_focus_control(window, nt_runtime_dialog_item(window, ID_LIST), false);
+    nt_ShowWindow(window, 5);
+    nt_SetForegroundWindow(window);
+    return true;
+}
+
+void nt_runtime_close_folder_views(void)
+{
+    for (size_t i = 0; i < FOLDER_VIEWS; ++i)
+        folder_views[i].window = 0;
 }
 
 static void visit_parent(uintptr_t window, struct file_dialog *dialog)

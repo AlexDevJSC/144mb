@@ -8,9 +8,11 @@
 #include "desktop_resources.h"
 #include "guest_profile.h"
 #include "winbase.h"
+#include "winfile.h"
 #include "sync.h"
 #include "user_folders.h"
 #include "dxcompiler_path.h"
+#include "child_process.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -18,6 +20,7 @@
 #include <linux/magic.h>
 #include <stdint.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,7 +32,7 @@
 extern char **environ;
 
 static struct pe_image active;
-static const char *active_dos_path;
+static const char *active_dos_path, *active_command, *active_directory;
 
 static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *context)
 {
@@ -61,10 +64,14 @@ static int NT_MS_ABI guest_entry(void)
             return 118;
         }
     }
-    char command[PATH_MAX + 4];
-    if (snprintf(command, sizeof(command), "\"%s\"", active_dos_path) >= (int)sizeof(command))
-        return 119;
-    if (!nt_runtime_set_guest_image((uintptr_t)active.base, active_dos_path, command))
+    if (active_directory) {
+        uint16_t *wide = nt_runtime_utf8_to_wide(active_directory);
+        bool changed = wide && nt_SetCurrentDirectoryW(wide);
+        free(wide);
+        if (!changed)
+            return 119;
+    }
+    if (!nt_runtime_set_guest_image((uintptr_t)active.base, active_dos_path, active_command))
         return 120;
     nt_runtime_set_guest_image_extent(active.size);
     const struct nt_guest_tls initial = {active.base + active.tls.data_rva, active.tls.bytes, active.tls.zero_fill};
@@ -109,33 +116,36 @@ static int NT_MS_ABI guest_entry(void)
     return status;
 }
 
-static int run_worker(const char *name)
+static bool worker_ready(bool child)
 {
     struct statfs root;
-    if (getpid() != 1 || prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 ||
+    if ((child ? getpid() == 1 || getppid() <= 1 : getpid() != 1) ||
+        prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 ||
         statfs("/", &root) != 0 || root.f_type != TMPFS_MAGIC) {
         fputs("Refusing worker outside sandbox; use pe-isolated-run FILE.exe\n", stderr);
-        return 125;
+        return false;
     }
     /* Windows reports a failed pipe write instead of terminating on SIGPIPE. */
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
-        return 125;
+        return false;
     /* Drop setup descriptors before loading guest code. A host directory fd
      * would otherwise retain access beyond the sandbox's filesystem root.
      */
-    if (close_range(3, UINT_MAX, 0) != 0) {
+    if (close_range(child ? 5 : 3, UINT_MAX, 0) != 0) {
         perror("Cannot close sandbox setup descriptors");
-        return 125;
+        return false;
     }
-    if (name[0] != '/' || strncmp(name, "/game/", 6) != 0 ||
-        strchr(name + 6, '/') != NULL || strchr(name + 6, '\\') != NULL ||
-        strstr(name + 6, "..") != NULL)
-        return 126;
-    const int fd = open(name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (fd < 0) {
-        perror("PE open");
-        return 2;
+    if (child) {
+        struct stat pipe;
+        if (fstat(4, &pipe) != 0 || !S_ISFIFO(pipe.st_mode))
+            return false;
     }
+    return true;
+}
+
+static int execute_pe(int fd, const char *dos_path, const char *command,
+                      const char *directory, int status_fd)
+{
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
         st.st_size <= 0 || st.st_size > PE_IMAGE_MAX_BYTES) {
@@ -172,11 +182,9 @@ static int run_worker(const char *name)
         fprintf(stderr, "PE loader: %s\n", error);
         return 3;
     }
-    const char *file_name = name + 6;
-    char dos_path[PATH_MAX];
-    if (snprintf(dos_path, sizeof(dos_path), "C:\\%s", file_name) >= (int)sizeof(dos_path))
-        return 4;
     active_dos_path = dos_path;
+    active_command = command;
+    active_directory = directory;
     uint32_t code = 0;
     const bool ran = nt_runtime_run_fixture(guest_entry, &code);
     pe_image_unload(&active);
@@ -185,7 +193,69 @@ static int run_worker(const char *name)
         return 5;
     }
     fprintf(stderr, "Guest exited with code %u\n", code);
+    if (status_fd >= 0) {
+        (void)write(status_fd, &code, sizeof(code));
+        close(status_fd);
+    }
     return code <= 255 ? (int)code : 1;
+}
+
+static int launch_child(int fd, const char *dos_path, const char *command,
+                        const char *directory, pid_t *pid, int *status_fd)
+{
+    int pipe_fds[2];
+    if (pipe2(pipe_fds, O_CLOEXEC | O_NONBLOCK) != 0)
+        return errno;
+    int image = fcntl(fd, F_DUPFD_CLOEXEC, 5);
+    int error = image < 0 ? errno : 0;
+    int status = error ? -1 : fcntl(pipe_fds[1], F_DUPFD_CLOEXEC, 5);
+    if (!error && status < 0)
+        error = errno;
+    if (!error) {
+        posix_spawn_file_actions_t actions;
+        error = posix_spawn_file_actions_init(&actions);
+        if (!error) {
+            error = posix_spawn_file_actions_adddup2(&actions, image, 3);
+            if (!error)
+                error = posix_spawn_file_actions_adddup2(&actions, status, 4);
+            if (!error) {
+                char *const args[] = {"/runner", "--child", (char *)dos_path,
+                                      (char *)command, (char *)directory, NULL};
+                error = posix_spawn(pid, "/runner", &actions, NULL, args, environ);
+            }
+            posix_spawn_file_actions_destroy(&actions);
+        }
+    }
+    if (image >= 0)
+        close(image);
+    if (status >= 0)
+        close(status);
+    close(pipe_fds[1]);
+    if (error)
+        close(pipe_fds[0]);
+    else
+        *status_fd = pipe_fds[0];
+    return error;
+}
+
+static int run_worker(const char *name)
+{
+    if (!worker_ready(false))
+        return 125;
+    if (strncmp(name, "/game/", 6) != 0 || strchr(name + 6, '/') != NULL ||
+        strchr(name + 6, '\\') != NULL || strstr(name + 6, "..") != NULL)
+        return 126;
+    char dos_path[PATH_MAX], command[PATH_MAX + 3];
+    if (snprintf(dos_path, sizeof(dos_path), "C:\\%s", name + 6) >= (int)sizeof(dos_path))
+        return 4;
+    snprintf(command, sizeof(command), "\"%s\"", dos_path);
+    int fd = open(name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        perror("PE open");
+        return 2;
+    }
+    nt_runtime_set_child_launcher(launch_child);
+    return execute_pe(fd, dos_path, command, NULL, -1);
 }
 
 static bool add_arg(char **args, size_t *count, size_t max, char *item)
@@ -335,6 +405,8 @@ int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--worker") == 0)
         return run_worker(argv[2]);
+    if (argc == 5 && strcmp(argv[1], "--child") == 0)
+        return worker_ready(true) ? execute_pe(3, argv[2], argv[3], argv[4], 4) : 125;
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
         usage(argv[0]);
         return 0;

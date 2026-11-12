@@ -22,7 +22,7 @@ VKD3D_CFLAGS ?= $(patsubst -I%,-isystem %,$(shell $(PKG_CONFIG) --cflags $(VKD3D
 VKD3D_LIBS ?= $(shell $(PKG_CONFIG) --libs $(VKD3D_PACKAGES) 2>/dev/null)
 RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process environment sync threads fluid crypto winsock nls registry raw_input exceptions \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
-                dialogs file_dialogs clipboard guest_thread display_config
+                dialogs file_dialogs clipboard guest_thread display_config child_process shell
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 ifneq ($(strip $(IMAGE_LIBS)),)
@@ -56,7 +56,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -91,6 +91,10 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/r
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-sync.o \
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-child_process.o: src/runtime/child_process.h
+$(BUILD_DIR)/runtime-child_process.o: src/runtime/winbase.h src/runtime/winfile.h src/pe/pe_bytes.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-shell.o: src/runtime/shell.h
+$(BUILD_DIR)/runtime-shell.o: src/runtime/child_process.h src/runtime/dialogs.h src/runtime/winfile.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o: src/runtime/winfile.h
 $(BUILD_DIR)/runtime-process.o: src/runtime/winfile.h include/ntnative/guest_thread.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-fluid.o: src/runtime/fluid_api.h
@@ -316,13 +320,29 @@ $(BUILD_DIR)/native-services.exe: tests/pe/native_services_fixture.c $(BUILD_DIR
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
 	    $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lbcrypt -lshell32 -lole32 -luser32 -lgdi32 -lmsimg32 -ladvapi32 -limm32 -lkernel32
 
-check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixture.exe $(BUILD_DIR)/folder-fixture.exe
+$(BUILD_DIR)/platform-fixture.exe: tests/pe/platform_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lshell32 -lole32 -luser32 -lkernel32
+
+check-pe-platform: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/platform-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/platform-fixture.exe
+
+$(BUILD_DIR)/child-parent-fixture.exe: tests/pe/child_process_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lkernel32
+
+$(BUILD_DIR)/child-fixture.exe: tests/pe/child_process_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) -DNT_CHILD_FIXTURE $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lkernel32
+
+check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixture.exe \
+    $(BUILD_DIR)/folder-fixture.exe $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe
 	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe \
-	    $(BUILD_DIR)/profile-fixture.exe $(BUILD_DIR)/folder-fixture.exe
+	    $(BUILD_DIR)/profile-fixture.exe $(BUILD_DIR)/folder-fixture.exe \
+	    $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe
 
 $(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/tools/guest_profile.h src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h \
-    src/runtime/user_folders.h src/runtime/winbase.h src/runtime/sync.h src/runtime/dxcompiler_path.h include/ntnative/guest_thread.h | $(BUILD_DIR)
+    src/runtime/user_folders.h src/runtime/winbase.h src/runtime/winfile.h src/runtime/sync.h \
+    src/runtime/child_process.h src/runtime/dxcompiler_path.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 

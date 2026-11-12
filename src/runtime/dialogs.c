@@ -226,6 +226,7 @@ void nt_runtime_close_dialogs(void)
 {
     /* The desktop has already released its windows without dispatching callbacks. */
     help.window = 0;
+    nt_runtime_close_folder_views();
     nt_runtime_set_help_document(NULL, NULL, NULL);
     dialog_class_registered = false;
 }

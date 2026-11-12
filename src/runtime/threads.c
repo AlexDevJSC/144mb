@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "sync.h"
+#include "child_process.h"
 #include "winbase.h"
 #include "ntnative/guest_thread.h"
 
@@ -10,10 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 enum { WAITABLE_COUNT = 256, FLS_COUNT = 128, WAIT_TIMEOUT = 258, STILL_ACTIVE = 259 };
-enum waitable_kind { EVENT, THREAD };
+enum waitable_kind { EVENT, THREAD, PROCESS };
 struct waitable {
     uintptr_t handle;
     unsigned int refs;
@@ -152,6 +154,103 @@ uint32_t NT_MS_ABI nt_WaitForSingleObjectEx(uintptr_t handle, uint32_t milliseco
 uint32_t NT_MS_ABI nt_WaitForSingleObject(uintptr_t handle, uint32_t milliseconds)
 {
     return nt_WaitForSingleObjectEx(handle, milliseconds, 0);
+}
+
+struct child_watch {
+    pid_t pid;
+    int status_fd;
+    struct waitable *process, *thread;
+};
+
+static void *reap_child(void *context)
+{
+    struct child_watch *watch = context;
+    int status = 0;
+    pid_t result;
+    do {
+        result = waitpid(watch->pid, &status, 0);
+    } while (result < 0 && errno == EINTR);
+    uint32_t code = NT_ERROR_GEN_FAILURE;
+    if (result == watch->pid && WIFEXITED(status)) {
+        ssize_t bytes;
+        do {
+            bytes = read(watch->status_fd, &code, sizeof(code));
+        } while (bytes < 0 && errno == EINTR);
+        if (bytes != (ssize_t)sizeof(code))
+            code = (uint32_t)WEXITSTATUS(status);
+    } else if (result == watch->pid && WIFSIGNALED(status)) {
+        code = (uint32_t)(128 + WTERMSIG(status));
+    }
+    close(watch->status_fd);
+    pthread_mutex_lock(&wait_lock);
+    watch->process->exit_code = watch->thread->exit_code = code;
+    watch->process->signaled = watch->thread->signaled = true;
+    --watch->process->refs;
+    --watch->thread->refs;
+    pthread_cond_broadcast(&wait_changed);
+    pthread_mutex_unlock(&wait_lock);
+    free(watch);
+    return NULL;
+}
+
+bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_information *info)
+{
+    struct child_watch *watch = malloc(sizeof(*watch));
+    pthread_attr_t attr;
+    if (!watch)
+        return false;
+    if (pthread_attr_init(&attr) != 0) {
+        free(watch);
+        return false;
+    }
+    int error = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *process = error == 0 ? new_waitable(PROCESS) : NULL;
+    struct waitable *thread = process ? new_waitable(THREAD) : NULL;
+    if (thread) {
+        ++process->refs;
+        ++thread->refs;
+        thread->thread_id = (uint32_t)pid;
+        *watch = (struct child_watch){pid, status_fd, process, thread};
+        pthread_t worker;
+        error = pthread_create(&worker, &attr, reap_child, watch);
+        if (!error)
+            *info = (struct nt_process_information){process->handle, thread->handle,
+                                                   (uint32_t)pid, (uint32_t)pid};
+    } else {
+        error = ENOMEM;
+    }
+    if (error) {
+        if (process)
+            *process = (struct waitable){0};
+        if (thread)
+            *thread = (struct waitable){0};
+        free(watch);
+    }
+    pthread_mutex_unlock(&wait_lock);
+    pthread_attr_destroy(&attr);
+    return error == 0;
+}
+
+int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
+{
+    if (!code) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (handle == UINTPTR_MAX) { /* GetCurrentProcess */
+        *code = STILL_ACTIVE;
+        return 1;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    bool valid = object && object->kind == PROCESS;
+    if (valid)
+        *code = object->signaled ? object->exit_code : STILL_ACTIVE;
+    pthread_mutex_unlock(&wait_lock);
+    if (!valid)
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return valid;
 }
 
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void) { return UINTPTR_MAX - 1; }

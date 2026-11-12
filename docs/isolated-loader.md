@@ -205,3 +205,23 @@ existan referencias al frame o al conversor. La prueba
 `make check-pe-wic` crea, decodifica y convierte un BMP desde un PE AMD64.
 La dependencia [SDL2_image](https://github.com/libsdl-org/SDL_image)
 conserva las licencias de los codecs empaquetados por la distribución.
+
+### Procesos hijos y shell
+
+`CreateProcessW` puede lanzar otro PE AMD64 del disco invitado en el mismo
+sandbox. Admite un ejecutable explícito o el primer argumento de una línea
+de comandos, un directorio de trabajo invitado y el entorno heredado.
+El padre conserva manejadores de espera y el código de salida de 32 bits.
+Las opciones de seguridad, la herencia arbitraria de manejadores, las
+consolas separadas y los bloques de entorno personalizados quedan fuera
+del perfil inicial.
+
+`SHParseDisplayName` genera un PIDL para rutas de archivos o directorios
+invitados. `SHOpenFolderAndSelectItems` muestra una carpeta SDL con selección
+de un elemento y `ShellExecuteW` admite abrir carpetas y ejecutar un PE
+con el mismo mecanismo de procesos hijos. Los verbos y asociaciones del
+escritorio anfitrión quedan fuera de este perfil.
+
+`make check-pe-platform` verifica el shell desde MinGW-w64. El caso de
+procesos hijos de `make check-pe-isolated` prueba argumentos Unicode,
+directorio de trabajo y código de salida superior a 255.
