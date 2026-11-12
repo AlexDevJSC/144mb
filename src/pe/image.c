@@ -533,6 +533,60 @@ bool pe_image_lookup_export(const struct pe_image *image, const char *name, uint
     return true;
 }
 
+/* Forwarded exports are data strings inside the export directory, not
+ * executable RVAs. Normalize bare module names to the builtin DLL registry.
+ * A caller may delegate further mapped-DLL forwarding through resolve(). */
+bool pe_image_resolve_export(const struct pe_image *image, const char *name, uint16_t ordinal,
+                             pe_image_resolver resolve, void *context, uintptr_t *address)
+{
+    if (address == NULL)
+        return false;
+    *address = 0;
+    struct pe_image_export result;
+    if (!pe_image_lookup_export(image, name, ordinal, &result))
+        return false;
+    if (result.forwarder == NULL) {
+        *address = result.address;
+        return result.address != 0;
+    }
+    if (resolve == NULL)
+        return false;
+    const char *dot = strrchr(result.forwarder, '.');
+    if (dot == NULL || dot == result.forwarder || dot[1] == '\\0')
+        return false;
+    const size_t module_length = (size_t)(dot - result.forwarder);
+    if (module_length > 119)
+        return false;
+    char module[128];
+    memcpy(module, result.forwarder, module_length);
+    memcpy(module + module_length, ".dll", sizeof(".dll"));
+
+    const char *target = dot + 1;
+    uint16_t target_ordinal = 0;
+    if (*target == '#') {
+        ++target;
+        unsigned int decimal = 0;
+        if (!*target)
+            return false;
+        for (; *target; ++target) {
+            if (*target < '0' || *target > '9')
+                return false;
+            decimal = decimal * 10u + (unsigned int)(*target - '0');
+            if (decimal > UINT16_MAX)
+                return false;
+        }
+        if (decimal == 0)
+            return false;
+        target_ordinal = (uint16_t)decimal;
+        target = NULL;
+    }
+    const uintptr_t found = resolve(module, target, target_ordinal, context);
+    if (found == 0)
+        return false;
+    *address = found;
+    return true;
+}
+
 bool pe_image_readable(uint32_t rva, size_t length, const void *opaque)
 {
     const struct pe_image *image = opaque;
