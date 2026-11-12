@@ -12,8 +12,10 @@ Usa un commit publicado del proyecto. El instalador descarga el repositorio
 completo en `~/.local/share/nt-native-linux/source`, instala con DNF las
 dependencias que falten y ejecuta `make all check check-pe-image` antes de
 activar la versión. Se puede repetir con el mismo commit. La instalación
-se activa en `~/.local/bin` con los comandos `nt-native-probe` y
-`pe-isolated-run`. La compilación y el lanzador se ejecutan como usuario.
+se activa en `~/.local/bin` con `pe-isolated-run`, `pe-import-audit`,
+`nt-native-probe` y `nt-vulkan-probe`. La compilación y el lanzador se
+ejecutan como usuario. El instalador verifica el SHA-256 del DXC nativo y
+guarda sus bibliotecas y licencias en la versión instalada del runtime.
 
 Ejecuta el instalador una vez por versión del runtime. Después, en una
 sesión KDE Wayland, abre cada EXE compatible con el mismo lanzador.
@@ -44,10 +46,10 @@ guardar y recuperar preferencias entre sesiones.
 
 ## Construcción del RPM
 
-El paquete instala los comandos ELF `nt-native-probe` y `pe-isolated-run` y documentación. Para ejecutar PE ajenos, el segundo requiere Bubblewrap y no permite omitir el sandbox. El
-comando permite verificar el backend del contador en una VM Fedora antes de
-integrar un lanzador. El spec limita el paquete a x86-64 y ejecuta las pruebas
-nativas en `%check`.
+El RPM instala el lanzador, el auditor y los comandos de diagnóstico. El
+lanzador ejecuta PE externos mediante Bubblewrap. El spec limita el paquete
+a x86-64 y ejecuta las pruebas nativas en `%check`. Para compilar DXIL con el
+RPM, proporciona `libdxcompiler.so` de Linux y su biblioteca `libdxil.so`.
 
 Desde un checkout Git, dentro de una VM desechable o un entorno de build Fedora:
 

@@ -13,6 +13,21 @@ fail() {
     exit 1
 }
 
+install_dxc() {
+    local archive="$work/dxc.tar.gz" unpack="$work/dxc"
+    local target="$candidate/lib/nt-native-linux/dxc"
+    local url=https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/linux_dxc_2025_07_14.x86_64.tar.gz
+    local sha256=f2213da1fc99dc8778c8823078e16ba97c7f80f86a1d4520ab1adf4b462bc48c
+    curl --fail --location --silent --show-error --retry 3 --proto '=https' --proto-redir '=https' \
+        --output "$archive" "$url"
+    printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status
+    mkdir -p -- "$unpack" "$target/lib"
+    tar -xzf "$archive" -C "$unpack" ./lib/libdxcompiler.so ./lib/libdxil.so \
+        ./LICENSE-MS.txt ./LICENSE-LLVM.txt
+    install -m 0644 -- "$unpack/lib/libdxcompiler.so" "$unpack/lib/libdxil.so" "$target/lib/"
+    install -m 0644 -- "$unpack/LICENSE-MS.txt" "$unpack/LICENSE-LLVM.txt" "$target/"
+}
+
 if [[ ${1-} == --help || ${1-} == -h ]]; then
     usage
     exit 0
@@ -33,8 +48,11 @@ fi
 [[ ${ID-} == fedora && $(uname -m) == x86_64 ]] ||
     fail 'Este instalador requiere Fedora x86-64.'
 
-dependencies=(git gcc binutils make pkgconf-pkg-config bubblewrap dejavu-sans-fonts
-              /usr/bin/flock 'pkgconfig(sdl2)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' 'pkgconfig(libcrypto)' fluidsynth-libs)
+dependencies=(git gcc binutils make pkgconf-pkg-config bubblewrap dejavu-sans-fonts tar gzip
+              /usr/bin/flock /usr/bin/curl /usr/bin/sha256sum
+              'pkgconfig(sdl2)' 'pkgconfig(SDL2_image)' 'pkgconfig(cairo)' 'pkgconfig(libffi)'
+              'pkgconfig(libcrypto)' 'pkgconfig(libvkd3d)' 'pkgconfig(libvkd3d-utils)' 'pkgconfig(vulkan)'
+              fluidsynth-libs libstdc++ mesa-vulkan-drivers)
 missing=()
 for dependency in "${dependencies[@]}"; do
     if ! rpm -q --whatprovides "$dependency" >/dev/null 2>&1; then
@@ -50,7 +68,7 @@ root="$HOME/.local/share/nt-native-linux"
 bin="$HOME/.local/bin"
 checkout="$root/source"
 version="$root/versions/$revision"
-commands=(nt-native-probe pe-isolated-run)
+commands=(nt-native-probe pe-isolated-run nt-vulkan-probe pe-import-audit)
 
 (
     mkdir -p -- "$root" "$bin"
@@ -93,9 +111,11 @@ commands=(nt-native-probe pe-isolated-run)
         make -C "$checkout" -j"$(nproc)" BUILD_DIR="$build" all check check-pe-image
         candidate="$work/payload"
         make -C "$checkout" BUILD_DIR="$build" DESTDIR="$candidate" PREFIX=/ BINDIR=/bin install
+        install_dxc
     fi
     "$candidate/bin/nt-native-probe"
     "$candidate/bin/pe-isolated-run" --help >/dev/null 2>&1
+    test -r "$candidate/lib/nt-native-linux/dxc/lib/libdxcompiler.so"
     if [[ $candidate != "$version" ]]; then
         mkdir -p -- "$root/versions"
         mv -T -- "$candidate" "$version"

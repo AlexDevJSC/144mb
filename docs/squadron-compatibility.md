@@ -4,7 +4,7 @@ Auditoría de las importaciones directas del ejecutable AMD64
 `Squadron121_DX12.exe` de la versión 2026.10.19-rc4. SHA-256
 `cfc4bbeb6948490f72ca63b031c9339c7eb68a9ef40f0b54b78da58cd8355d01`.
 
-| Biblioteca | Pendientes iniciales | Nuevos equivalentes | Pendientes |
+| Biblioteca | Pendientes iniciales | Cubiertas antes de esta rama | Cubiertas en esta rama |
 | --- | ---: | ---: | ---: |
 | KERNEL32 | 121 | 112 | 9 |
 | USER32 | 47 | 44 | 3 |
@@ -20,11 +20,9 @@ Auditoría de las importaciones directas del ejecutable AMD64
 | Streamline y compiladores de shaders | 20 | 0 | 20 |
 | **Total** | **253** | **217** | **36** |
 
-El binario pasó de 71 a 288 importaciones con un equivalente registrado
-entre 324 directas. El resultado incluye los 16 ordinales del binario.
-Los equivalentes se comprueban con sus contratos soportados. El juego
-requiere también inicialización, llamadas dinámicas y los servicios
-gráficos pendientes.
+El auditor resuelve las 324 importaciones directas del binario, incluidos
+los 16 ordinales. El resultado requiere FluidSynth, SDL2_image,
+vkd3d y Vulkan, el compilador DXBC de vkd3d-utils y el DXC nativo de Linux.
 
 ## Contratos comprobados
 
@@ -74,6 +72,8 @@ ordinal 345 de COMCTL32 corresponde a `TaskDialogIndirect`.
 
 ```sh
 make -j2 all check check-pe check-pe-import check-pe-image check-desktop check-pe-native
+make -j2 check-pe-console check-pe-displayconfig check-pe-platform check-pe-seh
+make -j2 check-pe-graphics check-pe-wic check-pe-shaders
 build/pe-import-audit --unresolved /ruta/a/Squadron121_DX12.exe
 build/native-audio-test /ruta/a/un-soundfont.sf2
 ```
@@ -86,36 +86,27 @@ nota MIDI. El auditor habilita los símbolos de FluidSynth cuando
 encuentra y enlaza los 22 símbolos del backend de Linux.
 
 Pruebas locales en Linux 6.18.57 AMD64, GCC 14.2, MinGW-w64 GCC 14,
-OpenSSL 3.5.7, FluidSynth 2.4.4 y SDL 2 offscreen. Se repitieron con
-UBSan. El ejecutable original de Mines conserva 197 de 197 importaciones
-y se verificó su flujo de preferencias en dos procesos aislados. Bubblewrap
-no pudo configurar el namespace de red estándar en Codex. Las pruebas del
-ejecutable original usaron el arnés local con aislamiento de usuario,
-montaje, PID, IPC y UTS y seccomp para bloquear sockets.
+OpenSSL 3.5.7, FluidSynth 2.4.4, SDL 2 offscreen, Mesa lavapipe 25.0.7,
+vkd3d 1.19 y DXC 1.8.2505.1. Se repitieron las pruebas del parser y del
+ABI con UBSan. Mines conserva 197 de 197 importaciones directas.
 
-El primer intento de carga de Squadron121 se detenía en su plantilla TLS
-de 337 bytes. Tras el cambio el cargador supera esa validación y se
-detiene en `sl.interposer.dll!D3D12CreateDevice`, antes de ejecutar
-código del juego.
+## Arranque del ejecutable original
 
-## Investigación posterior a la PR #47
+El cargador prepara TLS y los parámetros de proceso que el PE consulta
+mediante GS y el PEB. Squadron121 entra en su código principal, abre las
+fábricas DXGI y busca un adaptador D3D12. En Codex solo se detectó Mesa
+lavapipe. DXGI lo identifica como adaptador software, que el juego omite.
+El ejecutable informa `No Direct3D 12 Feature Level 12_0 adapter found.`
+El despacho C++ con `STATUS_UNWIND_CONSOLIDATE` entrega esa excepción al
+manejador del juego y se comprobó la aparición del error del propio juego.
 
-La rama de diagnóstico de Vulkan añade una consulta nativa a la biblioteca
-`libvulkan.so.1` y una prueba reproducible. **No registra todavía**
-`sl.interposer.dll!D3D12CreateDevice`; no modifica los 288/324
-equivalentes ni las 36 importaciones pendientes. Véase
-[la fase 0 de D3D12](vulkan-d3d12.md).
+Bubblewrap no pudo configurar el namespace de red estándar en Codex.
+La prueba usó un arnés local con namespaces de usuario, montaje, PID,
+IPC y UTS, y seccomp para bloquear sockets. Se usaron los datos del juego
+y el ejecutable original. Las DLL de Windows del paquete quedaron fuera.
 
-## Pendientes de la versión auditada
-
-| Bloque | Símbolos pendientes |
-| --- | --- |
-| Streamline y shaders (20) | 18 importaciones de `sl.interposer.dll`, incluida la creación D3D12/DXGI, más `D3DCompile` y `DxcCreateInstance`. |
-| Consola, procesos y excepciones (9) | `AllocConsole`, `AttachConsole`, `GetConsoleWindow`, `ReadConsoleW`, `SetConsoleTitleA`, `CreateProcessW`, `RaiseException`, `RtlUnwind` y `RtlUnwindEx`. |
-| Topología de pantalla (3) | `DisplayConfigGetDeviceInfo`, `GetDisplayConfigBufferSizes` y `QueryDisplayConfig`. |
-| Shell y COM (4) | `ShellExecuteW`, `SHParseDisplayName`, `SHOpenFolderAndSelectItems` y `CoCreateInstance`. |
-
-La ruta gráfica requiere dispositivos D3D12, fábrica DXGI, compilación de
-shaders y las interfaces de Streamline que el juego usa después de la
-creación del dispositivo. Los candidatos a backend están documentados en
-[Reutilización y licencias](reuse.md).
+`check-pe-graphics` verifica la creación de un dispositivo D3D12, la
+copia de datos y la sincronización de una cola mediante Vulkan. Queda
+pendiente la presentación de fotogramas a través de `IDXGISwapChain` y
+el acceso a una GPU física en el sandbox. El perfil de Streamline devuelve
+`eErrorFeatureMissing` para las extensiones de proveedor como DLSS y Reflex.
