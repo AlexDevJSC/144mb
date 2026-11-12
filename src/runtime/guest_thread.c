@@ -4,6 +4,7 @@
 
 #include <asm/prctl.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -105,6 +106,8 @@ bool nt_guest_thread_leave(struct nt_guest_thread *state)
         return false;
     current_teb = state->saved_teb;
     current_guest_thread = state->saved_thread;
+    free(state->tls_expansion);
+    state->tls_expansion = NULL;
     state->entered = false;
     return true;
 }
