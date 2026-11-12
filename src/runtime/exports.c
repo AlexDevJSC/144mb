@@ -7,6 +7,7 @@
 #include "dialogs.h"
 #include "nt_services.h"
 #include "nt_core_information.h"
+#include "exception_callbacks.h"
 #include "user_folders.h"
 #include "crypto.h"
 #include "sync.h"
@@ -270,6 +271,8 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(ProtectVirtualMemory),
     NT_EXPORT(QueryVirtualMemory),
     WIN_EXPORT(RtlGetCurrentPeb),
+    EXPORT("RtlAddVectoredExceptionHandler", nt_AddVectoredExceptionHandler),
+    EXPORT("RtlRemoveVectoredExceptionHandler", nt_RemoveVectoredExceptionHandler),
     WIN_EXPORT(RtlCaptureContext),
     WIN_EXPORT(RtlLookupFunctionEntry),
     WIN_EXPORT(RtlVirtualUnwind),
@@ -300,6 +303,8 @@ bool nt_runtime_fluidsynth_available(void);
 int NT_MS_ABI nt_fluid_synth_sfload(void *synth, const char *path, int reset);
 
 static const struct runtime_export kernel32_exports[] = {
+    WIN_EXPORT(AddVectoredExceptionHandler),
+    WIN_EXPORT(RemoveVectoredExceptionHandler),
     WIN_EXPORT(CloseHandle),
     WIN_EXPORT(DuplicateHandle),
     WIN_EXPORT(CreateDirectoryA),
