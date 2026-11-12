@@ -56,7 +56,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -259,10 +259,10 @@ $(BUILD_DIR)/pe-image-test: tests/pe/image_test.c src/pe/image.c $(PE_IMAGE_HEAD
 check-pe-image: $(BUILD_DIR)/pe-image-test
 	$(BUILD_DIR)/pe-image-test
 
-$(BUILD_DIR)/pe-external-host: tests/pe/external_host.c src/pe/image.c $(RUNTIME_OBJECTS) \
-    $(PE_IMAGE_HEADERS) src/runtime/winbase.h src/runtime/sync.h include/ntnative/guest_thread.h | $(BUILD_DIR)
+$(BUILD_DIR)/pe-external-host: tests/pe/external_host.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) \
+    $(PE_IMAGE_HEADERS) src/pe/dll_graph.h src/runtime/winbase.h src/runtime/sync.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    tests/pe/external_host.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+	    tests/pe/external_host.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
 check-pe-external: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/win32-desktop.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
@@ -373,6 +373,23 @@ check-pe-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe
 
+$(BUILD_DIR)/guest_companion.dll: tests/pe/guest_companion_dll.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) -shared -nostdlib \
+	    -Wl,--entry,DllMain,--subsystem,windows,--out-implib,$(BUILD_DIR)/fixture-guest_companion.a \
+	    -o "$@" "$<" -lkernel32
+
+$(BUILD_DIR)/guest-loader-dynamic.exe: tests/pe/guest_loader_dynamic_fixture.c $(BUILD_DIR)/guest_companion.dll | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
+
+$(BUILD_DIR)/guest-loader-static.exe: tests/pe/guest_loader_static_fixture.c $(BUILD_DIR)/guest_companion.dll | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-guest_companion.a -lkernel32
+
+check-pe-dll-graph: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-dynamic.exe $(BUILD_DIR)/guest-loader-static.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-dynamic.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-static.exe
+
 $(BUILD_DIR)/core-objects-fixture.exe: tests/pe/core_objects_fixture.c $(BUILD_DIR)/fixture-nt_core.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-nt_core.a -lkernel32
 
@@ -455,12 +472,12 @@ check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $
 	    $(BUILD_DIR)/profile-fixture.exe $(BUILD_DIR)/folder-fixture.exe \
 	    $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe $(BUILD_DIR)/command-fixture.exe
 
-$(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) \
+$(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/tools/guest_profile.h src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h \
     src/runtime/user_folders.h src/runtime/winbase.h src/runtime/winfile.h src/runtime/sync.h \
-    src/runtime/child_process.h src/runtime/dxcompiler_path.h include/ntnative/guest_thread.h | $(BUILD_DIR)
+    src/runtime/child_process.h src/runtime/dxcompiler_path.h src/pe/dll_graph.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+	    src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
 
 $(BUILD_DIR)/nt-counter-import.exe: tests/pe/import_fixture.c include/ntnative/counter.h | $(BUILD_DIR)
