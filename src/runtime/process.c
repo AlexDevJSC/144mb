@@ -232,12 +232,16 @@ const struct nt_guest_tls *nt_runtime_guest_tls(void) { return &guest.tls; }
 
 void nt_runtime_notify_tls(uint32_t reason)
 {
+    if (reason == 2) /* DLL_THREAD_ATTACH, before EXE static TLS callbacks */
+        nt_runtime_external_module_thread_event(reason);
     typedef void (NT_MS_ABI *tls_callback)(void *, uint32_t, void *);
     for (size_t i = 0; i < guest.tls_callback_count; ++i) {
         tls_callback callback;
         memcpy(&callback, guest.tls_callbacks + i * sizeof(callback), sizeof(callback));
         callback((void *)guest.module, reason, NULL);
     }
+    if (reason == 3) /* DLL_THREAD_DETACH, after EXE static TLS callbacks */
+        nt_runtime_external_module_thread_event(reason);
 }
 
 uintptr_t nt_runtime_guest_image_at(uintptr_t address)
