@@ -3,6 +3,11 @@
 #include <windows.h>
 #include <stdint.h>
 
+static DWORD WINAPI quick_thread(void *value)
+{
+    (void)value;
+    return 0;
+}
 static uintptr_t peblist(void)
 {
     uintptr_t peb = 0;
@@ -43,6 +48,17 @@ int import_fixture_entry(void)
     __builtin_memcpy(&answer, &proc, sizeof(answer));
     if (answer(1) != 43)
         return 13;
+    FARPROC thread_proc = GetProcAddress(module, "GuestThreadEvents");
+    if (thread_proc == NULL)
+        return 19;
+    int (WINAPI *events)(void) = NULL;
+    __builtin_memcpy(&events, &thread_proc, sizeof(events));
+    if (events() != 0)
+        return 20;
+    HANDLE child = CreateThread(NULL, 0, quick_thread, NULL, 0, NULL);
+    if (child == NULL || WaitForSingleObject(child, 5000) != WAIT_OBJECT_0 ||
+        !CloseHandle(child) || events() != 0x10001)
+        return 21;
     char path[200] = {0};
     if (GetModuleFileNameA(module, path, sizeof(path)) == 0 ||
         path[0] != 'C' || path[1] != ':' || path[2] != '\\')
