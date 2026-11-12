@@ -160,6 +160,32 @@ El PE de control crea el archivo por NTDLL, escribe por Win32, lo vuelve
 a abrir por NTDLL y lee por Win32. Comprueba también el cierre cruzado,
 el error de fichero ausente y la conservación de LastError.
 
+## APC de usuario y esperas alertables (continuación del núcleo de hilos)
+
+El runtime incorpora una cola acotada de APC por hilo invitado
+gestionado por la tabla de handles NT. `QueueUserAPC`,
+`NtQueueApcThread` y `NtTestAlert` entregan callbacks únicamente
+en el **hilo de destino** al ejecutar `SleepEx`,
+`NtDelayExecution(alertable=TRUE)` o `WaitFor*ObjectEx(alertable=TRUE)`.
+`NtQueueApcThread` usa tres argumentos y `QueueUserAPC` uno,
+siempre bajo el ABI Microsoft x64. Los derechos THREAD_SET_CONTEXT
+se validan para cada HANDLE, los índices de cola están acotados,
+y los callbacks pendientes se liberan cuando termina el hilo.
+
+No se ejecutan callbacks desde el hilo que los encola ni desde
+un manejador de señal de Linux. Los waits **no alertables** no
+despachan APC. Este perfil no implementa APC de kernel,
+`NtQueueApcThreadEx`, cancelación de APC, hilos arbitrarios
+externos, ni `IoCompletionPort`. La API `NtTestAlert` ejecuta
+como máximo una APC por llamada; esto no supone compatibilidad
+completa de todas las variantes del contrato Windows.
+
+La prueba `make check-pe-apc` genera un PE AMD64 independiente:
+suspende un hilo, le encola APC Win32/NT, lo reanuda, verifica el
+ID del hilo de callback, el orden de entrega, los estados
+`WAIT_IO_COMPLETION`/STATUS_USER_APC, la preservación de
+esperas no alertables y los derechos limitados.
+
 ## Nuevos contratos del cargador, PEB y objetos NT
 
 **DLL:** `pe_image_run_library_entry()` invoca de manera **explícita**
