@@ -394,8 +394,14 @@ int main(void)
                                   &image, reason, sizeof(reason)));
     make_tls_pe(bytes);
     w16(bytes + 0x84 + 18, 0x2002);
-    assert(!pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
-                                  &image, reason, sizeof(reason)));
-    puts("PASS unreadable export directories and unsafe DLL TLS rejected");
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(image.tls.present && image.tls.index_rva == 0x2150 &&
+           image.tls.bytes == 8 && image.tls.zero_fill == 8);
+    assert(pe_image_run_tls_callbacks(&image, 1));
+    assert(pe_image_run_tls_callbacks(&image, 2));
+    assert(!pe_image_run_tls_callbacks(&image, 4));
+    pe_image_unload(&image);
+    puts("PASS DLL TLS mapping, verified index location and explicit callbacks");
     return 0;
 }
