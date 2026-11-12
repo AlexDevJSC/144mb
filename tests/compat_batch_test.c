@@ -63,11 +63,13 @@ static void check_system(void)
     boottime = (struct timespec){4294967, 296000000};
     CHECK(nt_GetTickCount() == 0);
 
-    struct nt_file_time file_time;
+    /* This Win32 API leaves the output unchanged when CLOCK_REALTIME fails.
+     * Initialize it explicitly so GCC+LTO can prove every read is defined. */
+    struct nt_file_time file_time = {0};
     nt_GetSystemTimeAsFileTime(&file_time);
     const uint64_t ticks = (uint64_t)file_time.high << 32 | file_time.low;
     CHECK(ticks == UINT64_C(116444736001234567));
-    struct nt_system_time local;
+    struct nt_system_time local = {0};
     struct tm expected;
     CHECK(localtime_r(&realtime.tv_sec, &expected) == &expected);
     nt_GetLocalTime(&local);

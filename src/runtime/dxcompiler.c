@@ -15,7 +15,8 @@
 #include <unistd.h>
 #include <wchar.h>
 
-enum { CP_ACP = 0, CP_UTF16 = 1200, DXC_MAX_SOURCE = 64 * 1024 * 1024,
+enum { CP_ACP = 0, CP_UTF16 = 1200, DXC_OUT_OBJECT = 1,
+       DXC_MAX_SOURCE = 64 * 1024 * 1024,
        DXC_MAX_ARGS = 4096, DXC_MAX_WIDE = 32768 };
 enum object_kind { COMPILER, UTILS, RESULT, BLOB, ENCODED, UTF8, WIDE, INCLUDE };
 
@@ -152,6 +153,9 @@ struct dxc_object {
     void *native;
     void *converted;
     size_t converted_size;
+    /* Original UTF-16 DXC_OUT_OBJECT filename when native DXC cannot encode
+     * a Unicode -Fo argument. Owned by a wrapped RESULT until Release. */
+    uint16_t *output_filename;
 };
 
 #define GUEST_UNKNOWN \
@@ -308,6 +312,7 @@ static ULONG NT_MS_ABI object_release(struct dxc_object *object)
     if (!left) {
         HOST(object->native, unknown)->release(object->native);
         free(object->converted);
+        free(object->output_filename);
         free(object);
     }
     return left;
@@ -423,6 +428,24 @@ static HRESULT NT_MS_ABI result_output(struct dxc_object *object, UINT kind, REF
     if (SUCCEEDED(hr) && name) {
         hr = wrap_native(WIDE, native_name, name);
         native_name = NULL;
+        if (SUCCEEDED(hr) && *name != NULL && kind == DXC_OUT_OBJECT && object->output_filename != NULL) {
+            /* The guest must observe its real UTF-16 output name, not the
+             * ASCII name passed to the Linux DXC as a compatibility measure.
+             * This blob already owns the native COM name and keeps its refs. */
+            struct dxc_object *wide = *name;
+            size_t units = nt_runtime_wide_length(object->output_filename, DXC_MAX_WIDE);
+            uint16_t *copy = malloc((units + 1) * sizeof(*copy));
+            if (copy == NULL) {
+                object_release(wide);
+                *name = NULL;
+                hr = E_OUTOFMEMORY;
+            } else {
+                memcpy(copy, object->output_filename, (units + 1) * sizeof(*copy));
+                free(wide->converted);
+                wide->converted = copy;
+                wide->converted_size = (units + 1) * sizeof(*copy);
+            }
+        }
     }
     if (native_name)
         HOST(native_name, unknown)->release(native_name);
@@ -725,6 +748,35 @@ static HRESULT NT_MS_ABI compiler_compile(struct dxc_object *object, const struc
             break;
         }
     }
+    uint16_t *output_filename = NULL;
+    /* DXC 1.8.2505.1 on Linux returns DXC_E_STRING_ENCODING_FAILED for
+     * some Unicode -Fo filenames (upstream DirectXShaderCompiler #7394).
+     * Only the host compiler's argument is made ASCII. The guest-facing
+     * IDxcResult::GetOutput(DXC_OUT_OBJECT) name retains the original UTF-16.
+     * Do not mutate the application's argument array. */
+    for (UINT i = 0; SUCCEEDED(hr) && i + 1 < count; ++i) {
+        if (wcscmp(native_arguments[i], L"-Fo") != 0)
+            continue;
+        /* A later -Fo supersedes the earlier filename. */
+        free(output_filename);
+        output_filename = NULL;
+        bool non_ascii = false;
+        for (wchar_t *p = native_arguments[i + 1]; *p; ++p)
+            non_ascii |= (uint32_t)*p > 0x7f;
+        if (!non_ascii)
+            continue;
+        size_t units = nt_runtime_wide_length(arguments[i + 1], DXC_MAX_WIDE);
+        uint16_t *copy = malloc((units + 1) * sizeof(*copy));
+        if (!copy) {
+            hr = E_OUTOFMEMORY;
+            break;
+        }
+        memcpy(copy, arguments[i + 1], (units + 1) * sizeof(*copy));
+        output_filename = copy;
+        for (wchar_t *p = native_arguments[i + 1]; *p; ++p)
+            if ((uint32_t)*p > 0x7f)
+                *p = '_';
+    }
     struct include_bridge *bridge = NULL;
     if (SUCCEEDED(hr))
         hr = create_bridge(include, &bridge);
@@ -737,7 +789,15 @@ static HRESULT NT_MS_ABI compiler_compile(struct dxc_object *object, const struc
     for (UINT i = 0; i < count; ++i)
         free(native_arguments[i]);
     free(native_arguments);
-    return SUCCEEDED(hr) ? wrap_native(RESULT, native, out) : hr;
+    if (SUCCEEDED(hr)) {
+        hr = wrap_native(RESULT, native, out);
+        if (SUCCEEDED(hr) && *out) {
+            ((struct dxc_object *)*out)->output_filename = output_filename;
+            output_filename = NULL;
+        }
+    }
+    free(output_filename);
+    return hr;
 }
 static HRESULT NT_MS_ABI compiler_disassemble(struct dxc_object *object,
         const struct dxc_buffer *source, REFIID iid, void **out)

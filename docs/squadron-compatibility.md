@@ -68,6 +68,32 @@ ordinal 345 de COMCTL32 corresponde a `TaskDialogIndirect`.
 [BCryptCreateHash](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptcreatehash) ·
 [FluidSynth](https://www.fluidsynth.org/api/group__synth.html).
 
+## Portabilidad del compilador DXC en Fedora
+
+El fixture PE `tests/pe/shader_fixture.c` compila HLSL con `IDxcCompiler3`,
+incluye `color.hlsli` desde el disco C: del invitado, y verifica que
+`IDxcResult::GetOutput(DXC_OUT_OBJECT)` devuelve en UTF-16 el nombre
+`résultat.dxil`. En Fedora 45 con DXC Linux 1.8.2505.1, pasar el nombre
+Unicode directamente al compilador nativo producía
+`0x80AA000C (DXC_E_STRING_ENCODING_FAILED)`. Forzar una configuración
+regional UTF-8 no lo solucionó; usar un nombre ASCII sí. Se corresponde
+con el problema de rutas Unicode descrito en
+[DirectXShaderCompiler #7394](https://github.com/microsoft/DirectXShaderCompiler/issues/7394).
+
+El adaptador `src/runtime/dxcompiler.c` conserva sin modificar los
+argumentos del PE; para un valor no ASCII de `-Fo`, transmite a DXC una
+representación ASCII de ese nombre y mantiene una copia del original.
+Cuando el invitado consulta el nombre del objeto compilado, devuelve
+el UTF-16 original mediante su interfaz COM. Esta compatibilidad está
+acotada al nombre de salida `-Fo` de `IDxcCompiler3` y no promete
+normalizar todas las rutas de DXC ni repararlas en su biblioteca.
+
+El RPM empaqueta las pruebas `%check` con LTO y `-Werror`. La prueba
+`tests/compat_batch_test.c` inicializa explícitamente las estructuras
+que `GetSystemTimeAsFileTime` puede dejar intactas si falla el reloj.
+La CI de Fedora también ejecuta `check-pe-shaders` después de instalar
+DXC desde su paquete de Linux con SHA-256 verificado.
+
 ## Reproducir en Linux
 
 ```sh
