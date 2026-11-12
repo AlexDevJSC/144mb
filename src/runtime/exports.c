@@ -1049,6 +1049,12 @@ const char *nt_runtime_external_module_filename(uintptr_t base)
            external_backend.filename(external_backend.context, base) : NULL;
 }
 
+void nt_runtime_external_module_thread_event(uint32_t reason)
+{
+    if (external_backend.thread_event != NULL)
+        external_backend.thread_event(external_backend.context, reason);
+}
+
 uintptr_t NT_MS_ABI nt_LoadLibraryA(const char *name)
 {
     const size_t module = requested_module(name);
