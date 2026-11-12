@@ -15,7 +15,8 @@
 #include <unistd.h>
 #include <wchar.h>
 
-enum { CP_ACP = 0, CP_UTF16 = 1200, DXC_MAX_SOURCE = 64 * 1024 * 1024,
+enum { CP_ACP = 0, CP_UTF16 = 1200, DXC_OUT_OBJECT = 1,
+       DXC_MAX_SOURCE = 64 * 1024 * 1024,
        DXC_MAX_ARGS = 4096, DXC_MAX_WIDE = 32768 };
 enum object_kind { COMPILER, UTILS, RESULT, BLOB, ENCODED, UTF8, WIDE, INCLUDE };
 
@@ -427,7 +428,7 @@ static HRESULT NT_MS_ABI result_output(struct dxc_object *object, UINT kind, REF
     if (SUCCEEDED(hr) && name) {
         hr = wrap_native(WIDE, native_name, name);
         native_name = NULL;
-        if (SUCCEEDED(hr) && *name != NULL && kind == 1 && object->output_filename != NULL) {
+        if (SUCCEEDED(hr) && *name != NULL && kind == DXC_OUT_OBJECT && object->output_filename != NULL) {
             /* The guest must observe its real UTF-16 output name, not the
              * ASCII name passed to the Linux DXC as a compatibility measure.
              * This blob already owns the native COM name and keeps its refs. */
@@ -756,6 +757,9 @@ static HRESULT NT_MS_ABI compiler_compile(struct dxc_object *object, const struc
     for (UINT i = 0; SUCCEEDED(hr) && i + 1 < count; ++i) {
         if (wcscmp(native_arguments[i], L"-Fo") != 0)
             continue;
+        /* A later -Fo supersedes the earlier filename. */
+        free(output_filename);
+        output_filename = NULL;
         bool non_ascii = false;
         for (wchar_t *p = native_arguments[i + 1]; *p; ++p)
             non_ascii |= (uint32_t)*p > 0x7f;
@@ -768,7 +772,6 @@ static HRESULT NT_MS_ABI compiler_compile(struct dxc_object *object, const struc
             break;
         }
         memcpy(copy, arguments[i + 1], (units + 1) * sizeof(*copy));
-        free(output_filename);
         output_filename = copy;
         for (wchar_t *p = native_arguments[i + 1]; *p; ++p)
             if ((uint32_t)*p > 0x7f)
