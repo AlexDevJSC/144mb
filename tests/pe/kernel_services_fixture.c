@@ -140,7 +140,7 @@ static int test_duplicated_file(void)
 {
     /* dup(2) must preserve the shared file pointer when the original
      * guest HANDLE closes. Neither handle escapes the sandbox. */
-    HANDLE file = CreateFileW(L"C:\\\\nt-duplicate-test.bin", GENERIC_READ | GENERIC_WRITE,
+    HANDLE file = CreateFileW(L"C:\\nt-duplicate-test.bin", GENERIC_READ | GENERIC_WRITE,
                               0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE)
         return 40;
@@ -157,9 +157,9 @@ static int test_duplicated_file(void)
     if (!WriteFile(copy, value, sizeof(value), &count, NULL) || count != sizeof(value) ||
         !SetFilePointerEx(copy, beginning, NULL, FILE_BEGIN) ||
         !ReadFile(copy, result, sizeof(result), &count, NULL) ||
-        count != sizeof(result) || memcmp(value, result, sizeof(value)))
+        count != sizeof(result) || result[0] != 'O' || result[1] != 'K' || result[2] != 0)
         return 43;
-    if (!CloseHandle(copy) || !DeleteFileW(L"C:\\\\nt-duplicate-test.bin"))
+    if (!CloseHandle(copy) || !DeleteFileW(L"C:\\nt-duplicate-test.bin"))
         return 44;
     return 0;
 }
