@@ -6,6 +6,15 @@
 #include <dxgi1_6.h>
 #include <stdint.h>
 
+/* Some MinGW versions lower the fixture's aggregate initialization to memset. */
+void *memset(void *destination, int value, size_t size)
+{
+    volatile unsigned char *bytes = destination;
+    for (size_t i = 0; i < size; ++i)
+        bytes[i] = (unsigned char)value;
+    return destination;
+}
+
 static int root_signatures(ID3D12Device *device)
 {
     const D3D12_ROOT_SIGNATURE_DESC desc = {0};
