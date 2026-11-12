@@ -8,6 +8,7 @@
 #include <time.h>
 
 #define NT_STATUS_USER_APC INT32_C(0x000000c0)
+#define NT_STATUS_SUSPEND_COUNT_EXCEEDED ((nt_status)UINT32_C(0xc000004a))
 #define NT_STATUS_THREAD_IS_TERMINATING ((nt_status)UINT32_C(0xc000004b))
 #define NT_STATUS_TIMEOUT INT32_C(0x00000102)
 #define NT_STATUS_INVALID_INFO_CLASS ((nt_status)UINT32_C(0xc0000003))
@@ -93,6 +94,7 @@ nt_status NT_MS_ABI nt_NtOpenSemaphore(uintptr_t *handle, uint32_t access,
 nt_status NT_MS_ABI nt_NtQuerySemaphore(uintptr_t handle, uint32_t information_class,
                                         void *buffer, uint32_t length, uint32_t *returned_length);
 nt_status NT_MS_ABI nt_NtReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous);
+nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtSetEvent(uintptr_t handle, int32_t *previous);
 nt_status NT_MS_ABI nt_NtResetEvent(uintptr_t handle, int32_t *previous);
