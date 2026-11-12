@@ -23,6 +23,7 @@ struct graph_module {
     bool present, loading, attaching, attached, registered, pinned;
     unsigned int references;
     uint64_t attach_order;
+    uint32_t tls_index; /* Never reused while graph lives; 0 belongs to EXE. */
     char name[MAX_DLL_NAME];
     char dos_path[MAX_DLL_NAME + 4];
     struct pe_image image;
@@ -36,6 +37,7 @@ struct pe_dll_graph {
     struct graph_module *loading;
     unsigned int resolve_depth;
     uint64_t next_attach_order;
+    uint32_t next_tls_index;
 };
 
 static bool valid_module_name(const char *input, char output[MAX_DLL_NAME])
@@ -221,7 +223,8 @@ static bool attach_module(struct pe_dll_graph *graph, struct graph_module *modul
         return false;
     }
     module->registered = true;
-    if (!pe_image_run_library_entry(&module->image, 1)) {
+    if (!pe_image_run_tls_callbacks(&module->image, 1) ||
+        !pe_image_run_library_entry(&module->image, 1)) {
         nt_runtime_guest_unregister_dll(address);
         module->registered = false;
         module->attaching = false;
@@ -280,6 +283,23 @@ static struct graph_module *load_module(struct pe_dll_graph *graph,
         fprintf(stderr, "Guest PE DLL %s: %s\n", name, reason);
         *module = (struct graph_module){0};
         return NULL;
+    }
+    /* A pre-entry import can reserve its own static TLS slot. Loading a
+     * new TLS DLL after guest threads have started requires stop-the-world
+     * thread initialization and is deliberately unsupported here. Pin all
+     * such startup DLLs so another thread can never retain a stale pointer
+     * to a freed TLS template or callback. */
+    if (module->image.tls.present) {
+        if (nt_guest_thread_teb() != NULL || graph->next_tls_index >= 64) {
+            fprintf(stderr, "Guest PE DLL %s: static TLS only supported for startup imports\n", name);
+            pe_image_unload(&module->image);
+            *module = (struct graph_module){0};
+            return NULL;
+        }
+        module->tls_index = graph->next_tls_index++;
+        memcpy(module->image.base + module->image.tls.index_rva,
+               &module->tls_index, sizeof(module->tls_index));
+        module->pinned = true;
     }
     module->loading = false;
     track_dependency(graph, module);
@@ -363,6 +383,7 @@ static bool backend_release(void *context, uintptr_t base)
         --module->references;
     if (valid && module->references == 0 && !module->pinned) {
         if (module->attached) {
+            (void)pe_image_run_tls_callbacks(&module->image, 0);
             (void)pe_image_run_library_entry(&module->image, 0);
             module->attached = false;
         }
@@ -429,15 +450,38 @@ static void backend_thread_event(void *context, uint32_t reason)
         if (selected == NULL)
             break;
         boundary = selected->attach_order;
+        (void)pe_image_run_tls_callbacks(&selected->image, reason);
         (void)pe_image_run_library_entry(&selected->image, reason);
     }
     pthread_mutex_unlock(&graph->lock);
 }
 
+static bool backend_prepare_thread(void *context, struct nt_guest_thread *thread)
+{
+    struct pe_dll_graph *graph = context;
+    if (graph == NULL || thread == NULL)
+        return false;
+    pthread_mutex_lock(&graph->lock);
+    bool okay = true;
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        const struct graph_module *module = &graph->modules[i];
+        if (module->present && !module->loading && module->tls_index != 0 &&
+            !nt_guest_thread_set_static_tls(thread, module->tls_index,
+                module->image.base + module->image.tls.data_rva,
+                module->image.tls.bytes, module->image.tls.zero_fill)) {
+            okay = false;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&graph->lock);
+    return okay;
+}
+
 static const struct nt_external_module_backend host_module_backend = {
     .load = backend_load, .find = backend_find, .getproc = backend_getproc,
     .release = backend_release, .at = backend_at, .filename = backend_filename,
-    .thread_event = backend_thread_event
+    .thread_event = backend_thread_event,
+    .prepare_thread = backend_prepare_thread
 };
 
 void pe_dll_graph_install(struct pe_dll_graph *graph)
@@ -479,6 +523,7 @@ struct pe_dll_graph *pe_dll_graph_create(const char *directory)
         return NULL;
     }
     graph->directory_fd = fd;
+    graph->next_tls_index = 1; /* EXE static TLS is always index zero. */
     return graph;
 }
 
@@ -516,6 +561,7 @@ void pe_dll_graph_detach_all(struct pe_dll_graph *graph)
         if (selected == NULL)
             break;
         boundary = selected->attach_order;
+        (void)pe_image_run_tls_callbacks(&selected->image, 0);
         (void)pe_image_run_library_entry(&selected->image, 0);
         selected->attached = false;
     }
