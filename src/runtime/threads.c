@@ -17,12 +17,25 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128, STILL_ACTIVE = 259 };
+enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128,
+       STILL_ACTIVE = 259, MAX_PENDING_APC = 64 };
 enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
        SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
        THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
        THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
 enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
+typedef void (NT_MS_ABI *guest_user_apc)(uintptr_t);
+typedef void (NT_MS_ABI *guest_native_apc)(void *, void *, void *);
+struct guest_apc {
+    struct guest_apc *next;
+    guest_user_apc user;
+    guest_native_apc native;
+    uintptr_t first, second, third;
+};
+struct guest_apc_queue {
+    struct guest_apc *head, *tail;
+    uint32_t count;
+};
 struct waitable {
     uintptr_t handle;
     unsigned int refs;
@@ -35,6 +48,7 @@ struct waitable {
     bool manual, signaled, started;
     int32_t semaphore_count, semaphore_maximum;
     uintptr_t teb_base;
+    struct guest_apc_queue apcs;
     uint32_t suspend_count;
     uint32_t access;
     pthread_t host;
@@ -53,6 +67,179 @@ static pthread_cond_t wait_changed = PTHREAD_COND_INITIALIZER;
 static _Thread_local struct waitable *running_thread;
 static _Thread_local uint32_t thread_result;
 static _Thread_local sigjmp_buf thread_exit;
+/* A guest's primary thread is not represented by a waitable. Its own
+ * pseudo-handle has a strictly thread-local queue, never a host TID. */
+static _Thread_local struct guest_apc_queue primary_apcs;
+
+static struct guest_apc_queue *current_apcs(void)
+{
+    return running_thread != NULL ? &running_thread->apcs : &primary_apcs;
+}
+
+/* The caller holds wait_lock. APC callbacks execute only on their target
+ * thread, after dropping this lock, and never from a Linux signal handler. */
+static struct guest_apc *pop_apc_locked(void)
+{
+    struct guest_apc_queue *queue = current_apcs();
+    struct guest_apc *apc = queue->head;
+    if (apc != NULL) {
+        queue->head = apc->next;
+        if (queue->head == NULL)
+            queue->tail = NULL;
+        --queue->count;
+        apc->next = NULL;
+    }
+    return apc;
+}
+
+static void invoke_apc(struct guest_apc *apc)
+{
+    if (apc == NULL)
+        return;
+    const uint32_t prior = nt_GetLastError();
+    if (apc->native != NULL)
+        apc->native((void *)apc->first, (void *)apc->second, (void *)apc->third);
+    else
+        apc->user(apc->first);
+    nt_SetLastError(prior);
+    free(apc);
+}
+
+/* On termination the target cannot execute additional APCs. The queue
+ * belongs to its canonical THREAD slot even after every HANDLE is closed. */
+static void clear_apcs_locked(struct guest_apc_queue *queue)
+{
+    struct guest_apc *apc = queue->head;
+    while (apc != NULL) {
+        struct guest_apc *next = apc->next;
+        free(apc);
+        apc = next;
+    }
+    *queue = (struct guest_apc_queue){0};
+}
+
+nt_status nt_runtime_queue_apc(uintptr_t handle, guest_user_apc user,
+                                guest_native_apc native,
+                                uintptr_t first, uintptr_t second, uintptr_t third)
+{
+    if ((user == NULL) == (native == NULL))
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct guest_apc_queue *queue = NULL;
+    nt_status status = NT_STATUS_SUCCESS;
+    if (handle == UINTPTR_MAX - 1) {
+        queue = current_apcs();
+    } else {
+        struct waitable *object = find_waitable(handle);
+        if (object == NULL)
+            status = NT_STATUS_INVALID_HANDLE;
+        else if (object->kind != THREAD)
+            status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+        else if (wait_state(object)->owner_pid != (uint32_t)getpid())
+            status = NT_STATUS_NOT_SUPPORTED;
+        else if (!(object->access & 0x10u)) /* THREAD_SET_CONTEXT */
+            status = NT_STATUS_ACCESS_DENIED;
+        else if (wait_state(object)->signaled)
+            status = NT_STATUS_THREAD_IS_TERMINATING;
+        else
+            queue = &wait_state(object)->apcs;
+    }
+    if (queue != NULL) {
+        if (queue->count >= MAX_PENDING_APC) {
+            status = NT_STATUS_NO_MEMORY;
+        } else {
+            struct guest_apc *apc = calloc(1, sizeof(*apc));
+            if (apc == NULL) {
+                status = NT_STATUS_NO_MEMORY;
+            } else {
+                *apc = (struct guest_apc){
+                    .user = user, .native = native,
+                    .first = first, .second = second, .third = third
+                };
+                if (queue->tail != NULL)
+                    queue->tail->next = apc;
+                else
+                    queue->head = apc;
+                queue->tail = apc;
+                ++queue->count;
+                pthread_cond_broadcast(&wait_changed);
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+uint32_t NT_MS_ABI nt_QueueUserAPC(guest_user_apc callback, uintptr_t handle, uintptr_t data)
+{
+    const nt_status status = nt_runtime_queue_apc(handle, callback, NULL, data, 0, 0);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtQueueApcThread(uintptr_t thread, guest_native_apc routine,
+                                       void *context, void *first, void *second)
+{
+    return nt_runtime_queue_apc(thread, NULL, routine, (uintptr_t)context,
+                                (uintptr_t)first, (uintptr_t)second);
+}
+
+nt_status NT_MS_ABI nt_NtTestAlert(void)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct guest_apc *apc = pop_apc_locked();
+    pthread_mutex_unlock(&wait_lock);
+    if (apc == NULL)
+        return NT_STATUS_SUCCESS;
+    invoke_apc(apc);
+    return NT_STATUS_USER_APC;
+}
+
+/* Same condition variable as waits and queueing: no lost wake-ups between
+ * checking for work and sleeping, even when APCs are queued by another
+ * Linux host thread. NULL deadline denotes an infinite alertable wait. */
+nt_status nt_runtime_alertable_delay(const struct nt_wait_deadline *deadline)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct guest_apc *apc = NULL;
+    int error = 0;
+    for (;;) {
+        apc = pop_apc_locked();
+        if (apc != NULL)
+            break;
+        if (deadline != NULL && deadline->time.tv_sec < 0) {
+            error = ETIMEDOUT;
+            break;
+        }
+        error = deadline != NULL ?
+            pthread_cond_clockwait(&wait_changed, &wait_lock, deadline->clock, &deadline->time) :
+            pthread_cond_wait(&wait_changed, &wait_lock);
+        if (error != 0)
+            break;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (apc != NULL) {
+        invoke_apc(apc);
+        return NT_STATUS_USER_APC;
+    }
+    return error == 0 || error == ETIMEDOUT ? NT_STATUS_SUCCESS : NT_STATUS_UNSUCCESSFUL;
+}
+
+uint32_t NT_MS_ABI nt_SleepEx(uint32_t milliseconds, int32_t alertable)
+{
+    if (!alertable) {
+        nt_Sleep(milliseconds);
+        return 0;
+    }
+    const int64_t relative = -(int64_t)milliseconds * INT64_C(10000);
+    struct nt_wait_deadline deadline;
+    if (milliseconds == UINT32_MAX)
+        return nt_runtime_alertable_delay(NULL) == NT_STATUS_USER_APC ? 0xc0u : 0;
+    if (nt_runtime_wait_deadline(relative, &deadline) != NT_STATUS_SUCCESS)
+        return 0;
+    return nt_runtime_alertable_delay(&deadline) == NT_STATUS_USER_APC ? 0xc0u : 0;
+}
 
 static struct waitable *find_waitable(uintptr_t handle)
 {
