@@ -19,7 +19,9 @@
 
 enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128, STILL_ACTIVE = 259 };
 enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
-       SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003 };
+       SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
+       THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
+       THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
 enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
 struct waitable {
     uintptr_t handle;
@@ -839,6 +841,7 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         ++process->refs;
         ++thread->refs;
         thread->thread_id = (uint32_t)pid;
+        thread->access = THREAD_ALL_ACCESS;
         *watch = (struct child_watch){pid, status_fd, process, thread};
         pthread_t worker;
         error = pthread_create(&worker, &attr, reap_child, watch);
@@ -884,6 +887,85 @@ int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
 }
 
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void) { return UINTPTR_MAX - 1; }
+/* Thread metadata is kept in the same canonical table as wait handles, so
+ * OpenThread and native queries observe the same guest TEB and thread ID.
+ * No host pthread_t is returned as a Win32 HANDLE. */
+nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
+                                   uintptr_t *teb, uint32_t *exit_code)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        const struct waitable *state = wait_state(object);
+        if (thread_id != NULL)
+            *thread_id = state->thread_id;
+        if (teb != NULL)
+            *teb = state->teb_base;
+        if (exit_code != NULL)
+            *exit_code = state->signaled ? state->exit_code : STILL_ACTIVE;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle)
+{
+    if (handle == nt_GetCurrentThread())
+        return (uint32_t)gettid();
+    uint32_t id = 0;
+    const nt_status status = nt_runtime_query_thread(handle, &id, NULL, NULL);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS ? id : 0;
+}
+
+uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
+{
+    if (id == 0 || (access & ~THREAD_ALL_ACCESS) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *original = NULL;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+        struct waitable *item = &waitables[i];
+        if (item->kind == THREAD && item->shared == NULL &&
+            (item->refs != 0 || item->links != 0) && item->thread_id == id) {
+            original = item;
+            break;
+        }
+    }
+    uintptr_t result = 0;
+    uint32_t error = NT_ERROR_INVALID_PARAMETER;
+    if (original != NULL) {
+        if (access & ~original->access) {
+            error = NT_ERROR_ACCESS_DENIED;
+        } else {
+            struct waitable *alias = new_waitable(THREAD);
+            if (alias == NULL)
+                error = NT_ERROR_NOT_ENOUGH_MEMORY;
+            else {
+                ++original->links;
+                alias->shared = original;
+                alias->access = access;
+                alias->handle_flags = inherit != 0 ? 1u : 0u;
+                result = alias->handle;
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (result == 0)
+        nt_SetLastError(error);
+    return result;
+}
+
 
 static void finish_thread(void *state)
 {
@@ -895,6 +977,7 @@ static void finish_thread(void *state)
     }
     pthread_mutex_lock(&wait_lock);
     running_thread->exit_code = thread_result;
+    running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     running_thread->signaled = true;
     --running_thread->refs;
     pthread_cond_broadcast(&wait_changed);
@@ -909,6 +992,7 @@ static void *thread_main(void *context)
     const bool ready = image == 0 || nt_runtime_enter_guest_thread(&guest, image, nt_runtime_guest_tls());
     pthread_mutex_lock(&wait_lock);
     running_thread->thread_id = (uint32_t)gettid();
+    running_thread->teb_base = guest.entered ? (uintptr_t)guest.teb : 0;
     running_thread->started = true;
     pthread_cond_broadcast(&wait_changed);
     /* CREATE_SUSPENDED must prevent guest instructions, TLS callbacks and
@@ -948,6 +1032,7 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     if (thread != NULL) {
         thread->start = start;
         thread->parameter = parameter;
+        thread->access = THREAD_ALL_ACCESS;
         thread->suspend_count = (flags & 4u) ? 1u : 0u;
         ++thread->refs;
         error = pthread_create(&thread->host, &attr, thread_main, thread);
@@ -980,7 +1065,9 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
         status = NT_STATUS_INVALID_HANDLE;
     else if (thread->kind != THREAD)
         status = NT_STATUS_OBJECT_TYPE_MISMATCH;
-    else {
+    else if (!(thread->access & THREAD_SUSPEND_RESUME)) {
+        status = NT_STATUS_ACCESS_DENIED;
+    } else {
         struct waitable *state = wait_state(thread);
         if (previous != NULL)
             *previous = state->suspend_count;
