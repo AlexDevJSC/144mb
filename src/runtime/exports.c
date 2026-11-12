@@ -17,6 +17,9 @@
 #include "raw_input.h"
 #include "task_dialog.h"
 #include "windesktop.h"
+#ifdef NT_HAVE_WIC
+#include "wic.h"
+#endif
 #ifdef NT_HAVE_VKD3D
 #include "graphics.h"
 #include "shader.h"
@@ -574,6 +577,9 @@ static const struct runtime_export shell32_exports[] = {
 };
 
 static const struct runtime_export ole32_exports[] = {
+#ifdef NT_HAVE_WIC
+    EXPORT("CoCreateInstance", nt_CoCreateInstance),
+#endif
     EXPORT("CoTaskMemFree", crt_free),
     WIN_EXPORT(CoInitializeEx),
     WIN_EXPORT(CoUninitialize)

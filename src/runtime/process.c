@@ -482,6 +482,11 @@ uint16_t **NT_MS_ABI nt_CommandLineToArgvW(const uint16_t *command, int32_t *cou
 
 static _Thread_local uint32_t com_initializations, com_mode;
 
+bool nt_runtime_com_initialized(void)
+{
+    return com_initializations != 0;
+}
+
 int32_t NT_MS_ABI nt_CoInitializeEx(void *reserved, uint32_t mode)
 {
     if (reserved != NULL || (mode & ~UINT32_C(0x0e)) != 0)

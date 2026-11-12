@@ -15,6 +15,8 @@ GDI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags cairo)
 GDI_LIBS ?= $(shell $(PKG_CONFIG) --libs cairo)
 FFI_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libffi)
 FFI_LIBS ?= $(shell $(PKG_CONFIG) --libs libffi)
+IMAGE_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags SDL2_image 2>/dev/null)
+IMAGE_LIBS ?= $(shell $(PKG_CONFIG) --libs SDL2_image 2>/dev/null)
 VKD3D_PACKAGES = 'libvkd3d >= 1.2' 'libvkd3d-utils >= 1.2' vulkan
 VKD3D_CFLAGS ?= $(patsubst -I%,-isystem %,$(shell $(PKG_CONFIG) --cflags $(VKD3D_PACKAGES) 2>/dev/null))
 VKD3D_LIBS ?= $(shell $(PKG_CONFIG) --libs $(VKD3D_PACKAGES) 2>/dev/null)
@@ -23,6 +25,14 @@ RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files u
                 dialogs file_dialogs clipboard guest_thread display_config
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
+ifneq ($(strip $(IMAGE_LIBS)),)
+RUNTIME_PARTS += wic
+RUNTIME_LIBS += $(IMAGE_LIBS)
+$(BUILD_DIR)/runtime-exports.o: override CPPFLAGS += -DNT_HAVE_WIC
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-wic.o: src/runtime/wic.h
+$(BUILD_DIR)/runtime-wic.o: src/runtime/user_folders.h src/runtime/winbase.h
+$(BUILD_DIR)/runtime-wic.o: override CPPFLAGS += $(DESKTOP_CFLAGS) $(IMAGE_CFLAGS)
+endif
 ifneq ($(strip $(VKD3D_LIBS)),)
 RUNTIME_PARTS += d3d12_linux dxgi_linux d3dcompiler dxcompiler streamline
 RUNTIME_LIBS += $(VKD3D_LIBS)
@@ -46,7 +56,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -279,6 +289,19 @@ check-pe-shaders: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/shader-fixture.exe
 else
 check-pe-graphics check-pe-shaders:
 	@echo 'This check requires libvkd3d, libvkd3d-utils and Vulkan development files.' >&2
+	@exit 1
+endif
+
+ifneq ($(strip $(IMAGE_LIBS)),)
+$(BUILD_DIR)/wic-fixture.exe: tests/pe/wic_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lole32 -lkernel32
+
+check-pe-wic: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/wic-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/wic-fixture.exe
+else
+check-pe-wic:
+	@echo 'check-pe-wic requires SDL2_image development files.' >&2
 	@exit 1
 endif
 

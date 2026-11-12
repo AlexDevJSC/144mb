@@ -194,3 +194,14 @@ make -j2 BUILD_DIR=build-ubsan CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize
 El cargador y el lanzador están licenciados bajo MIT. Las dependencias
 SDL2, Cairo, libffi y Bubblewrap son externas y conservan sus licencias.
 No se incorporan DLL ni implementaciones propietarias de Windows.
+
+### COM e imágenes
+
+El perfil WIC de `CoCreateInstance` activa `IWICImagingFactory` con
+SDL2_image. Incluye decodificación desde un archivo invitado, consulta
+del tamaño y conversión de píxeles RGB/BGR y RGBA/BGRA. Respeta la
+inicialización COM por hilo y mantiene los píxeles vivos mientras
+existan referencias al frame o al conversor. La prueba
+`make check-pe-wic` crea, decodifica y convierte un BMP desde un PE AMD64.
+La dependencia [SDL2_image](https://github.com/libsdl-org/SDL_image)
+conserva las licencias de los codecs empaquetados por la distribución.
