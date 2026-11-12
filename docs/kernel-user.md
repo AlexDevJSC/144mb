@@ -61,26 +61,29 @@ flowchart TD
 ## TLS dinámico del TEB AMD64 (implementación incremental)
 
 El TEB invitado reserva ahora espacio suficiente para los 64 `TlsSlots`
-nativos de Windows x64, en el desplazamiento `GS:0x1480`. El runtime
-expone `TlsAlloc`, `TlsFree`, `TlsGetValue` y `TlsSetValue` tanto por
-KERNEL32 como por su alias KERNELBASE. Cada hilo mantiene sus propios
-valores, independientes de la plantilla TLS estática del PE accesible
-desde `GS:0x58`. Las entradas y salidas anidadas conservan el hilo
-invitado actual y restauran el estado previo de GS.
+nativos de Windows x64 en `GS:0x1480` y el puntero a
+`TlsExpansionSlots` en `GS:0x1780`. El runtime expone `TlsAlloc`,
+`TlsFree`, `TlsGetValue` y `TlsSetValue` tanto por KERNEL32 como
+por su alias KERNELBASE. Puede asignar los **1088 índices** (64 directos
+y 1024 adicionales), reservando la memoria de expansión individualmente
+por hilo solo cuando se utiliza. Los valores son independientes de la
+plantilla TLS estática del PE accesible desde `GS:0x58`.
+Las entradas y salidas anidadas conservan el hilo invitado actual y
+restauran el estado previo de GS.
 
 La asignación de índices es compartida por el proceso y está
 sincronizada. Una generación asociada a cada índice impide que liberar y
 reasignar un slot revele valores antiguos de otros hilos. `TlsGetValue`
 devuelve `NULL` y limpia `LastError` cuando el índice válido está vacío.
-El código PE generado para la prueba lee directamente `GS:0x1480`,
-crea un segundo hilo, verifica el aislamiento y comprueba la reutilización
-y el agotamiento de los 64 índices iniciales.
+El código PE generado para la prueba lee directamente `GS:0x1480`
+y `GS:0x1780`, crea hilos adicionales, verifica el aislamiento y
+comprueba la reutilización y el agotamiento de los 1088 índices.
 
-**No es un TEB completo:** faltan `TlsExpansionSlots` (hasta el máximo
-Win32 de índices), el gestor TLS dinámico de DLL, la política completa
-del cargador Ldr, campos adicionales de TEB/PEB y servicios NT asociados.
-El subconjunto actual nunca presenta un slot superior a 63 como válido,
-en lugar de simular silenciosamente el comportamiento faltante.
+**No es un TEB completo:** faltan el gestor de TLS estático y
+dinámico de DLL adicionales, la política completa del cargador Ldr,
+campos adicionales de TEB/PEB y servicios NT asociados. Los 1088 slots
+Win32 cubren `TlsAlloc` y sus operaciones afines; no completan el ABI
+del sistema de hilos de Windows ni sus interacciones con el cargador.
 
 Ejecutar `make check-pe-teb-tls` desde Linux comprueba la implementación
 Win32 desde un PE32+ AMD64 compilado con MinGW. La CI lo incluye en Ubuntu,
