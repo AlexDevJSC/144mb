@@ -338,6 +338,13 @@ check-pe-kernel-user: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/kernel-services
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/user-services.exe
 
+$(BUILD_DIR)/virtual-memory-fixture.exe: tests/pe/virtual_memory_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
+
+check-pe-memory: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/virtual-memory-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/virtual-memory-fixture.exe
+
 $(BUILD_DIR)/fixture-ws2_32.a: tests/pe/ws2_32.def | $(BUILD_DIR)
 	$(MINGW_DLLTOOL) -d "$<" -l "$@"
 
