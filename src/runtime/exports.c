@@ -1053,6 +1053,12 @@ const char *nt_runtime_external_module_filename(uintptr_t base)
            external_backend.filename(external_backend.context, base) : NULL;
 }
 
+void nt_runtime_external_module_thread_event(uint32_t reason)
+{
+    if (external_backend.thread_event != NULL)
+        external_backend.thread_event(external_backend.context, reason);
+}
+
 uintptr_t NT_MS_ABI nt_LoadLibraryA(const char *name)
 {
     const size_t module = requested_module(name);
@@ -1134,6 +1140,16 @@ static uintptr_t NT_MS_ABI win_LoadLibraryExW(const uint16_t *name, uintptr_t fi
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
+    /* Do not execute DllMain for a resource-only or datafile request. */
+    if (flags != 0 && external_backend.load != NULL) {
+        char narrow[128];
+        if (!narrow_module(name, narrow))
+            return 0;
+        if (requested_module(narrow) == MODULE_COUNT) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+    }
     return win_LoadLibraryW(name);
 }
 
@@ -1196,10 +1212,15 @@ nt_guest_proc NT_MS_ABI nt_GetProcAddress(uintptr_t handle, const char *name)
 {
     const size_t module = module_handle_index(handle);
     if (module == MODULE_COUNT) {
-        const uintptr_t address = external_backend.getproc != NULL ?
-            external_backend.getproc(external_backend.context, handle,
-                                     (uintptr_t)name > UINT16_MAX ? name : NULL,
-                                     (uintptr_t)name > UINT16_MAX ? 0 : (uint16_t)(uintptr_t)name) : 0;
+        if (external_backend.getproc == NULL || external_backend.filename == NULL ||
+            external_backend.filename(external_backend.context, handle) == NULL) {
+            nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+            return NULL;
+        }
+        const uintptr_t address = external_backend.getproc(
+            external_backend.context, handle,
+            (uintptr_t)name > UINT16_MAX ? name : NULL,
+            (uintptr_t)name > UINT16_MAX ? 0 : (uint16_t)(uintptr_t)name);
         nt_guest_proc target = NULL;
         if (address != 0)
             memcpy(&target, &address, sizeof(target));

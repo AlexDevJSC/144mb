@@ -6,6 +6,7 @@
 #include "../runtime/winbase.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -21,6 +22,7 @@ enum { MAX_DLLS = 64, MAX_DLL_NAME = 128 };
 struct graph_module {
     bool present, loading, attaching, attached, registered, pinned;
     unsigned int references;
+    uint64_t attach_order;
     char name[MAX_DLL_NAME];
     char dos_path[MAX_DLL_NAME + 4];
     struct pe_image image;
@@ -33,6 +35,7 @@ struct pe_dll_graph {
     struct graph_module modules[MAX_DLLS];
     struct graph_module *loading;
     unsigned int resolve_depth;
+    uint64_t next_attach_order;
 };
 
 static bool valid_module_name(const char *input, char output[MAX_DLL_NAME])
@@ -107,12 +110,62 @@ static void track_dependency(struct pe_dll_graph *graph, struct graph_module *de
         parent->dependencies[parent->dependency_count++] = dependency;
 }
 
+/* Linux filenames are case-sensitive while Windows DLL module names
+ * (under this intentionally ASCII-only contract) are not. Enumerate the
+ * already-opened directory only on ENOENT, require a unique matching name,
+ * and still open the result via O_NOFOLLOW beneath the same directory fd.
+ * Never follow symlinks, escape to a host directory, or guess between two
+ * differently-cased files with the same Windows module name. */
+static int open_dll_case_insensitive(int directory_fd, const char *name)
+{
+    int fd = openat(directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd >= 0 || errno != ENOENT)
+        return fd;
+
+    int listing_fd = openat(directory_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (listing_fd < 0)
+        return -1;
+    DIR *listing = fdopendir(listing_fd);
+    if (listing == NULL) {
+        const int error = errno;
+        close(listing_fd);
+        errno = error;
+        return -1;
+    }
+    char candidate[MAX_DLL_NAME] = {0};
+    bool ambiguous = false;
+    struct dirent *item;
+    while ((item = readdir(listing)) != NULL) {
+        const size_t length = strnlen(item->d_name, MAX_DLL_NAME);
+        if (length == 0 || length >= MAX_DLL_NAME || strcasecmp(item->d_name, name) != 0)
+            continue;
+        char validated[MAX_DLL_NAME];
+        if (!valid_module_name(item->d_name, validated))
+            continue;
+        if (candidate[0] != 0) {
+            ambiguous = true;
+            break;
+        }
+        memcpy(candidate, item->d_name, length + 1);
+    }
+    closedir(listing);
+    if (ambiguous) {
+        errno = EEXIST;
+        return -1;
+    }
+    if (candidate[0] == 0) {
+        errno = ENOENT;
+        return -1;
+    }
+    return openat(directory_fd, candidate, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+}
+
 /* Only a single pre-opened root can supply guest libraries; Windows guest
  * names can never escape into arbitrary host folders or follow symlinks. */
 static bool read_dll(struct pe_dll_graph *graph, const char *name,
                      unsigned char **bytes, size_t *size)
 {
-    const int fd = openat(graph->directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = open_dll_case_insensitive(graph->directory_fd, name);
     if (fd < 0)
         return false;
     struct stat info;
@@ -175,6 +228,7 @@ static bool attach_module(struct pe_dll_graph *graph, struct graph_module *modul
         return false;
     }
     module->attached = true;
+    module->attach_order = ++graph->next_attach_order;
     module->attaching = false;
     return true;
 }
@@ -352,9 +406,38 @@ static const char *backend_filename(void *context, uintptr_t base)
     return name;
 }
 
+static void backend_thread_event(void *context, uint32_t reason)
+{
+    if (reason != 2 && reason != 3)
+        return;
+    struct pe_dll_graph *graph = context;
+    pthread_mutex_lock(&graph->lock);
+    uint64_t boundary = reason == 2 ? 0 : UINT64_MAX;
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        struct graph_module *selected = NULL;
+        for (size_t j = 0; j < MAX_DLLS; ++j) {
+            struct graph_module *candidate = &graph->modules[j];
+            if (!candidate->present || !candidate->attached ||
+                (reason == 2 ? candidate->attach_order <= boundary :
+                               candidate->attach_order >= boundary))
+                continue;
+            if (selected == NULL ||
+                (reason == 2 ? candidate->attach_order < selected->attach_order :
+                               candidate->attach_order > selected->attach_order))
+                selected = candidate;
+        }
+        if (selected == NULL)
+            break;
+        boundary = selected->attach_order;
+        (void)pe_image_run_library_entry(&selected->image, reason);
+    }
+    pthread_mutex_unlock(&graph->lock);
+}
+
 static const struct nt_external_module_backend host_module_backend = {
     .load = backend_load, .find = backend_find, .getproc = backend_getproc,
-    .release = backend_release, .at = backend_at, .filename = backend_filename
+    .release = backend_release, .at = backend_at, .filename = backend_filename,
+    .thread_event = backend_thread_event
 };
 
 void pe_dll_graph_install(struct pe_dll_graph *graph)
@@ -419,12 +502,25 @@ void pe_dll_graph_detach_all(struct pe_dll_graph *graph)
     if (graph == NULL)
         return;
     pthread_mutex_lock(&graph->lock);
-    for (size_t i = MAX_DLLS; i != 0; --i) {
-        struct graph_module *module = &graph->modules[i - 1];
-        if (module->present && module->attached) {
-            (void)pe_image_run_library_entry(&module->image, 0);
-            module->attached = false;
+    uint64_t boundary = UINT64_MAX;
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        struct graph_module *selected = NULL;
+        for (size_t j = 0; j < MAX_DLLS; ++j) {
+            struct graph_module *candidate = &graph->modules[j];
+            if (!candidate->present || !candidate->attached ||
+                candidate->attach_order >= boundary)
+                continue;
+            if (selected == NULL || candidate->attach_order > selected->attach_order)
+                selected = candidate;
         }
+        if (selected == NULL)
+            break;
+        boundary = selected->attach_order;
+        (void)pe_image_run_library_entry(&selected->image, 0);
+        selected->attached = false;
+    }
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        struct graph_module *module = &graph->modules[i];
         if (module->present && module->registered) {
             nt_runtime_guest_unregister_dll((uintptr_t)module->image.base);
             module->registered = false;

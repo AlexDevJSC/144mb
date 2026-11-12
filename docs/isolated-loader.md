@@ -22,18 +22,22 @@ El parser ya distingue entre imágenes ejecutables y DLL PE32+ AMD64. La API
 `pe_image_load_library()` permite **mapear y validar** una DLL sin ejecutar
 código del invitado. Usa las mismas reglas que el ejecutable: relocaciones
 DIR64, importaciones compatibles con el registro nativo, tamaño limitado
-y permisos de página W^X. No ejecuta `DllMain` automáticamente (existe `pe_image_run_library_entry()` para invocación explícita de DLL sin TLS), no inicializa DLL
-dependientes ni crea índices TLS dinámicos; por seguridad, rechaza las
-DLL con directorio TLS que necesitarían esos índices.
+y permisos de página W^X. El mapeador en sí no ejecuta `DllMain`: el gestor
+`src/pe/dll_graph.c` hace la inicialización separada y ordenada de
+dependencias, con `DLL_PROCESS_ATTACH/DETACH` y
+`DLL_THREAD_ATTACH/DETACH` cuando hay TEB invitado. No crea índices
+TLS estáticos adicionales; se rechazan DLL con directorio TLS.
 
 `pe_image_lookup_export()` consulta la tabla de exportaciones por nombre
 o ordinal, comprueba los límites y diferencia direcciones reales de
 *forwarders* (`KERNEL32.Sleep`), que se entregan como texto y **no se
 ejecutan como direcciones**. Las referencias solo son válidas mientras
-la imagen permanece mapeada. El lanzador todavía no incorpora un gestor
-de módulos PE externos con dependencias, `DllMain`, conteo de referencias
-y descarga: esta funcionalidad prepara esa siguiente etapa y no implica
-que `LoadLibrary` ya soporte DLL arbitrarias.
+la imagen permanece mapeada. El lanzador incorpora ahora un gestor acotado de DLL externas,
+dependencias, `DllMain`, referencias y descarga. Solo carga archivos
+regulares con nombres simples del directorio aislado del programa,
+sin seguir symlinks. Esto **no** implica compatibilidad arbitraria
+con DLL de terceros, especialmente con TLS, rutas de búsqueda generales
+o inicializaciones cíclicas.
 
 Las tablas de importación retardada (`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT`)
 se mantienen intactas. No son importaciones que el cargador deba resolver
