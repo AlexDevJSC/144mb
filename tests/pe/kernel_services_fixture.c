@@ -6,6 +6,8 @@
 #include <ntstatus.h>
 
 __declspec(dllimport) NTSTATUS NTAPI NtCreateEvent(HANDLE *, ACCESS_MASK, OBJECT_ATTRIBUTES *, ULONG, BOOLEAN);
+__declspec(dllimport) NTSTATUS NTAPI NtDuplicateObject(HANDLE, HANDLE, HANDLE, HANDLE *, ACCESS_MASK,
+                                                        ULONG, ULONG);
 __declspec(dllimport) NTSTATUS NTAPI NtSetEvent(HANDLE, LONG *);
 __declspec(dllimport) NTSTATUS NTAPI ZwResetEvent(HANDLE, LONG *);
 __declspec(dllimport) NTSTATUS NTAPI NtWaitForMultipleObjects(ULONG, const HANDLE *, ULONG, BOOLEAN,
@@ -73,6 +75,15 @@ static int test_shared_objects(void)
         ZwResetEvent(manual, &previous) != STATUS_SUCCESS || previous != 1)
         return 22;
 
+    HANDLE manual_alias = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), manual, GetCurrentProcess(), &manual_alias,
+                         0, FALSE, DUPLICATE_SAME_ACCESS) || !manual_alias || manual_alias == manual ||
+        !SetEvent(manual_alias) || WaitForSingleObject(manual, 0) != WAIT_OBJECT_0 ||
+        !ResetEvent(manual))
+        return 28;
+    if (!CloseHandle(manual_alias))
+        return 29;
+
     HANDLE restricted = NULL;
     if (NtCreateEvent(&restricted, SYNCHRONIZE, NULL, 0, TRUE) != STATUS_SUCCESS)
         return 23;
@@ -80,18 +91,43 @@ static int test_shared_objects(void)
     previous = -1;
     if (NtSetEvent(restricted, &previous) != STATUS_ACCESS_DENIED || previous != -1 || GetLastError() != 0x405u ||
         SetEvent(restricted) || GetLastError() != ERROR_ACCESS_DENIED ||
-        NtWaitForSingleObject(restricted, FALSE, &poll) != STATUS_SUCCESS || !CloseHandle(restricted))
+        NtWaitForSingleObject(restricted, FALSE, &poll) != STATUS_SUCCESS)
         return 24;
+    HANDLE restricted_alias = NULL;
+    if (DuplicateHandle(GetCurrentProcess(), restricted, GetCurrentProcess(), &restricted_alias,
+                        EVENT_MODIFY_STATE, FALSE, 0) || GetLastError() != ERROR_ACCESS_DENIED ||
+        restricted_alias != NULL)
+        return 30;
+    if (NtDuplicateObject(GetCurrentProcess(), restricted, GetCurrentProcess(), &restricted_alias,
+                          0, 2, DUPLICATE_SAME_ACCESS) != STATUS_SUCCESS || !restricted_alias)
+        return 31;
+    DWORD alias_flags = 0;
+    if (!GetHandleInformation(restricted_alias, &alias_flags) ||
+        (alias_flags & HANDLE_FLAG_INHERIT) == 0 || !CloseHandle(restricted) ||
+        NtWaitForSingleObject(restricted_alias, FALSE, &poll) != STATUS_SUCCESS ||
+        NtSetEvent(restricted_alias, NULL) != STATUS_ACCESS_DENIED ||
+        !CloseHandle(restricted_alias))
+        return 32;
 
     SetLastError(0x406u);
     HANDLE thread = CreateThread(NULL, 0, signal_worker, manual, 0, NULL);
+    HANDLE thread_alias = NULL;
+    if (!thread || !DuplicateHandle(GetCurrentProcess(), thread, GetCurrentProcess(),
+                                     &thread_alias, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return 33;
     HANDLE pending[] = {manual, thread};
     DWORD exit_code = 0;
-    if (!thread || NtWaitForMultipleObjects(2, pending, 0, FALSE, &one_second) != STATUS_SUCCESS ||
+    if (NtWaitForMultipleObjects(2, pending, 0, FALSE, &one_second) != STATUS_SUCCESS ||
         !GetExitCodeThread(thread, &exit_code) || exit_code != 0x144u || GetLastError() != 0x406u)
         return 25;
-    if (NtClose(thread) != STATUS_SUCCESS || NtClose(manual) != STATUS_SUCCESS || !CloseHandle(automatic) ||
-        NtClose(manual) != STATUS_INVALID_HANDLE || NtWaitForSingleObject(manual, FALSE, &poll) != STATUS_INVALID_HANDLE)
+    if (NtClose(thread) != STATUS_SUCCESS ||
+        !GetExitCodeThread(thread_alias, &exit_code) || exit_code != 0x144u ||
+        WaitForSingleObject(thread_alias, 0) != WAIT_OBJECT_0)
+        return 34;
+    if (NtClose(thread_alias) != STATUS_SUCCESS ||
+        NtClose(manual) != STATUS_SUCCESS || !CloseHandle(automatic) ||
+        NtClose(manual) != STATUS_INVALID_HANDLE ||
+        NtWaitForSingleObject(manual, FALSE, &poll) != STATUS_INVALID_HANDLE)
         return 26;
 
     HANDLE invalid = (HANDLE)(ULONG_PTR)0x77u;
@@ -100,8 +136,38 @@ static int test_shared_objects(void)
            invalid == (HANDLE)(ULONG_PTR)0x77u ? 0 : 27;
 }
 
+static int test_duplicated_file(void)
+{
+    /* dup(2) must preserve the shared file pointer when the original
+     * guest HANDLE closes. Neither handle escapes the sandbox. */
+    HANDLE file = CreateFileW(L"C:\\\\nt-duplicate-test.bin", GENERIC_READ | GENERIC_WRITE,
+                              0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return 40;
+    HANDLE copy = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), file, GetCurrentProcess(), &copy,
+                         0, FALSE, DUPLICATE_SAME_ACCESS) || !copy || copy == file)
+        return 41;
+    if (!CloseHandle(file))
+        return 42;
+    const char value[] = "OK";
+    char result[sizeof(value)] = {0};
+    DWORD count = 0;
+    LARGE_INTEGER beginning = {.QuadPart = 0};
+    if (!WriteFile(copy, value, sizeof(value), &count, NULL) || count != sizeof(value) ||
+        !SetFilePointerEx(copy, beginning, NULL, FILE_BEGIN) ||
+        !ReadFile(copy, result, sizeof(result), &count, NULL) ||
+        count != sizeof(result) || memcmp(value, result, sizeof(value)))
+        return 43;
+    if (!CloseHandle(copy) || !DeleteFileW(L"C:\\\\nt-duplicate-test.bin"))
+        return 44;
+    return 0;
+}
+
 int import_fixture_entry(void)
 {
     int status = test_clocks_and_errors();
-    return status ? status : test_shared_objects();
+    if (!status)
+        status = test_shared_objects();
+    return status ? status : test_duplicated_file();
 }
