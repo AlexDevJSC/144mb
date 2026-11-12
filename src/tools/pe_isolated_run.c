@@ -87,14 +87,16 @@ static int NT_MS_ABI guest_entry(void)
         return 123;
     }
     if (active.exception_size) {
-        if (active.exception_size % sizeof(struct nt_runtime_function)) {
+        if (active.exception_size % sizeof(struct nt_runtime_function) ||
+            !nt_runtime_set_runtime_functions((uintptr_t)active.base, active.size,
+                (const struct nt_runtime_function *)(const void *)(active.base + active.exception_rva),
+                active.exception_size / sizeof(struct nt_runtime_function)) ||
+            !nt_runtime_enable_software_seh(active.code_rva, active.code_rva + active.code_size,
+                                            pe_image_readable, &active)) {
+            fputs("Cannot configure guest AMD64 unwind metadata\n", stderr);
             nt_runtime_close_desktop();
             return 124;
         }
-        (void)nt_runtime_set_runtime_functions(
-            (uintptr_t)active.base, active.size,
-            (const struct nt_runtime_function *)(const void *)(active.base + active.exception_rva),
-            active.exception_size / sizeof(struct nt_runtime_function));
     }
     struct nt_guest_thread guest_thread = {0};
     if (!nt_runtime_enter_guest_thread(&guest_thread, (uintptr_t)active.base, &initial)) {

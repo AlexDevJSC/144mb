@@ -202,6 +202,10 @@ int main(void)
     w32(bytes + 0x98 + 112 + 8, 0x5000);
     rejected(bytes, "out-of-range import directory");
     make_pe(bytes);
+    w32(bytes + 0x98 + 112 + 3*8, 0x2001);
+    w32(bytes + 0x98 + 112 + 3*8 + 4, 12);
+    rejected(bytes, "unaligned exception directory");
+    make_pe(bytes);
     w32(bytes + 0x600 + 4, 7);
     w64(bytes + 0x98 + 24, UINT64_C(0x1000)); /* force an ASLR relocation */
     rejected(bytes, "malformed base-relocation block");

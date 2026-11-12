@@ -234,3 +234,14 @@ crea un seudoterminal Linux y una ventana SDL con salida y entrada de texto.
 carece de HWND invitado. `make check-pe-platform` prueba apertura, título,
 entrada, salida y cierre desde un PE. `make check` comprueba UTF-8 y título
 en un terminal heredado.
+
+### Excepciones AMD64
+
+`RaiseException`, `RtlUnwind` y `RtlUnwindEx` usan las tablas AMD64 del PE
+y la pila Linux del hilo invitado. El perfil busca filtros Win64, ejecuta
+bloques de finalización y restaura registros al reanudar o transferir el
+control. Solo recorre código de la sección ejecutable de entrada y aplica
+límites a los marcos, la memoria legible y el anidamiento. Las señales
+síncronas de Linux y los formatos de unwind encadenados quedan fuera de
+este perfil. `make check-pe-seh` comprueba continuación, captura,
+finalización y ambos métodos de unwind desde un PE AMD64.

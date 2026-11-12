@@ -297,7 +297,7 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
     struct section sections[PE_IMAGE_MAX_SECTIONS] = {{0}};
     uint64_t previous_end = (uint64_t)(header_size + 4095u) & ~UINT64_C(4095);
     uint64_t previous_raw_end = header_size;
-    bool valid_entry = false;
+    const struct section *code = NULL;
     for (unsigned i = 0; i < count; ++i) {
         const unsigned char *sh = file + section_offset + (size_t)i * PE_SECTION_SIZE;
         struct section *s = &sections[i];
@@ -321,14 +321,19 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         previous_end = ((uint64_t)s->rva + s->extent + 4095) & ~UINT64_C(4095);
         if ((s->characteristics & SCN_EXECUTE) &&
             entry_rva >= s->rva && entry_rva - s->rva < s->extent)
-            valid_entry = true;
+            code = s;
     }
-    if (!valid_entry)
+    if (!code)
         return fail(error, error_size, "Entry point is not executable");
     for (unsigned i = 0; i < 16; ++i)
         if (directory[i].size && !span(i == PE_SECURITY_DIR ? length : image_size,
                                        directory[i].rva, directory[i].size))
             return fail(error, error_size, "Directory outside image");
+    if (directory[PE_EXCEPTION_DIR].size &&
+        ((directory[PE_EXCEPTION_DIR].rva & 3u) != 0 ||
+         !section_has(sections, count, directory[PE_EXCEPTION_DIR].rva,
+                      directory[PE_EXCEPTION_DIR].size, SCN_READ)))
+        return fail(error, error_size, "Exception table is not aligned or readable");
 
     /* Mapping preferred address only if the kernel says that region is unused. */
     void *mapped = MAP_FAILED;
@@ -396,6 +401,7 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         }
         *output = (struct pe_image){
             .base = base, .size = image_size, .entry_rva = entry_rva,
+            .code_rva = code->rva, .code_size = code->extent,
             .resource_rva = directory[PE_RESOURCE_DIR].rva,
             .resource_size = directory[PE_RESOURCE_DIR].size,
             .exception_rva = directory[PE_EXCEPTION_DIR].rva,
@@ -403,9 +409,26 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
             .tls = tls,
             .subsystem = subsystem
         };
+        output->readable[output->readable_count++] = (struct pe_image_range){0, header_size};
+        for (size_t i = 0; i < count; ++i) {
+            const struct section *s = &sections[i];
+            if (s->characteristics & (SCN_READ | SCN_WRITE | SCN_EXECUTE))
+                output->readable[output->readable_count++] = (struct pe_image_range){s->rva, s->extent};
+        }
         success = true;
     } while (0);
     if (!success)
         munmap(mapped, image_size);
     return success;
+}
+
+bool pe_image_readable(uint32_t rva, size_t length, const void *opaque)
+{
+    const struct pe_image *image = opaque;
+    for (size_t i = 0; i < image->readable_count; ++i) {
+        const struct pe_image_range *range = &image->readable[i];
+        if (rva >= range->rva && span(range->size, rva - range->rva, length))
+            return true;
+    }
+    return false;
 }

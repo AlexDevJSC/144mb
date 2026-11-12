@@ -56,7 +56,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -87,7 +87,8 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/r
 
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-crt.o \
     $(BUILD_DIR)/runtime-process.o $(BUILD_DIR)/runtime-system.o $(BUILD_DIR)/runtime-fluid.o \
-    $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-environment.o $(BUILD_DIR)/runtime-global_memory.o: src/runtime/winbase.h
+    $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-environment.o $(BUILD_DIR)/runtime-global_memory.o \
+    $(BUILD_DIR)/runtime-exceptions.o: src/runtime/winbase.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-sync.o \
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
@@ -329,6 +330,16 @@ $(BUILD_DIR)/platform-fixture.exe: tests/pe/platform_fixture.c | $(BUILD_DIR)
 check-pe-platform: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/platform-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/platform-fixture.exe
+
+$(BUILD_DIR)/fixture-seh.a: tests/pe/seh.def | $(BUILD_DIR)
+	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/seh-fixture.exe: tests/pe/seh_fixture.S $(BUILD_DIR)/fixture-seh.a | $(BUILD_DIR)
+	$(MINGW_CC) -nostdlib $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lkernel32
+
+check-pe-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe
 
 $(BUILD_DIR)/child-parent-fixture.exe: tests/pe/child_process_fixture.c | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lkernel32
