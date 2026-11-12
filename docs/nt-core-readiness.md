@@ -1,15 +1,15 @@
 # Núcleo NT/Win32: estado verificable y criterios de salida
 
 Este informe documenta el alcance **implementado** del prototipo AMD64 de
-`main` y la rama incremental `feature/nt-io-sync-bridge` (continuación de PR #61).
+`main` y la rama incremental `feature/nt-dll-lifecycle-integration` (continuación de PR #65).
 No es una declaración de compatibilidad universal con Windows. Una API
 registrada no se considera compatible sin pruebas de argumentos, efectos,
 errores, vida útil y concurrencia.
 
 | Componente crítico | Implementado en esta etapa | Fuera de alcance o aún pendiente |
 | --- | --- | --- |
-| 1. Cargador PE y DLL | PE32+ AMD64, relocaciones DIR64, exportaciones y forwarders; entrada de DLL sin TLS ejecutable mediante invocación **explícita** de DllMain con ABI Microsoft x64 | Carga automática y dependencias de DLL PE, TLS de DLL, gestión de refcounts y descarga de DLL arbitrarias, DllMain automático por hilo/proceso |
-| 2. PEB/TEB | PEB/TEB mínimos por hilo, 1088 TLS, PEB->Ldr con tres listas circulares y entrada del ejecutable principal (nombre UTF-16, base y tamaño); consulta de hilos reales creados por el runtime | Listas completas con DLL adicionales, PEB/TEB completos, offsets avanzados y objetos de otros procesos |
+| 1. Cargador PE y DLL | PE32+ AMD64, relocaciones, importaciones, forwarders y grafo de DLL limitado a archivos regulares del directorio aislado; `LoadLibrary/GetProcAddress/FreeLibrary`, dependencias estáticas, `DllMain` de proceso/hilo y contador de referencias local | TLS estático de DLL, ciclos complejos, búsqueda general de rutas Windows, contratos completos de Ldr y concurrencia/descarga arbitraria |
+| 2. PEB/TEB | PEB/TEB parciales con 1088 slots TLS Win32; tres listas de `PEB_LDR_DATA` que incluyen EXE y DLL PE locales registradas mientras están adjuntas | Registro y TLS estático por DLL, estructura completa de Ldr/PEB/TEB y objetos de procesos externos |
 | 3. Objetos NT | Eventos y **semáforos** con nombre local, alias de handles y esperas múltiples, contadores y límites de semáforos, derechos y validación de colisiones entre tipos | Namespaces entre procesos, objetos globales de sesión, nombres Unicode arbitrarios, mutexes/semáforos compartidos entre procesos, broker/IPC y seguridad NT avanzada |
 | 4. Procesos e hilos | Procesos hijo PE acotados; TLS/FLS, handles de hilos reales, creación suspendida y **APC de usuario acotadas** entregadas mediante esperas alertables (`NtQueueApcThread`, `QueueUserAPC`, `NtTestAlert`, `SleepEx`) | Suspensión asíncrona de hilos en ejecución, APC de kernel/variantes Ex, contexto externo, herencia general, tokens, procesos arbitrarios y acceso a hilos ajenos al runtime |
 | 5. Memoria virtual | `VirtualAlloc/Free/Protect/Query` en reservas propias y puente `NtAllocate/Free/Protect/QueryVirtualMemory` para proceso actual | Vistas de sección compartidas, acceso a memoria de otros procesos, PAGE_GUARD, MEM_RESET, regiones no gestionadas y semántica NT completa de memoria |
@@ -24,7 +24,7 @@ PE32+ AMD64 sobre Linux. Se incluyen en la CI Ubuntu, UBSan y Fedora 45:
 ```sh
 make check-pe-image check-pe-native-core check-pe-named-events \
      check-pe-suspended-thread check-pe-veh check-pe-teb-tls check-pe-memory \
-     check-pe-nt-io check-pe-core-objects check-pe-apc
+     check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph
 ```
 
 - `check-pe-image`: distingue DLL/EXE, exportaciones y *forwarders*
@@ -35,6 +35,9 @@ make check-pe-image check-pe-native-core check-pe-named-events \
   y destrucción del objeto tras cerrar la última referencia.
 - `check-pe-suspended-thread`: un hilo creado suspendido no ejecuta
   código invitado hasta `ResumeThread`; comprobación de códigos y errores.
+- `check-pe-dll-graph`: compila una DLL PE local sin CRT y dos ejecutables Win64;
+  valida imports estáticos, carga dinámica, PEB, DllMain de proceso e hilo,
+  descarga y recarga, rutas bloqueadas y nombres con distinto uso de mayúsculas.
 - `check-pe-apc`: un hilo suspendido recibe APC Win32/NT en su
   propio contexto durante esperas alertables, con orden de entrega,
   derechos THREAD_SET_CONTEXT, respuestas de tiempo y rechazo de
