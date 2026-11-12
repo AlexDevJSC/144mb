@@ -160,6 +160,50 @@ El PE de control crea el archivo por NTDLL, escribe por Win32, lo vuelve
 a abrir por NTDLL y lee por Win32. Comprueba también el cierre cruzado,
 el error de fichero ausente y la conservación de LastError.
 
+## Nuevos contratos del cargador, PEB y objetos NT
+
+**DLL:** `pe_image_run_library_entry()` invoca de manera **explícita**
+`DllMain` de una DLL PE32+ AMD64 ya mapeada y sin directorio TLS.
+Valida que el entry point esté en la sección de código y utiliza el
+ABI Microsoft x64. No la ejecuta al mapear ni gestiona dependencias,
+recursión, TLS de DLL, inicialización de proceso/hilo, refcounts o
+`FreeLibrary` de DLL externas. El llamador debe aportar el contexto
+invitado GS/TEB correcto antes de invocarla.
+
+**PEB:** `PEB->Ldr` (offset 0x18) apunta a un prefijo válido
+`PEB_LDR_DATA` con anillos de carga, memoria e inicialización.
+Estos contienen por ahora **únicamente la imagen EXE principal**, con
+dirección base, tamaño y nombre completo/corto UTF-16. La dirección
+`EntryPoint` está vacía y las DLL adicionales aún no se registran.
+Por tanto no es un PEB/LDR_DATA completo.
+
+**Objetos NT:** `NtCreateSemaphore`, `NtOpenSemaphore`,
+`NtQuerySemaphore`, `NtReleaseSemaphore` y las API Win32
+`CreateSemaphoreW`, `OpenSemaphoreW`, `ReleaseSemaphore`
+comparten la tabla de handles de eventos, un mutex y el namespace
+local ASCII. Al adquirir se consume una unidad del contador
+de forma atómica; las esperas `WaitAll` consumen todas las
+unidades solo cuando todos los objetos están señalizados.
+El exceso sobre el máximo devuelve
+`STATUS_SEMAPHORE_LIMIT_EXCEEDED` / `ERROR_TOO_MANY_POSTS`.
+Los nombres de eventos y semáforos se excluyen mutuamente cuando
+el tipo no coincide. No existe namespace global ni sincronización
+entre procesos.
+
+**Hilos:** `OpenThread` permite abrir handles adicionales de hilos
+creados por el runtime; `GetThreadId` y
+`NtQueryInformationThread` obtienen IDs y el TEB mientras el hilo
+está vivo, o el estado final tras su terminación. Los accesos están
+sujetos a derechos y la dirección TEB deja de exponerse al liberar
+la pila. No se admite abrir hilos arbitrarios del anfitrión,
+suspender hilos activos de forma asíncrona, APC o manipulación
+completa de contextos.
+
+La CI comprueba estos contratos con `make check-pe-image
+check-pe-native-core check-pe-core-objects check-pe-teb-tls`.
+Siguen siendo **subconjuntos** de los cuatro primeros bloques
+críticos, no una declaración de compatibilidad general.
+
 ## E/S síncrona nativa del mismo handle (continuación de PR #61)
 
 El puente NTDLL extiende ahora las operaciones abiertas mediante Win32
