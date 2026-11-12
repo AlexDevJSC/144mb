@@ -1192,10 +1192,15 @@ nt_guest_proc NT_MS_ABI nt_GetProcAddress(uintptr_t handle, const char *name)
 {
     const size_t module = module_handle_index(handle);
     if (module == MODULE_COUNT) {
-        const uintptr_t address = external_backend.getproc != NULL ?
-            external_backend.getproc(external_backend.context, handle,
-                                     (uintptr_t)name > UINT16_MAX ? name : NULL,
-                                     (uintptr_t)name > UINT16_MAX ? 0 : (uint16_t)(uintptr_t)name) : 0;
+        if (external_backend.getproc == NULL || external_backend.filename == NULL ||
+            external_backend.filename(external_backend.context, handle) == NULL) {
+            nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+            return NULL;
+        }
+        const uintptr_t address = external_backend.getproc(
+            external_backend.context, handle,
+            (uintptr_t)name > UINT16_MAX ? name : NULL,
+            (uintptr_t)name > UINT16_MAX ? 0 : (uint16_t)(uintptr_t)name);
         nt_guest_proc target = NULL;
         if (address != 0)
             memcpy(&target, &address, sizeof(target));
