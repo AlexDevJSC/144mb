@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 enum {
-    PE_OPTIONAL_MIN = 112, PE_SECTION_SIZE = 40, PE_IMPORT_DIR = 1,
+    PE_OPTIONAL_MIN = 112, PE_SECTION_SIZE = 40, PE_EXPORT_DIR = 0, PE_IMPORT_DIR = 1,
     PE_SECURITY_DIR = 4, PE_EXCEPTION_DIR = 3, PE_RESOURCE_DIR = 2, PE_BASERELOC_DIR = 5,
     PE_TLS_DIR = 9, PE_DELAY_DIR = 13, PE_IAT_DIR = 12,
     MAX_IMPORTS = 65536, MAX_NAME = 512
@@ -246,8 +246,9 @@ void pe_image_unload(struct pe_image *image)
     memset(image, 0, sizeof(*image));
 }
 
-bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver resolver,
-                   void *context, struct pe_image *output, char *error, size_t error_size)
+static bool load_image(const unsigned char *file, size_t length, pe_image_resolver resolver,
+                       void *context, struct pe_image *output, char *error,
+                       size_t error_size, bool as_library)
 {
     if (file == NULL || output == NULL || length < 64 || length > PE_IMAGE_MAX_BYTES ||
         memcmp(file, "MZ", 2) != 0)
@@ -262,9 +263,9 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
     const uint16_t flags = read_u16(coff + 18);
     const size_t opt_offset = (size_t)pe + 24;
     if (machine != 0x8664 || count == 0 || count > PE_IMAGE_MAX_SECTIONS ||
-        !(flags & 0x0002) || (flags & 0x2000) ||
+        !(flags & 0x0002) || ((flags & 0x2000) != 0) != as_library ||
         optional_length < PE_OPTIONAL_MIN || !span(length, opt_offset, optional_length))
-        return fail(error, error_size, "Not an executable PE32+ AMD64 image");
+        return fail(error, error_size, "Not a PE32+ AMD64 image of the requested type");
     const unsigned char *opt = file + opt_offset;
     if (read_u16(opt) != 0x20b)
         return fail(error, error_size, "Only PE32+ is supported");
@@ -282,7 +283,7 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         file_align < 512 || file_align > 65536 || (file_align & (file_align - 1)) ||
         header_size == 0 || header_size > image_size || header_size > length ||
         header_size % file_align || !span(header_size, section_offset, (size_t)count * PE_SECTION_SIZE) ||
-        entry_rva >= image_size || preferred == 0 ||
+        (entry_rva >= image_size && (!as_library || entry_rva != 0)) || preferred == 0 ||
         dir_count > ((uint32_t)optional_length - PE_OPTIONAL_MIN) / 8u ||
         (subsystem != 2 && subsystem != 3))
         return fail(error, error_size, "Invalid image dimensions or optional header");
@@ -293,6 +294,10 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
     }
     if (directory[PE_DELAY_DIR].size)
         return fail(error, error_size, "Delayed imports are not supported yet");
+    /* A DLL needs its own loader-assigned TLS index. Reusing the EXE's
+     * index zero would corrupt TLS and is deliberately prohibited. */
+    if (as_library && directory[PE_TLS_DIR].size)
+        return fail(error, error_size, "DLL static TLS needs a module loader");
 
     struct section sections[PE_IMAGE_MAX_SECTIONS] = {{0}};
     uint64_t previous_end = (uint64_t)(header_size + 4095u) & ~UINT64_C(4095);
@@ -320,10 +325,11 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
             previous_raw_end = (uint64_t)s->raw_offset + s->raw_size;
         previous_end = ((uint64_t)s->rva + s->extent + 4095) & ~UINT64_C(4095);
         if ((s->characteristics & SCN_EXECUTE) &&
-            entry_rva >= s->rva && entry_rva - s->rva < s->extent)
+            (entry_rva ? (entry_rva >= s->rva && entry_rva - s->rva < s->extent)
+                       : as_library && code == NULL))
             code = s;
     }
-    if (!code)
+    if (!code && (!as_library || entry_rva != 0))
         return fail(error, error_size, "Entry point is not executable");
     for (unsigned i = 0; i < 16; ++i)
         if (directory[i].size && !span(i == PE_SECURITY_DIR ? length : image_size,
@@ -334,6 +340,11 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
          !section_has(sections, count, directory[PE_EXCEPTION_DIR].rva,
                       directory[PE_EXCEPTION_DIR].size, SCN_READ)))
         return fail(error, error_size, "Exception table is not aligned or readable");
+    if (directory[PE_EXPORT_DIR].size &&
+        (directory[PE_EXPORT_DIR].size < 40 ||
+         !section_has(sections, count, directory[PE_EXPORT_DIR].rva,
+                      directory[PE_EXPORT_DIR].size, SCN_READ)))
+        return fail(error, error_size, "Export directory is not readable");
 
     /* Mapping preferred address only if the kernel says that region is unused. */
     void *mapped = MAP_FAILED;
@@ -401,7 +412,9 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
         }
         *output = (struct pe_image){
             .base = base, .size = image_size, .entry_rva = entry_rva,
-            .code_rva = code->rva, .code_size = code->extent,
+            .code_rva = code ? code->rva : 0, .code_size = code ? code->extent : 0,
+            .export_rva = directory[PE_EXPORT_DIR].rva,
+            .export_size = directory[PE_EXPORT_DIR].size,
             .resource_rva = directory[PE_RESOURCE_DIR].rva,
             .resource_size = directory[PE_RESOURCE_DIR].size,
             .exception_rva = directory[PE_EXCEPTION_DIR].rva,
@@ -420,6 +433,101 @@ bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver r
     if (!success)
         munmap(mapped, image_size);
     return success;
+}
+
+bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver resolve,
+                   void *context, struct pe_image *output, char *error, size_t error_size)
+{
+    return load_image(file, length, resolve, context, output, error, error_size, false);
+}
+
+bool pe_image_load_library(const unsigned char *file, size_t length, pe_image_resolver resolve,
+                           void *context, struct pe_image *output, char *error, size_t error_size)
+{
+    return load_image(file, length, resolve, context, output, error, error_size, true);
+}
+
+/* Every byte must lie in readable image pages before scanning a NUL
+ * terminator. A valid RVA alone does not make a PE section readable. */
+static bool export_string(const struct pe_image *image, uint32_t rva, size_t maximum,
+                          const char **out)
+{
+    if (maximum > MAX_NAME)
+        maximum = MAX_NAME;
+    for (size_t i = 0; i < maximum; ++i) {
+        if (!span(image->size, (uint64_t)rva + i, 1) ||
+            !pe_image_readable(rva + (uint32_t)i, 1, image))
+            return false;
+        if (image->base[rva + i] == 0) {
+            if (i == 0)
+                return false;
+            *out = (const char *)(image->base + rva);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool pe_image_lookup_export(const struct pe_image *image, const char *name, uint16_t ordinal,
+                            struct pe_image_export *output)
+{
+    if (!output)
+        return false;
+    *output = (struct pe_image_export){0};
+    if (!image || !image->base || !image->export_size || (!name && !ordinal) ||
+        (name && ordinal) || (name && !*name) ||
+        !pe_image_readable(image->export_rva, 40, image))
+        return false;
+
+    const unsigned char *dir = image->base + image->export_rva;
+    const uint32_t base_ordinal = read_u32(dir + 16);
+    const uint32_t functions = read_u32(dir + 20);
+    const uint32_t names = read_u32(dir + 24);
+    const uint32_t functions_rva = read_u32(dir + 28);
+    const uint32_t names_rva = read_u32(dir + 32);
+    const uint32_t ordinals_rva = read_u32(dir + 36);
+    if (!functions || functions > MAX_IMPORTS || names > functions ||
+        !pe_image_readable(functions_rva, (size_t)functions * 4, image) ||
+        (names && (!pe_image_readable(names_rva, (size_t)names * 4, image) ||
+                   !pe_image_readable(ordinals_rva, (size_t)names * 2, image))))
+        return false;
+
+    uint32_t index = UINT32_MAX;
+    if (name) {
+        for (uint32_t i = 0; i < names; ++i) {
+            uint32_t target_name = read_u32(image->base + names_rva + (size_t)i * 4);
+            const char *candidate = NULL;
+            if (!export_string(image, target_name, MAX_NAME, &candidate))
+                return false;
+            if (strcmp(name, candidate) == 0) {
+                index = read_u16(image->base + ordinals_rva + (size_t)i * 2);
+                break;
+            }
+        }
+    } else if ((uint32_t)ordinal >= base_ordinal &&
+               (uint32_t)ordinal - base_ordinal < functions) {
+        index = (uint32_t)ordinal - base_ordinal;
+    }
+    if (index >= functions)
+        return false;
+    const uint32_t target = read_u32(image->base + functions_rva + (size_t)index * 4);
+    if (!target)
+        return false;
+    const uint64_t export_end = (uint64_t)image->export_rva + image->export_size;
+    if (target >= image->export_rva && target < export_end) {
+        /* A forwarder points to "DLL.Function" in the export directory.
+         * It is not executable code and must be resolved by a later loader. */
+        const char *forwarder = NULL;
+        if (!export_string(image, target, (size_t)(export_end - target), &forwarder) ||
+            !strchr(forwarder, '.'))
+            return false;
+        output->forwarder = forwarder;
+        return true;
+    }
+    if (!pe_image_readable(target, 1, image))
+        return false;
+    output->address = (uintptr_t)(image->base + target);
+    return true;
 }
 
 bool pe_image_readable(uint32_t rva, size_t length, const void *opaque)
