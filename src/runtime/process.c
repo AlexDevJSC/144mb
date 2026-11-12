@@ -106,6 +106,7 @@ bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t mod
         parameters->image_path = process_string(guest.wide_path);
         parameters->command_line = process_string(guest.wide_line);
         parameters->environment = guest.initial_environment;
+        nt_guest_process_bind_image(&guest.process, &parameters->image_path, guest.image_size);
         guest.process_ready = true;
     }
     pthread_mutex_unlock(&guest_process_lock);
