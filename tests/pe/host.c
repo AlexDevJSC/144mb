@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "fixture_abi.h"
+#include "pe_bytes.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -16,21 +17,6 @@ struct pe_code {
     size_t length;
     size_t entry_offset;
 };
-
-static uint16_t read_u16(const unsigned char *field)
-{
-    return (uint16_t)(field[0] | (uint16_t)field[1] << 8);
-}
-
-static uint32_t read_u32(const unsigned char *field)
-{
-    return read_u16(field) | (uint32_t)read_u16(field + 2) << 16;
-}
-
-static bool contains(size_t total, size_t offset, size_t length)
-{
-    return offset <= total && length <= total - offset;
-}
 
 /* Recognize the subset emitted for our embedded, position-independent
  * fixture. This parser never receives a path or arbitrary executable bytes.
@@ -90,11 +76,6 @@ static bool fixture_code(const unsigned char *image, size_t size, struct pe_code
 
     *code = (struct pe_code){image + raw_offset, virtual_size, entry - rva};
     return true;
-}
-
-static nt_status NT_MS_ABI query_from_pe(int64_t *counter, int64_t *frequency)
-{
-    return nt_query_performance_counter(counter, frequency);
 }
 
 int main(void)

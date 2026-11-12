@@ -1,0 +1,5 @@
+LIBRARY win32u.dll
+EXPORTS
+    NtUserGetCursorPos
+    NtUserGetForegroundWindow
+    NtUserGetKeyState
