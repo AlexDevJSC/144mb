@@ -361,12 +361,14 @@ static void backend_thread_event(void *context, uint32_t reason)
         return;
     struct pe_dll_graph *graph = context;
     pthread_mutex_lock(&graph->lock);
-    /* Follow actual process attach order (not array insertion order). */
+    uint64_t boundary = reason == 2 ? 0 : UINT64_MAX;
     for (size_t i = 0; i < MAX_DLLS; ++i) {
         struct graph_module *selected = NULL;
         for (size_t j = 0; j < MAX_DLLS; ++j) {
             struct graph_module *candidate = &graph->modules[j];
-            if (!candidate->present || !candidate->attached)
+            if (!candidate->present || !candidate->attached ||
+                (reason == 2 ? candidate->attach_order <= boundary :
+                               candidate->attach_order >= boundary))
                 continue;
             if (selected == NULL ||
                 (reason == 2 ? candidate->attach_order < selected->attach_order :
@@ -375,19 +377,8 @@ static void backend_thread_event(void *context, uint32_t reason)
         }
         if (selected == NULL)
             break;
-        /* Mark one selected slot as processed without modifying its state.
-         * The ascending/descending threshold is advanced by last_order. */
-        (void)selected;
-        break;
-    }
-    /* The fixed 64-module table permits direct ordered delivery by rank. */
-    for (uint64_t order = 1; order <= graph->next_attach_order; ++order) {
-        const uint64_t wanted = reason == 2 ? order : graph->next_attach_order - order + 1;
-        for (size_t i = 0; i < MAX_DLLS; ++i) {
-            struct graph_module *module = &graph->modules[i];
-            if (module->present && module->attached && module->attach_order == wanted)
-                (void)pe_image_run_library_entry(&module->image, reason);
-        }
+        boundary = selected->attach_order;
+        (void)pe_image_run_library_entry(&selected->image, reason);
     }
     pthread_mutex_unlock(&graph->lock);
 }
@@ -460,12 +451,25 @@ void pe_dll_graph_detach_all(struct pe_dll_graph *graph)
     if (graph == NULL)
         return;
     pthread_mutex_lock(&graph->lock);
-    for (size_t i = MAX_DLLS; i != 0; --i) {
-        struct graph_module *module = &graph->modules[i - 1];
-        if (module->present && module->attached) {
-            (void)pe_image_run_library_entry(&module->image, 0);
-            module->attached = false;
+    uint64_t boundary = UINT64_MAX;
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        struct graph_module *selected = NULL;
+        for (size_t j = 0; j < MAX_DLLS; ++j) {
+            struct graph_module *candidate = &graph->modules[j];
+            if (!candidate->present || !candidate->attached ||
+                candidate->attach_order >= boundary)
+                continue;
+            if (selected == NULL || candidate->attach_order > selected->attach_order)
+                selected = candidate;
         }
+        if (selected == NULL)
+            break;
+        boundary = selected->attach_order;
+        (void)pe_image_run_library_entry(&selected->image, 0);
+        selected->attached = false;
+    }
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        struct graph_module *module = &graph->modules[i];
         if (module->present && module->registered) {
             nt_runtime_guest_unregister_dll((uintptr_t)module->image.base);
             module->registered = false;
