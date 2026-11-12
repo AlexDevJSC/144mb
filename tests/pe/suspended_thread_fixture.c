@@ -43,6 +43,13 @@ int import_fixture_entry(void)
     if (query_only == NULL || NtSuspendThread(query_only, &previous) != STATUS_ACCESS_DENIED ||
         previous != 999 || !CloseHandle(query_only))
         return 12;
+    HANDLE suspend_only = OpenThread(THREAD_SUSPEND_RESUME, FALSE, thread_id);
+    exit_code = 0xabcdefu;
+    SetLastError(0);
+    if (suspend_only == NULL || GetExitCodeThread(suspend_only, &exit_code) ||
+        GetLastError() != ERROR_ACCESS_DENIED || exit_code != 0xabcdefu ||
+        !CloseHandle(suspend_only))
+        return 30;
     if (NtSuspendThread(thread, &previous) != 0 || previous != 1)
         return 13;
     if (SuspendThread(thread) != 2)
