@@ -33,6 +33,9 @@ nt_status nt_runtime_wait_deadline(int64_t ticks, struct nt_wait_deadline *deadl
 nt_status NT_MS_ABI nt_NtQuerySystemTime(int64_t *ticks);
 nt_status NT_MS_ABI nt_NtDelayExecution(uint8_t alertable, const int64_t *interval);
 nt_status NT_MS_ABI nt_NtClose(uintptr_t handle);
+nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t source,
+                                        uintptr_t target_process, uintptr_t *target,
+                                        uint32_t access, uint32_t attributes, uint32_t options);
 nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
                                    const struct nt_object_attributes *attributes,
                                    uint32_t type, uint8_t initial_state);
