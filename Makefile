@@ -56,7 +56,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -362,6 +362,23 @@ check-pe-teb-tls: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/teb-tls-fixture.exe
 
 $(BUILD_DIR)/fixture-nt_core.a: tests/pe/nt_core.def | $(BUILD_DIR)
 	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/guest_companion.dll: tests/pe/guest_companion_dll.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) -shared -nostdlib \
+	    -Wl,--entry,DllMain,--subsystem,windows,--out-implib,$(BUILD_DIR)/fixture-guest_companion.a \
+	    -o "$@" "$<" -lkernel32
+
+$(BUILD_DIR)/guest-loader-dynamic.exe: tests/pe/guest_loader_dynamic_fixture.c $(BUILD_DIR)/guest_companion.dll | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
+
+$(BUILD_DIR)/guest-loader-static.exe: tests/pe/guest_loader_static_fixture.c $(BUILD_DIR)/guest_companion.dll | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-guest_companion.a -lkernel32
+
+check-pe-dll-graph: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-dynamic.exe $(BUILD_DIR)/guest-loader-static.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-dynamic.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-static.exe
 
 $(BUILD_DIR)/core-objects-fixture.exe: tests/pe/core_objects_fixture.c $(BUILD_DIR)/fixture-nt_core.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-nt_core.a -lkernel32
