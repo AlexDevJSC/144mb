@@ -42,6 +42,12 @@ bool pe_image_load_library(const unsigned char *file, size_t length, pe_image_re
  */
 bool pe_image_lookup_export(const struct pe_image *image, const char *name, uint16_t ordinal,
                             struct pe_image_export *output);
+/* Resolve direct DLL exports or forwarders using the shared import resolver.
+ * This helper supports forwarded targets in built-in modules and delegates
+ * cross-DLL chains to the caller; it does not load DLL dependencies.
+ * Reject malformed forwarding syntax rather than treating it as code. */
+bool pe_image_resolve_export(const struct pe_image *image, const char *name, uint16_t ordinal,
+                             pe_image_resolver resolve, void *context, uintptr_t *address);
 /* No guest instruction is executed. Caller must sandbox before calling entry. */
 bool pe_image_load(const unsigned char *file, size_t length, pe_image_resolver resolve,
                    void *context, struct pe_image *output, char *error, size_t error_size);
