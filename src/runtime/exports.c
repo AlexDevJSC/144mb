@@ -9,6 +9,7 @@
 #include "user_folders.h"
 #include "crypto.h"
 #include "sync.h"
+#include "dynamic_tls.h"
 #include "winbase.h"
 #include "winfile.h"
 #include "child_process.h"
@@ -374,6 +375,10 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(FlsFree),
     WIN_EXPORT(FlsGetValue),
     WIN_EXPORT(FlsSetValue),
+    WIN_EXPORT(TlsAlloc),
+    WIN_EXPORT(TlsFree),
+    WIN_EXPORT(TlsGetValue),
+    WIN_EXPORT(TlsSetValue),
     WIN_EXPORT(FlushFileBuffers),
     WIN_EXPORT(FormatMessageW),
     WIN_EXPORT(FreeEnvironmentStringsW),
