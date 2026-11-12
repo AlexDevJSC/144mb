@@ -96,10 +96,13 @@ static int compile_modern(void)
     const struct utils_api *utils_methods = utils->vtable;
     if (FAILED(utils_methods->include(utils, &include)) || !include)
         return 21;
-    const WCHAR *arguments[] = {L"fixture.hlsl", L"-E", L"main", L"-T", L"ps_6_0",
+    /* IDxcCompiler3::Compile receives the shader source in DxcBuffer.
+     * Only switches belong in pArguments; a positional source file is not
+     * accepted consistently by the native compiler on Fedora. */
+    const WCHAR *arguments[] = {L"-E", L"main", L"-T", L"ps_6_0",
                                 L"-Fo", L"r\x00e9sultat.dxil"};
     const struct dxc_buffer shader = {source, sizeof(source) - 1, CP_UTF8};
-    if (FAILED(compiler_methods->compile(compiler, &shader, arguments, 7, include, &iid_result, (void **)&result)) ||
+    if (FAILED(compiler_methods->compile(compiler, &shader, arguments, 6, include, &iid_result, (void **)&result)) ||
         !result)
         return 22;
     const struct result_api *result_methods = result->vtable;
@@ -107,6 +110,19 @@ static int compile_modern(void)
     if (FAILED(result_methods->status(result, &compilation)))
         return 23;
     if (FAILED(compilation)) {
+        /* Report the native HRESULT even if DXC provides no error blob. */
+        static const char prefix[] = "DXC status 0x";
+        char diagnostic[sizeof(prefix) - 1 + 8 + 1];
+        static const char digits[] = "0123456789abcdef";
+        for (unsigned int i = 0; i < sizeof(prefix) - 1; ++i)
+            diagnostic[i] = prefix[i];
+        for (unsigned int i = 0; i < 8; ++i)
+            diagnostic[sizeof(prefix) - 1 + i] =
+                digits[((UINT32)compilation >> ((7 - i) * 4)) & 15];
+        diagnostic[sizeof(diagnostic) - 1] = '\n';
+        DWORD written = 0;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), diagnostic,
+                  sizeof(diagnostic), &written, NULL);
         report_dxc_error(result, result_methods);
         return 24;
     }
@@ -126,7 +142,7 @@ static int compile_modern(void)
     IUnknown_Release((IUnknown *)result);
     result = NULL;
     const struct dxc_buffer bad = {bad_source, sizeof(bad_source) - 1, CP_UTF8};
-    if (FAILED(compiler_methods->compile(compiler, &bad, arguments, 7, include, &iid_result, (void **)&result)) ||
+    if (FAILED(compiler_methods->compile(compiler, &bad, arguments, 6, include, &iid_result, (void **)&result)) ||
         !result || FAILED(result_methods->status(result, &compilation)) || SUCCEEDED(compilation) ||
         !result_methods->has_output(result, 2))
         return 27;
