@@ -215,7 +215,13 @@ bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t mod
         guest.process_ready = true;
     }
     pthread_mutex_unlock(&guest_process_lock);
-    return nt_guest_thread_enter_in_process(thread, module, initial, &guest.process);
+    if (!nt_guest_thread_enter_in_process(thread, module, initial, &guest.process))
+        return false;
+    if (!nt_runtime_external_module_prepare_thread(thread)) {
+        (void)nt_guest_thread_leave(thread);
+        return false;
+    }
+    return true;
 }
 
 void nt_runtime_set_guest_image_extent(size_t size) { guest.image_size = size; }
