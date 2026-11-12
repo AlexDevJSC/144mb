@@ -21,6 +21,7 @@ enum { MAX_DLLS = 64, MAX_DLL_NAME = 128 };
 struct graph_module {
     bool present, loading, attaching, attached, registered, pinned;
     unsigned int references;
+    uint64_t attach_order;
     char name[MAX_DLL_NAME];
     char dos_path[MAX_DLL_NAME + 4];
     struct pe_image image;
@@ -33,6 +34,7 @@ struct pe_dll_graph {
     struct graph_module modules[MAX_DLLS];
     struct graph_module *loading;
     unsigned int resolve_depth;
+    uint64_t next_attach_order;
 };
 
 static bool valid_module_name(const char *input, char output[MAX_DLL_NAME])
@@ -175,6 +177,7 @@ static bool attach_module(struct pe_dll_graph *graph, struct graph_module *modul
         return false;
     }
     module->attached = true;
+    module->attach_order = ++graph->next_attach_order;
     module->attaching = false;
     return true;
 }
@@ -352,9 +355,38 @@ static const char *backend_filename(void *context, uintptr_t base)
     return name;
 }
 
+static void backend_thread_event(void *context, uint32_t reason)
+{
+    if (reason != 2 && reason != 3)
+        return;
+    struct pe_dll_graph *graph = context;
+    pthread_mutex_lock(&graph->lock);
+    uint64_t boundary = reason == 2 ? 0 : UINT64_MAX;
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        struct graph_module *selected = NULL;
+        for (size_t j = 0; j < MAX_DLLS; ++j) {
+            struct graph_module *candidate = &graph->modules[j];
+            if (!candidate->present || !candidate->attached ||
+                (reason == 2 ? candidate->attach_order <= boundary :
+                               candidate->attach_order >= boundary))
+                continue;
+            if (selected == NULL ||
+                (reason == 2 ? candidate->attach_order < selected->attach_order :
+                               candidate->attach_order > selected->attach_order))
+                selected = candidate;
+        }
+        if (selected == NULL)
+            break;
+        boundary = selected->attach_order;
+        (void)pe_image_run_library_entry(&selected->image, reason);
+    }
+    pthread_mutex_unlock(&graph->lock);
+}
+
 static const struct nt_external_module_backend host_module_backend = {
     .load = backend_load, .find = backend_find, .getproc = backend_getproc,
-    .release = backend_release, .at = backend_at, .filename = backend_filename
+    .release = backend_release, .at = backend_at, .filename = backend_filename,
+    .thread_event = backend_thread_event
 };
 
 void pe_dll_graph_install(struct pe_dll_graph *graph)
@@ -419,12 +451,25 @@ void pe_dll_graph_detach_all(struct pe_dll_graph *graph)
     if (graph == NULL)
         return;
     pthread_mutex_lock(&graph->lock);
-    for (size_t i = MAX_DLLS; i != 0; --i) {
-        struct graph_module *module = &graph->modules[i - 1];
-        if (module->present && module->attached) {
-            (void)pe_image_run_library_entry(&module->image, 0);
-            module->attached = false;
+    uint64_t boundary = UINT64_MAX;
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        struct graph_module *selected = NULL;
+        for (size_t j = 0; j < MAX_DLLS; ++j) {
+            struct graph_module *candidate = &graph->modules[j];
+            if (!candidate->present || !candidate->attached ||
+                candidate->attach_order >= boundary)
+                continue;
+            if (selected == NULL || candidate->attach_order > selected->attach_order)
+                selected = candidate;
         }
+        if (selected == NULL)
+            break;
+        boundary = selected->attach_order;
+        (void)pe_image_run_library_entry(&selected->image, 0);
+        selected->attached = false;
+    }
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        struct graph_module *module = &graph->modules[i];
         if (module->present && module->registered) {
             nt_runtime_guest_unregister_dll((uintptr_t)module->image.base);
             module->registered = false;
