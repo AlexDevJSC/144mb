@@ -24,6 +24,29 @@ void nt_runtime_notify_tls(uint32_t reason);
 uintptr_t nt_runtime_guest_image_at(uintptr_t address);
 uintptr_t NT_MS_ABI nt_RtlPcToFileHeader(const void *address, uintptr_t *image);
 
+/* Configured only by the trusted Linux host. User-facing LoadLibrary and
+ * GetProcAddress delegate to this backend after checking built-in modules.
+ * No caller-controlled host paths are passed directly to the backend. */
+struct nt_external_module_backend {
+    void *context;
+    uintptr_t (*load)(void *, const char *);
+    uintptr_t (*find)(void *, const char *);
+    uintptr_t (*getproc)(void *, uintptr_t, const char *, uint16_t);
+    bool (*release)(void *, uintptr_t);
+    uintptr_t (*at)(void *, uintptr_t);
+    const char *(*filename)(void *, uintptr_t);
+};
+void nt_runtime_set_external_module_backend(const struct nt_external_module_backend *backend);
+uintptr_t nt_runtime_external_module_at(uintptr_t address);
+const char *nt_runtime_external_module_filename(uintptr_t base);
+
+/* Register each successfully attached PE DLL in all three PEB_LDR_DATA
+ * lists, under the process lock, for native Windows module enumeration. */
+bool nt_runtime_guest_register_dll(uintptr_t base, size_t bytes, uintptr_t entry,
+                                    const char *guest_full_path);
+void nt_runtime_guest_unregister_dll(uintptr_t base);
+
+
 int32_t NT_MS_ABI nt_VirtualProtect(void *address, size_t size, uint32_t protection, uint32_t *previous);
 struct nt_os_version_info {
     uint32_t size, major, minor, build, platform;

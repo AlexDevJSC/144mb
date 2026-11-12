@@ -4,6 +4,7 @@
  */
 #define _GNU_SOURCE
 #include "image.h"
+#include "dll_graph.h"
 #include "ntnative/runtime.h"
 #include "ntnative/guest_thread.h"
 #include "compat.h"
@@ -21,15 +22,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *unused)
+static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *graph)
 {
-    (void)unused;
-    nt_guest_proc target = name != NULL ? nt_runtime_resolve(module, name) :
-                             nt_runtime_resolve_ordinal(module, ordinal);
-    uintptr_t address = 0;
-    _Static_assert(sizeof(address) == sizeof(target), "MS x64 pointers");
-    memcpy(&address, &target, sizeof(target));
-    if (target == NULL)
+    const uintptr_t address = pe_dll_graph_resolve(module, name, ordinal, graph);
+    if (address == 0)
         fprintf(stderr, "Unresolved: %s!%s%u\n", module, name ? name : "#",
                 name ? 0 : ordinal);
     return address;
@@ -79,9 +75,30 @@ int main(int argc, char **argv)
     size_t length = 0;
     if (!read_file(argv[1], &file, &length))
         return 2;
+    /* The trusted test host uses the fixture's own directory. The actual
+     * Fedora launcher uses the isolated /game directory instead. */
+    char module_directory[4096];
+    const char *slash = strrchr(argv[1], '/');
+    const size_t directory_length = slash == NULL ? 0 : (size_t)(slash - argv[1]);
+    if (directory_length >= sizeof(module_directory))
+        return 2;
+    if (slash == NULL)
+        memcpy(module_directory, ".", sizeof("."));
+    else if (directory_length == 0)
+        memcpy(module_directory, "/", sizeof("/"));
+    else {
+        memcpy(module_directory, argv[1], directory_length);
+        module_directory[directory_length] = 0;
+    }
+    struct pe_dll_graph *graph = pe_dll_graph_create(module_directory);
+    if (graph == NULL) {
+        free(file);
+        return 2;
+    }
+    pe_dll_graph_install(graph);
     struct pe_image image = {0};
     char reason[192];
-    const bool mapped = pe_image_load(file, length, resolve, NULL,
+    const bool mapped = pe_image_load(file, length, resolve, graph,
                                       &image, reason, sizeof(reason));
     free(file);
     if (!mapped) {
@@ -139,9 +156,19 @@ int main(int argc, char **argv)
     const void *addr = image.base + image.entry_rva;
     int (NT_MS_ABI *entry)(void);
     memcpy(&entry, &addr, sizeof(entry));
+    if (!pe_dll_graph_attach_all(graph)) {
+        fputs("Cannot attach imported guest DLLs\n", stderr);
+        (void)nt_guest_thread_leave(&thread);
+        nt_runtime_close_desktop();
+        pe_image_unload(&image);
+        pe_dll_graph_uninstall();
+        pe_dll_graph_destroy(graph);
+        return 8;
+    }
     nt_runtime_notify_tls(1);
     const int status = entry();
     nt_runtime_notify_tls(0);
+    pe_dll_graph_detach_all(graph);
     nt_runtime_run_fls_cleanup();
     if (!nt_guest_thread_leave(&thread)) {
         fputs("Failed to restore GS base\n", stderr);
@@ -149,6 +176,8 @@ int main(int argc, char **argv)
     }
     nt_runtime_close_desktop();
     pe_image_unload(&image);
+    pe_dll_graph_uninstall();
+    pe_dll_graph_destroy(graph);
     if (status != 0)
         fprintf(stderr, "External PE fixture returned %d\n", status);
     if (rmdir(temp) != 0) {

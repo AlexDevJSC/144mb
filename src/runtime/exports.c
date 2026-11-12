@@ -1033,12 +1033,35 @@ static size_t requested_module(const char *name)
     return module_index(with_extension);
 }
 
+static struct nt_external_module_backend external_backend;
+
+void nt_runtime_set_external_module_backend(const struct nt_external_module_backend *backend)
+{
+    /* This is installed by the host before any guest thread starts. */
+    external_backend = backend != NULL ? *backend : (struct nt_external_module_backend){0};
+}
+
+uintptr_t nt_runtime_external_module_at(uintptr_t address)
+{
+    return external_backend.at != NULL ?
+           external_backend.at(external_backend.context, address) : 0;
+}
+
+const char *nt_runtime_external_module_filename(uintptr_t base)
+{
+    return external_backend.filename != NULL ?
+           external_backend.filename(external_backend.context, base) : NULL;
+}
+
 uintptr_t NT_MS_ABI nt_LoadLibraryA(const char *name)
 {
     const size_t module = requested_module(name);
     if (module == MODULE_COUNT) {
-        nt_SetLastError(NT_ERROR_MOD_NOT_FOUND);
-        return 0;
+        const uintptr_t loaded = name != NULL && external_backend.load != NULL ?
+            external_backend.load(external_backend.context, name) : 0;
+        if (loaded == 0)
+            nt_SetLastError(NT_ERROR_MOD_NOT_FOUND);
+        return loaded;
     }
     pthread_mutex_lock(&module_lock);
     const bool acquired = module_references[module] < UINT32_MAX;
@@ -1060,6 +1083,11 @@ static uintptr_t NT_MS_ABI win_GetModuleHandleA(const char *name)
     const size_t module = requested_module(name);
     if (module != MODULE_COUNT)
         return MODULE_BASE + module;
+    if (name != NULL && external_backend.find != NULL) {
+        const uintptr_t mapped = external_backend.find(external_backend.context, name);
+        if (mapped != 0)
+            return mapped;
+    }
     if (name != NULL && guest != 0) {
         char path[4099];
         const uint32_t length = nt_GetModuleFileNameA(guest, path, sizeof(path));
@@ -1148,8 +1176,11 @@ int32_t NT_MS_ABI nt_FreeLibrary(uintptr_t handle)
 {
     const size_t module = module_handle_index(handle);
     if (module == MODULE_COUNT) {
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-        return 0;
+        const bool released = external_backend.release != NULL &&
+                              external_backend.release(external_backend.context, handle);
+        if (!released)
+            nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return released;
     }
     pthread_mutex_lock(&module_lock);
     const bool acquired = module_references[module] != 0 || module_pinned[module];
@@ -1165,8 +1196,16 @@ nt_guest_proc NT_MS_ABI nt_GetProcAddress(uintptr_t handle, const char *name)
 {
     const size_t module = module_handle_index(handle);
     if (module == MODULE_COUNT) {
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-        return NULL;
+        const uintptr_t address = external_backend.getproc != NULL ?
+            external_backend.getproc(external_backend.context, handle,
+                                     (uintptr_t)name > UINT16_MAX ? name : NULL,
+                                     (uintptr_t)name > UINT16_MAX ? 0 : (uint16_t)(uintptr_t)name) : 0;
+        nt_guest_proc target = NULL;
+        if (address != 0)
+            memcpy(&target, &address, sizeof(target));
+        else
+            nt_SetLastError(NT_ERROR_PROC_NOT_FOUND);
+        return target;
     }
     const nt_guest_proc target = (uintptr_t)name > UINT16_MAX ? find_export(module, name) :
                                  find_ordinal(module, (unsigned int)(uintptr_t)name);

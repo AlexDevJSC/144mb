@@ -32,6 +32,105 @@ static struct {
     bool process_ready;
 } guest;
 static pthread_mutex_t guest_process_lock = PTHREAD_MUTEX_INITIALIZER;
+struct guest_ldr_module_record {
+    struct guest_ldr_module_record *next;
+    uintptr_t base;
+    struct nt_guest_ldr_entry entry;
+    uint16_t *wide_path;
+};
+static struct guest_ldr_module_record *external_modules;
+
+static void insert_link(struct nt_guest_list_entry *head, struct nt_guest_list_entry *item)
+{
+    struct nt_guest_list_entry *tail = (struct nt_guest_list_entry *)head->blink;
+    item->flink = (uintptr_t)head;
+    item->blink = (uintptr_t)tail;
+    tail->flink = (uintptr_t)item;
+    head->blink = (uintptr_t)item;
+}
+
+static void remove_link(struct nt_guest_list_entry *item)
+{
+    if (item->flink == 0 || item->blink == 0)
+        return;
+    struct nt_guest_list_entry *prev = (struct nt_guest_list_entry *)item->blink;
+    struct nt_guest_list_entry *next = (struct nt_guest_list_entry *)item->flink;
+    prev->flink = (uintptr_t)next;
+    next->blink = (uintptr_t)prev;
+    item->flink = item->blink = 0;
+}
+
+bool nt_runtime_guest_register_dll(uintptr_t base, size_t bytes, uintptr_t entry,
+                                    const char *guest_full_path)
+{
+    if (base == 0 || guest_full_path == NULL || bytes == 0 || bytes > UINT32_MAX)
+        return false;
+    struct guest_ldr_module_record *record = calloc(1, sizeof(*record));
+    if (record == NULL)
+        return false;
+    record->wide_path = nt_runtime_utf8_to_wide(guest_full_path);
+    if (record->wide_path == NULL) {
+        free(record);
+        return false;
+    }
+    size_t length = nt_runtime_wide_length(record->wide_path, 32767);
+    if (length == 32767 || length > UINT16_MAX / sizeof(uint16_t) - 1) {
+        free(record->wide_path);
+        free(record);
+        return false;
+    }
+    size_t leaf = 0;
+    for (size_t i = 0; i < length; ++i)
+        if (record->wide_path[i] == '\\' || record->wide_path[i] == '/')
+            leaf = i + 1;
+    record->base = base;
+    record->entry = (struct nt_guest_ldr_entry){
+        .dll_base = base, .entry_point = entry, .image_size = (uint32_t)bytes,
+        .full_name = {(uint16_t)(length * 2), (uint16_t)((length + 1) * 2), record->wide_path},
+        .base_name = {(uint16_t)((length - leaf) * 2),
+                      (uint16_t)((length - leaf + 1) * 2), record->wide_path + leaf}
+    };
+    pthread_mutex_lock(&guest_process_lock);
+    bool accepted = guest.process_ready;
+    for (struct guest_ldr_module_record *current = external_modules; current; current = current->next)
+        if (current->base == base)
+            accepted = false;
+    if (accepted) {
+        insert_link(&guest.process.loader.load_order, &record->entry.load_links);
+        insert_link(&guest.process.loader.memory_order, &record->entry.memory_links);
+        insert_link(&guest.process.loader.initialization_order, &record->entry.initialization_links);
+        record->next = external_modules;
+        external_modules = record;
+    }
+    pthread_mutex_unlock(&guest_process_lock);
+    if (!accepted) {
+        free(record->wide_path);
+        free(record);
+    }
+    return accepted;
+}
+
+void nt_runtime_guest_unregister_dll(uintptr_t base)
+{
+    pthread_mutex_lock(&guest_process_lock);
+    struct guest_ldr_module_record **link = &external_modules;
+    while (*link != NULL && (*link)->base != base)
+        link = &(*link)->next;
+    struct guest_ldr_module_record *found = *link;
+    if (found != NULL) {
+        *link = found->next;
+        remove_link(&found->entry.load_links);
+        remove_link(&found->entry.memory_links);
+        remove_link(&found->entry.initialization_links);
+    }
+    pthread_mutex_unlock(&guest_process_lock);
+    if (found != NULL) {
+        free(found->wide_path);
+        free(found);
+    }
+}
+
+
 
 static void clear_argv(void)
 {
@@ -56,6 +155,8 @@ bool nt_runtime_set_guest_image(uintptr_t module, const char *path, const char *
         return false;
     }
     clear_argv();
+    while (external_modules != NULL)
+        nt_runtime_guest_unregister_dll(external_modules->base);
     free(guest.initial_environment);
     guest.initial_environment = NULL;
     guest.process_ready = false;
@@ -141,8 +242,10 @@ void nt_runtime_notify_tls(uint32_t reason)
 
 uintptr_t nt_runtime_guest_image_at(uintptr_t address)
 {
-    return guest.module != 0 && address >= guest.module && address - guest.module < guest.image_size ?
-           guest.module : 0;
+    if (guest.module != 0 && address >= guest.module &&
+        address - guest.module < guest.image_size)
+        return guest.module;
+    return nt_runtime_external_module_at(address);
 }
 
 char *NT_MS_ABI nt_GetCommandLineA(void) { return (char *)guest.line; }
@@ -150,7 +253,9 @@ uint16_t *NT_MS_ABI nt_GetCommandLineW(void) { return guest.wide_line; }
 
 uint32_t NT_MS_ABI nt_GetModuleFileNameW(uintptr_t module, uint16_t *buffer, uint32_t size)
 {
-    if (guest.module == 0 || (module != 0 && module != guest.module)) {
+    const bool main_image = module == 0 || module == guest.module;
+    const char *external = main_image ? NULL : nt_runtime_external_module_filename(module);
+    if (guest.module == 0 || (!main_image && external == NULL)) {
         nt_SetLastError(NT_ERROR_MOD_NOT_FOUND);
         return 0;
     }
@@ -158,12 +263,19 @@ uint32_t NT_MS_ABI nt_GetModuleFileNameW(uintptr_t module, uint16_t *buffer, uin
         nt_SetLastError(size == 0 ? NT_ERROR_INSUFFICIENT_BUFFER : NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    size_t length = nt_runtime_wide_length(guest.wide_path, COMMAND_LINE_MAX);
+    uint16_t *temporary = external != NULL ? nt_runtime_utf8_to_wide(external) : NULL;
+    if (external != NULL && temporary == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    const uint16_t *full = temporary != NULL ? temporary : guest.wide_path;
+    size_t length = nt_runtime_wide_length(full, COMMAND_LINE_MAX);
     const bool truncated = length >= size;
     if (truncated)
         length = size - 1;
-    memcpy(buffer, guest.wide_path, length * sizeof(*buffer));
+    memcpy(buffer, full, length * sizeof(*buffer));
     buffer[length] = 0;
+    free(temporary);
     if (truncated)
         nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
     return truncated ? size : (uint32_t)length;
@@ -184,7 +296,9 @@ uintptr_t nt_runtime_guest_module(void)
 
 uint32_t NT_MS_ABI nt_GetModuleFileNameA(uintptr_t module, char *buffer, uint32_t size)
 {
-    if (guest.module == 0 || (module != 0 && module != guest.module)) {
+    const bool main_image = module == 0 || module == guest.module;
+    const char *source = main_image ? guest.path : nt_runtime_external_module_filename(module);
+    if (guest.module == 0 || source == NULL) {
         nt_SetLastError(NT_ERROR_MOD_NOT_FOUND);
         return 0;
     }
@@ -192,14 +306,14 @@ uint32_t NT_MS_ABI nt_GetModuleFileNameA(uintptr_t module, char *buffer, uint32_
         nt_SetLastError(size == 0 ? NT_ERROR_INSUFFICIENT_BUFFER : NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    const size_t length = strlen(guest.path);
+    const size_t length = strlen(source);
     if (length >= size) {
-        memcpy(buffer, guest.path, size - 1);
+        memcpy(buffer, source, size - 1);
         buffer[size - 1] = '\0';
         nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
         return size;
     }
-    memcpy(buffer, guest.path, length + 1);
+    memcpy(buffer, source, length + 1);
     return (uint32_t)length;
 }
 
