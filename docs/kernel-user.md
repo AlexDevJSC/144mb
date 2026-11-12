@@ -58,6 +58,34 @@ flowchart TD
   invitado que conoce SDL. Las llamadas directas a números de syscall NT,
   los controladores Windows y la carga general de DLL PE quedan pendientes.
 
+## TLS dinámico del TEB AMD64 (implementación incremental)
+
+El TEB invitado reserva ahora espacio suficiente para los 64 `TlsSlots`
+nativos de Windows x64, en el desplazamiento `GS:0x1480`. El runtime
+expone `TlsAlloc`, `TlsFree`, `TlsGetValue` y `TlsSetValue` tanto por
+KERNEL32 como por su alias KERNELBASE. Cada hilo mantiene sus propios
+valores, independientes de la plantilla TLS estática del PE accesible
+desde `GS:0x58`. Las entradas y salidas anidadas conservan el hilo
+invitado actual y restauran el estado previo de GS.
+
+La asignación de índices es compartida por el proceso y está
+sincronizada. Una generación asociada a cada índice impide que liberar y
+reasignar un slot revele valores antiguos de otros hilos. `TlsGetValue`
+devuelve `NULL` y limpia `LastError` cuando el índice válido está vacío.
+El código PE generado para la prueba lee directamente `GS:0x1480`,
+crea un segundo hilo, verifica el aislamiento y comprueba la reutilización
+y el agotamiento de los 64 índices iniciales.
+
+**No es un TEB completo:** faltan `TlsExpansionSlots` (hasta el máximo
+Win32 de índices), el gestor TLS dinámico de DLL, la política completa
+del cargador Ldr, campos adicionales de TEB/PEB y servicios NT asociados.
+El subconjunto actual nunca presenta un slot superior a 63 como válido,
+en lugar de simular silenciosamente el comportamiento faltante.
+
+Ejecutar `make check-pe-teb-tls` desde Linux comprueba la implementación
+Win32 desde un PE32+ AMD64 compilado con MinGW. La CI lo incluye en Ubuntu,
+UBSan y Fedora.
+
 ## Verificación
 
 `make -j2 check check-pe check-pe-import check-pe-kernel-user` ejecuta dos
