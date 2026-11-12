@@ -253,6 +253,7 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(QuerySystemTime),
     NT_EXPORT(DelayExecution),
     NT_EXPORT(Close),
+    NT_EXPORT(DuplicateObject),
     NT_EXPORT(CreateEvent),
     NT_EXPORT(SetEvent),
     NT_EXPORT(ResetEvent),
@@ -289,6 +290,7 @@ int NT_MS_ABI nt_fluid_synth_sfload(void *synth, const char *path, int reset);
 
 static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(CloseHandle),
+    WIN_EXPORT(DuplicateHandle),
     WIN_EXPORT(CreateDirectoryA),
     WIN_EXPORT(CreateFileA),
     WIN_EXPORT(DeleteFileA),
