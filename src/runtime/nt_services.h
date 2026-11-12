@@ -48,6 +48,7 @@ nt_status NT_MS_ABI nt_NtOpenEvent(uintptr_t *handle, uint32_t access,
                                   const struct nt_object_attributes *attributes);
 nt_status NT_MS_ABI nt_NtQueryEvent(uintptr_t handle, uint32_t information_class,
                                    void *buffer, uint32_t length, uint32_t *returned_length);
+nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtSetEvent(uintptr_t handle, int32_t *previous);
 nt_status NT_MS_ABI nt_NtResetEvent(uintptr_t handle, int32_t *previous);
 nt_status NT_MS_ABI nt_NtWaitForSingleObject(uintptr_t handle, uint8_t alertable, const int64_t *timeout);
