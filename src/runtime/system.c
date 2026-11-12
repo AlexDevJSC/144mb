@@ -128,13 +128,14 @@ nt_status nt_runtime_wait_deadline(int64_t ticks, struct nt_wait_deadline *deadl
 
 nt_status NT_MS_ABI nt_NtDelayExecution(uint8_t alertable, const int64_t *interval)
 {
-    (void)alertable; /* No guest APC producer is registered. */
     if (!interval)
         return NT_STATUS_ACCESS_VIOLATION;
     struct nt_wait_deadline deadline;
     const nt_status status = nt_runtime_wait_deadline(*interval, &deadline);
     if (status != NT_STATUS_SUCCESS || deadline.time.tv_sec < 0)
         return status;
+    if (alertable != 0)
+        return nt_runtime_alertable_delay(&deadline);
     int error;
     do {
         error = clock_nanosleep(deadline.clock, TIMER_ABSTIME, &deadline.time, NULL);
