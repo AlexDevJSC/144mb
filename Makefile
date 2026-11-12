@@ -20,7 +20,7 @@ IMAGE_LIBS ?= $(shell $(PKG_CONFIG) --libs SDL2_image 2>/dev/null)
 VKD3D_PACKAGES = 'libvkd3d >= 1.2' 'libvkd3d-utils >= 1.2' vulkan
 VKD3D_CFLAGS ?= $(patsubst -I%,-isystem %,$(shell $(PKG_CONFIG) --cflags $(VKD3D_PACKAGES) 2>/dev/null))
 VKD3D_LIBS ?= $(shell $(PKG_CONFIG) --libs $(VKD3D_PACKAGES) 2>/dev/null)
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory environment sync threads fluid crypto winsock nls registry raw_input exceptions \
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
@@ -56,7 +56,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -91,10 +91,12 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/r
     $(BUILD_DIR)/runtime-exceptions.o: src/runtime/winbase.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-sync.o \
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
+$(BUILD_DIR)/runtime-exports.o: src/runtime/dynamic_tls.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-system.o $(BUILD_DIR)/runtime-threads.o \
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/nt_services.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_thread.o: include/ntnative/guest_thread.h
+$(BUILD_DIR)/runtime-dynamic_tls.o: src/runtime/dynamic_tls.h include/ntnative/guest_thread.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-child_process.o: src/runtime/child_process.h
 $(BUILD_DIR)/runtime-child_process.o: src/runtime/winbase.h src/runtime/winfile.h src/pe/pe_bytes.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-shell.o: src/runtime/shell.h
@@ -337,6 +339,13 @@ check-pe-kernel-user: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/kernel-services
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/kernel-services.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/user-services.exe
+
+$(BUILD_DIR)/teb-tls-fixture.exe: tests/pe/teb_tls_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
+
+check-pe-teb-tls: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/teb-tls-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/teb-tls-fixture.exe
 
 $(BUILD_DIR)/virtual-memory-fixture.exe: tests/pe/virtual_memory_fixture.c | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32

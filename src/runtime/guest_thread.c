@@ -4,11 +4,18 @@
 
 #include <asm/prctl.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 static _Thread_local unsigned char *current_teb;
+static _Thread_local struct nt_guest_thread *current_guest_thread;
+
+struct nt_guest_thread *nt_guest_thread_current(void)
+{
+    return current_guest_thread;
+}
 
 unsigned char *nt_guest_thread_teb(void)
 {
@@ -73,7 +80,9 @@ bool nt_guest_thread_enter_in_process(struct nt_guest_thread *state, uintptr_t i
     if (syscall(SYS_arch_prctl, ARCH_SET_GS, state->teb) != 0)
         return false;
     state->saved_teb = current_teb;
+    state->saved_thread = current_guest_thread;
     current_teb = state->teb;
+    current_guest_thread = state;
     state->entered = true;
     return true;
 }
@@ -96,6 +105,9 @@ bool nt_guest_thread_leave(struct nt_guest_thread *state)
     if (syscall(SYS_arch_prctl, ARCH_SET_GS, state->saved_gs) != 0)
         return false;
     current_teb = state->saved_teb;
+    current_guest_thread = state->saved_thread;
+    free(state->tls_expansion);
+    state->tls_expansion = NULL;
     state->entered = false;
     return true;
 }

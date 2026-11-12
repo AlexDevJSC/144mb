@@ -37,6 +37,7 @@ int main(void)
     assert(nt_guest_thread_enter(&thread, image));
     assert(from_gs_30() == (uintptr_t)thread.teb);
     assert(nt_guest_thread_teb() == thread.teb);
+    assert(nt_guest_thread_current() == &thread);
     assert(from_gs_58() == (uintptr_t)thread.tls_vector);
     assert(from_gs_60() == (uintptr_t)thread.standalone.peb);
     assert(thread.tls_vector[0] == (uintptr_t)thread.tls_block);
@@ -49,11 +50,13 @@ int main(void)
     assert(!nt_guest_thread_enter(&thread, image));
     struct nt_guest_thread nested = {0};
     assert(nt_guest_thread_enter(&nested, image));
-    assert(nt_guest_thread_teb() == nested.teb && !nt_guest_thread_leave(&thread));
+    assert(nt_guest_thread_teb() == nested.teb && nt_guest_thread_current() == &nested &&
+           !nt_guest_thread_leave(&thread));
     assert(nt_guest_thread_leave(&nested));
-    assert(nt_guest_thread_teb() == thread.teb && from_gs_30() == (uintptr_t)thread.teb);
+    assert(nt_guest_thread_teb() == thread.teb && nt_guest_thread_current() == &thread &&
+           from_gs_30() == (uintptr_t)thread.teb);
     assert(nt_guest_thread_leave(&thread));
-    assert(nt_guest_thread_teb() == NULL);
+    assert(nt_guest_thread_teb() == NULL && nt_guest_thread_current() == NULL);
     uintptr_t current = UINTPTR_MAX;
     assert(syscall(SYS_arch_prctl, ARCH_GET_GS, &current) == 0);
     assert(current == previous);
@@ -68,6 +71,6 @@ int main(void)
     assert(nt_guest_thread_enter_with_tls(&thread, image, &template));
     assert(thread.tls_block[0] == seed[0]);
     assert(nt_guest_thread_leave(&thread));
-    puts("PASS Linux GS/TEB/PEB mapping, static TLS copy and previous GS restoration");
+    puts("PASS Linux GS/TEB/PEB mapping, nested thread state and static TLS copy");
     return 0;
 }
