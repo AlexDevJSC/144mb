@@ -31,6 +31,47 @@ _Static_assert(offsetof(struct nt_guest_process_parameters, flags) == 0x08, "Pro
 _Static_assert(offsetof(struct nt_guest_process_parameters, image_path) == 0x60, "ProcessParameters ImagePathName");
 _Static_assert(offsetof(struct nt_guest_process_parameters, command_line) == 0x70, "ProcessParameters CommandLine");
 _Static_assert(offsetof(struct nt_guest_process_parameters, environment) == 0x80, "ProcessParameters Environment");
+_Static_assert(offsetof(struct nt_guest_ldr_data, load_order) == 0x10,
+               "PEB_LDR_DATA InLoadOrderModuleList offset");
+_Static_assert(offsetof(struct nt_guest_ldr_data, memory_order) == 0x20,
+               "PEB_LDR_DATA InMemoryOrderModuleList offset");
+_Static_assert(offsetof(struct nt_guest_ldr_data, initialization_order) == 0x30,
+               "PEB_LDR_DATA InInitializationOrderModuleList offset");
+_Static_assert(offsetof(struct nt_guest_ldr_entry, dll_base) == 0x30,
+               "LDR_DATA_TABLE_ENTRY DllBase offset");
+_Static_assert(offsetof(struct nt_guest_ldr_entry, full_name) == 0x48,
+               "LDR_DATA_TABLE_ENTRY FullDllName offset");
+_Static_assert(offsetof(struct nt_guest_ldr_entry, base_name) == 0x58,
+               "LDR_DATA_TABLE_ENTRY BaseDllName offset");
+
+static void link_primary(struct nt_guest_list_entry *head, struct nt_guest_list_entry *entry)
+{
+    head->flink = head->blink = (uintptr_t)entry;
+    entry->flink = entry->blink = (uintptr_t)head;
+}
+
+void nt_guest_process_bind_image(struct nt_guest_process *process,
+                                 const struct nt_guest_unicode_string *path,
+                                 size_t image_bytes)
+{
+    if (process == NULL || path == NULL || path->buffer == NULL ||
+        path->length % sizeof(uint16_t) != 0 || path->length > path->maximum_length)
+        return;
+    process->image_entry.full_name = *path;
+    const size_t count = path->length / sizeof(uint16_t);
+    size_t leaf = 0;
+    for (size_t i = 0; i < count; ++i)
+        if (path->buffer[i] == '\\' || path->buffer[i] == '/')
+            leaf = i + 1;
+    process->image_entry.base_name = (struct nt_guest_unicode_string){
+        (uint16_t)((count - leaf) * sizeof(uint16_t)),
+        (uint16_t)(path->maximum_length - leaf * sizeof(uint16_t)),
+        path->buffer + leaf
+    };
+    process->image_entry.image_size = image_bytes <= UINT32_MAX ?
+                                     (uint32_t)image_bytes : 0;
+}
+
 
 void nt_guest_process_init(struct nt_guest_process *process, uintptr_t image, uintptr_t heap)
 {
@@ -38,8 +79,15 @@ void nt_guest_process_init(struct nt_guest_process *process, uintptr_t image, ui
     process->parameters.maximum_length = process->parameters.length = sizeof(process->parameters);
     process->parameters.flags = 1; /* PROCESS_PARAMS_FLAG_NORMALIZED */
     put_pointer(process->peb, 0x10, image);
+    put_pointer(process->peb, 0x18, (uintptr_t)&process->loader);
     put_pointer(process->peb, 0x20, (uintptr_t)&process->parameters);
     put_pointer(process->peb, 0x30, heap);
+    process->loader.length = sizeof(process->loader);
+    process->loader.initialized = 1;
+    process->image_entry.dll_base = image;
+    link_primary(&process->loader.load_order, &process->image_entry.load_links);
+    link_primary(&process->loader.memory_order, &process->image_entry.memory_links);
+    link_primary(&process->loader.initialization_order, &process->image_entry.initialization_links);
 }
 
 bool nt_guest_thread_enter_in_process(struct nt_guest_thread *state, uintptr_t image_base,
