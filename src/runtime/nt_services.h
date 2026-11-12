@@ -29,6 +29,19 @@ struct nt_object_attributes {
     const void *security, *qos;
 };
 
+struct nt_io_status_block {
+    nt_status status;
+    uintptr_t information;
+};
+
+nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, struct nt_io_status_block *io,
+    const int64_t *allocation, uint32_t file_attributes, uint32_t share,
+    uint32_t disposition, uint32_t options, const void *ea, uint32_t ea_length);
+nt_status NT_MS_ABI nt_NtOpenFile(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, struct nt_io_status_block *io,
+    uint32_t share, uint32_t options);
+
 struct nt_wait_deadline {
     struct timespec time;
     int clock;

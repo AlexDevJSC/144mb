@@ -1364,6 +1364,91 @@ uintptr_t NT_MS_ABI nt_CreateFileW(const uint16_t *path, uint32_t access, uint32
            nt_CreateFileA(narrow, access, share, security, disposition, flags, template_file) : UINTPTR_MAX;
 }
 
+_Static_assert(sizeof(struct nt_io_status_block) == 16 &&
+               offsetof(struct nt_io_status_block, information) == 8, "AMD64 IO_STATUS_BLOCK");
+
+static nt_status nt_file_error(uint32_t error)
+{
+    switch (error) {
+    case NT_ERROR_FILE_NOT_FOUND: return (nt_status)UINT32_C(0xc0000034);
+    case NT_ERROR_PATH_NOT_FOUND: return (nt_status)UINT32_C(0xc000003a);
+    case NT_ERROR_FILE_EXISTS: return (nt_status)UINT32_C(0xc0000035);
+    case NT_ERROR_SHARING_VIOLATION: return (nt_status)UINT32_C(0xc0000043);
+    case NT_ERROR_INVALID_NAME: return (nt_status)UINT32_C(0xc0000033);
+    case NT_ERROR_INVALID_PARAMETER: return NT_STATUS_INVALID_PARAMETER;
+    case NT_ERROR_NOT_ENOUGH_MEMORY: return NT_STATUS_NO_MEMORY;
+    case NT_ERROR_ACCESS_DENIED: return NT_STATUS_ACCESS_DENIED;
+    case NT_ERROR_NOT_SUPPORTED: return NT_STATUS_NOT_SUPPORTED;
+    default: return NT_STATUS_UNSUCCESSFUL;
+    }
+}
+
+nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, struct nt_io_status_block *io,
+    const int64_t *allocation, uint32_t file_attributes, uint32_t share,
+    uint32_t disposition, uint32_t options, const void *ea, uint32_t ea_length)
+{
+    static const uint32_t win_dispositions[] = {
+        0, OPEN_EXISTING, CREATE_NEW, OPEN_ALWAYS, TRUNCATE_EXISTING, CREATE_ALWAYS,
+    };
+    if (!handle || !io || !attributes || !attributes->name || !attributes->name->buffer)
+        return NT_STATUS_ACCESS_VIOLATION;
+    const struct nt_guest_unicode_string *name = attributes->name;
+    const size_t length = name->length / sizeof(uint16_t);
+    if (attributes->size != sizeof(*attributes) || disposition >= sizeof(win_dispositions) / sizeof(*win_dispositions) ||
+        (name->length & 1u) || name->length > name->maximum_length || length >= PATH_MAX)
+        return NT_STATUS_INVALID_PARAMETER;
+    const uint32_t supported_access = UINT32_C(0xc0100003);
+    if (!disposition || attributes->root || attributes->security || attributes->qos ||
+        (attributes->attributes & ~0x42u) || (allocation && *allocation) || ea || ea_length ||
+        (access & ~supported_access) || (options & ~0x60u) || (share & ~3u) ||
+        (file_attributes & ~FILE_ATTRIBUTE_NORMAL))
+        return NT_STATUS_NOT_SUPPORTED;
+    if ((options & 0x20u) && !(access & 0x100000u))
+        return NT_STATUS_INVALID_PARAMETER;
+
+    static const uint16_t prefix[] = {'\\', '?', '?', '\\'};
+    if (length < 7 || memcmp(name->buffer, prefix, sizeof(prefix)) ||
+        (name->buffer[4] != 'C' && name->buffer[4] != 'c') ||
+        name->buffer[5] != ':' || name->buffer[6] != '\\')
+        return (nt_status)UINT32_C(0xc000003b); /* STATUS_OBJECT_PATH_SYNTAX_BAD */
+    uint16_t path[PATH_MAX];
+    for (size_t i = 4; i < length; ++i) {
+        if (!name->buffer[i])
+            return NT_STATUS_INVALID_PARAMETER;
+        path[i - 4] = name->buffer[i];
+    }
+    path[length - 4] = 0;
+    uint32_t desired = access & UINT32_C(0xc0000000);
+    if (access & 1u)
+        desired |= UINT32_C(0x80000000);
+    if (access & 2u)
+        desired |= UINT32_C(0x40000000);
+    const struct security_attributes security = {sizeof(security), NULL, (attributes->attributes & 2u) != 0};
+    const uint32_t saved = nt_GetLastError();
+    const uintptr_t result = nt_CreateFileW(path, desired, share, &security,
+                                            win_dispositions[disposition], file_attributes, 0);
+    const uint32_t error = nt_GetLastError();
+    nt_SetLastError(saved);
+    if (result == UINTPTR_MAX)
+        return nt_file_error(error);
+    uintptr_t action = 1; /* FILE_OPENED */
+    if (disposition == 2 || ((disposition == 3 || disposition == 5) && error == NT_ERROR_SUCCESS))
+        action = 2; /* FILE_CREATED */
+    else if (disposition == 4 || disposition == 5)
+        action = 3; /* FILE_OVERWRITTEN */
+    *io = (struct nt_io_status_block){NT_STATUS_SUCCESS, action};
+    *handle = result;
+    return NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtOpenFile(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, struct nt_io_status_block *io,
+    uint32_t share, uint32_t options)
+{
+    return nt_NtCreateFile(handle, access, attributes, io, NULL, 0, share, 1, options, NULL, 0);
+}
+
 uintptr_t NT_MS_ABI nt_CreateFile2(const uint16_t *path, uint32_t access, uint32_t share,
                                   uint32_t disposition, const struct nt_createfile2_params *params)
 {

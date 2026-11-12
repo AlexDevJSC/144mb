@@ -145,3 +145,17 @@ módulos y las firmas win32u se contrastaron con Wine 11.0.
 [Windows API sets](https://learn.microsoft.com/en-us/windows/win32/apiindex/windows-apisets) ·
 [Wine 11.0 API sets](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/apisetschema/apisetschema.spec) ·
 [Wine 11.0 win32u](https://github.com/wine-mirror/wine/blob/wine-11.0/dlls/win32u/win32u.spec).
+
+## Apertura de archivos desde NTDLL
+
+`NtCreateFile`, `NtOpenFile` y sus variantes `Zw` usan la apertura
+confinada de Win32. La ruta NT absoluta `\??\C:\` se traduce al disco C:
+invitado. El perfil admite archivos normales con apertura, creación y
+sobrescritura, acceso de lectura o escritura y uso síncrono. Las rutas
+con directorio raíz mediante handle, los directorios y las opciones de
+E/S especializadas quedan fuera del perfil. Se conserva LastError y se
+devuelve NTSTATUS junto al resultado de apertura en IO_STATUS_BLOCK.
+
+El PE de control crea el archivo por NTDLL, escribe por Win32, lo vuelve
+a abrir por NTDLL y lee por Win32. Comprueba también el cierre cruzado,
+el error de fichero ausente y la conservación de LastError.

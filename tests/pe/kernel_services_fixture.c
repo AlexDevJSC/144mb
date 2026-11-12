@@ -164,10 +164,40 @@ static int test_duplicated_file(void)
     return 0;
 }
 
+static int test_native_file(void)
+{
+    WCHAR path[] = L"\\??\\C:\\nt-native-test.bin";
+    UNICODE_STRING name = {sizeof(path) - sizeof(WCHAR), sizeof(path), path};
+    OBJECT_ATTRIBUTES attributes = {.Length = sizeof(attributes), .ObjectName = &name};
+    IO_STATUS_BLOCK io;
+    HANDLE file = NULL;
+    SetLastError(0x421u);
+    if (NtCreateFile(&file, GENERIC_WRITE | SYNCHRONIZE, &attributes, &io, NULL,
+                     FILE_ATTRIBUTE_NORMAL, 0, FILE_CREATE,
+                     FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0) != STATUS_SUCCESS ||
+        io.Information != FILE_CREATED || GetLastError() != 0x421u)
+        return 50;
+    DWORD count = 0;
+    if (!WriteFile(file, "A", 1, &count, NULL) || count != 1 || !CloseHandle(file))
+        return 51;
+    if (NtOpenFile(&file, GENERIC_READ | SYNCHRONIZE, &attributes, &io,
+                   FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT) != STATUS_SUCCESS || io.Information != FILE_OPENED)
+        return 52;
+    char value = 0;
+    if (!ReadFile(file, &value, 1, &count, NULL) || count != 1 || value != 'A' ||
+        NtClose(file) != STATUS_SUCCESS || !DeleteFileW(L"C:\\nt-native-test.bin"))
+        return 53;
+    SetLastError(0x422u);
+    return NtOpenFile(&file, GENERIC_READ, &attributes, &io, FILE_SHARE_READ, 0) ==
+           STATUS_OBJECT_NAME_NOT_FOUND && GetLastError() == 0x422u ? 0 : 54;
+}
+
 int import_fixture_entry(void)
 {
     int status = test_clocks_and_errors();
     if (!status)
         status = test_shared_objects();
-    return status ? status : test_duplicated_file();
+    if (!status)
+        status = test_duplicated_file();
+    return status ? status : test_native_file();
 }
