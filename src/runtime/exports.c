@@ -432,6 +432,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetEnvironmentVariableA),
     WIN_EXPORT(GetEnvironmentVariableW),
     WIN_EXPORT(GetExitCodeThread),
+    WIN_EXPORT(GetThreadId),
+    WIN_EXPORT(OpenThread),
     WIN_EXPORT(GetFileAttributesExW),
     WIN_EXPORT(GetFileAttributesW),
     WIN_EXPORT(GetFileInformationByHandleEx),
