@@ -1660,7 +1660,9 @@ static nt_status nt_guest_io(uintptr_t handle, uintptr_t event, void *apc, void 
         return nt_file_complete(io, NT_STATUS_NOT_SUPPORTED, 0);
     if (length != 0 && buffer == NULL)
         return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
-    if (length > SSIZE_MAX || (offset != NULL && *offset < 0))
+    /* The Win32 length is ULONG (32 bits); Linux AMD64 ssize_t is 64 bits,
+     * so every possible length is representable by read/pread/write/pwrite. */
+    if (offset != NULL && *offset < 0)
         return nt_file_complete(io, NT_STATUS_INVALID_PARAMETER, 0);
 
     const int fd = duplicate_handle(handle, write_operation ? FILE_WRITE : FILE_READ);
