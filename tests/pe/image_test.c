@@ -310,8 +310,10 @@ int main(void)
     assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
                                  &image, reason, sizeof(reason)));
     assert(pe_image_run_library_entry(&image, 1));
+    assert(pe_image_run_library_entry(&image, 2));
+    assert(pe_image_run_library_entry(&image, 3));
     assert(pe_image_run_library_entry(&image, 0));
-    assert(!pe_image_run_library_entry(&image, 2));
+    assert(!pe_image_run_library_entry(&image, 4));
     pe_image_unload(&image);
     make_export_dll(bytes);
     w32(bytes + 0x98 + 16, 0x2100); /* Export data is not executable. */
