@@ -79,7 +79,7 @@ static int test_shared_objects(void)
     if (!DuplicateHandle(GetCurrentProcess(), manual, GetCurrentProcess(), &manual_alias,
                          0, FALSE, DUPLICATE_SAME_ACCESS) || !manual_alias || manual_alias == manual ||
         !SetEvent(manual_alias) || WaitForSingleObject(manual, 0) != WAIT_OBJECT_0 ||
-        !ResetEvent(manual))
+        ZwResetEvent(manual, NULL) != STATUS_SUCCESS)
         return 28;
     if (!CloseHandle(manual_alias))
         return 29;
