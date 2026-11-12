@@ -456,7 +456,7 @@ bool pe_image_load_library(const unsigned char *file, size_t length, pe_image_re
  * guarantee a suitable guest thread context before invoking it. */
 bool pe_image_run_library_entry(const struct pe_image *image, uint32_t reason)
 {
-    if (image == NULL || image->base == NULL || (reason != 0 && reason != 1))
+    if (image == NULL || image->base == NULL || reason > 3)
         return false;
     if (image->entry_rva == 0)
         return true;
