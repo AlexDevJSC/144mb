@@ -534,6 +534,13 @@ static uint32_t region_protection(uintptr_t address, uintptr_t end)
 
 int32_t NT_MS_ABI nt_VirtualProtect(void *address, size_t size, uint32_t protection, uint32_t *previous)
 {
+    /* Heap and other reserved pages are governed by the virtual-memory
+     * manager. Preserve the existing PE image path for mapped sections. */
+    if (previous != NULL) {
+        const int managed = nt_virtual_protect_managed(address, size, protection, previous);
+        if (managed >= 0)
+            return managed;
+    }
     const uintptr_t start = (uintptr_t)address;
     if (size == 0 || previous == NULL || size - 1 > UINTPTR_MAX - start ||
         nt_runtime_guest_image_at(start) == 0 || nt_runtime_guest_image_at(start + size - 1) == 0) {
