@@ -31,6 +31,7 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started;
+    uint32_t suspend_count;
     uint32_t access;
     pthread_t host;
     uint32_t thread_id, exit_code;
@@ -692,6 +693,10 @@ static void *thread_main(void *context)
     running_thread->thread_id = (uint32_t)gettid();
     running_thread->started = true;
     pthread_cond_broadcast(&wait_changed);
+    /* CREATE_SUSPENDED must prevent guest instructions, TLS callbacks and
+     * the user's thread entry from running until ResumeThread. */
+    while (running_thread->suspend_count != 0)
+        pthread_cond_wait(&wait_changed, &wait_lock);
     pthread_mutex_unlock(&wait_lock);
     if (sigsetjmp(thread_exit, 1) == 0) {
         if (guest.entered)
@@ -705,7 +710,7 @@ static void *thread_main(void *context)
 uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_thread_start start,
                                    void *parameter, uint32_t flags, uint32_t *thread_id)
 {
-    if (start == NULL || security != NULL || flags != 0) {
+    if (start == NULL || security != NULL || (flags & ~4u) != 0) {
         nt_SetLastError(start == NULL ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
@@ -725,6 +730,7 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     if (thread != NULL) {
         thread->start = start;
         thread->parameter = parameter;
+        thread->suspend_count = (flags & 4u) ? 1u : 0u;
         ++thread->refs;
         error = pthread_create(&thread->host, &attr, thread_main, thread);
         if (error == 0) {
@@ -743,6 +749,44 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     if (handle == 0)
         nt_SetLastError(error == EINVAL ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_NOT_ENOUGH_MEMORY);
     return handle;
+}
+
+/* A bounded startup-suspension contract. Running-thread asynchronous
+ * suspension needs a separate guest scheduler and is not implemented. */
+static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *thread = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (thread == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (thread->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else {
+        struct waitable *state = wait_state(thread);
+        if (previous != NULL)
+            *previous = state->suspend_count;
+        if (state->suspend_count != 0) {
+            --state->suspend_count;
+            pthread_cond_broadcast(&wait_changed);
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle)
+{
+    uint32_t previous = UINT32_MAX;
+    const nt_status status = resume_guest_thread(handle, &previous);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS ? previous : UINT32_MAX;
+}
+
+nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous)
+{
+    return resume_guest_thread(handle, previous);
 }
 
 void NT_MS_ABI nt_ExitThread(uint32_t code)
