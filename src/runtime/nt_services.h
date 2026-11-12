@@ -18,6 +18,7 @@
 #define NT_STATUS_NO_MEMORY ((nt_status)UINT32_C(0xc0000017))
 #define NT_STATUS_ACCESS_DENIED ((nt_status)UINT32_C(0xc0000022))
 #define NT_STATUS_OBJECT_TYPE_MISMATCH ((nt_status)UINT32_C(0xc0000024))
+#define NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED ((nt_status)UINT32_C(0xc0000047))
 #define NT_STATUS_NOT_SUPPORTED ((nt_status)UINT32_C(0xc00000bb))
 #define NT_STATUS_END_OF_FILE ((nt_status)UINT32_C(0xc0000011))
 
@@ -77,6 +78,14 @@ nt_status NT_MS_ABI nt_NtOpenEvent(uintptr_t *handle, uint32_t access,
                                   const struct nt_object_attributes *attributes);
 nt_status NT_MS_ABI nt_NtQueryEvent(uintptr_t handle, uint32_t information_class,
                                    void *buffer, uint32_t length, uint32_t *returned_length);
+nt_status NT_MS_ABI nt_NtCreateSemaphore(uintptr_t *handle, uint32_t access,
+                                         const struct nt_object_attributes *attributes,
+                                         int32_t initial, int32_t maximum);
+nt_status NT_MS_ABI nt_NtOpenSemaphore(uintptr_t *handle, uint32_t access,
+                                       const struct nt_object_attributes *attributes);
+nt_status NT_MS_ABI nt_NtQuerySemaphore(uintptr_t handle, uint32_t information_class,
+                                        void *buffer, uint32_t length, uint32_t *returned_length);
+nt_status NT_MS_ABI nt_NtReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous);
 nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtSetEvent(uintptr_t handle, int32_t *previous);
 nt_status NT_MS_ABI nt_NtResetEvent(uintptr_t handle, int32_t *previous);

@@ -3,6 +3,7 @@
 #include "nt_core_information.h"
 #include "ntnative/guest_thread.h"
 #include "winbase.h"
+#include "sync.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -93,21 +94,28 @@ nt_status NT_MS_ABI nt_NtQueryInformationThread(uintptr_t thread, uint32_t info_
                                                  void *buffer, uint32_t length,
                                                  uint32_t *returned_length)
 {
-    if (!local_thread(thread))
-        return NT_STATUS_INVALID_HANDLE;
     if (info_class != NT_BASIC_INFORMATION_CLASS)
         return NT_STATUS_INVALID_INFO_CLASS;
-    unsigned char *teb = nt_guest_thread_teb();
-    if (teb == NULL)
-        return NT_STATUS_NOT_SUPPORTED;
+    uintptr_t teb = 0;
+    uint32_t tid = 0, exit_status = 259;
+    if (local_thread(thread)) {
+        teb = (uintptr_t)nt_guest_thread_teb();
+        if (teb == 0)
+            return NT_STATUS_NOT_SUPPORTED;
+        tid = (uint32_t)syscall(SYS_gettid);
+    } else {
+        const nt_status status = nt_runtime_query_thread(thread, &tid, &teb, &exit_status);
+        if (status != NT_STATUS_SUCCESS)
+            return status;
+    }
     const nt_status status = require_buffer(buffer, length,
                                              sizeof(struct nt_thread_basic_information), returned_length);
     if (status != NT_STATUS_SUCCESS)
         return status;
     const struct nt_thread_basic_information result = {
-        .exit_status = 259, /* STILL_ACTIVE */
-        .teb_base = teb,
-        .client_id = {(uintptr_t)getpid(), (uintptr_t)syscall(SYS_gettid)},
+        .exit_status = (nt_status)exit_status,
+        .teb_base = (void *)teb,
+        .client_id = {(uintptr_t)getpid(), (uintptr_t)tid},
         .affinity_mask = 1,
         .priority = 8,
         .base_priority = 8

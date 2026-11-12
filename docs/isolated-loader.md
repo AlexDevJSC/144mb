@@ -22,7 +22,7 @@ El parser ya distingue entre imágenes ejecutables y DLL PE32+ AMD64. La API
 `pe_image_load_library()` permite **mapear y validar** una DLL sin ejecutar
 código del invitado. Usa las mismas reglas que el ejecutable: relocaciones
 DIR64, importaciones compatibles con el registro nativo, tamaño limitado
-y permisos de página W^X. No ejecuta `DllMain`, no inicializa DLL
+y permisos de página W^X. No ejecuta `DllMain` automáticamente (existe `pe_image_run_library_entry()` para invocación explícita de DLL sin TLS), no inicializa DLL
 dependientes ni crea índices TLS dinámicos; por seguridad, rechaza las
 DLL con directorio TLS que necesitarían esos índices.
 

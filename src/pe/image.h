@@ -35,6 +35,11 @@ struct pe_image_export {
  */
 bool pe_image_load_library(const unsigned char *file, size_t length, pe_image_resolver resolve,
                            void *context, struct pe_image *output, char *error, size_t error_size);
+/* Explicitly invoke the initialized entry point of a mapped, TLS-free DLL.
+ * Only DLL_PROCESS_ATTACH (1) and DLL_PROCESS_DETACH (0) are supported.
+ * The caller owns dependency order, guest GS/TEB setup, lifecycle,
+ * rollback and unloading. No guest code executes during mapping. */
+bool pe_image_run_library_entry(const struct pe_image *image, uint32_t reason);
 /* Resolve a by-name or by-ordinal export from a mapped DLL. Exactly one of
  * name or ordinal must be specified. Forwarders are returned as strings
  * instead of mistaken for executable addresses. Return false if missing,

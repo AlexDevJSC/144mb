@@ -35,9 +35,30 @@ struct nt_guest_process_parameters {
     uint16_t *environment;
 };
 
+/* AMD64 layout of the public loader list prefix, not the full private
+ * Windows PEB_LDR_DATA / LDR_DATA_TABLE_ENTRY structures. */
+struct nt_guest_list_entry {
+    uintptr_t flink, blink;
+};
+struct nt_guest_ldr_data {
+    uint32_t length;
+    uint8_t initialized;
+    uint8_t pad[3];
+    uintptr_t ss_handle;
+    struct nt_guest_list_entry load_order, memory_order, initialization_order;
+};
+struct nt_guest_ldr_entry {
+    struct nt_guest_list_entry load_links, memory_links, initialization_links;
+    uintptr_t dll_base, entry_point;
+    uint32_t image_size, pad;
+    struct nt_guest_unicode_string full_name, base_name;
+};
+
 struct nt_guest_process {
     _Alignas(16) unsigned char peb[512];
     struct nt_guest_process_parameters parameters;
+    struct nt_guest_ldr_data loader;
+    struct nt_guest_ldr_entry image_entry;
 };
 
 struct nt_guest_thread {
@@ -56,6 +77,9 @@ struct nt_guest_thread {
 };
 
 void nt_guest_process_init(struct nt_guest_process *process, uintptr_t image, uintptr_t heap);
+void nt_guest_process_bind_image(struct nt_guest_process *process,
+                                 const struct nt_guest_unicode_string *path,
+                                 size_t image_bytes);
 bool nt_guest_thread_enter(struct nt_guest_thread *state, uintptr_t image_base);
 bool nt_guest_thread_enter_with_tls(struct nt_guest_thread *state, uintptr_t image_base,
                                     const struct nt_guest_tls *initial);

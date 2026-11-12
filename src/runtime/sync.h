@@ -24,6 +24,10 @@ int32_t NT_MS_ABI nt_InitOnceComplete(void *once, uint32_t flags, void *context)
 
 uintptr_t NT_MS_ABI nt_CreateEventW(const void *security, int32_t manual, int32_t initial, const uint16_t *name);
 uintptr_t NT_MS_ABI nt_OpenEventW(uint32_t access, int32_t inherit, const uint16_t *name);
+uintptr_t NT_MS_ABI nt_CreateSemaphoreW(const void *security, int32_t initial,
+                                        int32_t maximum, const uint16_t *name);
+uintptr_t NT_MS_ABI nt_OpenSemaphoreW(uint32_t access, int32_t inherit, const uint16_t *name);
+int32_t NT_MS_ABI nt_ReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous);
 int32_t NT_MS_ABI nt_SetEvent(uintptr_t event);
 int32_t NT_MS_ABI nt_ResetEvent(uintptr_t event);
 uint32_t NT_MS_ABI nt_WaitForSingleObject(uintptr_t handle, uint32_t milliseconds);
@@ -38,6 +42,10 @@ nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
                                          uint32_t attributes, uint32_t options,
                                          uintptr_t *target);
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void);
+uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle);
+uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t thread_id);
+nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
+                                   uintptr_t *teb, uint32_t *exit_code);
 uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_thread_start start,
                                    void *parameter, uint32_t flags, uint32_t *thread_id);
 uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);

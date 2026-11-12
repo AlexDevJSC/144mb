@@ -19,8 +19,10 @@
 
 enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128, STILL_ACTIVE = 259 };
 enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
-       SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003 };
-enum waitable_kind { EVENT, THREAD, PROCESS };
+       SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
+       THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
+       THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
+enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
 struct waitable {
     uintptr_t handle;
     unsigned int refs;
@@ -31,15 +33,17 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started;
+    int32_t semaphore_count, semaphore_maximum;
+    uintptr_t teb_base;
     uint32_t suspend_count;
     uint32_t access;
     pthread_t host;
-    uint32_t thread_id, exit_code;
+    uint32_t thread_id, exit_code, owner_pid;
     nt_thread_start start;
     void *parameter;
-    /* Only canonical EVENT entries own a name; aliases reference shared
-     * state, and names vanish after the final handle/reference closes. */
-    char event_name[128];
+    /* Canonical named event/semaphore entries own a name. Aliases share
+     * the same state, and the object vanishes after the last close. */
+    char object_name[128];
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
@@ -117,7 +121,7 @@ _Static_assert(sizeof(struct nt_object_attributes) == 48 &&
 /* Bounded ASCII-only names under the local BaseNamedObjects namespace.
  * Do not claim global/session, nested directories or Unicode case folding
  * until a cross-process NT object namespace broker exists. */
-static nt_status event_name(const struct nt_guest_unicode_string *unicode, char output[128])
+static nt_status named_object_name(const struct nt_guest_unicode_string *unicode, char output[128])
 {
     output[0] = 0;
     if (unicode == NULL)
@@ -162,22 +166,23 @@ static bool event_name_equal(const char *left, const char *right, bool insensiti
     return *left == 0 && *right == 0;
 }
 
-static struct waitable *find_named_event(const char *name, bool insensitive)
+static struct waitable *find_named_object(const char *name, bool insensitive)
 {
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         struct waitable *entry = &waitables[i];
-        if (entry->kind == EVENT && entry->shared == NULL && entry->event_name[0] &&
+        if ((entry->kind == EVENT || entry->kind == SEMAPHORE) &&
+            entry->shared == NULL && entry->object_name[0] &&
             (entry->refs != 0 || entry->links != 0) &&
-            event_name_equal(entry->event_name, name, insensitive))
+            event_name_equal(entry->object_name, name, insensitive))
             return entry;
     }
     return NULL;
 }
 
 /* Allocate an independent handle referring to a named object's state. */
-static struct waitable *open_event_alias(struct waitable *state, uint32_t access, bool inherit)
+static struct waitable *open_named_alias(struct waitable *state, uint32_t access, bool inherit)
 {
-    struct waitable *alias = new_waitable(EVENT);
+    struct waitable *alias = new_waitable(state->kind);
     if (alias == NULL)
         return NULL;
     ++state->links;
@@ -217,7 +222,8 @@ nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
         status = NT_STATUS_INVALID_HANDLE;
     } else {
         uint32_t rights = (options & 2u) ? original->access :
-                          original->kind == EVENT ? event_access(access) : access;
+                          (original->kind == EVENT || original->kind == SEMAPHORE) ?
+                          event_access(access) : access;
         if (rights & ~original->access) {
             status = NT_STATUS_ACCESS_DENIED;
         } else {
@@ -251,7 +257,7 @@ nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
                        (attributes->attributes & ~(0x40u | 2u))))
         return NT_STATUS_NOT_SUPPORTED;
     char normalized[128];
-    const nt_status name_status = event_name(attributes ? attributes->name : NULL, normalized);
+    const nt_status name_status = named_object_name(attributes ? attributes->name : NULL, normalized);
     if (name_status != NT_STATUS_SUCCESS)
         return name_status;
     const uint32_t rights = event_access(access);
@@ -260,12 +266,14 @@ nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
     pthread_mutex_lock(&wait_lock);
     nt_status status = NT_STATUS_SUCCESS;
     struct waitable *event = normalized[0] ?
-        find_named_event(normalized, attributes && (attributes->attributes & 0x40u)) : NULL;
+        find_named_object(normalized, attributes && (attributes->attributes & 0x40u)) : NULL;
     if (event != NULL) {
-        if (rights & ~event->access) {
+        if (event->kind != EVENT) {
+            status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+        } else if (rights & ~event->access) {
             status = NT_STATUS_ACCESS_DENIED;
         } else {
-            event = open_event_alias(event, rights, attributes && (attributes->attributes & 2u));
+            event = open_named_alias(event, rights, attributes && (attributes->attributes & 2u));
             status = event ? NT_STATUS_OBJECT_NAME_EXISTS : NT_STATUS_NO_MEMORY;
         }
     } else {
@@ -276,7 +284,7 @@ nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
             event->access = rights;
             event->handle_flags = attributes && (attributes->attributes & 2u) ? 1u : 0u;
             if (normalized[0])
-                memcpy(event->event_name, normalized, strlen(normalized) + 1);
+                memcpy(event->object_name, normalized, strlen(normalized) + 1);
         } else {
             status = NT_STATUS_NO_MEMORY;
         }
@@ -299,21 +307,23 @@ nt_status NT_MS_ABI nt_NtOpenEvent(uintptr_t *handle, uint32_t access,
         (attributes->attributes & ~(0x40u | 2u)))
         return NT_STATUS_NOT_SUPPORTED;
     char normalized[128];
-    const nt_status name_status = event_name(attributes->name, normalized);
+    const nt_status name_status = named_object_name(attributes->name, normalized);
     if (name_status != NT_STATUS_SUCCESS)
         return name_status;
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
     pthread_mutex_lock(&wait_lock);
-    struct waitable *state = find_named_event(normalized, (attributes->attributes & 0x40u) != 0);
+    struct waitable *state = find_named_object(normalized, (attributes->attributes & 0x40u) != 0);
     nt_status status = NT_STATUS_SUCCESS;
     if (state == NULL) {
         status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (state->kind != EVENT) {
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
     } else if (rights & ~state->access) {
         status = NT_STATUS_ACCESS_DENIED;
     } else {
-        struct waitable *alias = open_event_alias(state, rights, (attributes->attributes & 2u) != 0);
+        struct waitable *alias = open_named_alias(state, rights, (attributes->attributes & 2u) != 0);
         if (alias == NULL)
             status = NT_STATUS_NO_MEMORY;
         else
@@ -341,6 +351,211 @@ static struct nt_guest_unicode_string win_event_string(const uint16_t *name)
             ++length;
     const uint16_t bytes = (uint16_t)(length * sizeof(uint16_t));
     return (struct nt_guest_unicode_string){bytes, bytes, (uint16_t *)name};
+}
+
+/* Native Win64 Semaphore objects share the same waitable table and the
+ * process-local object namespace as named events. Cross-process objects and
+ * security descriptors still require a dedicated broker. */
+nt_status NT_MS_ABI nt_NtCreateSemaphore(uintptr_t *handle, uint32_t access,
+                                         const struct nt_object_attributes *attributes,
+                                         int32_t initial, int32_t maximum)
+{
+    if (handle == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (initial < 0 || maximum <= 0 || initial > maximum ||
+        (attributes && attributes->size != sizeof(*attributes)))
+        return NT_STATUS_INVALID_PARAMETER;
+    if (attributes && (attributes->root || attributes->security || attributes->qos ||
+                       (attributes->attributes & ~(0x40u | 2u))))
+        return NT_STATUS_NOT_SUPPORTED;
+    char normalized[128];
+    const nt_status name_status = named_object_name(attributes ? attributes->name : NULL, normalized);
+    if (name_status != NT_STATUS_SUCCESS)
+        return name_status;
+    const uint32_t rights = event_access(access);
+    if (rights & ~EVENT_ALL_ACCESS)
+        return NT_STATUS_ACCESS_DENIED;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = normalized[0] ?
+        find_named_object(normalized, attributes && (attributes->attributes & 0x40u)) : NULL;
+    nt_status status = NT_STATUS_SUCCESS;
+    if (object != NULL) {
+        if (object->kind != SEMAPHORE)
+            status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+        else if (rights & ~object->access)
+            status = NT_STATUS_ACCESS_DENIED;
+        else {
+            object = open_named_alias(object, rights, attributes && (attributes->attributes & 2u));
+            status = object ? NT_STATUS_OBJECT_NAME_EXISTS : NT_STATUS_NO_MEMORY;
+        }
+    } else {
+        object = new_waitable(SEMAPHORE);
+        if (object == NULL) {
+            status = NT_STATUS_NO_MEMORY;
+        } else {
+            object->access = rights;
+            object->semaphore_count = initial;
+            object->semaphore_maximum = maximum;
+            object->signaled = initial > 0;
+            object->handle_flags = attributes && (attributes->attributes & 2u) ? 1u : 0u;
+            if (normalized[0])
+                memcpy(object->object_name, normalized, strlen(normalized) + 1);
+        }
+    }
+    if (status == NT_STATUS_SUCCESS || status == NT_STATUS_OBJECT_NAME_EXISTS)
+        *handle = object->handle;
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+nt_status NT_MS_ABI nt_NtOpenSemaphore(uintptr_t *handle, uint32_t access,
+                                       const struct nt_object_attributes *attributes)
+{
+    if (handle == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (attributes == NULL || attributes->size != sizeof(*attributes) || attributes->name == NULL)
+        return NT_STATUS_INVALID_PARAMETER;
+    if (attributes->root || attributes->security || attributes->qos ||
+        (attributes->attributes & ~(0x40u | 2u)))
+        return NT_STATUS_NOT_SUPPORTED;
+    char normalized[128];
+    const nt_status parsed = named_object_name(attributes->name, normalized);
+    if (parsed != NT_STATUS_SUCCESS)
+        return parsed;
+    const uint32_t rights = event_access(access);
+    if (rights & ~EVENT_ALL_ACCESS)
+        return NT_STATUS_ACCESS_DENIED;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *state = find_named_object(normalized, (attributes->attributes & 0x40u) != 0);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (state == NULL)
+        status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    else if (state->kind != SEMAPHORE)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (rights & ~state->access)
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *alias = open_named_alias(state, rights, (attributes->attributes & 2u) != 0);
+        if (alias == NULL)
+            status = NT_STATUS_NO_MEMORY;
+        else
+            *handle = alias->handle;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+struct nt_semaphore_basic_information {
+    int32_t current_count, maximum_count;
+};
+_Static_assert(sizeof(struct nt_semaphore_basic_information) == 8, "SEMAPHORE_BASIC_INFORMATION ABI");
+
+nt_status NT_MS_ABI nt_NtQuerySemaphore(uintptr_t handle, uint32_t information_class,
+                                        void *buffer, uint32_t length, uint32_t *returned_length)
+{
+    if (information_class != 0)
+        return NT_STATUS_INVALID_INFO_CLASS;
+    if (returned_length != NULL)
+        *returned_length = sizeof(struct nt_semaphore_basic_information);
+    if (buffer == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (length < sizeof(struct nt_semaphore_basic_information))
+        return NT_STATUS_INFO_LENGTH_MISMATCH;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *entry = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (entry == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (entry->kind != SEMAPHORE)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(entry->access & EVENT_QUERY_STATE))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        const struct waitable *state = wait_state(entry);
+        const struct nt_semaphore_basic_information info = {
+            state->semaphore_count, state->semaphore_maximum
+        };
+        memcpy(buffer, &info, sizeof(info));
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+nt_status NT_MS_ABI nt_NtReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous)
+{
+    if (count <= 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *entry = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (entry == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (entry->kind != SEMAPHORE)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(entry->access & EVENT_MODIFY_STATE))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(entry);
+        if (count > state->semaphore_maximum - state->semaphore_count) {
+            status = NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+        } else {
+            if (previous != NULL)
+                *previous = state->semaphore_count;
+            state->semaphore_count += count;
+            state->signaled = true;
+            pthread_cond_broadcast(&wait_changed);
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+uintptr_t NT_MS_ABI nt_CreateSemaphoreW(const void *security, int32_t initial,
+                                         int32_t maximum, const uint16_t *name)
+{
+    if (security != NULL) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    struct nt_guest_unicode_string unicode = win_event_string(name);
+    if (name != NULL && *name && unicode.length >= 127 * sizeof(uint16_t)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_object_attributes attrs = win_event_attributes(&unicode, false);
+    uintptr_t handle = 0;
+    const nt_status status = nt_NtCreateSemaphore(&handle, EVENT_ALL_ACCESS,
+                                                  name && *name ? &attrs : NULL,
+                                                  initial, maximum);
+    nt_SetLastError(nt_runtime_nt_error(status));
+    return handle;
+}
+
+uintptr_t NT_MS_ABI nt_OpenSemaphoreW(uint32_t access, int32_t inherit, const uint16_t *name)
+{
+    if (name == NULL || !*name) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_guest_unicode_string unicode = win_event_string(name);
+    if (unicode.length >= 127 * sizeof(uint16_t)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_object_attributes attrs = win_event_attributes(&unicode, inherit != 0);
+    uintptr_t handle = 0;
+    const nt_status status = nt_NtOpenSemaphore(&handle, access, &attrs);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return handle;
+}
+
+int32_t NT_MS_ABI nt_ReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous)
+{
+    const nt_status status = nt_NtReleaseSemaphore(handle, count, previous);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
 }
 
 uintptr_t NT_MS_ABI nt_CreateEventW(const void *security, int32_t manual, int32_t initial,
@@ -492,8 +707,13 @@ static nt_status check_wait_objects(struct waitable *const *objects, uint32_t co
     const uint32_t start = all ? 0 : first;
     const uint32_t end = all ? count : first + 1;
     for (uint32_t i = start; i < end; ++i) {
-        if (objects[i]->kind == EVENT && !wait_state(objects[i])->manual)
-            wait_state(objects[i])->signaled = false;
+        struct waitable *state = wait_state(objects[i]);
+        if (objects[i]->kind == EVENT && !state->manual)
+            state->signaled = false;
+        if (objects[i]->kind == SEMAPHORE) {
+            --state->semaphore_count;
+            state->signaled = state->semaphore_count > 0;
+        }
     }
     return all ? NT_STATUS_SUCCESS : (nt_status)first;
 }
@@ -621,6 +841,8 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         ++process->refs;
         ++thread->refs;
         thread->thread_id = (uint32_t)pid;
+        thread->owner_pid = (uint32_t)pid;
+        thread->access = THREAD_ALL_ACCESS;
         *watch = (struct child_watch){pid, status_fd, process, thread};
         pthread_t worker;
         error = pthread_create(&worker, &attr, reap_child, watch);
@@ -666,6 +888,88 @@ int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
 }
 
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void) { return UINTPTR_MAX - 1; }
+/* Thread metadata is kept in the same canonical table as wait handles, so
+ * OpenThread and native queries observe the same guest TEB and thread ID.
+ * No host pthread_t is returned as a Win32 HANDLE. */
+nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
+                                   uintptr_t *teb, uint32_t *exit_code)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (wait_state(object)->owner_pid != (uint32_t)getpid())
+        status = NT_STATUS_NOT_SUPPORTED;
+    else if (!(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        const struct waitable *state = wait_state(object);
+        if (thread_id != NULL)
+            *thread_id = state->thread_id;
+        if (teb != NULL)
+            *teb = state->teb_base;
+        if (exit_code != NULL)
+            *exit_code = state->signaled ? state->exit_code : STILL_ACTIVE;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle)
+{
+    if (handle == nt_GetCurrentThread())
+        return (uint32_t)gettid();
+    uint32_t id = 0;
+    const nt_status status = nt_runtime_query_thread(handle, &id, NULL, NULL);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS ? id : 0;
+}
+
+uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
+{
+    if (id == 0 || (access & ~THREAD_ALL_ACCESS) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *original = NULL;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+        struct waitable *item = &waitables[i];
+        if (item->kind == THREAD && item->shared == NULL &&
+            (item->refs != 0 || item->links != 0) &&
+            item->owner_pid == (uint32_t)getpid() && item->thread_id == id) {
+            original = item;
+            break;
+        }
+    }
+    uintptr_t result = 0;
+    uint32_t error = NT_ERROR_INVALID_PARAMETER;
+    if (original != NULL) {
+        if (access & ~original->access) {
+            error = NT_ERROR_ACCESS_DENIED;
+        } else {
+            struct waitable *alias = new_waitable(THREAD);
+            if (alias == NULL)
+                error = NT_ERROR_NOT_ENOUGH_MEMORY;
+            else {
+                ++original->links;
+                alias->shared = original;
+                alias->access = access;
+                alias->handle_flags = inherit != 0 ? 1u : 0u;
+                result = alias->handle;
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (result == 0)
+        nt_SetLastError(error);
+    return result;
+}
+
 
 static void finish_thread(void *state)
 {
@@ -677,6 +981,7 @@ static void finish_thread(void *state)
     }
     pthread_mutex_lock(&wait_lock);
     running_thread->exit_code = thread_result;
+    running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     running_thread->signaled = true;
     --running_thread->refs;
     pthread_cond_broadcast(&wait_changed);
@@ -691,6 +996,8 @@ static void *thread_main(void *context)
     const bool ready = image == 0 || nt_runtime_enter_guest_thread(&guest, image, nt_runtime_guest_tls());
     pthread_mutex_lock(&wait_lock);
     running_thread->thread_id = (uint32_t)gettid();
+    running_thread->owner_pid = (uint32_t)getpid();
+    running_thread->teb_base = guest.entered ? (uintptr_t)guest.teb : 0;
     running_thread->started = true;
     pthread_cond_broadcast(&wait_changed);
     /* CREATE_SUSPENDED must prevent guest instructions, TLS callbacks and
@@ -730,6 +1037,7 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     if (thread != NULL) {
         thread->start = start;
         thread->parameter = parameter;
+        thread->access = THREAD_ALL_ACCESS;
         thread->suspend_count = (flags & 4u) ? 1u : 0u;
         ++thread->refs;
         error = pthread_create(&thread->host, &attr, thread_main, thread);
@@ -762,7 +1070,9 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
         status = NT_STATUS_INVALID_HANDLE;
     else if (thread->kind != THREAD)
         status = NT_STATUS_OBJECT_TYPE_MISMATCH;
-    else {
+    else if (!(thread->access & THREAD_SUSPEND_RESUME)) {
+        status = NT_STATUS_ACCESS_DENIED;
+    } else {
         struct waitable *state = wait_state(thread);
         if (previous != NULL)
             *previous = state->suspend_count;

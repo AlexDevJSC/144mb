@@ -17,6 +17,7 @@ char *NT_MS_ABI nt_GetCommandLineA(void);
 uint16_t *NT_MS_ABI nt_GetCommandLineW(void);
 uint32_t NT_MS_ABI nt_GetModuleFileNameW(uintptr_t module, uint16_t *buffer, uint32_t size);
 void nt_runtime_set_guest_image_extent(size_t size);
+void nt_runtime_set_guest_image_entrypoint(uint32_t rva);
 void nt_runtime_set_guest_tls(const struct nt_guest_tls *initial, const unsigned char *callbacks, size_t count);
 const struct nt_guest_tls *nt_runtime_guest_tls(void);
 void nt_runtime_notify_tls(uint32_t reason);

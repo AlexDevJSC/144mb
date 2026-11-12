@@ -451,6 +451,28 @@ bool pe_image_load_library(const unsigned char *file, size_t length, pe_image_re
     return load_image(file, length, resolve, context, output, error, error_size, true);
 }
 
+/* A DLL with no entry point needs no DllMain invocation. The native
+ * loader must keep the mapped image alive throughout this call and
+ * guarantee a suitable guest thread context before invoking it. */
+bool pe_image_run_library_entry(const struct pe_image *image, uint32_t reason)
+{
+    if (image == NULL || image->base == NULL || (reason != 0 && reason != 1))
+        return false;
+    if (image->entry_rva == 0)
+        return true;
+    /* Executing a raw RVA outside the verified code section would turn
+     * malformed PE metadata into an arbitrary native jump. */
+    if (image->entry_rva < image->code_rva ||
+        image->entry_rva - image->code_rva >= image->code_size ||
+        image->entry_rva >= image->size)
+        return false;
+    typedef int (__attribute__((ms_abi)) *pe_dll_main)(void *, uint32_t, void *);
+    const uintptr_t address = (uintptr_t)(image->base + image->entry_rva);
+    pe_dll_main entry;
+    memcpy(&entry, &address, sizeof(entry));
+    return entry(image->base, reason, NULL) != 0;
+}
+
 /* Every byte must lie in readable image pages before scanning a NUL
  * terminator. A valid RVA alone does not make a PE section readable. */
 static bool export_string(const struct pe_image *image, uint32_t rva, size_t maximum,

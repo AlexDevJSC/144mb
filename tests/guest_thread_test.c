@@ -47,6 +47,24 @@ int main(void)
     uintptr_t parameters = 0;
     __builtin_memcpy(&parameters, thread.standalone.peb + 0x20, sizeof(parameters));
     assert(parameters == (uintptr_t)&thread.standalone.parameters && thread.standalone.parameters.flags == 1);
+    uintptr_t ldr = 0;
+    __builtin_memcpy(&ldr, thread.standalone.peb + 0x18, sizeof(ldr));
+    assert(ldr == (uintptr_t)&thread.standalone.loader);
+    assert(thread.standalone.loader.initialized == 1);
+    assert(thread.standalone.image_entry.dll_base == image);
+    assert(thread.standalone.loader.load_order.flink ==
+           (uintptr_t)&thread.standalone.image_entry.load_links);
+    assert(thread.standalone.image_entry.load_links.blink ==
+           (uintptr_t)&thread.standalone.loader.load_order);
+    static uint16_t path[] = {'C', ':', '\\', 'p', 'r', 'o', 'g', '\\', 'f', '.', 'e', 'x', 'e', 0};
+    struct nt_guest_unicode_string image_path = {
+        sizeof(path) - sizeof(path[0]), sizeof(path), path
+    };
+    nt_guest_process_bind_image(&thread.standalone, &image_path, 0x5000);
+    assert(thread.standalone.image_entry.image_size == 0x5000);
+    assert(thread.standalone.image_entry.full_name.buffer == path);
+    assert(thread.standalone.image_entry.base_name.buffer == path + 8);
+    assert(thread.standalone.image_entry.base_name.length == 5 * sizeof(uint16_t));
     assert(!nt_guest_thread_enter(&thread, image));
     struct nt_guest_thread nested = {0};
     assert(nt_guest_thread_enter(&nested, image));

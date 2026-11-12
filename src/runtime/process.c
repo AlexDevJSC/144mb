@@ -20,6 +20,7 @@ static struct {
     const char *path, *line;
     uint16_t *wide_path, *wide_line;
     size_t image_size, tls_callback_count;
+    uint32_t entry_rva;
     struct nt_guest_tls tls;
     const unsigned char *tls_callbacks;
     char **argv;
@@ -66,6 +67,7 @@ bool nt_runtime_set_guest_image(uintptr_t module, const char *path, const char *
     guest.wide_path = wide_path;
     guest.wide_line = wide_line;
     guest.image_size = 0;
+    guest.entry_rva = 0;
     guest.tls = (struct nt_guest_tls){0};
     guest.tls_callbacks = NULL;
     guest.tls_callback_count = 0;
@@ -106,6 +108,9 @@ bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t mod
         parameters->image_path = process_string(guest.wide_path);
         parameters->command_line = process_string(guest.wide_line);
         parameters->environment = guest.initial_environment;
+        nt_guest_process_bind_image(&guest.process, &parameters->image_path, guest.image_size);
+        if (guest.image_size > 0 && guest.entry_rva < guest.image_size)
+            guest.process.image_entry.entry_point = module + guest.entry_rva;
         guest.process_ready = true;
     }
     pthread_mutex_unlock(&guest_process_lock);
@@ -113,6 +118,7 @@ bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t mod
 }
 
 void nt_runtime_set_guest_image_extent(size_t size) { guest.image_size = size; }
+void nt_runtime_set_guest_image_entrypoint(uint32_t rva) { guest.entry_rva = rva; }
 
 void nt_runtime_set_guest_tls(const struct nt_guest_tls *initial, const unsigned char *callbacks, size_t count)
 {
