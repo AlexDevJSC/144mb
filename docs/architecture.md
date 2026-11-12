@@ -31,6 +31,40 @@ el contador NT y un conjunto inicial de contratos Win32 y CRT.
 | Escritorio | Usuario. Lanzador KDE, asociación MIME y estado separado por aplicación. El instalador PE usa la misma política y el mismo entorno que el lanzador. | RPM de diagnóstico preparado. |
 | Pruebas | Usuario y CI en Linux. Contratos documentados, PE sintéticos y mediciones. | Linux y PE controlado comprobados. |
 
+## Memoria virtual privada del invitado (fase incremental)
+
+Además de la protección existente de la imagen PE, el runtime implementa
+`VirtualAlloc`, `VirtualFree`, `VirtualProtect` y `VirtualQuery` para
+reservas anónimas **propias del proceso invitado**. El nuevo módulo
+`src/runtime/virtual_memory.c` mantiene una tabla de intervalos y el
+estado/protección por página bajo un mutex; usa `mmap`, `mprotect`,
+`madvise(MADV_DONTNEED)` y `munmap` del Linux anfitrión.
+
+El contrato inicial admite reserva con granularidad de 64 KiB y páginas
+de 4 KiB, confirmación sobre reservas existentes, `MEM_COMMIT` con
+dirección nula, desconfirmación, liberación de la reserva completa y
+consultas `MEMORY_BASIC_INFORMATION` x64. `VirtualProtect` distingue
+estas reservas del mapeo del ejecutable, para no alterar la ruta de carga PE.
+Solo admite protecciones `NOACCESS`, `READONLY`, `READWRITE`,
+`EXECUTE` y `EXECUTE_READ`. **No admite páginas W+X**. No modifica
+arbitrariamente los mapas ELF ni direcciones ajenas al gestor de regiones.
+
+**Pendiente para compatibilidad general:** `VirtualQuery` sobre regiones
+no creadas por el gestor (DLL, imágenes PE, pilas y memoria Linux),
+`MEM_RESET`, `MEM_LARGE_PAGES`, `PAGE_GUARD`, memoria compartida,
+protecciones de copia en escritura, búsqueda de direcciones, seguimiento de
+modificaciones, regiones reservadas por otros mecanismos y equivalencias
+completas de `NtAllocateVirtualMemory`/`NtFreeVirtualMemory`.
+Los parámetros actuales requieren alineación explícita para reservas a
+dirección fija y confirmaciones. El backend exige páginas host de 4 KiB;
+otras configuraciones fallan de forma explícita. La nueva API no convierte
+este prototipo en una implementación universal del gestor de memoria NT.
+
+`make check-pe-memory` compila un PE x64 generado localmente y verifica
+reserva, consulta de regiones, confirmación, cambio de protección,
+desconfirmación con puesta a cero, rechazo de páginas W+X y liberación.
+La CI lo ejecuta en Ubuntu, bajo UBSan y en el entorno del instalador Fedora.
+
 ## Ruta de laboratorio
 
 GCC compila una función sin dependencias con ABI Microsoft x64. GNU
