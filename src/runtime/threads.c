@@ -1377,15 +1377,19 @@ int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t handle, uint32_t *code)
     }
     pthread_mutex_lock(&wait_lock);
     const struct waitable *thread = find_waitable(handle);
-    const bool valid = thread != NULL && thread->kind == THREAD;
-    if (valid) {
+    uint32_t error = 0;
+    if (thread == NULL || thread->kind != THREAD) {
+        error = NT_ERROR_INVALID_HANDLE;
+    } else if (!(thread->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION))) {
+        error = NT_ERROR_ACCESS_DENIED;
+    } else {
         const struct waitable *state = wait_state((struct waitable *)thread);
         *code = state->signaled ? state->exit_code : STILL_ACTIVE;
     }
     pthread_mutex_unlock(&wait_lock);
-    if (!valid)
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-    return valid;
+    if (error != 0)
+        nt_SetLastError(error);
+    return error == 0;
 }
 
 int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t handle, const uint16_t *description)
