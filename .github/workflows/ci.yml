@@ -34,7 +34,7 @@ jobs:
       - name: Exercise window messages and clipboard offscreen
         run: SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-desktop
       - name: Map and execute trusted external desktop PE on Linux
-        run: make check-pe-external check-pe-native check-pe-kernel-user check-pe-memory check-pe-teb-tls
+        run: make check-pe-external check-pe-native check-pe-kernel-user check-pe-memory check-pe-native-core check-pe-teb-tls
       - name: Execute Win32 display topology fixture on Linux
         run: make check-pe-displayconfig
       - name: Execute native Win32 console PE fixture on Linux
@@ -60,7 +60,7 @@ jobs:
           make -j2 BUILD_DIR=build-ubsan \
           CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
             check check-pe check-pe-import check-pe-image check-desktop check-pe-native check-pe-displayconfig \
-            check-pe-console check-pe-graphics check-pe-wic check-pe-platform check-pe-seh check-pe-kernel-user check-pe-memory check-pe-teb-tls
+            check-pe-console check-pe-graphics check-pe-wic check-pe-platform check-pe-seh check-pe-kernel-user check-pe-memory check-pe-native-core check-pe-teb-tls
 
   fedora-rpm:
     runs-on: ubuntu-24.04
@@ -101,4 +101,4 @@ jobs:
           dxc="$install_home/share/nt-native-linux/current/lib/nt-native-linux/dxc/lib"
           runuser -u nt-installer -- env "VK_DRIVER_FILES=$icd" "LD_LIBRARY_PATH=$dxc" \
             make -j2 -C "$install_home/share/nt-native-linux/source" "BUILD_DIR=build-fedora-$INSTALL_REVISION" \
-            check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-kernel-user check-pe-memory check-pe-teb-tls
+            check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-kernel-user check-pe-memory check-pe-native-core check-pe-teb-tls
