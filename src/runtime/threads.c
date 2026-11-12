@@ -38,7 +38,7 @@ struct waitable {
     uint32_t suspend_count;
     uint32_t access;
     pthread_t host;
-    uint32_t thread_id, exit_code;
+    uint32_t thread_id, exit_code, owner_pid;
     nt_thread_start start;
     void *parameter;
     /* Canonical named event/semaphore entries own a name. Aliases share
@@ -841,6 +841,7 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         ++process->refs;
         ++thread->refs;
         thread->thread_id = (uint32_t)pid;
+        thread->owner_pid = (uint32_t)pid;
         thread->access = THREAD_ALL_ACCESS;
         *watch = (struct child_watch){pid, status_fd, process, thread};
         pthread_t worker;
@@ -900,6 +901,8 @@ nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
         status = NT_STATUS_INVALID_HANDLE;
     else if (object->kind != THREAD)
         status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (wait_state(object)->owner_pid != (uint32_t)getpid())
+        status = NT_STATUS_NOT_SUPPORTED;
     else if (!(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
         status = NT_STATUS_ACCESS_DENIED;
     else {
@@ -937,7 +940,8 @@ uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         struct waitable *item = &waitables[i];
         if (item->kind == THREAD && item->shared == NULL &&
-            (item->refs != 0 || item->links != 0) && item->thread_id == id) {
+            (item->refs != 0 || item->links != 0) &&
+            item->owner_pid == (uint32_t)getpid() && item->thread_id == id) {
             original = item;
             break;
         }
@@ -992,6 +996,7 @@ static void *thread_main(void *context)
     const bool ready = image == 0 || nt_runtime_enter_guest_thread(&guest, image, nt_runtime_guest_tls());
     pthread_mutex_lock(&wait_lock);
     running_thread->thread_id = (uint32_t)gettid();
+    running_thread->owner_pid = (uint32_t)getpid();
     running_thread->teb_base = guest.entered ? (uintptr_t)guest.teb : 0;
     running_thread->started = true;
     pthread_cond_broadcast(&wait_changed);
