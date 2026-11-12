@@ -1,0 +1,13 @@
+LIBRARY ntdll.dll
+EXPORTS
+    NtQueryInformationProcess
+    NtQueryInformationThread
+    NtAllocateVirtualMemory
+    NtFreeVirtualMemory
+    NtProtectVirtualMemory
+    NtQueryVirtualMemory
+    RtlGetCurrentPeb
+    NtCreateEvent
+    NtOpenEvent
+    NtQueryEvent
+    NtResumeThread

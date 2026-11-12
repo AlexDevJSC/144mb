@@ -54,7 +54,10 @@ no creadas por el gestor (DLL, imágenes PE, pilas y memoria Linux),
 `MEM_RESET`, `MEM_LARGE_PAGES`, `PAGE_GUARD`, memoria compartida,
 protecciones de copia en escritura, búsqueda de direcciones, seguimiento de
 modificaciones, regiones reservadas por otros mecanismos y equivalencias
-completas de `NtAllocateVirtualMemory`/`NtFreeVirtualMemory`.
+completas de clases NT aún no implementadas de memoria. Los adaptadores
+`NtAllocateVirtualMemory`, `NtFreeVirtualMemory`,
+`NtProtectVirtualMemory` y `NtQueryVirtualMemory` ya cubren un
+subconjunto del proceso actual y solo regiones administradas por el runtime.
 Los parámetros actuales requieren alineación explícita para reservas a
 dirección fija y confirmaciones. El backend exige páginas host de 4 KiB;
 otras configuraciones fallan de forma explícita. La nueva API no convierte

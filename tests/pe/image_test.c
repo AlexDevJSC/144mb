@@ -29,6 +29,21 @@ static uintptr_t resolver(const char *module, const char *name,
     return result;
 }
 
+static uintptr_t forward_resolver(const char *module, const char *name,
+                                  uint16_t ordinal, void *context)
+{
+    (void)context;
+    nt_guest_proc function = (nt_guest_proc)answer;
+    uintptr_t address = 0;
+    memcpy(&address, &function, sizeof(address));
+    if (strcmp(module, "KERNEL32.dll") == 0 && name &&
+        strcmp(name, "Sleep") == 0 && ordinal == 0)
+        return address;
+    if (strcmp(module, "NTDLL.dll") == 0 && name == NULL && ordinal == 51)
+        return address;
+    return 0;
+}
+
 static void section(unsigned char *sh, const char *name,
                     uint32_t rva, uint32_t raw, uint32_t flags)
 {
@@ -295,8 +310,34 @@ int main(void)
     assert(pe_image_lookup_export(&image, "Return42", 0, &by_name));
     assert(by_name.address == 0 && by_name.forwarder != NULL &&
            strcmp(by_name.forwarder, "KERNEL32.Sleep") == 0);
+    uintptr_t forwarded = 0;
+    assert(pe_image_resolve_export(&image, "Return42", 0, forward_resolver, NULL, &forwarded));
+    nt_guest_proc expected_function = (nt_guest_proc)answer;
+    uintptr_t expected_address = 0;
+    memcpy(&expected_address, &expected_function, sizeof(expected_address));
+    assert(forwarded == expected_address);
+    assert(!pe_image_resolve_export(&image, "Return42", 0, NULL, NULL, &forwarded));
+    assert(forwarded == 0);
     pe_image_unload(&image);
-    puts("PASS export forwarders are strings, never executable addresses");
+    puts("PASS forwarded exports resolve via the shared host import resolver");
+
+    make_export_dll(bytes);
+    w32(bytes + 0x400 + 0x130, 0x2180);
+    memcpy(bytes + 0x400 + 0x180, "NTDLL.#51", 10);
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(pe_image_resolve_export(&image, NULL, 5, forward_resolver, NULL, &forwarded));
+    assert(forwarded == expected_address);
+    pe_image_unload(&image);
+
+    make_export_dll(bytes);
+    w32(bytes + 0x400 + 0x130, 0x2180);
+    memcpy(bytes + 0x400 + 0x180, "NTDLL.#0", 9);
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(!pe_image_resolve_export(&image, "Return42", 0, forward_resolver, NULL, &forwarded));
+    pe_image_unload(&image);
+    puts("PASS forwarded ordinals and malformed forwarders are handled safely");
 
     make_export_dll(bytes);
     w32(bytes + 0x400 + 0x100 + 28, 0x3ffe);

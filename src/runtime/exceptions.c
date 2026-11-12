@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "compat.h"
 #include "winbase.h"
+#include "exception_callbacks.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -585,6 +586,15 @@ _Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint3
     if (state.depth > SOFTWARE_MAX_NESTING)
         software_failure(STATUS_BAD_STACK);
     active_software = &state;
+    struct nt_exception_pointers pointers = {&record, origin};
+    /* Windows delivers software exceptions to vectored exception
+     * handlers before searching frame-specific SEH handlers. */
+    if (nt_runtime_dispatch_vectored_exception(&pointers) == -1) {
+        if (record.flags & SOFTWARE_NONCONTINUABLE)
+            software_failure(STATUS_NONCONTINUABLE);
+        if (ready)
+            resume_software(origin, state.previous);
+    }
     struct nt_context64 next = *origin;
     if (ready) {
         for (size_t i = 0; i < SOFTWARE_MAX_FRAMES; ++i) {
@@ -598,7 +608,6 @@ _Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint3
             }
         }
     }
-    struct nt_exception_pointers pointers = {&record, origin};
     if (nt_UnhandledExceptionFilter(&pointers) == -1 && ready) {
         if (record.flags & SOFTWARE_NONCONTINUABLE)
             software_failure(STATUS_NONCONTINUABLE);

@@ -122,6 +122,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | [tests](tests) | Contratos, PE controlados y medición en Linux |
 | [Arquitectura](docs/architecture.md) | Límites entre el kernel, el runtime y el escritorio |
 | [Capa Kernel/User](docs/kernel-user.md) | ABI, objetos compartidos y módulos de Windows |
+| [Núcleo NT: estado y criterios](docs/nt-core-readiness.md) | Siete componentes críticos, pruebas y límites pendientes |
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |
 | [Validación](docs/validation.md) | Pruebas realizadas y plan comparativo |

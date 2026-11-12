@@ -31,7 +31,10 @@ flowchart TD
   ocupan 64 bits y `OBJECT_ATTRIBUTES` ocupa 48 bytes. Las salidas deben ser
   escribibles. Las funciones `Nt*` devuelven `NTSTATUS` y mantienen
   `LastErrorValue`. Los adaptadores Win32 traducen sus propios errores.
-- Los eventos son anónimos y pertenecen al proceso. Se aplican los derechos
+- Los eventos son anónimos o tienen nombres locales y pertenecen al proceso.
+  Los nombres aceptan el subconjunto ASCII de `Local\\` o
+  `\\BaseNamedObjects\\`, con coincidencia insensible a mayúsculas cuando
+  se pide `OBJ_CASE_INSENSITIVE`. Se aplican los derechos
   de espera y modificación del handle. `NtDuplicateObject` y `DuplicateHandle`
   crean handles distintos para el mismo estado de evento, hilo o proceso;
   cerrar el original no invalida el duplicado. Se admiten derechos reducidos
@@ -48,7 +51,9 @@ flowchart TD
   de la misma tabla, incluidos eventos, hilos y procesos hijos. La espera
   múltiple solo consume autoeventos si se satisface el conjunto solicitado.
   El cierre concurrente despierta al hilo y devuelve handle inválido.
-  Los eventos con nombre, los APC y `/dev/ntsync` quedan fuera de este perfil.
+  Los objetos con nombre compartidos entre procesos, las rutas de sesión
+  `Global\\`, los nombres Unicode generales, los APC y `/dev/ntsync`
+  quedan fuera de este perfil.
 - Los API sets se seleccionan por nombre completo y versión registrada.
   Se acepta la ruta virtual `C:\Windows\System32\` para los módulos
   incorporados. El mismo registro sirve para el auditor, la IAT y las
@@ -89,6 +94,31 @@ Ejecutar `make check-pe-teb-tls` desde Linux comprueba la implementación
 Win32 desde un PE32+ AMD64 compilado con MinGW. La CI lo incluye en Ubuntu,
 UBSan y Fedora.
 
+## Consultas nativas del proceso, memoria y excepciones
+
+El perfil nativo amplía NTDLL con
+`NtQueryInformationProcess` (clases Basic y WOW64), `NtQueryInformationThread`
+(Basic) y `RtlGetCurrentPeb` para el proceso/hilo actual. Las estructuras
+devueltas mantienen el ABI AMD64 de 48 bytes. No se prometen consultas de
+procesos arbitrarios ni clases no implementadas.
+
+`NtAllocateVirtualMemory`, `NtFreeVirtualMemory`,
+`NtProtectVirtualMemory` y `NtQueryVirtualMemory` traducen al gestor
+de memoria del proceso invitado. Conservan `LastError` porque son API
+NTSTATUS. No se permiten operaciones sobre procesos remotos ni vistas de
+sección no gestionadas.
+
+`CREATE_SUSPENDED` bloquea un hilo antes de ejecutar código invitado.
+`ResumeThread` y `NtResumeThread` liberan esa espera y devuelven el
+contador anterior. Esto no equivale a suspender asíncronamente un hilo
+que ya está ejecutándose.
+
+Los manejadores VEH registrados con `AddVectoredExceptionHandler` y
+`RemoveVectoredExceptionHandler` se invocan en orden para las excepciones
+software canalizadas por `RaiseException`, antes del recorrido SEH.
+No traducen por sí mismos señales síncronas Linux en excepciones Windows.
+Véase [estado de los siete componentes](nt-core-readiness.md).
+
 ## Verificación
 
 `make -j2 check check-pe check-pe-import check-pe-kernel-user` ejecuta dos
@@ -98,8 +128,9 @@ relojes, espera múltiple, derechos, hilos y escrituras directas al TEB.
 El primer PE también duplica eventos y hilos con handles independientes,
 comprueba límites de permisos y cierre del original, y duplica un descriptor de
 archivo para verificar que puede seguir usándose después del cierre del
-original. No se prueban aquí objetos con nombre ni handles compartidos
-entre procesos, que siguen fuera del alcance.
+original. La nueva prueba `check-pe-named-events` cubre nombres de evento
+locales, apertura por nombre, permisos, espera, consulta y cierre de la última
+referencia. Los handles compartidos entre procesos siguen fuera de alcance.
 
 El segundo combina USER32, win32u y un API set de escritorio, y prueba
 también el cargador dinámico y los errores de módulo o símbolo ausente.
