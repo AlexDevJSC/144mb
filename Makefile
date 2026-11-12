@@ -378,17 +378,28 @@ $(BUILD_DIR)/guest_companion.dll: tests/pe/guest_companion_dll.c | $(BUILD_DIR)
 	    -Wl,--entry,DllMain,--subsystem,windows,--out-implib,$(BUILD_DIR)/fixture-guest_companion.a \
 	    -o "$@" "$<" -lkernel32
 
+$(BUILD_DIR)/guest_tls.dll: tests/pe/guest_tls_dll.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) -shared -nostdlib \
+	    -Wl,--entry,DllMain,--subsystem,windows,--out-implib,$(BUILD_DIR)/fixture-guest_tls.a \
+	    -o "$@" "$<" -lkernel32
+
+$(BUILD_DIR)/guest-tls-fixture.exe: tests/pe/guest_tls_fixture.c $(BUILD_DIR)/guest_tls.dll | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" \
+	    $(BUILD_DIR)/fixture-guest_tls.a -lkernel32
+
 $(BUILD_DIR)/guest-loader-dynamic.exe: tests/pe/guest_loader_dynamic_fixture.c $(BUILD_DIR)/guest_companion.dll | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
 
 $(BUILD_DIR)/guest-loader-static.exe: tests/pe/guest_loader_static_fixture.c $(BUILD_DIR)/guest_companion.dll | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-guest_companion.a -lkernel32
 
-check-pe-dll-graph: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-dynamic.exe $(BUILD_DIR)/guest-loader-static.exe
+check-pe-dll-graph: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-dynamic.exe $(BUILD_DIR)/guest-loader-static.exe $(BUILD_DIR)/guest-tls-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-dynamic.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-loader-static.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/guest-tls-fixture.exe
 
 $(BUILD_DIR)/core-objects-fixture.exe: tests/pe/core_objects_fixture.c $(BUILD_DIR)/fixture-nt_core.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-nt_core.a -lkernel32

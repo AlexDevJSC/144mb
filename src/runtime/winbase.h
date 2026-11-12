@@ -36,11 +36,15 @@ struct nt_external_module_backend {
     uintptr_t (*at)(void *, uintptr_t);
     const char *(*filename)(void *, uintptr_t);
     void (*thread_event)(void *, uint32_t);
+    /* Prepare immutable startup DLL static TLS for a newly entered guest
+     * thread, before invoking any TLS callbacks or DLL_THREAD_ATTACH. */
+    bool (*prepare_thread)(void *, struct nt_guest_thread *);
 };
 void nt_runtime_set_external_module_backend(const struct nt_external_module_backend *backend);
 uintptr_t nt_runtime_external_module_at(uintptr_t address);
 const char *nt_runtime_external_module_filename(uintptr_t base);
 void nt_runtime_external_module_thread_event(uint32_t reason);
+bool nt_runtime_external_module_prepare_thread(struct nt_guest_thread *thread);
 
 /* Register each successfully attached PE DLL in all three PEB_LDR_DATA
  * lists, under the process lock, for native Windows module enumeration. */

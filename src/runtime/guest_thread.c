@@ -146,6 +146,25 @@ bool nt_guest_thread_enter(struct nt_guest_thread *state, uintptr_t image_base)
     return nt_guest_thread_enter_with_tls(state, image_base, NULL);
 }
 
+bool nt_guest_thread_set_static_tls(struct nt_guest_thread *state, uint32_t index,
+                                     const unsigned char *data, size_t bytes, size_t zero_fill)
+{
+    if (state == NULL || !state->entered || current_guest_thread != state ||
+        index == 0 || index >= 64 || state->tls_vector[index] != 0 ||
+        bytes > NT_GUEST_TLS_MAX || zero_fill > NT_GUEST_TLS_MAX - bytes ||
+        (bytes != 0 && data == NULL))
+        return false;
+    const size_t size = bytes + zero_fill;
+    unsigned char *block = calloc(1, size ? size : 1);
+    if (block == NULL)
+        return false;
+    if (bytes != 0)
+        memcpy(block, data, bytes);
+    state->static_tls_blocks[index] = block;
+    state->tls_vector[index] = (uintptr_t)block;
+    return true;
+}
+
 bool nt_guest_thread_leave(struct nt_guest_thread *state)
 {
     if (state == NULL || !state->entered || current_teb != state->teb)
@@ -156,6 +175,11 @@ bool nt_guest_thread_leave(struct nt_guest_thread *state)
     current_guest_thread = state->saved_thread;
     free(state->tls_expansion);
     state->tls_expansion = NULL;
+    for (size_t i = 1; i < 64; ++i) {
+        free(state->static_tls_blocks[i]);
+        state->static_tls_blocks[i] = NULL;
+        state->tls_vector[i] = 0;
+    }
     state->entered = false;
     return true;
 }

@@ -211,6 +211,8 @@ static bool prepare_tls(unsigned char *base, size_t size, struct directory tls,
     }
     out->zero_fill = fill;
     const uint32_t index_rva = (uint32_t)(index_va - (uintptr_t)base);
+    out->index_rva = index_rva;
+    out->present = true;
     const uint32_t zero = 0;
     memcpy(base + index_rva, &zero, sizeof(zero));
     if (callbacks_va == 0)
@@ -298,11 +300,6 @@ static bool load_image(const unsigned char *file, size_t length, pe_image_resolv
      * Keep their mapped contents and mutable delay IAT intact. Calls made
      * later through LoadLibrary/GetProcAddress are resolved at first use.
      * This does not imply support for arbitrary external guest DLLs. */
-    /* A DLL needs its own loader-assigned TLS index. Reusing the EXE's
-     * index zero would corrupt TLS and is deliberately prohibited. */
-    if (as_library && directory[PE_TLS_DIR].size)
-        return fail(error, error_size, "DLL static TLS needs a module loader");
-
     struct section sections[PE_IMAGE_MAX_SECTIONS] = {{0}};
     uint64_t previous_end = (uint64_t)(header_size + 4095u) & ~UINT64_C(4095);
     uint64_t previous_raw_end = header_size;
@@ -449,6 +446,31 @@ bool pe_image_load_library(const unsigned char *file, size_t length, pe_image_re
                            void *context, struct pe_image *output, char *error, size_t error_size)
 {
     return load_image(file, length, resolve, context, output, error, error_size, true);
+}
+
+bool pe_image_run_tls_callbacks(const struct pe_image *image, uint32_t reason)
+{
+    if (image == NULL || image->base == NULL || reason > 3)
+        return false;
+    if (!image->tls.present || image->tls.callback_count == 0)
+        return true;
+    if (!pe_image_readable(image->tls.callbacks_rva,
+                           (size_t)image->tls.callback_count * sizeof(uintptr_t), image))
+        return false;
+    typedef void (__attribute__((ms_abi)) *pe_tls_callback)(void *, uint32_t, void *);
+    for (uint32_t i = 0; i < image->tls.callback_count; ++i) {
+        uintptr_t address = 0;
+        memcpy(&address, image->base + image->tls.callbacks_rva +
+                         (size_t)i * sizeof(address), sizeof(address));
+        if (address < (uintptr_t)image->base ||
+            address - (uintptr_t)image->base > UINT32_MAX ||
+            !pe_image_readable((uint32_t)(address - (uintptr_t)image->base), 1, image))
+            return false;
+        pe_tls_callback callback;
+        memcpy(&callback, &address, sizeof(callback));
+        callback(image->base, reason, NULL);
+    }
+    return true;
 }
 
 /* A DLL with no entry point needs no DllMain invocation. The native

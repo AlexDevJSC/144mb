@@ -84,8 +84,10 @@ El código PE generado para la prueba lee directamente `GS:0x1480`
 y `GS:0x1780`, crea hilos adicionales, verifica el aislamiento y
 comprueba la reutilización y el agotamiento de los 1088 índices.
 
-**No es un TEB completo:** faltan el gestor de TLS estático y
-dinámico de DLL adicionales, la política completa del cargador Ldr,
+**No es un TEB completo:** el cargador admite TLS estático de DLL
+importadas antes de crear el primer hilo, pero falta inicializar TLS en hilos
+existentes ante LoadLibrary dinámico y gestionar la descarga/reutilización
+de índices. También sigue pendiente la política completa del cargador Ldr,
 campos adicionales de TEB/PEB y servicios NT asociados. Los 1088 slots
 Win32 cubren `TlsAlloc` y sus operaciones afines; no completan el ABI
 del sistema de hilos de Windows ni sus interacciones con el cargador.
@@ -196,8 +198,13 @@ que sus importadores y enlaza `LoadLibrary`, `GetProcAddress`,
 nombres ASCII de DLL sin importar mayúsculas/minúsculas, rechaza nombres
 ambiguos y no sigue enlaces simbólicos. `DllMain` se invoca con
 `DLL_PROCESS_ATTACH/DETACH` y `DLL_THREAD_ATTACH/DETACH` cuando
-corresponde, con el TEB invitado activo. Se exige una DLL sin directorio
-TLS: su soporte estático/dinámico completo sigue pendiente. `LoadLibraryEx`
+corresponde, con el TEB invitado activo. Las DLL con directorio TLS
+importadas antes de entrar al primer hilo obtienen un índice propio
+de 1 a 63 en `GS:0x58`; sus plantillas se copian por hilo y se ejecutan
+los callbacks TLS antes de DllMain. Se mantienen mapeadas hasta el fin
+del proceso para evitar referencias TLS colgantes. Una DLL nueva con TLS
+cargada después del arranque se rechaza expresamente: falta inicializar
+de forma segura todos los hilos existentes. `LoadLibraryEx`
 con flags de datos/recursos no ejecuta bibliotecas externas en este perfil.
 
 **PEB:** `PEB->Ldr` (offset 0x18) apunta a un prefijo válido

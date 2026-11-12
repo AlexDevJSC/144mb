@@ -66,6 +66,9 @@ struct nt_guest_thread {
     struct nt_guest_process standalone;
     _Alignas(NT_GUEST_TLS_ALIGNMENT) unsigned char tls_block[NT_GUEST_TLS_MAX];
     uintptr_t tls_vector[64];
+    /* EXE uses index 0. DLLs get indices 1..63 from the graph loader.
+     * Allocation ownership is per thread; index reuse is prohibited. */
+    void *static_tls_blocks[64];
     uintptr_t saved_gs;
     unsigned char *saved_teb;
     struct nt_guest_thread *saved_thread;
@@ -85,6 +88,10 @@ bool nt_guest_thread_enter_with_tls(struct nt_guest_thread *state, uintptr_t ima
                                     const struct nt_guest_tls *initial);
 bool nt_guest_thread_enter_in_process(struct nt_guest_thread *state, uintptr_t image_base,
         const struct nt_guest_tls *initial, const struct nt_guest_process *process);
+/* Only call for a currently entered guest thread, after the DLL has been
+ * mapped and assigned an immutable index by the trusted loader. */
+bool nt_guest_thread_set_static_tls(struct nt_guest_thread *state, uint32_t index,
+                                     const unsigned char *data, size_t bytes, size_t zero_fill);
 bool nt_guest_thread_leave(struct nt_guest_thread *state);
 unsigned char *nt_guest_thread_teb(void);
 struct nt_guest_thread *nt_guest_thread_current(void);
