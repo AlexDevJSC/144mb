@@ -196,8 +196,15 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
     }
     fprintf(stderr, "Guest exited with code %u\n", code);
     if (status_fd >= 0) {
-        (void)write(status_fd, &code, sizeof(code));
+        ssize_t written;
+        do {
+            written = write(status_fd, &code, sizeof(code));
+        } while (written < 0 && errno == EINTR);
         close(status_fd);
+        if (written != sizeof(code)) {
+            fputs("Could not report guest exit code to the parent\n", stderr);
+            return 6;
+        }
     }
     return code <= 255 ? (int)code : 1;
 }
