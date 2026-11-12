@@ -31,9 +31,13 @@ static int test_console(void)
 static int test_shell(void)
 {
     const WCHAR path[] = L"C:\\test-file.txt";
-    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    SECURITY_ATTRIBUTES attributes_file = {sizeof(attributes_file), NULL, TRUE};
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, &attributes_file, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE)
         return 21;
+    DWORD handle_flags = 0;
+    if (!GetHandleInformation(file, &handle_flags) || handle_flags != HANDLE_FLAG_INHERIT)
+        return 25;
     CloseHandle(file);
     PIDLIST_ABSOLUTE root = NULL, item = NULL;
     SFGAOF attributes = 0;

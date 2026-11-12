@@ -100,6 +100,28 @@ El ejecutable informa `No Direct3D 12 Feature Level 12_0 adapter found.`
 El despacho C++ con `STATUS_UNWIND_CONSOLIDATE` entrega esa excepción al
 manejador del juego y se comprobó la aparición del error del propio juego.
 
+El modo Autoplay Lab del mismo ejecutable completa partidas sin gráficos.
+Se probaron diez semillas del nivel 1 con el agente heurístico incorporado.
+Seis partidas terminaron en derrota y cuatro alcanzaron el límite de tiempo.
+El juego guardó un JSON válido, devolvió código 0 y confirmó las diez
+comparaciones de determinismo. Se corrigió `CreateFileW` para aceptar el
+atributo estándar de herencia que usa el CRT al abrir ese archivo.
+
+Otra ejecución probó los 32 niveles con tres semillas por nivel y hasta
+ocho continuaciones. De 96 partidas, 28 despejaron el tablero, 47
+terminaron en derrota y 21 alcanzaron el límite de tiempo. El programa
+escribió los 96 resultados en JSON y devolvió código 0. Por ejemplo, en
+el nivel 1 la semilla 2 despejó el tablero en 7787 ticks.
+
+```sh
+SDL_VIDEODRIVER=offscreen pe-isolated-run /ruta/a/Squadron121_DX12.exe \
+  --bench squadron-headless.json --agent heuristic --channel structured \
+  --clock step --levels 1 --seeds 10 --seed-base 1 --max-ticks 36000 --determinism-all
+```
+
+Los datos del juego se disponen en el disco C: del invitado para esta
+prueba. El resultado se escribe en la raíz de ese disco persistente.
+
 Bubblewrap no pudo configurar el namespace de red estándar en Codex.
 La prueba usó un arnés local con namespaces de usuario, montaje, PID,
 IPC y UTS, y seccomp para bloquear sockets. Se usaron los datos del juego

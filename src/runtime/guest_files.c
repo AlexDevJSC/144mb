@@ -447,6 +447,7 @@ static uint32_t path_error(int error, bool parent)
 
 enum {
     FILE_READ = 1, FILE_WRITE = 2, FILE_TABLE_SIZE = 256,
+    HANDLE_FLAG_INHERIT = 1,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
     TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80
 };
@@ -458,6 +459,7 @@ struct guest_file {
     uintptr_t handle;
     int fd;
     unsigned int access, share;
+    uint32_t handle_flags;
     dev_t device;
     ino_t inode;
     bool text;
@@ -550,8 +552,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     if ((desired & ~(generic_read | generic_write)) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
-        template_file != 0 || (attributes != NULL &&
-                              (attributes->descriptor != NULL || attributes->inherit != 0))) {
+        template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return UINTPTR_MAX;
     }
@@ -609,6 +610,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
                 next_handle += 16;
                 slot->owner = WIN_HANDLE;
                 slot->handle = result;
+                slot->handle_flags = attributes && attributes->inherit ? HANDLE_FLAG_INHERIT : 0;
                 slot->path = saved_path;
                 saved_path = NULL;
             }
@@ -631,6 +633,22 @@ static int close_file(struct guest_file *file)
     file->path = NULL;
     file->owner = FREE_FILE;
     return result;
+}
+
+int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
+{
+    if (!flags) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    if (file)
+        *flags = file->handle_flags;
+    pthread_mutex_unlock(&file_lock);
+    if (!file)
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return file != NULL;
 }
 
 int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)

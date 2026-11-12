@@ -247,17 +247,16 @@ static int launch_child(int fd, const char *dos_path, const char *command,
     return error;
 }
 
-static int run_worker(const char *name)
+static int run_worker(const char *name, const char *command)
 {
     if (!worker_ready(false))
         return 125;
     if (strncmp(name, "/game/", 6) != 0 || strchr(name + 6, '/') != NULL ||
         strchr(name + 6, '\\') != NULL || strstr(name + 6, "..") != NULL)
         return 126;
-    char dos_path[PATH_MAX], command[PATH_MAX + 3];
+    char dos_path[PATH_MAX];
     if (snprintf(dos_path, sizeof(dos_path), "C:\\%s", name + 6) >= (int)sizeof(dos_path))
         return 4;
-    snprintf(command, sizeof(command), "\"%s\"", dos_path);
     int fd = open(name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
         perror("PE open");
@@ -287,7 +286,34 @@ static int inherit_mount_descriptor(int fd)
     return inherited;
 }
 
-static int run_isolated(const char *path, const char *const folders[NT_USER_FOLDER_COUNT])
+static bool append_guest_argument(char **end, const char *limit, const char *value)
+{
+    char *out = *end;
+    if (limit - out < 3)
+        return false;
+    *out++ = ' ';
+    *out++ = '"';
+    for (;;) {
+        size_t slashes = strspn(value, "\\");
+        value += slashes;
+        if (*value == '\0' || *value == '"')
+            slashes = 2 * slashes + (*value == '"');
+        if (slashes >= (size_t)(limit - out))
+            return false;
+        memset(out, '\\', slashes);
+        out += slashes;
+        if (*value == '\0')
+            break;
+        *out++ = *value++;
+    }
+    *out++ = '"';
+    *out = '\0';
+    *end = out;
+    return true;
+}
+
+static int run_isolated(const char *path, const char *const folders[NT_USER_FOLDER_COUNT],
+                        int argument_count, char **arguments)
 {
     char absolute[PATH_MAX], runner[PATH_MAX], socket_path[PATH_MAX];
     if (realpath(path, absolute) == NULL) {
@@ -301,7 +327,8 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
     }
     runner[got] = '\0';
     char *slash = strrchr(absolute, '/');
-    if (slash == NULL || slash[1] == '\0' || strstr(slash + 1, "..") != NULL) {
+    if (slash == NULL || slash[1] == '\0' || strpbrk(slash + 1, "\\\"") ||
+        strstr(slash + 1, "..") != NULL) {
         fputs("Invalid executable name\n", stderr);
         return 2;
     }
@@ -313,6 +340,17 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
     char inside[PATH_MAX];
     if (snprintf(inside, sizeof(inside), "/game/%s", slash + 1) >= (int)sizeof(inside))
         return 2;
+    char command[32767];
+    int length = snprintf(command, sizeof(command), "\"C:\\%s\"", slash + 1);
+    if (length < 0 || (size_t)length >= sizeof(command))
+        return 2;
+    char *end = command + length;
+    for (int i = 0; i < argument_count; ++i) {
+        if (!append_guest_argument(&end, command + sizeof(command) - 1, arguments[i])) {
+            fputs("Guest command line is too long\n", stderr);
+            return 2;
+        }
+    }
 
     const char *home = getenv("HOME");
     const int profile = inherit_mount_descriptor(nt_open_guest_profile(getenv("XDG_STATE_HOME"), home));
@@ -391,7 +429,7 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
         snprintf(folder_targets[i], sizeof(folder_targets[i]), "%s/%s", NT_GUEST_FOLDER_MOUNTS, nt_user_folders[i].name);
         ADD("--bind"); ADD(folder_sources[i]); ADD(folder_targets[i]);
     }
-    ADD("--"); ADD("/runner"); ADD("--worker"); ADD(inside);
+    ADD("--"); ADD("/runner"); ADD("--worker"); ADD(inside); ADD(command);
     args[n] = NULL;
 #undef ADD
     execv("/usr/bin/bwrap", args);
@@ -404,7 +442,7 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
 
 static void usage(const char *command)
 {
-    fprintf(stderr, "Usage: %s [--share Folder=/absolute/linux/path]... [--] path/to/program.exe\n"
+    fprintf(stderr, "Usage: %s [--share Folder=/absolute/linux/path]... [--] path/to/program.exe [argument...]\n"
             "Folders with read/write access: Desktop, Documents, Downloads, Music, Pictures, Videos.\n"
             "Requires bubblewrap + Wayland. For headless smoke tests use SDL_VIDEODRIVER=offscreen.\n",
             command);
@@ -412,8 +450,8 @@ static void usage(const char *command)
 
 int main(int argc, char **argv)
 {
-    if (argc == 3 && strcmp(argv[1], "--worker") == 0)
-        return run_worker(argv[2]);
+    if (argc > 1 && strcmp(argv[1], "--worker") == 0)
+        return argc == 4 ? run_worker(argv[2], argv[3]) : 125;
     if (argc == 5 && strcmp(argv[1], "--child") == 0)
         return worker_ready(true) ? execute_pe(3, argv[2], argv[3], argv[4], 4) : 125;
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
@@ -447,9 +485,9 @@ int main(int argc, char **argv)
     const bool end_options = arg < argc && strcmp(argv[arg], "--") == 0;
     if (end_options)
         ++arg;
-    if (arg != argc - 1 || (!end_options && argv[arg][0] == '-')) {
+    if (arg >= argc || (!end_options && argv[arg][0] == '-')) {
         usage(argv[0]);
         return 2;
     }
-    return run_isolated(argv[arg], folders);
+    return run_isolated(argv[arg], folders, argc - arg - 1, argv + arg + 1);
 }

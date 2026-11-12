@@ -4,6 +4,8 @@
 
 #include "compat.h"
 
+int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags);
+
 struct nt_createfile2_params {
     uint32_t size, attributes, flags, security_qos;
     const void *security;

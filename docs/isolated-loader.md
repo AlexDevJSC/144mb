@@ -226,6 +226,13 @@ escritorio anfitrión quedan fuera de este perfil.
 procesos hijos de `make check-pe-isolated` prueba argumentos Unicode,
 directorio de trabajo y código de salida superior a 255.
 
+El lanzador pasa los argumentos que siguen al EXE a la línea de comandos
+Win64. Un PE de prueba verifica argumentos vacíos, Unicode, espacios,
+comillas y barras invertidas. `CreateFileW` conserva `HANDLE_FLAG_INHERIT`
+en el manejador invitado cuando recibe un descriptor de seguridad nulo.
+`GetHandleInformation` expone ese bit. Los descriptores Linux siguen
+cerrándose al ejecutar otro proceso.
+
 ### Consola
 
 `AttachConsole` admite el terminal Linux heredado del padre. `AllocConsole`

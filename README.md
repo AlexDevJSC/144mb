@@ -94,9 +94,11 @@ build/pe-import-audit --unresolved /ruta/a/mines.exe
 
 Squadron121 DX12 tiene 324 de 324 importaciones directas con un equivalente
 registrado cuando están instalados los backends requeridos. El ejecutable
-llega a la selección de adaptador. La prueba en Codex se detuvo porque el
-juego requiere Direct3D 12 Feature Level 12_0 y descarta el único adaptador
-de ese entorno, Mesa lavapipe. [Cobertura y prueba de arranque](docs/squadron-compatibility.md).
+original completó la prueba Autoplay Lab en 32 niveles sin gráficos, con
+28 partidas que despejaron el tablero. El modo gráfico en Codex se detuvo
+en la selección de adaptador. El juego requiere Direct3D 12 Feature Level
+12_0 y descarta el único adaptador disponible, Mesa lavapipe.
+[Cobertura y prueba de arranque](docs/squadron-compatibility.md).
 
 El auditor lee una copia del archivo de hasta 128 MiB. Informa sobre
 las importaciones directas y devuelve 0 si todas tienen un equivalente,

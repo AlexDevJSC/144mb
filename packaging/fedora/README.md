@@ -26,6 +26,8 @@ al terminar la instalación.
 "$HOME/.local/bin/pe-isolated-run" /ruta/al/programa.exe
 ```
 
+Puedes añadir los argumentos del programa después de la ruta del EXE.
+
 Para dar al programa acceso de lectura y escritura a tus Documentos de
 Linux, usa la ruta que configuraste en el escritorio.
 

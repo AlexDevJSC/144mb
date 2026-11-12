@@ -347,11 +347,15 @@ $(BUILD_DIR)/child-parent-fixture.exe: tests/pe/child_process_fixture.c | $(BUIL
 $(BUILD_DIR)/child-fixture.exe: tests/pe/child_process_fixture.c | $(BUILD_DIR)
 	$(MINGW_CC) -DNT_CHILD_FIXTURE $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lkernel32
 
+$(BUILD_DIR)/command-fixture.exe: tests/pe/command_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lshell32 -lkernel32
+
 check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixture.exe \
-    $(BUILD_DIR)/folder-fixture.exe $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe
+    $(BUILD_DIR)/folder-fixture.exe $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe \
+    $(BUILD_DIR)/command-fixture.exe
 	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe \
 	    $(BUILD_DIR)/profile-fixture.exe $(BUILD_DIR)/folder-fixture.exe \
-	    $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe
+	    $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe $(BUILD_DIR)/command-fixture.exe
 
 $(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/tools/guest_profile.h src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h \
