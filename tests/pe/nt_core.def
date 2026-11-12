@@ -10,3 +10,4 @@ EXPORTS
     NtCreateEvent
     NtOpenEvent
     NtQueryEvent
+    NtResumeThread
