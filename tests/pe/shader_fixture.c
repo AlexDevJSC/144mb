@@ -100,7 +100,7 @@ static int compile_modern(void)
      * Only switches belong in pArguments; a positional source file is not
      * accepted consistently by the native compiler on Fedora. */
     const WCHAR *arguments[] = {L"-E", L"main", L"-T", L"ps_6_0",
-                                L"-Fo", L"result.dxil"};
+                                L"-Fo", L"r\x00e9sultat.dxil"};
     const struct dxc_buffer shader = {source, sizeof(source) - 1, CP_UTF8};
     if (FAILED(compiler_methods->compile(compiler, &shader, arguments, 6, include, &iid_result, (void **)&result)) ||
         !result)
@@ -134,7 +134,7 @@ static int compile_modern(void)
     BOOL known = FALSE;
     UINT encoding = 0;
     if (!dx_container(blob_methods->data(blob), blob_methods->size(blob)) || !filename ||
-        name_methods->length(name) != 11 || filename[1] != 'e' ||
+        name_methods->length(name) != 13 || filename[1] != 0x00e9 ||
         FAILED(name_methods->encoding(name, &known, &encoding)) || !known || encoding != 1200)
         return 26;
     IUnknown_Release((IUnknown *)name);
