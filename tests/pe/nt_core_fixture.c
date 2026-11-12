@@ -60,6 +60,24 @@ int import_fixture_entry(void)
         GetLastError() != 0x5678)
         return 10;
 
+    /* Real Win64 programs discover their module by following PEB->Ldr
+     * and the InLoadOrderModuleList from GS. Check that the primary
+     * image is linked, its path is a Unicode string and its size
+     * corresponds to a mapped PE image. */
+    const unsigned char *peb = (const unsigned char *)basic.peb;
+    const unsigned char *ldr = *(const unsigned char *const *)(peb + 0x18);
+    if (ldr == NULL || *(const ULONG *)(ldr) < 0x40 ||
+        *(const BYTE *)(ldr + 4) == 0)
+        return 26;
+    const unsigned char *entry = *(const unsigned char *const *)(ldr + 0x10);
+    if (entry == NULL ||
+        *(const unsigned char *const *)(entry + 8) != ldr + 0x10 ||
+        *(const uintptr_t *)(entry + 0x30) == 0 ||
+        *(const ULONG *)(entry + 0x40) < 4096 ||
+        *(const WCHAR *const *)(entry + 0x50) == NULL ||
+        *(const WCHAR *const *)(entry + 0x60) == NULL)
+        return 27;
+
     if (NtQueryInformationThread(thread, 0, &thread_basic, sizeof(thread_basic), &returned) != NT_OK ||
         returned != sizeof(thread_basic) || thread_basic.teb != (void *)gs_pointer(0x30) ||
         thread_basic.client_id.process != GetCurrentProcessId() ||
