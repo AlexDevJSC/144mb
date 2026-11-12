@@ -244,4 +244,5 @@ control. Solo recorre código de la sección ejecutable de entrada y aplica
 límites a los marcos, la memoria legible y el anidamiento. Las señales
 síncronas de Linux y los formatos de unwind encadenados quedan fuera de
 este perfil. `make check-pe-seh` comprueba continuación, captura,
-finalización y ambos métodos de unwind desde un PE AMD64.
+finalización, ambos métodos de unwind y el callback de consolidación de
+excepciones C++ desde un PE AMD64.

@@ -443,6 +443,7 @@ invalid:
 
 #define STATUS_NONCONTINUABLE UINT32_C(0xc0000025)
 #define STATUS_UNWIND UINT32_C(0xc0000027)
+#define STATUS_UNWIND_CONSOLIDATE UINT32_C(0x80000029)
 #define STATUS_BAD_STACK UINT32_C(0xc0000028)
 #define STATUS_INVALID_TARGET UINT32_C(0xc0000029)
 enum {
@@ -460,6 +461,7 @@ static _Thread_local struct software_exception *active_software;
 
 typedef int32_t (NT_MS_ABI *software_handler)(struct nt_exception_record *, uint64_t,
                                              struct nt_context64 *, struct nt_dispatcher_context *);
+typedef uint64_t (NT_MS_ABI *consolidate_handler)(struct nt_exception_record *);
 _Noreturn void nt_restore_software_context(const struct nt_context64 *context);
 
 static _Noreturn void software_failure(uint32_t status)
@@ -634,6 +636,13 @@ static _Noreturn void software_unwind(struct nt_context64 *origin, uint64_t fram
         if (found) {
             current.rip = target;
             current.rax = value;
+            if (record->code == STATUS_UNWIND_CONSOLIDATE) {
+                if (!record->count || !software_code(record->information[0]))
+                    software_failure(STATUS_INVALID_TARGET);
+                if (output)
+                    *output = current;
+                current.rip = ((consolidate_handler)record->information[0])(record);
+            }
             if (output)
                 *output = current;
             resume_software(&current, previous);

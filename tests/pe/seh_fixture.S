@@ -16,6 +16,9 @@ import_fixture_entry:
     testl %eax, %eax
     jne entry_done
     call unwind_ex_here
+    testl %eax, %eax
+    jne entry_done
+    call consolidate_here
 entry_done:
     addq $40, %rsp
     ret
@@ -176,7 +179,50 @@ unwind_ex_done:
     ret
 .seh_endproc
 
+.seh_proc consolidate_here
+consolidate_here:
+    subq $56, %rsp
+    .seh_stackalloc 56
+    .seh_endprologue
+    movq %rsp, %rcx
+    leaq consolidate_invalid(%rip), %rdx
+    leaq consolidate_record(%rip), %r8
+    movl $0x80000029, (%r8)
+    movl $1, 24(%r8)
+    leaq consolidate_callback(%rip), %rax
+    movq %rax, 32(%r8)
+    movl $0x23456, %r9d
+    leaq caller_context(%rip), %rax
+    movq %rax, 32(%rsp)
+    movq $0, 40(%rsp)
+    call *__imp_RtlUnwindEx(%rip)
+    jmp consolidate_invalid
+consolidate_target:
+    cmpq $0x23456, %rax
+    jne consolidate_invalid
+    leaq consolidate_target(%rip), %rax
+    cmpq %rax, caller_context+0xf8(%rip)
+    jne consolidate_invalid
+    xorl %eax, %eax
+    jmp consolidate_done
+consolidate_invalid:
+    movl $38, %eax
+consolidate_done:
+    addq $56, %rsp
+    ret
+.seh_endproc
+
+consolidate_callback:
+    cmpl $0x22, 4(%rcx)
+    jne consolidate_bad_record
+    leaq consolidate_target(%rip), %rax
+    ret
+consolidate_bad_record:
+    leaq consolidate_invalid(%rip), %rax
+    ret
+
 .bss
 .balign 16
 caller_context: .space 1232
+consolidate_record: .space 152
 ran_finally: .long 0
