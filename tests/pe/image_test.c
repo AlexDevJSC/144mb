@@ -121,6 +121,31 @@ static void make_tls_pe(unsigned char *bytes)
     w16(reloc + 18, 0xa140);
 }
 
+/* A synthetic DLL exports the same MS x64 code via ordinal #5 and
+ * by name. None of these bytes come from an external executable. */
+static void make_export_dll(unsigned char *bytes)
+{
+    make_pe(bytes);
+    w16(bytes + 0x84 + 18, 0x2002); /* IMAGE_FILE_DLL | EXECUTABLE_IMAGE */
+    w32(bytes + 0x98 + 16, 0);      /* Resource-only DLLs may omit DllMain. */
+    w32(bytes + 0x98 + 112, 0x2100); /* IMAGE_DIRECTORY_ENTRY_EXPORT */
+    w32(bytes + 0x98 + 116, 0x100);
+
+    unsigned char *idata = bytes + 0x400;
+    w32(idata + 0x100 + 12, 0x2160); /* Name */
+    w32(idata + 0x100 + 16, 5);      /* Base ordinal */
+    w32(idata + 0x100 + 20, 1);      /* NumberOfFunctions */
+    w32(idata + 0x100 + 24, 1);      /* NumberOfNames */
+    w32(idata + 0x100 + 28, 0x2130); /* AddressOfFunctions */
+    w32(idata + 0x100 + 32, 0x2140); /* AddressOfNames */
+    w32(idata + 0x100 + 36, 0x2150); /* AddressOfNameOrdinals */
+    w32(idata + 0x130, 0x1000);      /* .text entry point RVA */
+    w32(idata + 0x140, 0x2170);      /* "Return42" RVA */
+    w16(idata + 0x150, 0);           /* Index into function RVAs */
+    memcpy(idata + 0x160, "demo.dll", 9);
+    memcpy(idata + 0x170, "Return42", 9);
+}
+
 static void rejected(unsigned char *bytes, const char *what)
 {
     struct pe_image image = {0};
@@ -209,5 +234,76 @@ int main(void)
     w32(bytes + 0x600 + 4, 7);
     w64(bytes + 0x98 + 24, UINT64_C(0x1000)); /* force an ASLR relocation */
     rejected(bytes, "malformed base-relocation block");
+
+    /* The EXE entry point and the DLL loader must not be interchangeable. */
+    make_export_dll(bytes);
+    rejected(bytes, "DLL passed to the EXE-only loader");
+    make_pe(bytes);
+    assert(!pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                  &image, reason, sizeof(reason)));
+    puts("PASS DLL and EXE image types remain distinct");
+
+    make_export_dll(bytes);
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(image.entry_rva == 0 && image.export_rva == 0x2100);
+    struct pe_image_export by_name = {0}, by_ordinal = {0};
+    assert(pe_image_lookup_export(&image, "Return42", 0, &by_name));
+    assert(pe_image_lookup_export(&image, NULL, 5, &by_ordinal));
+    assert(by_name.address == by_ordinal.address &&
+           by_name.address == (uintptr_t)(image.base + 0x1000) &&
+           by_name.forwarder == NULL);
+    int (NT_MS_ABI *dll_entry)(void);
+    const uintptr_t code_address = by_name.address;
+    memcpy(&dll_entry, &code_address, sizeof(dll_entry));
+    assert(dll_entry() == 42);
+    assert(!pe_image_lookup_export(&image, "not-exported", 0, &by_name));
+    assert(by_name.address == 0 && by_name.forwarder == NULL);
+    assert(!pe_image_lookup_export(&image, NULL, 4, &by_name));
+    assert(!pe_image_lookup_export(&image, NULL, 6, &by_name));
+    pe_image_unload(&image);
+    puts("PASS mapped DLL exports by name and base-relative ordinal");
+
+    make_export_dll(bytes);
+    w32(bytes + 0x400 + 0x130, 0x2180);
+    memcpy(bytes + 0x400 + 0x180, "KERNEL32.Sleep", 15);
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(pe_image_lookup_export(&image, "Return42", 0, &by_name));
+    assert(by_name.address == 0 && by_name.forwarder != NULL &&
+           strcmp(by_name.forwarder, "KERNEL32.Sleep") == 0);
+    pe_image_unload(&image);
+    puts("PASS export forwarders are strings, never executable addresses");
+
+    make_export_dll(bytes);
+    w32(bytes + 0x400 + 0x100 + 28, 0x3ffe);
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(!pe_image_lookup_export(&image, "Return42", 0, &by_name));
+    pe_image_unload(&image);
+    make_export_dll(bytes);
+    w16(bytes + 0x400 + 0x150, 2);
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(!pe_image_lookup_export(&image, "Return42", 0, &by_name));
+    pe_image_unload(&image);
+    make_export_dll(bytes);
+    w32(bytes + 0x400 + 0x130, 0x21ff);
+    bytes[0x400 + 0x1ff] = 'A';
+    assert(pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                 &image, reason, sizeof(reason)));
+    assert(!pe_image_lookup_export(&image, "Return42", 0, &by_name));
+    pe_image_unload(&image);
+    puts("PASS malformed export bounds, ordinals and unterminated forwarders rejected");
+
+    make_export_dll(bytes);
+    w32(bytes + 0x98 + 112, 0x3ffe);
+    assert(!pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                  &image, reason, sizeof(reason)));
+    make_tls_pe(bytes);
+    w16(bytes + 0x84 + 18, 0x2002);
+    assert(!pe_image_load_library(bytes, sizeof(bytes), resolver, NULL,
+                                  &image, reason, sizeof(reason)));
+    puts("PASS unreadable export directories and unsafe DLL TLS rejected");
     return 0;
 }
