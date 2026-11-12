@@ -277,6 +277,48 @@ int nt_runtime_open_guest_file_readonly(const char *input)
     return fd;
 }
 
+int nt_runtime_read_guest_file(const char *path, size_t limit, void **data, size_t *size)
+{
+    *data = NULL;
+    *size = 0;
+    const int fd = nt_runtime_open_guest_file_readonly(path);
+    if (fd < 0)
+        return errno;
+    struct stat info;
+    int error = fstat(fd, &info) != 0 ? errno : 0;
+    if (error == 0 && (info.st_size < 0 || (uintmax_t)info.st_size > limit))
+        error = EFBIG;
+    if (error) {
+        close(fd);
+        return error;
+    }
+    size_t length = (size_t)info.st_size;
+    unsigned char *bytes = malloc(length ? length : 1);
+    if (!bytes) {
+        close(fd);
+        return ENOMEM;
+    }
+    size_t done = 0;
+    while (done < length) {
+        ssize_t got = read(fd, bytes + done, length - done);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0) {
+            error = got == 0 ? EIO : errno;
+            break;
+        }
+        done += (size_t)got;
+    }
+    close(fd);
+    if (error) {
+        free(bytes);
+        return error;
+    }
+    *data = bytes;
+    *size = length;
+    return 0;
+}
+
 static int open_parent(int root, const char *path, const char **leaf)
 {
     const char *slash = strrchr(path, '/');

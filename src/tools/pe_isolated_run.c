@@ -10,6 +10,7 @@
 #include "winbase.h"
 #include "sync.h"
 #include "user_folders.h"
+#include "dxcompiler_path.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -263,6 +264,13 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
     ADD("--bind"); ADD(profile_source); ADD("/game");
     ADD("--ro-bind"); ADD(absolute); ADD(inside);
     ADD("--ro-bind"); ADD(runner); ADD("/runner");
+    char dxc_directory[PATH_MAX];
+    struct stat dxc_info;
+    if (nt_dxc_install_path(runner, dxc_directory, sizeof(dxc_directory)) &&
+        stat(dxc_directory, &dxc_info) == 0 && S_ISDIR(dxc_info.st_mode)) {
+        ADD("--ro-bind"); ADD(dxc_directory); ADD(NT_DXC_SANDBOX_DIRECTORY);
+        ADD("--setenv"); ADD("LD_LIBRARY_PATH"); ADD(NT_DXC_SANDBOX_DIRECTORY);
+    }
     ADD("--chdir"); ADD("/game");
 
     const char *video = getenv("SDL_VIDEODRIVER");

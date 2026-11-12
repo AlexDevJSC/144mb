@@ -24,15 +24,18 @@ RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files u
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 ifneq ($(strip $(VKD3D_LIBS)),)
-RUNTIME_PARTS += d3d12_linux dxgi_linux
+RUNTIME_PARTS += d3d12_linux dxgi_linux d3dcompiler dxcompiler
 RUNTIME_LIBS += $(VKD3D_LIBS)
-VKD3D_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,d3d12_linux.o dxgi_linux.o)
+VKD3D_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,d3d12_linux.o dxgi_linux.o d3dcompiler.o dxcompiler.o)
 $(BUILD_DIR)/runtime-exports.o: override CPPFLAGS += -DNT_HAVE_VKD3D
 $(BUILD_DIR)/runtime-exports.o $(VKD3D_OBJECTS): src/runtime/graphics.h
 $(VKD3D_OBJECTS): src/runtime/graphics_linux.h
 $(VKD3D_OBJECTS): override CPPFLAGS += $(VKD3D_CFLAGS)
 $(BUILD_DIR)/runtime-d3d12_linux.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-dxgi_linux.o: src/runtime/desktop.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-d3dcompiler.o $(BUILD_DIR)/runtime-dxcompiler.o: src/runtime/shader.h
+$(BUILD_DIR)/runtime-d3dcompiler.o $(BUILD_DIR)/runtime-dxcompiler.o: src/runtime/winbase.h
+$(BUILD_DIR)/runtime-dxcompiler.o: src/runtime/dxcompiler_path.h
 endif
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
 PE_IMAGE_HEADERS = src/pe/image.h src/pe/pe_bytes.h include/ntnative/guest_thread.h
@@ -42,7 +45,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-isolated check-desktop benchmark install
+.PHONY: all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
 
 $(BUILD_DIR):
@@ -262,9 +265,19 @@ $(BUILD_DIR)/graphics-fixture.exe: tests/pe/graphics_fixture.c $(BUILD_DIR)/fixt
 check-pe-graphics: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/graphics-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 30s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/graphics-fixture.exe
+
+$(BUILD_DIR)/fixture-dxcompiler.a: tests/pe/dxcompiler.def | $(BUILD_DIR)
+	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/shader-fixture.exe: tests/pe/shader_fixture.c $(BUILD_DIR)/fixture-dxcompiler.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -ld3dcompiler_47 -lkernel32
+
+check-pe-shaders: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/shader-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 30s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/shader-fixture.exe
 else
-check-pe-graphics:
-	@echo 'check-pe-graphics requires libvkd3d, libvkd3d-utils and Vulkan development files.' >&2
+check-pe-graphics check-pe-shaders:
+	@echo 'This check requires libvkd3d, libvkd3d-utils and Vulkan development files.' >&2
 	@exit 1
 endif
 
@@ -285,7 +298,7 @@ check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $
 
 $(BUILD_DIR)/pe-isolated-run: src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/tools/guest_profile.h src/runtime/compat.h src/runtime/desktop.h src/runtime/desktop_resources.h \
-    src/runtime/user_folders.h src/runtime/winbase.h src/runtime/sync.h include/ntnative/guest_thread.h | $(BUILD_DIR)
+    src/runtime/user_folders.h src/runtime/winbase.h src/runtime/sync.h src/runtime/dxcompiler_path.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    src/tools/pe_isolated_run.c src/tools/guest_profile.c src/pe/image.c $(RUNTIME_OBJECTS) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 

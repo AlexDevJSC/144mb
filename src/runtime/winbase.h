@@ -53,5 +53,6 @@ int32_t NT_MS_ABI nt_FreeEnvironmentStringsW(uint16_t *block);
 uint32_t NT_MS_ABI nt_GetTempPathW(uint32_t capacity, uint16_t *buffer);
 uint32_t NT_MS_ABI nt_GetSystemDirectoryW(uint16_t *buffer, uint32_t capacity);
 int nt_runtime_open_guest_file_readonly(const char *path);
+int nt_runtime_read_guest_file(const char *path, size_t limit, void **data, size_t *size);
 
 #endif

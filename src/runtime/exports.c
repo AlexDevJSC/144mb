@@ -19,6 +19,7 @@
 #include "windesktop.h"
 #ifdef NT_HAVE_VKD3D
 #include "graphics.h"
+#include "shader.h"
 #endif
 #include "display_config.h"
 
@@ -744,6 +745,12 @@ static const struct runtime_export dxgi_exports[] = {
     EXPORT("CreateDXGIFactory1", nt_CreateDXGIFactory1),
     EXPORT("CreateDXGIFactory2", nt_CreateDXGIFactory2),
 };
+static const struct runtime_export d3dcompiler_exports[] = {
+    EXPORT("D3DCompile", nt_D3DCompile),
+};
+static const struct runtime_export dxcompiler_exports[] = {
+    EXPORT("DxcCreateInstance", nt_DxcCreateInstance),
+};
 static const struct runtime_export streamline_exports[] = {
     EXPORT("D3D12CreateDevice", nt_D3D12CreateDevice),
     EXPORT("D3D12SerializeRootSignature", nt_D3D12SerializeRootSignature),
@@ -786,6 +793,8 @@ static const struct {
 #ifdef NT_HAVE_VKD3D
     MODULE("d3d12.dll", d3d12_exports),
     MODULE("dxgi.dll", dxgi_exports),
+    MODULE("d3dcompiler_47.dll", d3dcompiler_exports),
+    MODULE("dxcompiler.dll", dxcompiler_exports),
     MODULE("sl.interposer.dll", streamline_exports),
 #endif
 #undef MODULE
@@ -799,8 +808,17 @@ static pthread_mutex_t module_lock = PTHREAD_MUTEX_INITIALIZER;
 static size_t module_index(const char *name)
 {
     for (size_t i = 0; i < MODULE_COUNT; ++i) {
-        if (nt_module_name_equal(name, modules[i].name))
-            return modules[i].exports != fluid_exports || nt_runtime_fluidsynth_available() ? i : MODULE_COUNT;
+        if (!nt_module_name_equal(name, modules[i].name))
+            continue;
+        if (modules[i].exports == fluid_exports && !nt_runtime_fluidsynth_available())
+            return MODULE_COUNT;
+#ifdef NT_HAVE_VKD3D
+        if (modules[i].exports == d3dcompiler_exports && !nt_runtime_d3dcompiler_available())
+            return MODULE_COUNT;
+        if (modules[i].exports == dxcompiler_exports && !nt_runtime_dxcompiler_available())
+            return MODULE_COUNT;
+#endif
+        return i;
     }
     return MODULE_COUNT;
 }

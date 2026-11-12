@@ -27,3 +27,19 @@ y del [cargador Vulkan](https://github.com/KhronosGroup/Vulkan-Loader).
 Las bibliotecas conservan sus licencias LGPL-2.1-or-later y Apache-2.0,
 respectivamente. Mesa conserva su licencia de distribución. El puente
 del runtime es código propio MIT.
+
+## Compilación de shaders
+
+`D3DCompile` usa la exportación de libvkd3d-utils cuando está disponible.
+`DxcCreateInstance` abre `libdxcompiler.so` y comprueba que ofrece
+`IDxcCompiler3` e `IDxcUtils`. Las interfaces invitadas convierten argumentos
+y resultados UTF-16 y conservan los HRESULT y la propiedad COM. El include
+predeterminado lee archivos del disco invitado mediante la apertura confinada.
+Las extensiones de reflexión y PDB de DXC siguen pendientes.
+
+`make check-pe-shaders` ejecuta desde un PE ambos compiladores y verifica
+compilación DXBC (SM5), DXIL (SM6), lectura de include, diagnóstico de código
+inválido y un nombre de salida Unicode. La prueba local usó vkd3d 1.19 y el
+[DXC ELF 1.8.2505.1 de Microsoft](https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.8.2505.1).
+DXC conserva las licencias del archivo upstream y el código del runtime
+mantiene MIT.
