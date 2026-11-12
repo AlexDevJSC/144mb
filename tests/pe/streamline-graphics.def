@@ -5,3 +5,16 @@ EXPORTS
     D3D12CreateDevice
     D3D12SerializeRootSignature
     D3D12SerializeVersionedRootSignature
+    slInit
+    slShutdown
+    slSetD3DDevice
+    slGetNativeInterface
+    slGetNewFrameToken
+    slSetConstants
+    slSetTagForFrame
+    slGetFeatureRequirements
+    slIsFeatureSupported
+    slSetFeatureLoaded
+    slGetFeatureFunction
+    slFreeResources
+    slEvaluateFeature

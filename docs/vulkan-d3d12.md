@@ -43,3 +43,13 @@ inválido y un nombre de salida Unicode. La prueba local usó vkd3d 1.19 y el
 [DXC ELF 1.8.2505.1 de Microsoft](https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.8.2505.1).
 DXC conserva las licencias del archivo upstream y el código del runtime
 mantiene MIT.
+
+## Perfil Streamline para Direct3D 12
+
+La ABI de [Streamline 2.11.1](https://github.com/NVIDIA-RTX/Streamline/tree/v2.11.1/include)
+admite inicializar y cerrar una sesión, asociar un dispositivo COM,
+identificar frames y registrar constantes y recursos para viewports.
+Se mantienen las referencias COM hasta reemplazar o retirar el registro.
+Las consultas de características de proveedor devuelven
+`eErrorFeatureMissing` en este perfil. DLSS y Reflex quedan fuera de este
+backend. La prueba de gráficos verifica los estados y la propiedad COM.

@@ -20,6 +20,7 @@
 #ifdef NT_HAVE_VKD3D
 #include "graphics.h"
 #include "shader.h"
+#include "streamline.h"
 #endif
 #include "display_config.h"
 
@@ -757,6 +758,19 @@ static const struct runtime_export streamline_exports[] = {
     EXPORT("D3D12SerializeVersionedRootSignature", nt_D3D12SerializeVersionedRootSignature),
     EXPORT("CreateDXGIFactory1", nt_CreateDXGIFactory1),
     EXPORT("CreateDXGIFactory2", nt_CreateDXGIFactory2),
+    EXPORT("slInit", nt_slInit),
+    EXPORT("slShutdown", nt_slShutdown),
+    EXPORT("slSetD3DDevice", nt_slSetD3DDevice),
+    EXPORT("slGetNativeInterface", nt_slGetNativeInterface),
+    EXPORT("slGetNewFrameToken", nt_slGetNewFrameToken),
+    EXPORT("slSetConstants", nt_slSetConstants),
+    EXPORT("slSetTagForFrame", nt_slSetTagForFrame),
+    EXPORT("slGetFeatureRequirements", nt_slGetFeatureRequirements),
+    EXPORT("slIsFeatureSupported", nt_slIsFeatureSupported),
+    EXPORT("slSetFeatureLoaded", nt_slSetFeatureLoaded),
+    EXPORT("slGetFeatureFunction", nt_slGetFeatureFunction),
+    EXPORT("slFreeResources", nt_slFreeResources),
+    EXPORT("slEvaluateFeature", nt_slEvaluateFeature),
 };
 #endif
 

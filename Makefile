@@ -24,9 +24,9 @@ RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files u
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS)
 ifneq ($(strip $(VKD3D_LIBS)),)
-RUNTIME_PARTS += d3d12_linux dxgi_linux d3dcompiler dxcompiler
+RUNTIME_PARTS += d3d12_linux dxgi_linux d3dcompiler dxcompiler streamline
 RUNTIME_LIBS += $(VKD3D_LIBS)
-VKD3D_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,d3d12_linux.o dxgi_linux.o d3dcompiler.o dxcompiler.o)
+VKD3D_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,d3d12_linux.o dxgi_linux.o d3dcompiler.o dxcompiler.o streamline.o)
 $(BUILD_DIR)/runtime-exports.o: override CPPFLAGS += -DNT_HAVE_VKD3D
 $(BUILD_DIR)/runtime-exports.o $(VKD3D_OBJECTS): src/runtime/graphics.h
 $(VKD3D_OBJECTS): src/runtime/graphics_linux.h
@@ -36,6 +36,7 @@ $(BUILD_DIR)/runtime-dxgi_linux.o: src/runtime/desktop.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-d3dcompiler.o $(BUILD_DIR)/runtime-dxcompiler.o: src/runtime/shader.h
 $(BUILD_DIR)/runtime-d3dcompiler.o $(BUILD_DIR)/runtime-dxcompiler.o: src/runtime/winbase.h
 $(BUILD_DIR)/runtime-dxcompiler.o: src/runtime/dxcompiler_path.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-streamline.o: src/runtime/streamline.h
 endif
 PE_IMPORT_HEADERS = src/pe/fixture_import.h src/pe/pe_bytes.h include/ntnative/runtime.h
 PE_IMAGE_HEADERS = src/pe/image.h src/pe/pe_bytes.h include/ntnative/guest_thread.h

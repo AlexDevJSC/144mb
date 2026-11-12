@@ -46,6 +46,90 @@ static HRESULT create_buffer(ID3D12Device *device, D3D12_HEAP_TYPE type,
         &desc, state, NULL, &IID_ID3D12Resource, (void **)buffer);
 }
 
+struct sl_header { const void *next; GUID type; size_t version; };
+struct sl_viewport { struct sl_header header; UINT index; };
+struct sl_resource { struct sl_header header; UINT type; void *native, *memory, *view; UINT state; };
+struct sl_tag { struct sl_header header; const struct sl_resource *resource; UINT type, lifecycle, extent[4]; };
+struct sl_token;
+struct sl_token_api { UINT (WINAPI *index)(const struct sl_token *); };
+struct sl_token { const struct sl_token_api *vtable; struct sl_header header; };
+
+__declspec(dllimport) int WINAPI slInit(const void *, UINT64);
+__declspec(dllimport) int WINAPI slShutdown(void);
+__declspec(dllimport) int WINAPI slSetD3DDevice(void *);
+__declspec(dllimport) int WINAPI slGetNativeInterface(void *, void **);
+__declspec(dllimport) int WINAPI slGetNewFrameToken(struct sl_token **, const UINT *);
+__declspec(dllimport) int WINAPI slSetConstants(const void *, const void *, const void *);
+__declspec(dllimport) int WINAPI slSetTagForFrame(const void *, const void *, const void *, UINT, void *);
+__declspec(dllimport) int WINAPI slGetFeatureRequirements(UINT, void *);
+__declspec(dllimport) int WINAPI slIsFeatureSupported(UINT, const void *);
+__declspec(dllimport) int WINAPI slSetFeatureLoaded(UINT, unsigned char);
+__declspec(dllimport) int WINAPI slGetFeatureFunction(UINT, const char *, void **);
+__declspec(dllimport) int WINAPI slFreeResources(UINT, const void *);
+__declspec(dllimport) int WINAPI slEvaluateFeature(UINT, const void *, const void *, UINT, void *);
+
+static int streamline(ID3D12Device *device)
+{
+    const struct {
+        struct sl_header header;
+        UINT64 reserved[7], flags;
+        UINT64 reserved2[5];
+        UINT render_api;
+    } preferences = {
+        .header = {NULL,{0x1ca10965,0xbf8e,0x432b,{0x8d,0xa1,0x67,0x16,0xd8,0x79,0xfb,0x14}},1},
+        .flags = 128, .render_api = 1,
+    };
+    const struct sl_viewport viewport = {
+        {NULL,{0x171b6435,0x9b3c,0x4fc8,{0x99,0x94,0xfb,0xe5,0x25,0x69,0xaa,0xa4}},1}, 7,
+    };
+    const struct {
+        struct sl_header header;
+        unsigned char values[424];
+    } constants = {
+        .header = {NULL,{0xdcd35ad7,0x4e4a,0x4bad,{0xa9,0x0c,0xe0,0xc4,0x9e,0xb2,0x3a,0xfe}},2},
+    };
+    struct sl_header requirements = {
+        NULL,{0x66714097,0xac6d,0x4bc6,{0x89,0x15,0x1e,0x0f,0x55,0xa6,0xb6,0x1f}},2,
+    };
+    ID3D12Device *native = NULL;
+    struct sl_token *frame = NULL, *same = NULL;
+    const UINT index = 42;
+    void *function = device;
+    if (slGetNewFrameToken(&frame, &index) != 23 ||
+        slInit(&preferences, 0x0002000b0001fedcULL) || slSetD3DDevice(device) ||
+        slGetNativeInterface(device, (void **)&native) || native != device)
+        return 40;
+    ID3D12Device_Release(native);
+    if (slGetNewFrameToken(&frame, &index) || !frame || frame->vtable->index(frame) != index ||
+        slGetNewFrameToken(&same, &index) || same != frame ||
+        slSetConstants(&constants, frame, &viewport) || slSetConstants(&constants, frame, &viewport) != 27)
+        return 41;
+    ID3D12Resource *buffer = NULL;
+    if (FAILED(create_buffer(device, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, &buffer)))
+        return 42;
+    const struct sl_resource resource = {
+        {NULL,{0x3a9d70cf,0x2418,0x4b72,{0x83,0x91,0x13,0xf8,0x72,0x1c,0x72,0x61}},1},
+        1, buffer, NULL, NULL, D3D12_RESOURCE_STATE_GENERIC_READ,
+    };
+    struct sl_tag tag = {
+        {NULL,{0x4c6a5aad,0xb445,0x496c,{0x87,0xff,0x1a,0xf3,0x84,0x5b,0xe6,0x53}},1},
+        &resource, 3, 1, {0},
+    };
+    if (slSetTagForFrame(frame, &viewport, &tag, 1, NULL))
+        return 43;
+    ID3D12Resource_Release(buffer);
+    tag.resource = NULL;
+    if (slSetTagForFrame(frame, &viewport, &tag, 1, NULL) ||
+        slGetFeatureRequirements(0, &requirements) != 31 ||
+        slIsFeatureSupported(0, NULL) != 31 || slSetFeatureLoaded(0, 1) != 31 ||
+        slGetFeatureFunction(0, "slDLSSSetOptions", &function) != 31 || function ||
+        slFreeResources(0, &viewport) != 31 || slEvaluateFeature(0, frame, NULL, 0, NULL) != 25 ||
+        slEvaluateFeature(0, frame, NULL, 0, device) != 31 ||
+        slShutdown() || slGetNewFrameToken(&frame, &index) != 23)
+        return 44;
+    return 0;
+}
+
 static int copy_buffer(ID3D12Device *device)
 {
     ID3D12Resource *upload = NULL, *readback = NULL;
@@ -135,6 +219,8 @@ int import_fixture_entry(void)
     int status = root_signatures(device);
     if (!status)
         status = copy_buffer(device);
+    if (!status)
+        status = streamline(device);
     ID3D12Device_Release(device);
     return status;
 }
