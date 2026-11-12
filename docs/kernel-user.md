@@ -159,3 +159,39 @@ devuelve NTSTATUS junto al resultado de apertura en IO_STATUS_BLOCK.
 El PE de control crea el archivo por NTDLL, escribe por Win32, lo vuelve
 a abrir por NTDLL y lee por Win32. Comprueba también el cierre cruzado,
 el error de fichero ausente y la conservación de LastError.
+
+## E/S síncrona nativa del mismo handle (continuación de PR #61)
+
+El puente NTDLL extiende ahora las operaciones abiertas mediante Win32
+o `NtCreateFile`/`NtOpenFile` con cinco entradas de NTDLL y sus alias
+`Zw`: `NtReadFile`, `NtWriteFile`, `NtQueryInformationFile`,
+`NtSetInformationFile` y `NtFlushBuffersFile`.
+
+- La lectura/escritura síncrona con `ByteOffset == NULL` utiliza la
+  posición compartida del descriptor Linux, igual que `ReadFile` y
+  `WriteFile`; las lecturas/escrituras con `ByteOffset >= 0` usan
+  `pread`/`pwrite` sin cambiar la posición compartida.
+- El `IO_STATUS_BLOCK` informa de `NTSTATUS` y bytes transferidos.
+  Una lectura sin datos con longitud positiva devuelve
+  `STATUS_END_OF_FILE`. Se conserva el `LastError` Win32 del hilo.
+- `FileStandardInformation` (clase 5) devuelve tamaño del archivo,
+  bloques asignados y número de enlaces; `FilePositionInformation`
+  (clase 14) permite consultar y mover la posición del descriptor.
+  `FileEndOfFileInformation` (clase 20) permite truncar un archivo con
+  permiso de escritura. `NtFlushBuffersFile` utiliza `fsync`.
+- La implementación reutiliza la tabla de handles y sus comprobaciones
+  de acceso; no abre rutas Linux arbitrarias ni crea un segundo espacio
+  de nombres.
+
+**Límites del perfil:** E/S asíncrona, eventos/APC, completion ports,
+offsets especiales NT, cancelación, oplocks, acceso entre procesos y
+otras clases de `FILE_INFORMATION_CLASS` siguen pendientes. Los
+descriptores explícitamente posicionados no actualizan el puntero
+compartido. Esto no pretende reproducir toda la semántica de NTFS.
+
+`make check-pe-nt-io` compila un PE AMD64 controlado que mezcla
+NTDLL y Win32 para probar escritura, lectura, EOF, offsets, información
+de tamaño, posicionamiento, truncado, flush, duplicación y cierre de
+handles, derechos reducidos, argumentos inválidos y conservación de
+`LastError`. Se integra en los tres recorridos de CI, incluido Fedora.
+
