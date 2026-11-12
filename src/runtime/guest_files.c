@@ -636,6 +636,47 @@ static int close_file(struct guest_file *file)
     return result;
 }
 
+/* Duplicated descriptors share a Linux open-file description (and therefore
+ * the seek offset), as a duplicated Windows file HANDLE does. They remain
+ * independent entries in the guest handle table. Rights-preserving copies
+ * are supported; reducing access rights needs a separate access-mask model. */
+static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
+                                       uint32_t options, uintptr_t *target)
+{
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *original = find_handle(source);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (!original) {
+        status = NT_STATUS_INVALID_HANDLE;
+    } else if (!(options & 2u)) { /* DUPLICATE_SAME_ACCESS */
+        status = NT_STATUS_NOT_SUPPORTED;
+    } else {
+        struct guest_file *copy = new_file();
+        if (!copy || next_handle == UINTPTR_MAX) {
+            status = NT_STATUS_NO_MEMORY;
+        } else {
+            const int fd = fcntl(original->fd, F_DUPFD_CLOEXEC, 0);
+            char *path = original->path ? strdup(original->path) : NULL;
+            if (fd < 0 || (original->path && !path)) {
+                if (fd >= 0)
+                    close(fd);
+                free(path);
+                status = NT_STATUS_NO_MEMORY;
+            } else {
+                *copy = *original;
+                copy->fd = fd;
+                copy->path = path;
+                copy->handle = next_handle++;
+                copy->handle_flags = (options & 4u) ? original->handle_flags :
+                                     (attributes & 2u) ? HANDLE_FLAG_INHERIT : 0;
+                *target = copy->handle;
+            }
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    return status;
+}
+
 int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
 {
     if (!flags) {
@@ -647,6 +688,8 @@ int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
     if (file)
         *flags = file->handle_flags;
     pthread_mutex_unlock(&file_lock);
+    if (!file && nt_runtime_get_waitable_flags(handle, flags))
+        return 1;
     if (!file)
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
     return file != NULL;
@@ -661,6 +704,40 @@ static int close_object(uintptr_t handle)
     if (file == NULL && nt_runtime_close_waitable(handle))
         return 0;
     return error;
+}
+
+nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t source,
+                                        uintptr_t target_process, uintptr_t *target,
+                                        uint32_t access, uint32_t attributes, uint32_t options)
+{
+    /* A real cross-process object-manager requires a shared namespace and
+     * broker. Do not pass host pid/FD values as foreign NT process handles. */
+    if (!target)
+        return NT_STATUS_ACCESS_VIOLATION;
+    *target = 0;
+    if (source_process != UINTPTR_MAX || target_process != UINTPTR_MAX)
+        return NT_STATUS_NOT_SUPPORTED;
+    if ((options & ~7u) || (attributes & ~2u))
+        return NT_STATUS_INVALID_PARAMETER;
+    nt_status status = nt_runtime_duplicate_waitable(source, access, attributes, options, target);
+    if (status == NT_STATUS_INVALID_HANDLE)
+        status = duplicate_file_handle(source, attributes, options, target);
+    if (status == NT_STATUS_SUCCESS && (options & 1u)) {
+        /* After successful duplication each handle has an independent life. */
+        (void)nt_NtClose(source);
+    }
+    return status;
+}
+
+int32_t NT_MS_ABI nt_DuplicateHandle(uintptr_t source_process, uintptr_t source,
+                                     uintptr_t target_process, uintptr_t *target,
+                                     uint32_t access, int32_t inherit, uint32_t options)
+{
+    const nt_status status = nt_NtDuplicateObject(source_process, source, target_process,
+                                                   target, access, inherit ? 2u : 0, options);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
 }
 
 nt_status NT_MS_ABI nt_NtClose(uintptr_t handle)
