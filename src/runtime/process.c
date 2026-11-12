@@ -253,7 +253,9 @@ uint16_t *NT_MS_ABI nt_GetCommandLineW(void) { return guest.wide_line; }
 
 uint32_t NT_MS_ABI nt_GetModuleFileNameW(uintptr_t module, uint16_t *buffer, uint32_t size)
 {
-    if (guest.module == 0 || (module != 0 && module != guest.module)) {
+    const bool main_image = module == 0 || module == guest.module;
+    const char *external = main_image ? NULL : nt_runtime_external_module_filename(module);
+    if (guest.module == 0 || (!main_image && external == NULL)) {
         nt_SetLastError(NT_ERROR_MOD_NOT_FOUND);
         return 0;
     }
@@ -261,12 +263,19 @@ uint32_t NT_MS_ABI nt_GetModuleFileNameW(uintptr_t module, uint16_t *buffer, uin
         nt_SetLastError(size == 0 ? NT_ERROR_INSUFFICIENT_BUFFER : NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    size_t length = nt_runtime_wide_length(guest.wide_path, COMMAND_LINE_MAX);
+    uint16_t *temporary = external != NULL ? nt_runtime_utf8_to_wide(external) : NULL;
+    if (external != NULL && temporary == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    const uint16_t *full = temporary != NULL ? temporary : guest.wide_path;
+    size_t length = nt_runtime_wide_length(full, COMMAND_LINE_MAX);
     const bool truncated = length >= size;
     if (truncated)
         length = size - 1;
-    memcpy(buffer, guest.wide_path, length * sizeof(*buffer));
+    memcpy(buffer, full, length * sizeof(*buffer));
     buffer[length] = 0;
+    free(temporary);
     if (truncated)
         nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
     return truncated ? size : (uint32_t)length;
@@ -287,7 +296,9 @@ uintptr_t nt_runtime_guest_module(void)
 
 uint32_t NT_MS_ABI nt_GetModuleFileNameA(uintptr_t module, char *buffer, uint32_t size)
 {
-    if (guest.module == 0 || (module != 0 && module != guest.module)) {
+    const bool main_image = module == 0 || module == guest.module;
+    const char *source = main_image ? guest.path : nt_runtime_external_module_filename(module);
+    if (guest.module == 0 || source == NULL) {
         nt_SetLastError(NT_ERROR_MOD_NOT_FOUND);
         return 0;
     }
@@ -295,14 +306,14 @@ uint32_t NT_MS_ABI nt_GetModuleFileNameA(uintptr_t module, char *buffer, uint32_
         nt_SetLastError(size == 0 ? NT_ERROR_INSUFFICIENT_BUFFER : NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    const size_t length = strlen(guest.path);
+    const size_t length = strlen(source);
     if (length >= size) {
-        memcpy(buffer, guest.path, size - 1);
+        memcpy(buffer, source, size - 1);
         buffer[size - 1] = '\0';
         nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
         return size;
     }
-    memcpy(buffer, guest.path, length + 1);
+    memcpy(buffer, source, length + 1);
     return (uint32_t)length;
 }
 
