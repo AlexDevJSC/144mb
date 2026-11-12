@@ -1130,6 +1130,17 @@ static uintptr_t NT_MS_ABI win_LoadLibraryExW(const uint16_t *name, uintptr_t fi
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
+    /* LOAD_LIBRARY_AS_DATAFILE and IMAGE_RESOURCE must never execute an
+     * external DLL's DllMain. This profile does not map guest DLL datafiles. */
+    if (flags != 0 && external_backend.load != NULL) {
+        char narrow[128];
+        if (!narrow_module(name, narrow))
+            return 0;
+        if (requested_module(narrow) == MODULE_COUNT) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+    }
     return win_LoadLibraryW(name);
 }
 
