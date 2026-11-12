@@ -39,7 +39,8 @@ int import_fixture_entry(void)
     FARPROC proc = GetProcAddress(module, "GuestAnswer");
     if (proc == NULL)
         return 12;
-    int (WINAPI *answer)(int) = (int (WINAPI *)(int))proc;
+    int (WINAPI *answer)(int) = NULL;
+    __builtin_memcpy(&answer, &proc, sizeof(answer));
     if (answer(1) != 43)
         return 13;
     char path[200] = {0};
