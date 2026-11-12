@@ -254,6 +254,8 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(QuerySystemTime),
     NT_EXPORT(DelayExecution),
     NT_EXPORT(Close),
+    NT_EXPORT(CreateFile),
+    NT_EXPORT(OpenFile),
     NT_EXPORT(DuplicateObject),
     NT_EXPORT(CreateEvent),
     NT_EXPORT(SetEvent),
