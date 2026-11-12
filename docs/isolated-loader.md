@@ -16,6 +16,37 @@ fuera de pantalla. El usuario ha confirmado ambos finales en su portátil
 Fedora KDE y ha comunicado fallos de menús. La revisión de esos fallos y el
 alcance funcional están en [Compatibilidad de Mines](mines-compatibility.md).
 
+### Carga de DLL PE y exportaciones (infraestructura)
+
+El parser ya distingue entre imágenes ejecutables y DLL PE32+ AMD64. La API
+`pe_image_load_library()` permite **mapear y validar** una DLL sin ejecutar
+código del invitado. Usa las mismas reglas que el ejecutable: relocaciones
+DIR64, importaciones compatibles con el registro nativo, tamaño limitado
+y permisos de página W^X. No ejecuta `DllMain`, no inicializa DLL
+dependientes ni crea índices TLS dinámicos; por seguridad, rechaza las
+DLL con directorio TLS que necesitarían esos índices.
+
+`pe_image_lookup_export()` consulta la tabla de exportaciones por nombre
+o ordinal, comprueba los límites y diferencia direcciones reales de
+*forwarders* (`KERNEL32.Sleep`), que se entregan como texto y **no se
+ejecutan como direcciones**. Las referencias solo son válidas mientras
+la imagen permanece mapeada. El lanzador todavía no incorpora un gestor
+de módulos PE externos con dependencias, `DllMain`, conteo de referencias
+y descarga: esta funcionalidad prepara esa siguiente etapa y no implica
+que `LoadLibrary` ya soporte DLL arbitrarias.
+
+Las tablas de importación retardada (`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT`)
+se mantienen intactas. No son importaciones que el cargador deba resolver
+antes del arranque: el ayudante del CRT invitado puede llamar después a
+`LoadLibrary` y `GetProcAddress`. Hoy ese mecanismo está limitado a las
+bibliotecas y API que nuestro registro de módulos ya reconoce. Un directorio
+fuera de los límites del PE sigue rechazándose.
+
+Las pruebas `make check-pe-image` generan DLL sintéticas y comprueban
+exportación por nombre/ordinal, *forwarders*, punteros malformados, TLS no
+compatible y preservación del IAT retardado. No se ejecuta ningún PE
+externo para validar este componente.
+
 ### Operaciones implementadas
 
 - Validación de MZ, PE32+, máquina AMD64, encabezados opcionales,
@@ -170,9 +201,10 @@ de Squadron121 fue de solo lectura.
 ### Fuera de alcance y riesgos pendientes
 
 - TLS de DLL adicionales, plantillas fuera de los límites del cargador,
-  importaciones retardadas,
   PEB/TEB completos (hay solo estructuras mínimas), llamadas dinámicas no incluidas en las 197
-  importaciones directas de Mines, compatibilidad de DLL externas.
+  importaciones directas de Mines y ejecución dinámica de DLL externas.
+  Las tablas de importación retardada se preservan para el ayudante CRT
+  del PE, pero la carga de DLL externas sigue sin soporte completo.
 - Entrega general de SEH y fallos de memoria del código invitado; el
   backend existente solo admite los perfiles descritos en la documentación.
 - Inicialización Win32/CRT completa, identidad de módulos, recursos
