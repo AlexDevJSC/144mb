@@ -442,6 +442,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetProcessId),
     WIN_EXPORT(GetProcessIdOfThread),
     WIN_EXPORT(GetThreadId),
+    WIN_EXPORT(GetThreadDescription),
     WIN_EXPORT(OpenThread),
     WIN_EXPORT(GetFileAttributesExW),
     WIN_EXPORT(GetFileAttributesW),
