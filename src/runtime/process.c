@@ -499,8 +499,12 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
 
 int32_t NT_MS_ABI nt_TerminateProcess(uintptr_t process, uint32_t code)
 {
-    if (process == UINTPTR_MAX && worker_status_fd >= 0)
-        finish_worker(code);
+    if (process == UINTPTR_MAX) {
+        if (worker_status_fd >= 0)
+            finish_worker(code);
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
     const nt_status status = nt_runtime_terminate_child_process(process, code);
     if (status != NT_STATUS_SUCCESS)
         nt_SetLastError(nt_runtime_nt_error(status));
