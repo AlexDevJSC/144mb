@@ -274,6 +274,8 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(QuerySemaphore),
     NT_EXPORT(ReleaseSemaphore),
     NT_EXPORT(TerminateProcess),
+    NT_EXPORT(CreateThreadEx),
+    NT_EXPORT(TerminateThread),
     NT_EXPORT(OpenThread),
     NT_EXPORT(SuspendThread),
     NT_EXPORT(ResumeThread),
