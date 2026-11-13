@@ -3,6 +3,7 @@
 #include "winbase.h"
 #include "winfile.h"
 #include "child_process.h"
+#include "sync.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -499,7 +500,8 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
 
 int32_t NT_MS_ABI nt_TerminateProcess(uintptr_t process, uint32_t code)
 {
-    if (process == UINTPTR_MAX) {
+    if (process == UINTPTR_MAX ||
+        nt_runtime_check_self_process(process, 1u) == NT_STATUS_SUCCESS) {
         if (worker_status_fd >= 0)
             finish_worker(code);
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
@@ -513,8 +515,12 @@ int32_t NT_MS_ABI nt_TerminateProcess(uintptr_t process, uint32_t code)
 
 nt_status NT_MS_ABI nt_NtTerminateProcess(uintptr_t process, nt_status exit_code)
 {
-    if (process == UINTPTR_MAX && worker_status_fd >= 0)
-        finish_worker((uint32_t)exit_code);
+    if (process == UINTPTR_MAX ||
+        nt_runtime_check_self_process(process, 1u) == NT_STATUS_SUCCESS) {
+        if (worker_status_fd >= 0)
+            finish_worker((uint32_t)exit_code);
+        return NT_STATUS_ACCESS_DENIED;
+    }
     return nt_runtime_terminate_child_process(process, (uint32_t)exit_code);
 }
 
