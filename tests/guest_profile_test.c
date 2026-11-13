@@ -45,11 +45,54 @@ int main(void)
     CHECK(drive >= 0);
     struct stat info;
     CHECK(fstat(drive, &info) == 0 && (info.st_mode & 0777) == 0700);
+    /* C: is literally a Linux directory; names are only a folder skeleton. */
+    char physical_c[512], profile_base[512];
+    CHECK(snprintf(physical_c, sizeof(physical_c),
+                   "%s/nt-native-linux/C:", state) > 0);
+    CHECK(snprintf(profile_base, sizeof(profile_base),
+                   "%s/nt-native-linux", state) > 0);
+    CHECK(stat(physical_c, &info) == 0 && S_ISDIR(info.st_mode));
+    CHECK(fstatat(drive, "Windows/System32", &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+          S_ISDIR(info.st_mode));
+    CHECK(fstatat(drive, "Windows/SysWOW64", &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+          S_ISDIR(info.st_mode));
+    CHECK(fstatat(drive, "Program Files", &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+          S_ISDIR(info.st_mode));
+    CHECK(fstatat(drive, "Program Files (x86)", &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+          S_ISDIR(info.st_mode));
+    CHECK(fstatat(drive, "ProgramData", &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+          S_ISDIR(info.st_mode));
+    CHECK(fstatat(drive, "Users/guest/Documents", &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+          S_ISDIR(info.st_mode));
+    CHECK(fstatat(drive, "Users/guest/AppData/Roaming", &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+          S_ISDIR(info.st_mode));
+    CHECK(mkdirat(drive, "Program Files/Demo App", 0700) == 0);
+    int install = openat(drive, "Program Files/Demo App/settings.ini",
+                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    CHECK(install >= 0 && write(install, "fedora", 6) == 6 && close(install) == 0);
+
     const char *file = "Users/guest/AppData/Roaming/preferences.dat";
     int config = openat(drive, file, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     CHECK(config >= 0 && write(config, "settings", 8) == 8 && close(config) == 0);
     CHECK(close(drive) == 0);
+    /* Atomically move a populated older profile, never copy its files. */
+    int profile_dir = open(profile_base, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    CHECK(profile_dir >= 0);
+    CHECK(renameat(profile_dir, "C:", profile_dir, "drive-c") == 0);
+    CHECK(fstatat(profile_dir, "C:", &info, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
     drive = nt_open_guest_profile(state, NULL);
+    CHECK(drive >= 0);
+    CHECK(fstatat(profile_dir, "drive-c", &info, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
+    CHECK(stat(physical_c, &info) == 0 && S_ISDIR(info.st_mode));
+    int migrated = openat(drive, "Program Files/Demo App/settings.ini", O_RDONLY | O_CLOEXEC);
+    char original[6];
+    CHECK(migrated >= 0 && read(migrated, original, sizeof(original)) == 6 &&
+          memcmp(original, "fedora", 6) == 0 && close(migrated) == 0);
+    /* In case of conflicting roots, refuse to choose and risk data loss. */
+    CHECK(mkdirat(profile_dir, "drive-c", 0700) == 0);
+    CHECK(nt_open_guest_profile(state, NULL) < 0 && errno == EEXIST);
+    CHECK(unlinkat(profile_dir, "drive-c", AT_REMOVEDIR) == 0);
+    CHECK(close(profile_dir) == 0);
     CHECK(drive >= 0);
     config = openat(drive, file, O_RDONLY | O_CLOEXEC);
     char saved[8];
