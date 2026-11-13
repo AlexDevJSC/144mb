@@ -965,6 +965,11 @@ int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path)
     return change_path(path, REMOVE_DIRECTORY);
 }
 
+int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
+{
+    return nt_MoveFileExA(from, to, 0);
+}
+
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags)
 {
     char source[PATH_MAX], destination[PATH_MAX];
@@ -1639,6 +1644,19 @@ int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destina
     return wide_path(source, from) && wide_path(destination, to) && nt_MoveFileExA(from, to, flags);
 }
 
+int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination)
+{
+    return nt_MoveFileExW(source, destination, 0);
+}
+
+int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destination,
+                              int32_t fail_if_exists)
+{
+    char from[PATH_MAX], to[PATH_MAX];
+    return wide_path(source, from) && wide_path(destination, to) &&
+           nt_CopyFileA(from, to, fail_if_exists);
+}
+
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer)
 {
     char path[PATH_MAX + 3];
@@ -1762,6 +1780,102 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
     if (written >= 0)
         *done = (uint32_t)written;
     return file_result(fd, written >= 0);
+}
+
+/* CopyFile is built on the same guest HANDLE table and path confinement
+ * as CreateFile. In particular, OPEN_ALWAYS does not truncate until
+ * both descriptors are safely opened and the source/destination inodes
+ * have been checked for identity. */
+int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
+                              int32_t fail_if_exists)
+{
+    const uint32_t generic_read = UINT32_C(0x80000000);
+    const uint32_t generic_write = UINT32_C(0x40000000);
+    const uintptr_t from = nt_CreateFileA(source, generic_read, FILE_READ, NULL,
+                                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    if (from == UINTPTR_MAX)
+        return 0;
+
+    const uintptr_t to = nt_CreateFileA(destination, generic_write, 0, NULL,
+                                       fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
+                                       FILE_ATTRIBUTE_NORMAL, 0);
+    if (to == UINTPTR_MAX) {
+        const uint32_t error = nt_GetLastError();
+        nt_CloseHandle(from);
+        nt_SetLastError(error);
+        return 0;
+    }
+    const bool created = fail_if_exists || nt_GetLastError() != NT_ERROR_ALREADY_EXISTS;
+
+    /* Hard links and different casings of the same path are equally
+     * forbidden as a copy destination: never truncate the source inode. */
+    bool identical = false;
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *read_file = find_handle(from);
+    const struct guest_file *write_file = find_handle(to);
+    if (read_file && write_file)
+        identical = read_file->device == write_file->device &&
+                    read_file->inode == write_file->inode;
+    pthread_mutex_unlock(&file_lock);
+
+    uint32_t error = NT_ERROR_SUCCESS;
+    int32_t success = 0;
+    unsigned char *buffer = NULL;
+    if (identical) {
+        error = NT_ERROR_ACCESS_DENIED;
+    } else if ((buffer = malloc(64u * 1024u)) == NULL) {
+        error = NT_ERROR_NOT_ENOUGH_MEMORY;
+    } else if (!nt_SetEndOfFile(to)) {
+        error = nt_GetLastError();
+    } else {
+        bool finished = false;
+        for (;;) {
+            uint32_t received = 0;
+            if (!nt_ReadFile(from, buffer, 64u * 1024u, &received, NULL)) {
+                error = nt_GetLastError();
+                break;
+            }
+            if (received == 0) {
+                finished = true;
+                break;
+            }
+            uint32_t position = 0;
+            while (position < received) {
+                uint32_t written = 0;
+                if (!nt_WriteFile(to, buffer + position, received - position, &written, NULL)) {
+                    error = nt_GetLastError();
+                    break;
+                }
+                if (written == 0) {
+                    error = NT_ERROR_GEN_FAILURE;
+                    break;
+                }
+                position += written;
+            }
+            if (error != NT_ERROR_SUCCESS)
+                break;
+        }
+        if (finished && nt_FlushFileBuffers(to))
+            success = 1;
+        else if (finished)
+            error = nt_GetLastError();
+    }
+    free(buffer);
+    if (!nt_CloseHandle(to) && success) {
+        success = 0;
+        error = nt_GetLastError();
+    }
+    if (!nt_CloseHandle(from) && success) {
+        success = 0;
+        error = nt_GetLastError();
+    }
+    if (!success) {
+        /* A newly created partial destination is not a valid copy. */
+        if (created)
+            nt_DeleteFileA(destination);
+        nt_SetLastError(error);
+    }
+    return success;
 }
 
 /* Native NTDLL file operations use the same guest HANDLE table and the
