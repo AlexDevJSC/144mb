@@ -4,11 +4,48 @@ Este subsistema **traduce las rutas que pide un ejecutable Windows hacia directo
 
 ## Qué existe
 
-- Un perfil persistente privado para los datos propios del invitado: C:\Users\guest\AppData\..., almacenado bajo $XDG_STATE_HOME/nt-native-linux/drive-c (o $HOME/.local/state/nt-native-linux/drive-c).
+- Una carpeta Linux normal y persistente para los datos propios del invitado: C:\Users\guest\AppData\..., almacenado bajo $XDG_STATE_HOME/nt-native-linux/C: (o $HOME/.local/state/nt-native-linux/C:).
 - Carpetas explícitamente autorizadas con acceso **directo de lectura/escritura**: Desktop, Documents, Downloads, Music, Pictures, Videos. La ruta Windows C:\Users\guest\Documents se corresponde con el directorio Linux autorizado.
 - A partir de este cambio, los permisos de carpeta se pueden **recordar una sola vez por usuario**. Cada ejecución posterior utiliza esa configuración sin repetir --share para cada programa.
 
 Esta autorización no es automática. No exponemos todo $HOME ni la raíz / del host. Bubblewrap conserva el aislamiento actual, y se mantienen las comprobaciones openat2 que impiden escapar de una raíz autorizada a través de enlaces simbólicos o cruces de montaje.
+
+## Transcripción de rutas y directorios
+
+Este diseño no emula un volumen. La carpeta `C:` es un directorio Linux real.
+El runtime recibe la ruta de Windows, elimina el prefijo `C:`, cambia
+los separadores de `\` a `/`, valida los componentes y accede al mismo
+fichero desde el descriptor de esa carpeta mediante APIs nativas Linux.
+Esta operación pertenece al runtime de archivos, no al compilador Linux.
+
+Ejemplo:
+
+~~~text
+Windows: C:\Program Files\Mi Aplicacion\config.ini
+Fedora:  $HOME/.local/state/nt-native-linux/C:/Program Files/Mi Aplicacion/config.ini
+~~~
+
+La carpeta `C:` incluye una estructura **de directorios vacíos** para instalar:
+`Windows/System32`, `Windows/SysWOW64`, `Windows/Fonts`, `Windows/Temp`,
+`Program Files`, `Program Files (x86)`, `ProgramData`, `Users/guest`,
+`Users/guest/AppData/Local`, `Users/guest/AppData/Roaming`,
+`Desktop`, `Documents`, `Downloads`, `Music`, `Pictures`, `Videos` dentro de
+`Users/guest`, además de `Users/Public` y `Temp`.
+
+No se incluyen DLL, binarios o datos Windows simulados. La aplicación o su
+instalador es responsable de crear las subcarpetas específicas que necesite.
+La existencia de `C:/Program Files` por sí sola no proporciona compatibilidad
+con cualquier instalador EXE o MSI.
+
+## Conservación de perfiles existentes
+
+Si había datos en `drive-c`, el perfil privado se renombra atómicamente a
+`C:` en el mismo directorio. No se copian los datos y se conservan sus inodos,
+permisos y contenido. Las aperturas concurrentes usan un bloqueo del
+directorio de estado para evitar carreras entre lanzadores.
+
+Si existen simultáneamente `drive-c` y `C:`, el lanzador falla sin borrar
+ni sobrescribir ninguno. Esa situación requiere revisión manual del usuario.
 
 ## Uso en Fedora 45
 
