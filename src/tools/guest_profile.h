@@ -4,7 +4,10 @@
 
 #include <stddef.h>
 
-/* Open a private persistent C: drive beneath the user's state directory.
+/* Open the ordinary Linux directory named "C:" beneath the user's state
+ * directory. On first use, migrate an existing private "drive-c" directory
+ * by rename (preserving original files, not copying them). Existing C: and
+ * drive-c at once is an error; a new directory is never overwritten.
  * An absolute state_home takes precedence over home/.local/state.
  * The caller owns the returned close-on-exec directory descriptor.
  */
