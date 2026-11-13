@@ -43,9 +43,16 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 - `make check-pe-isolated`: PE de procesos hijo comprueba `CREATE_SUSPENDED`, apertura, permisos y terminación del proceso. Una prueba `SKIP` por limitaciones de Bubblewrap **no es** una validación de esta ruta.
 - El estado final de los jobs Linux/UBSan/Fedora y los hallazgos de seguridad deben acompañar la PR de esta fase; no confundir compilación con validación de las rutas funcionales.
 
+### Consultas nativas del planificador
+
+`NtQueryInformationThread(ThreadBasicInformation)` ahora obtiene la máscara de afinidad de grupo cero y la prioridad real Linux del hilo, y conserva una captura final antes de la salida para consultas posteriores. Sin CPU del grupo representable o con valor `nice` ajeno al perfil, devuelve `STATUS_NOT_SUPPORTED`, en vez de inventar la afinidad o la prioridad. Pruebas PE comprueban la transición `NORMAL` → `BELOW_NORMAL` tanto antes como después de terminar el hilo.
+
 ## Madurez del componente
 
-- **Actualización propuesta en PR de prioridades y tiempos: 60 % → 66 % (+6 puntos porcentuales estimados, pendiente de CI).** El incremento corresponde a planificación discreta con efectos reales en Linux y telemetría de procesos/hilos, no a suspensión asíncrona, contextos completos o herencia de handles.
+- **Propuesta adicional tras esta PR: 66 % → 68 % (+2 puntos porcentuales estimados, sujetos a CI).** Corrige campos nativos previamente falsos. No completa contextos AMD64, suspensión arbitraria ni herencia general.
+
+
+- **Actual tras PR #76 fusionada: 66 %** (estimación, **+6 puntos porcentuales** respecto a 60 %; [CI Linux, UBSan y Fedora correcta](https://github.com/AlexDevJSC/144mb/actions/runs/43483478807)). El incremento corresponde a planificación discreta con efectos reales en Linux y telemetría de procesos/hilos, no a suspensión asíncrona, contextos completos o herencia de handles.
 
 
 - **Anterior: 35 %** (línea base tras PR #68).
