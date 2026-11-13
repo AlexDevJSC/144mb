@@ -260,6 +260,14 @@ int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path);
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags);
 int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to);
 int32_t NT_MS_ABI nt_CopyFileA(const char *from, const char *to, int32_t fail_if_exists);
+uint32_t NT_MS_ABI nt_GetCurrentDirectoryA(uint32_t size, char *buffer);
+int32_t NT_MS_ABI nt_SetCurrentDirectoryA(const char *path);
+uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size, char *buffer, char **leaf);
+uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path);
+struct nt_file_attribute_data;
+int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
+                                         struct nt_file_attribute_data *info);
+uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer);
 void *NT_MS_ABI nt_fopen(const char *path, const char *mode);
 int NT_MS_ABI nt_open_osfhandle(intptr_t handle, int flags);
 void *NT_MS_ABI nt_fdopen(int descriptor, const char *mode);
