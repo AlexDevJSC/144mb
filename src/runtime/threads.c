@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sched.h>
+#include <sys/resource.h>
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1881,6 +1882,124 @@ int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *proces
     *process_mask = mask;
     *system_mask = mask;
     return 1;
+}
+
+/* Bounded native-backed Windows priority classes. Linux nice is per-TID
+ * on current Fedora/Ubuntu kernels; a change to another thread requires
+ * proper THREAD_SET_INFORMATION and host scheduler permission.
+ *
+ * Windows REALTIME_PRIORITY_CLASS and dynamic boosts have no equivalent
+ * here: do not return fabricated success for those contracts. */
+static bool guest_priority_nice(int32_t guest, int *nice)
+{
+    switch (guest) {
+    case -15: *nice = 10; return true; /* IDLE */
+    case -2:  *nice = 4; return true;  /* LOWEST */
+    case -1:  *nice = 2; return true;  /* BELOW_NORMAL */
+    case 0:   *nice = 0; return true;  /* NORMAL */
+    case 1:   *nice = -2; return true; /* ABOVE_NORMAL */
+    case 2:   *nice = -4; return true; /* HIGHEST */
+    case 15:  *nice = -10; return true;/* TIME_CRITICAL */
+    default: return false;
+    }
+}
+
+static bool host_nice_priority(int nice, int32_t *guest)
+{
+    switch (nice) {
+    case 10: *guest = -15; return true;
+    case 4:  *guest = -2; return true;
+    case 2:  *guest = -1; return true;
+    case 0:  *guest = 0; return true;
+    case -2: *guest = 1; return true;
+    case -4: *guest = 2; return true;
+    case -10: *guest = 15; return true;
+    default: return false;
+    }
+}
+
+/* Read process-local TIDs from the canonical thread object; a numerical
+ * Windows HANDLE never becomes a Linux process identifier. */
+static nt_status priority_thread_tid(uintptr_t handle, uint32_t rights, pid_t *tid)
+{
+    if (handle == nt_GetCurrentThread()) {
+        *tid = gettid();
+        return NT_STATUS_SUCCESS;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *thread = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (thread == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (thread->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(thread->access & rights))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(thread);
+        if (state->owner_pid != (uint32_t)getpid())
+            status = NT_STATUS_NOT_SUPPORTED;
+        else if (state->signaled)
+            status = NT_STATUS_THREAD_IS_TERMINATING;
+        else
+            *tid = (pid_t)state->thread_id;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority)
+{
+    int requested = 0;
+    if (!guest_priority_nice(priority, &requested)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pid_t tid = 0;
+    const nt_status status = priority_thread_tid(handle, THREAD_SET_INFORMATION, &tid);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    /* Avoid relying on getpriority's ambiguous -1 return on success. */
+    errno = 0;
+    const int previous = getpriority(PRIO_PROCESS, (id_t)tid);
+    if (previous == -1 && errno != 0) {
+        nt_SetLastError(errno == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    if (previous == requested)
+        return 1;
+    if (setpriority(PRIO_PROCESS, (id_t)tid, requested) != 0) {
+        nt_SetLastError(errno == EACCES || errno == EPERM ? NT_ERROR_ACCESS_DENIED :
+                        errno == ESRCH ? NT_ERROR_INVALID_HANDLE :
+                        errno == EINVAL ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle)
+{
+    pid_t tid = 0;
+    const nt_status status = priority_thread_tid(handle,
+                           THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, &tid);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return INT32_MAX; /* THREAD_PRIORITY_ERROR_RETURN */
+    }
+    errno = 0;
+    const int value = getpriority(PRIO_PROCESS, (id_t)tid);
+    if (value == -1 && errno != 0) {
+        nt_SetLastError(errno == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
+        return INT32_MAX;
+    }
+    int32_t priority = 0;
+    if (!host_nice_priority(value, &priority)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return INT32_MAX;
+    }
+    return priority;
 }
 
 void NT_MS_ABI nt_ExitThread(uint32_t code)
