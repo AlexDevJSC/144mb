@@ -2,7 +2,7 @@
 #ifndef NT_RUNTIME_CHILD_PROCESS_H
 #define NT_RUNTIME_CHILD_PROCESS_H
 
-#include "ntnative/runtime.h"
+#include "nt_services.h"
 
 #include <stdint.h>
 #include <sys/types.h>
