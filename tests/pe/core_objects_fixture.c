@@ -180,7 +180,7 @@ static int test_thread_handles(void)
         (set_thread_description_fn)GetProcAddress(kernel, "SetThreadDescription");
     get_thread_description_fn get_description =
         (get_thread_description_fn)GetProcAddress(kernel, "GetThreadDescription");
-    static const WCHAR full_name[] = L"Nombre-\\u00e4-01234567890123456789";
+    static const WCHAR full_name[] = L"Nombre-ä-01234567890123456789";
     PWSTR name_copy = NULL;
     if (set_description == NULL || get_description == NULL ||
         set_description(alias, full_name) != (HRESULT)0x80070005u ||
