@@ -1436,7 +1436,7 @@ static void *thread_main(void *context)
     const bool cancelled = running_thread->terminate_at_start;
     const uint32_t cancel_code = running_thread->requested_exit_code;
     pthread_mutex_unlock(&wait_lock);
-    bool attached = false;
+    volatile bool attached = false; /* survives ExitThread siglongjmp */
     if (cancelled) {
         thread_result = cancel_code;
     } else if (sigsetjmp(thread_exit, 1) == 0) {
