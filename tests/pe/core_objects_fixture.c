@@ -173,6 +173,26 @@ static int test_thread_handles(void)
         GetLastError() != ERROR_ACCESS_DENIED || !CloseHandle(no_query))
         return 42;
 
+    typedef HRESULT (WINAPI *set_thread_description_fn)(HANDLE, PCWSTR);
+    typedef HRESULT (WINAPI *get_thread_description_fn)(HANDLE, PWSTR *);
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    set_thread_description_fn set_description =
+        (set_thread_description_fn)GetProcAddress(kernel, "SetThreadDescription");
+    get_thread_description_fn get_description =
+        (get_thread_description_fn)GetProcAddress(kernel, "GetThreadDescription");
+    static const WCHAR full_name[] = L"Nombre-\\u00e4-01234567890123456789";
+    PWSTR name_copy = NULL;
+    if (set_description == NULL || get_description == NULL ||
+        set_description(alias, full_name) != (HRESULT)0x80070005u ||
+        set_description(original, full_name) != S_OK ||
+        get_description(alias, &name_copy) != S_OK || name_copy == NULL)
+        return 43;
+    for (unsigned int i = 0; i < sizeof(full_name) / sizeof(full_name[0]); ++i)
+        if (name_copy[i] != full_name[i])
+            return 44;
+    if (LocalFree(name_copy) != NULL)
+        return 45;
+
     struct win_thread_basic basic = {0};
     ULONG returned = 0;
     SetLastError(0x755);
@@ -195,6 +215,14 @@ static int test_thread_handles(void)
     if (NtQueryInformationThread(alias, 0, &basic, sizeof(basic), NULL) != ST_OK ||
         basic.status != 0x144 || basic.teb != NULL)
         return 36;
+    name_copy = NULL;
+    if (get_description(native, &name_copy) != S_OK || name_copy == NULL)
+        return 46;
+    for (unsigned int i = 0; i < sizeof(full_name) / sizeof(full_name[0]); ++i)
+        if (name_copy[i] != full_name[i])
+            return 47;
+    if (LocalFree(name_copy) != NULL)
+        return 48;
     if (!CloseHandle(original) || !CloseHandle(alias) || !CloseHandle(native))
         return 37;
 
