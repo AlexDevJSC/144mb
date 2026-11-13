@@ -1708,6 +1708,109 @@ uint32_t NT_MS_ABI nt_GetFullPathNameW(const uint16_t *path, uint32_t size, uint
     return length;
 }
 
+/* ANSI entry points are UTF-8 at this stage of the native bridge:
+ * the true Windows ACP/OEM codepage model is tracked separately. */
+static bool utf8_guest_to_wide(const char *path, uint16_t result[PATH_MAX])
+{
+    if (!path) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    return nt_MultiByteToWideChar(65001, 8, path, -1, result, PATH_MAX) != 0;
+}
+
+uint32_t NT_MS_ABI nt_GetCurrentDirectoryA(uint32_t size, char *buffer)
+{
+    char full[PATH_MAX + 3];
+    pthread_mutex_lock(&root_lock);
+    const bool valid = copy_dos_path(guest_cwd, full, sizeof(full));
+    pthread_mutex_unlock(&root_lock);
+    if (!valid) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const size_t required = strlen(full) + 1;
+    if (size < required)
+        return (uint32_t)required;
+    if (!buffer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    memcpy(buffer, full, required);
+    return (uint32_t)required - 1;
+}
+
+int32_t NT_MS_ABI nt_SetCurrentDirectoryA(const char *path)
+{
+    uint16_t wide[PATH_MAX];
+    return utf8_guest_to_wide(path, wide) && nt_SetCurrentDirectoryW(wide);
+}
+
+uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size,
+                                      char *buffer, char **leaf)
+{
+    char relative[PATH_MAX], full[PATH_MAX + 3];
+    if (leaf)
+        *leaf = NULL;
+    if (!normalize_path(path, relative, true) ||
+        !copy_dos_path(relative, full, sizeof(full))) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const size_t required = strlen(full) + 1;
+    if (size < required)
+        return (uint32_t)required;
+    if (!buffer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    memcpy(buffer, full, required);
+    if (leaf && relative[0] != '\0') {
+        char *slash = strrchr(buffer, '\\');
+        *leaf = slash ? slash + 1 : NULL;
+    }
+    return (uint32_t)required - 1;
+}
+
+uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path)
+{
+    uint16_t wide[PATH_MAX];
+    return utf8_guest_to_wide(path, wide) ?
+           nt_GetFileAttributesW(wide) : UINT32_MAX;
+}
+
+int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
+                                         struct nt_file_attribute_data *info)
+{
+    uint16_t wide[PATH_MAX];
+    return utf8_guest_to_wide(path, wide) &&
+           nt_GetFileAttributesExW(wide, level, info);
+}
+
+uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer)
+{
+    uint16_t wide[PATH_MAX];
+    const uint32_t count = nt_GetTempPathW(PATH_MAX, wide);
+    if (count == 0 || count >= PATH_MAX) {
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    const int32_t required = nt_WideCharToMultiByte(65001, 0x80, wide, -1,
+                                                    NULL, 0, NULL, NULL);
+    if (required <= 0)
+        return 0;
+    if (size < (uint32_t)required)
+        return (uint32_t)required;
+    if (!buffer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (nt_WideCharToMultiByte(65001, 0x80, wide, -1, buffer, required,
+                               NULL, NULL) != required)
+        return 0;
+    return (uint32_t)required - 1;
+}
+
 static int duplicate_handle(uintptr_t handle, unsigned int access)
 {
     pthread_mutex_lock(&file_lock);
