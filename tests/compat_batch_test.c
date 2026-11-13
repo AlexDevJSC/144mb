@@ -304,23 +304,23 @@ static void check_files(void)
     CHECK(nt_GetCurrentDirectoryA(0, NULL) == 4);
     char win_cwd[256], absolute_path[256], *base_name = NULL;
     CHECK(nt_GetCurrentDirectoryA(sizeof(win_cwd), win_cwd) == 3 &&
-          strcmp(win_cwd, "C:\\\\") == 0);
-    CHECK(nt_SetCurrentDirectoryA("C:\\\\DATA") != 0);
+          strcmp(win_cwd, "C:\\") == 0);
+    CHECK(nt_SetCurrentDirectoryA("C:\\DATA") != 0);
     CHECK(nt_GetCurrentDirectoryA(sizeof(win_cwd), win_cwd) == 7 &&
-          strcmp(win_cwd, "C:\\\\DATA") == 0);
-    CHECK(nt_GetFullPathNameA("..\\\\data\\\\scores.txt", sizeof(absolute_path),
-                              absolute_path, &base_name) == strlen("C:\\\\data\\\\scores.txt") &&
-          strcmp(absolute_path, "C:\\\\data\\\\scores.txt") == 0 &&
+          strcmp(win_cwd, "C:\\DATA") == 0);
+    CHECK(nt_GetFullPathNameA("..\\data\\scores.txt", sizeof(absolute_path),
+                              absolute_path, &base_name) == strlen("C:\\data\\scores.txt") &&
+          strcmp(absolute_path, "C:\\data\\scores.txt") == 0 &&
           base_name != NULL && strcmp(base_name, "scores.txt") == 0);
-    CHECK(nt_SetCurrentDirectoryA("C:\\\\") != 0);
-    CHECK((nt_GetFileAttributesA("C:\\\\DATA") & 0x10u) != 0);
+    CHECK(nt_SetCurrentDirectoryA("C:\\") != 0);
+    CHECK((nt_GetFileAttributesA("C:\\DATA") & 0x10u) != 0);
     struct nt_file_attribute_data folder_attributes;
     CHECK(nt_GetFileAttributesExA("data", 0, &folder_attributes) != 0 &&
           (folder_attributes.attributes & 0x10u) != 0);
     const uint32_t temp_required = nt_GetTempPathA(0, NULL);
     CHECK(temp_required > 3 && temp_required < sizeof(absolute_path));
     CHECK(nt_GetTempPathA(sizeof(absolute_path), absolute_path) == temp_required - 1 &&
-          strncmp(absolute_path, "C:\\\\", 3) == 0);
+          strncmp(absolute_path, "C:\\", 3) == 0);
     CHECK(nt_CreateDirectoryA("data\\nested", NULL) != 0);
     CHECK(nt_CreateDirectoryA("DATA\\Nested", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
     CHECK(nt_CreateDirectoryA("data\\nested\\..\\subfolder", NULL) != 0);
