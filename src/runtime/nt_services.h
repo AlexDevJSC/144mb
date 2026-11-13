@@ -96,6 +96,7 @@ nt_status NT_MS_ABI nt_NtQuerySemaphore(uintptr_t handle, uint32_t information_c
                                         void *buffer, uint32_t length, uint32_t *returned_length);
 nt_status NT_MS_ABI nt_NtReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous);
 struct nt_client_id;
+nt_status NT_MS_ABI nt_NtTerminateProcess(uintptr_t process, nt_status exit_code);
 nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
     const struct nt_object_attributes *attributes, const struct nt_client_id *client_id);
 nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous);
