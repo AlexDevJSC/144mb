@@ -1661,6 +1661,35 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     return handle;
 }
 
+/* CreateRemoteThread/Ex are supported only when the target HANDLE
+ * denotes this guest's current process with PROCESS_CREATE_THREAD rights.
+ * An arbitrary Windows HANDLE is never interpreted as a host Linux PID;
+ * no cross-process memory injection or token impersonation is attempted. */
+uintptr_t NT_MS_ABI nt_CreateRemoteThread(uintptr_t process, const void *security,
+                                         size_t stack, nt_thread_start start,
+                                         void *parameter, uint32_t flags, uint32_t *thread_id)
+{
+    const nt_status status = nt_runtime_check_self_process(process, 0x2u);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    return nt_CreateThread(security, stack, start, parameter, flags, thread_id);
+}
+
+uintptr_t NT_MS_ABI nt_CreateRemoteThreadEx(uintptr_t process, const void *security,
+                                           size_t stack, nt_thread_start start,
+                                           void *parameter, uint32_t flags,
+                                           const void *attributes, uint32_t *thread_id)
+{
+    if (attributes != NULL) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    return nt_CreateRemoteThread(process, security, stack, start,
+                                 parameter, flags, thread_id);
+}
+
 /* Native thread creation is a bounded adapter over the same owned
  * pthread/TEB path as CreateThread. Unsupported extended attributes must
  * fail before the thread is started. Native entrypoints preserve LastError. */
@@ -1674,8 +1703,11 @@ nt_status NT_MS_ABI nt_NtCreateThreadEx(uintptr_t *handle, uint32_t desired_acce
     if (handle == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
     *handle = 0;
-    if (process != UINTPTR_MAX)
-        return NT_STATUS_INVALID_HANDLE;
+    /* NtCreateThreadEx accepts real handles for our own process.
+     * Unlike pseudo-handles these must grant PROCESS_CREATE_THREAD. */
+    const nt_status process_status = nt_runtime_check_self_process(process, 0x2u);
+    if (process_status != NT_STATUS_SUCCESS)
+        return process_status;
     if (start == NULL || desired_access & ~THREAD_ALL_ACCESS)
         return NT_STATUS_INVALID_PARAMETER;
     if (attributes != NULL) {

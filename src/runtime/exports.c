@@ -400,6 +400,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(CreateFile2),
     WIN_EXPORT(CreateFileW),
     WIN_EXPORT(CreateThread),
+    WIN_EXPORT(CreateRemoteThread),
+    WIN_EXPORT(CreateRemoteThreadEx),
     WIN_EXPORT(TerminateThread),
     WIN_EXPORT(SuspendThread),
     WIN_EXPORT(ResumeThread),

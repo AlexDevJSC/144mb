@@ -7,6 +7,7 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 
 | Dominio | Entradas del invitado | Comportamiento |
 | --- | --- | --- |
+| Creación remota acotada | `CreateRemoteThread`, `CreateRemoteThreadEx`, `NtCreateThreadEx` con HANDLE real | Admite la creación de hilos exclusivamente en el proceso actual, validando `PROCESS_CREATE_THREAD` y reutilizando la puerta `CREATE_SUSPENDED` y el TEB/TLS de los hilos propios. Los procesos hijo o ajenos, los atributos extendidos y los espacios de direcciones externos no son compatibles. |
 | Creación de hilos | `CreateThread`, `NtCreateThreadEx` | Hilos pthread del proceso actual, ABI x64, TEB/TLS de invitado, opción `CREATE_SUSPENDED`, handles con derechos; `NtCreateThreadEx` admite solo proceso actual, sin lista extendida de atributos ni flags no probadas |
 | Abrir e identificar hilos | `OpenThread`, `NtOpenThread`, `GetThreadId`, `GetProcessIdOfThread`, `NtQueryInformationThread` (Basic) | IDs locales, alias de HANDLE independientes, `CLIENT_ID` y derechos de consulta; no se confunde un HANDLE con un PID/TID Linux |
 | Descripción Unicode | `SetThreadDescription`, `GetThreadDescription` | Conserva el nombre UTF-16 completo en el objeto canónico y entrega búfer liberable con `LocalFree`. El nombre abreviado de pthread es solo diagnóstico. |
@@ -47,9 +48,16 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 
 `NtQueryInformationThread(ThreadBasicInformation)` ahora obtiene la máscara de afinidad de grupo cero y la prioridad real Linux del hilo, y conserva una captura final antes de la salida para consultas posteriores. Sin CPU del grupo representable o con valor `nice` ajeno al perfil, devuelve `STATUS_NOT_SUPPORTED`, en vez de inventar la afinidad o la prioridad. Pruebas PE comprueban la transición `NORMAL` → `BELOW_NORMAL` tanto antes como después de terminar el hilo.
 
+### Creación de hilos mediante handles de proceso
+
+`CreateRemoteThread` y `CreateRemoteThreadEx` aceptan un seudohandle o HANDLE real del proceso actual con derecho `PROCESS_CREATE_THREAD`. `NtCreateThreadEx` comparte esa validación. Se prueba con un PE AMD64 que las tres rutas pueden crear hilos suspendidos, reanudarlos y observar el código de salida; los handles de solo consulta o los atributos no implementados devuelven error.
+
 ## Madurez del componente
 
-- **Propuesta adicional tras esta PR: 66 % → 68 % (+2 puntos porcentuales estimados, sujetos a CI).** Corrige campos nativos previamente falsos. No completa contextos AMD64, suspensión arbitraria ni herencia general.
+- **Propuesta adicional tras esta PR: 68 % → 70 % (+2 puntos porcentuales estimados, pendiente de CI).** El soporte remoto sigue limitado al proceso actual.
+
+
+- **Actual tras PR #78 fusionada: 68 %** (estimación, **+2 puntos porcentuales** respecto a 66 %; [CI Linux, UBSan y Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43484452467)). Corrige campos nativos previamente falsos. No completa contextos AMD64, suspensión arbitraria ni herencia general.
 
 
 - **Actual tras PR #76 fusionada: 66 %** (estimación, **+6 puntos porcentuales** respecto a 60 %; [CI Linux, UBSan y Fedora correcta](https://github.com/AlexDevJSC/144mb/actions/runs/43483478807)). El incremento corresponde a planificación discreta con efectos reales en Linux y telemetría de procesos/hilos, no a suspensión asíncrona, contextos completos o herencia de handles.
