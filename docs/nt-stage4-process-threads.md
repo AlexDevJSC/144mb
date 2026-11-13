@@ -39,10 +39,10 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 ## Madurez del componente
 
 - **Anterior: 35 %** (línea base tras PR #68).
-- **Propuesto tras PR #71: 55 %** (estimación, **+20 puntos porcentuales**, pendiente de la validación final de la PR).
+- **Actual tras PR #71 y #72 fusionadas: 55 %** (estimación, **+20 puntos porcentuales**).
 - **Justificación:** ahora existen rutas conectadas de creación, apertura, identidad, consulta, suspensión de arranque, terminación y cierre tanto para hilos como para procesos hijo, y pruebas Win64/host que recorren varias de ellas.
 - **Por qué no 70 % ni 100 %:** faltan contratos sustanciales de suspensión/terminación remota, captura y restauración de contextos AMD64, tokens y permisos NT, herencia de handles, servicios entre procesos, prioridades/afinidad y comparación de comportamiento con Windows real.
 
 Este número **no mide aceleración de CPU**. No se ha realizado ni demostrado una mejora 2× en rendimiento; «duplicar porcentaje» y «duplicar rendimiento» son objetivos distintos.
 
-Las pruebas de GitHub Actions, en particular el job Linux con UBSan, el RPM Fedora y cualquier test de aislamiento omitido, deben acompañar la entrega. Un fallo obliga a corregir o a retirar la estimación de madurez antes de cerrar la PR.
+La [CI del último commit de la rama de integración](https://github.com/AlexDevJSC/144mb/actions/runs/43341757354) terminó correctamente tanto en Linux como en Fedora RPM. Las pruebas omitidas por restricciones del entorno no constituyen validación. Permanecen necesarios tests diferenciales Windows y de estrés para justificar porcentajes mayores.
