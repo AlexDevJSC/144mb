@@ -51,7 +51,7 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started;
-    bool termination_requested;
+    bool termination_requested, child_guest;
     int32_t semaphore_count, semaphore_maximum;
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
@@ -60,7 +60,7 @@ struct waitable {
     pthread_t host;
     uint32_t thread_id, exit_code, owner_pid;
     uint32_t requested_exit_code;
-    int pidfd;
+    int pidfd, start_gate_fd;
     nt_thread_start start;
     void *parameter;
     /* Canonical named event/semaphore entries own a name. Aliases share
@@ -269,7 +269,7 @@ static struct waitable *new_waitable(enum waitable_kind kind)
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         if (waitables[i].refs == 0 && waitables[i].links == 0) {
             waitables[i] = (struct waitable){.handle = next_handle++, .refs = 1, .kind = kind,
-                                             .access = SYNCHRONIZE, .pidfd = -1};
+                                             .access = SYNCHRONIZE, .pidfd = -1, .start_gate_fd = -1};
             return &waitables[i];
         }
     }
@@ -1032,6 +1032,10 @@ static void *reap_child(void *context)
     pthread_mutex_lock(&wait_lock);
     if (watch->process->termination_requested)
         code = watch->process->requested_exit_code;
+    if (watch->thread->start_gate_fd >= 0) {
+        close(watch->thread->start_gate_fd);
+        watch->thread->start_gate_fd = -1;
+    }
     if (watch->process->pidfd >= 0) {
         close(watch->process->pidfd);
         watch->process->pidfd = -1;
@@ -1046,7 +1050,8 @@ static void *reap_child(void *context)
     return NULL;
 }
 
-bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_information *info)
+bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
+                            struct nt_process_information *info)
 {
     struct child_watch *watch = malloc(sizeof(*watch));
     pthread_attr_t attr;
@@ -1066,6 +1071,9 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         thread->thread_id = (uint32_t)pid;
         thread->owner_pid = (uint32_t)pid;
         thread->access = THREAD_ALL_ACCESS;
+        thread->child_guest = true;
+        thread->start_gate_fd = start_fd;
+        thread->suspend_count = start_fd >= 0 ? 1u : 0u;
         process->access = PROCESS_ALL_ACCESS;
         process->owner_pid = (uint32_t)pid;
         process->pidfd = -1;
@@ -1479,7 +1487,7 @@ static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
         status = NT_STATUS_ACCESS_DENIED;
     else {
         struct waitable *state = wait_state(thread);
-        if (state->owner_pid != (uint32_t)getpid())
+        if (state->owner_pid != (uint32_t)getpid() && !state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled)
             status = NT_STATUS_THREAD_IS_TERMINATING;
@@ -1524,7 +1532,7 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
         status = NT_STATUS_ACCESS_DENIED;
     else {
         struct waitable *state = wait_state(thread);
-        if (state->owner_pid != (uint32_t)getpid())
+        if (state->owner_pid != (uint32_t)getpid() && !state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled)
             status = NT_STATUS_THREAD_IS_TERMINATING;
@@ -1532,8 +1540,24 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
             if (previous != NULL)
                 *previous = state->suspend_count;
             if (state->suspend_count != 0) {
-                --state->suspend_count;
-                pthread_cond_broadcast(&wait_changed);
+                /* For a child created suspended, release the private fd5
+                 * execution gate only on the final ResumeThread. Never
+                 * reuse a PID or send SIGCONT to an unrelated process. */
+                if (state->suspend_count == 1 && state->child_guest) {
+                    const unsigned char token = 'G';
+                    ssize_t written;
+                    do {
+                        written = write(state->start_gate_fd, &token, 1);
+                    } while (written < 0 && errno == EINTR);
+                    close(state->start_gate_fd);
+                    state->start_gate_fd = -1;
+                    if (written != 1)
+                        status = NT_STATUS_THREAD_IS_TERMINATING;
+                }
+                if (status == NT_STATUS_SUCCESS) {
+                    --state->suspend_count;
+                    pthread_cond_broadcast(&wait_changed);
+                }
             }
         }
     }
