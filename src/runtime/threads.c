@@ -51,7 +51,7 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started;
-    bool termination_requested, child_guest, terminate_at_start;
+    bool termination_requested, child_guest, terminate_at_start, self_process;
     int32_t semaphore_count, semaphore_maximum;
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
@@ -71,6 +71,7 @@ struct waitable {
 
 static struct waitable waitables[WAITABLE_COUNT];
 static uintptr_t next_handle = 0x76000001;
+static struct waitable *current_process_state;
 static pthread_mutex_t wait_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wait_changed = PTHREAD_COND_INITIALIZER;
 static _Thread_local struct waitable *running_thread;
@@ -1183,7 +1184,23 @@ static nt_status open_local_process(uintptr_t *result, uint32_t access,
             break;
         }
     }
-    nt_status status = NT_STATUS_INVALID_CID;
+    /* Model the current process as a persistent canonical state. Only
+     * aliases are exposed to the guest; the internal canonical HANDLE
+     * itself remains zero and cannot be closed by the application. */
+    if (original == NULL && pid == (uint32_t)getpid()) {
+        if (current_process_state == NULL) {
+            current_process_state = new_waitable(PROCESS);
+            if (current_process_state != NULL) {
+                current_process_state->handle = 0;
+                current_process_state->owner_pid = (uint32_t)getpid();
+                current_process_state->access = PROCESS_ALL_ACCESS;
+                current_process_state->self_process = true;
+            }
+        }
+        original = current_process_state;
+    }
+    nt_status status = original == NULL && pid == (uint32_t)getpid() ?
+                       NT_STATUS_NO_MEMORY : NT_STATUS_INVALID_CID;
     if (original != NULL) {
         if (access & ~original->access)
             status = NT_STATUS_ACCESS_DENIED;
@@ -1203,6 +1220,18 @@ static nt_status open_local_process(uintptr_t *result, uint32_t access,
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
+}
+
+bool nt_runtime_is_self_process_handle(uintptr_t handle)
+{
+    if (handle == UINTPTR_MAX)
+        return true;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    const bool self = object != NULL && object->kind == PROCESS &&
+                      wait_state(object)->self_process;
+    pthread_mutex_unlock(&wait_lock);
+    return self;
 }
 
 uintptr_t NT_MS_ABI nt_OpenProcess(uint32_t access, int32_t inherit, uint32_t pid)
