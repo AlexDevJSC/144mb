@@ -203,5 +203,97 @@ int import_fixture_entry(void)
         SetThreadAffinityMask(GetCurrentThread(), 0) != 0 ||
         GetLastError() != ERROR_INVALID_PARAMETER)
         return 42;
+    /* Native-backed priority controls: changing nice=2 must be visible
+     * in the test guest, not simply stored in a fake Win32 field. */
+    FILETIME created = {0}, exited = {0}, kernel_time = {0}, user_time = {0};
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel_time, &user_time) ||
+        (created.dwLowDateTime == 0 && created.dwHighDateTime == 0) ||
+        exited.dwLowDateTime || exited.dwHighDateTime ||
+        !GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel_time, &user_time) ||
+        exited.dwLowDateTime || exited.dwHighDateTime)
+        return 47;
+
+    HANDLE low = CreateThread(NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL);
+    if (low == NULL || GetThreadPriority(low) != THREAD_PRIORITY_NORMAL ||
+        !SetThreadPriority(low, THREAD_PRIORITY_BELOW_NORMAL) ||
+        GetThreadPriority(low) != THREAD_PRIORITY_BELOW_NORMAL)
+        return 43;
+    if (!GetThreadTimes(low, &created, &exited, &kernel_time, &user_time) ||
+        (created.dwLowDateTime == 0 && created.dwHighDateTime == 0) ||
+        exited.dwLowDateTime || exited.dwHighDateTime)
+        return 48;
+    DWORD low_id = GetThreadId(low);
+    HANDLE limited = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, low_id);
+    SetLastError(0);
+    if (limited == NULL || SetThreadPriority(limited, THREAD_PRIORITY_NORMAL) ||
+        GetLastError() != ERROR_ACCESS_DENIED ||
+        GetThreadPriority(limited) != THREAD_PRIORITY_BELOW_NORMAL ||
+        !CloseHandle(limited))
+        return 44;
+    SetLastError(0);
+    if (SetThreadPriority(low, 12) || GetLastError() != ERROR_INVALID_PARAMETER ||
+        ResumeThread(low) != 1 || WaitForSingleObject(low, 5000) != WAIT_OBJECT_0)
+        return 45;
+    if (!GetThreadTimes(low, &created, &exited, &kernel_time, &user_time) ||
+        (exited.dwLowDateTime == 0 && exited.dwHighDateTime == 0) ||
+        !CloseHandle(low))
+        return 49;
+    SetLastError(0);
+    if (GetThreadPriority(NULL) != THREAD_PRIORITY_ERROR_RETURN ||
+        GetLastError() != ERROR_INVALID_HANDLE)
+        return 46;
+    /* Cross-process thread injection is deliberately unsupported, but
+     * Windows programs can use the same API with a current-process HANDLE. */
+    HANDLE self = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_LIMITED_INFORMATION,
+                              FALSE, GetCurrentProcessId());
+    HANDLE no_create = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                   FALSE, GetCurrentProcessId());
+    if (self == NULL || no_create == NULL)
+        return 50;
+    entered = 0;
+    DWORD remote_id = 0;
+    HANDLE remote = CreateRemoteThread(self, NULL, 0, worker, NULL,
+                                       CREATE_SUSPENDED, &remote_id);
+    if (remote == NULL || remote_id == 0 || entered != 0 ||
+        ResumeThread(remote) != 1 || WaitForSingleObject(remote, 5000) != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(remote, &exit_code) || exit_code != 0x144u ||
+        !CloseHandle(remote))
+        return 51;
+    SetLastError(0);
+    if (CreateRemoteThread(no_create, NULL, 0, worker, NULL, 0, NULL) != NULL ||
+        GetLastError() != ERROR_ACCESS_DENIED)
+        return 52;
+    remote = NULL;
+    SetLastError(0x788u);
+    if (NtCreateThreadEx(&remote, THREAD_ALL_ACCESS, NULL, self, worker, NULL,
+                         1, 0, 0, 0, NULL) != 0 || remote == NULL ||
+        GetLastError() != 0x788u ||
+        ResumeThread(remote) != 1 ||
+        WaitForSingleObject(remote, 5000) != WAIT_OBJECT_0 ||
+        !CloseHandle(remote))
+        return 53;
+    if (NtCreateThreadEx(&remote, THREAD_ALL_ACCESS, NULL, no_create, worker, NULL,
+                         1, 0, 0, 0, NULL) != STATUS_ACCESS_DENIED)
+        return 54;
+    typedef HANDLE (WINAPI *remote_ex_proc)(HANDLE, const void *, SIZE_T,
+                                            LPTHREAD_START_ROUTINE, void *, DWORD,
+                                            const void *, DWORD *);
+    FARPROC raw_remote_ex = GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
+                                           "CreateRemoteThreadEx");
+    remote_ex_proc remote_ex = NULL;
+    __builtin_memcpy(&remote_ex, &raw_remote_ex, sizeof(remote_ex));
+    if (remote_ex == NULL)
+        return 55;
+    entered = 0;
+    remote = remote_ex(self, NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL, &remote_id);
+    if (remote == NULL || entered != 0 ||
+        ResumeThread(remote) != 1 || WaitForSingleObject(remote, 5000) != WAIT_OBJECT_0 ||
+        !CloseHandle(remote))
+        return 56;
+    SetLastError(0);
+    if (remote_ex(self, NULL, 0, worker, NULL, 0, (const void *)(uintptr_t)1, NULL) != NULL ||
+        GetLastError() != ERROR_NOT_SUPPORTED ||
+        !CloseHandle(self) || !CloseHandle(no_create))
+        return 57;
     return 0;
 }

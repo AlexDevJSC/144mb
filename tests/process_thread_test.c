@@ -14,6 +14,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+static uint64_t filetime_value(const struct nt_file_time *stamp)
+{
+    return ((uint64_t)stamp->high << 32) | stamp->low;
+}
+
 static void check(int condition, const char *message)
 {
     if (!condition) {
@@ -55,6 +60,10 @@ int main(void)
           "self alias without terminate right");
     check(nt_runtime_close_waitable(self), "release self process alias");
     check(nt_GetProcessId(info.process) == (uint32_t)child, "child process ID");
+    struct nt_file_time created = {0}, exited = {0}, kernel = {0}, user = {0};
+    check(nt_GetProcessTimes(info.process, &created, &exited, &kernel, &user) &&
+          filetime_value(&created) != 0 && filetime_value(&exited) == 0,
+          "running child process creation and CPU times");
     check(nt_GetProcessIdOfThread(info.thread) == (uint32_t)child, "child thread owner");
     uintptr_t restricted = 0;
     check(nt_runtime_duplicate_waitable(info.process, 0x1000u, 0, 0, &restricted) ==
@@ -74,6 +83,10 @@ int main(void)
           "native restricted process cannot terminate child");
     check(nt_runtime_close_waitable(native) && nt_runtime_close_waitable(by_pid),
           "close reopened child handles");
+    nt_SetLastError(0);
+    check(!nt_GetProcessTimes(restricted, NULL, &exited, &kernel, &user) &&
+          nt_GetLastError() == NT_ERROR_INVALID_PARAMETER,
+          "reject incomplete GetProcessTimes outputs");
 
     nt_SetLastError(0);
     check(!nt_TerminateProcess(restricted, 11) &&
@@ -96,6 +109,10 @@ int main(void)
     }
     check(nt_WaitForSingleObject(info.process, 5000) == 0, "wait on child");
     check(nt_WaitForSingleObject(info.thread, 0) == 0, "wait on child primary thread");
+    check(nt_GetProcessTimes(info.process, &created, &exited, &kernel, &user) &&
+          filetime_value(&exited) >= filetime_value(&created) &&
+          filetime_value(&exited) != 0,
+          "terminated child process exit and wait4 rusage");
     if (status == NT_STATUS_SUCCESS) {
         uint32_t code = 0;
         check(nt_GetExitCodeProcess(info.process, &code) && code == 0x12345678u,

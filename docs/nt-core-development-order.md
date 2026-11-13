@@ -53,6 +53,14 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **13-11-2026, PR #74 fusionada — afinidad y ciclo de vida: 55 % → 60 % (+5 puntos porcentuales estimados, CI validada).** `SetThreadAffinityMask`, `NtSetInformationThread` clase 4 y `GetProcessAffinityMask` aplican y consultan afinidad real Linux en el perfil representable de 64 CPU, con derechos y errores explícitos; prueba de 48 hilos y alias. Sigue pendiente la compatibilidad con múltiples processor groups, prioridades y contextos de hilos activos. Resultados: [Linux, UBSan y Fedora correctos (run 43346528358)](https://github.com/AlexDevJSC/144mb/actions/runs/43346528358). Prueba positiva de afinidad Linux y 48 ciclos de vida ejecutada sin SKIP; ello no demuestra grupos Windows múltiples ni planificación completa.
 
+- **13-11-2026, PR #76 fusionada — planificación y tiempos: 60 % → 66 % (+6 puntos porcentuales estimados).** Añade prioridades reales de hilos por `nice` con derechos, `GetThreadTimes` y `GetProcessTimes` con FILETIME y tiempos CPU de Linux. No se incluyen contextos arbitrarios, suspensión asíncrona ni herencia general. [CI Linux/UBSan/Fedora superada (run 43483478807)](https://github.com/AlexDevJSC/144mb/actions/runs/43483478807).
+
+- **13-11-2026, PR #78 integrada — consultas nativas: 66 % → 68 % (+2 puntos porcentuales estimados).** `NtQueryInformationThread(ThreadBasicInformation)` deja de devolver prioridad 8 y afinidad 1 ficticias; consulta el planificador Linux para hilos activos y usa una captura final del propio hilo para consultas posteriores a su terminación. El perfil sigue acotado a CPU group 0 y valores de prioridad representables.
+
+- **13-11-2026, PR #79 fusionada — creación de hilos en el proceso propio: 68 % → 70 % (+2 puntos porcentuales estimados, CI Linux/UBSan/Fedora correcta).** `CreateRemoteThread`, `CreateRemoteThreadEx` y `NtCreateThreadEx` aceptan el proceso actual a través de handles reales con `PROCESS_CREATE_THREAD`; nunca habilitan la inyección en otro proceso Linux o Windows, ni atributos extendidos no implementados. Se prueban creación suspendida y derechos.
+
+- **13-11-2026, preparación de pruebas físicas Fedora (esta PR): 70 % → 70 % (+0 puntos).** Se añade `scripts/fedora-check-stage4.sh`, que ejecuta pruebas de runtime Linux, PE Windows, UBSan y procesos hijo aislados, y rechaza explícitamente suites omitidas (`SKIP`). Un script de pruebas no añade contratos al runtime y no justifica aumentar el porcentaje.
+
 ### Formato de cierre para cambios futuros
 
 > **Componente 4 — Procesos e hilos:** 35 % → XX % (**+N puntos porcentuales**, estimación).\

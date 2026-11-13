@@ -53,11 +53,24 @@ uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t thread_id);
 nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
                                    uintptr_t *teb, uint32_t *exit_code);
+nt_status nt_runtime_query_thread_scheduling(uintptr_t handle, uintptr_t *affinity,
+                                             int32_t *priority);
+uintptr_t NT_MS_ABI nt_CreateRemoteThread(uintptr_t process, const void *security,
+    size_t stack, nt_thread_start start, void *parameter, uint32_t flags, uint32_t *thread_id);
+uintptr_t NT_MS_ABI nt_CreateRemoteThreadEx(uintptr_t process, const void *security,
+    size_t stack, nt_thread_start start, void *parameter, uint32_t flags,
+    const void *attributes, uint32_t *thread_id);
 uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_thread_start start,
                                    void *parameter, uint32_t flags, uint32_t *thread_id);
 uint32_t NT_MS_ABI nt_SuspendThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask);
+int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority);
+int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle);
+int32_t NT_MS_ABI nt_GetThreadTimes(uintptr_t handle, struct nt_file_time *created,
+    struct nt_file_time *exited, struct nt_file_time *kernel, struct nt_file_time *user);
+int32_t NT_MS_ABI nt_GetProcessTimes(uintptr_t handle, struct nt_file_time *created,
+    struct nt_file_time *exited, struct nt_file_time *kernel, struct nt_file_time *user);
 int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *process_mask,
                                             uintptr_t *system_mask);
 void NT_MS_ABI nt_ExitThread(uint32_t code);

@@ -114,13 +114,18 @@ nt_status NT_MS_ABI nt_NtQueryInformationThread(uintptr_t thread, uint32_t info_
                                              sizeof(struct nt_thread_basic_information), returned_length);
     if (status != NT_STATUS_SUCCESS)
         return status;
+    uintptr_t mask = 0;
+    int32_t base_priority = 0;
+    const nt_status sched_status = nt_runtime_query_thread_scheduling(thread, &mask, &base_priority);
+    if (sched_status != NT_STATUS_SUCCESS)
+        return sched_status;
     const struct nt_thread_basic_information result = {
         .exit_status = (nt_status)exit_status,
         .teb_base = (void *)teb,
         .client_id = {(uintptr_t)getpid(), (uintptr_t)tid},
-        .affinity_mask = 1,
-        .priority = 8,
-        .base_priority = 8
+        .affinity_mask = mask,
+        .priority = base_priority,
+        .base_priority = base_priority
     };
     memcpy(buffer, &result, sizeof(result));
     return NT_STATUS_SUCCESS;

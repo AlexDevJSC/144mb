@@ -124,6 +124,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | [Capa Kernel/User](docs/kernel-user.md) | ABI, objetos compartidos y módulos de Windows |
 | [E/S de archivos NT](docs/kernel-user.md#es-síncrona-nativa-del-mismo-handle-continuación-de-pr-61) | Lectura, escritura, metadatos y sincronización sobre handles compartidos |
 | [Núcleo NT: estado y criterios](docs/nt-core-readiness.md) | Siete componentes críticos, pruebas y límites pendientes |
+| [Prueba del componente 4 en Fedora físico](scripts/fedora-check-stage4.sh) | Puerta de aceptación que rechaza los tests aislados omitidos y conserva los límites de compatibilidad |
 | [Orden de desarrollo NT](docs/nt-core-development-order.md) | Prioridad acordada 4 → 5 → 2 → 3 → 1 → 6 → 7 y criterios de transición |
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |
