@@ -112,6 +112,13 @@ copia creada incompleta; la sustitución de una copia preexistente **no
 es transaccional** y puede dejar contenido parcial si falla el disco.
 No se garantiza todavía la reproducción de todos los metadatos NT,
 flujos alternativos o atributos extendidos al copiar.
+
+Además, se han añadido las variantes `GetCurrentDirectoryA`,
+`SetCurrentDirectoryA`, `GetFullPathNameA`, `GetFileAttributesA`,
+`GetFileAttributesExA` y `GetTempPathA`, junto a las funciones `W` ya
+disponibles. El modo «ANSI» de esta primera implementación **acepta UTF-8**
+(y lo convierte a UTF-16 para las funciones `W`); falta implementar
+correctamente la página de códigos ANSI configurada por Windows.
 Las rutas relativas admiten `..` **solo cuando permanecen dentro de la
 raíz concedida**; si intentan subir por encima, fallan.
 
