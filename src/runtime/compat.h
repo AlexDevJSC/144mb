@@ -258,6 +258,8 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle);
 int32_t NT_MS_ABI nt_DeleteFileA(const char *path);
 int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path);
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags);
+int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to);
+int32_t NT_MS_ABI nt_CopyFileA(const char *from, const char *to, int32_t fail_if_exists);
 void *NT_MS_ABI nt_fopen(const char *path, const char *mode);
 int NT_MS_ABI nt_open_osfhandle(intptr_t handle, int flags);
 void *NT_MS_ABI nt_fdopen(int descriptor, const char *mode);
