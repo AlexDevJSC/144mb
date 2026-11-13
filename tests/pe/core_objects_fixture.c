@@ -176,10 +176,14 @@ static int test_thread_handles(void)
     typedef HRESULT (WINAPI *set_thread_description_fn)(HANDLE, PCWSTR);
     typedef HRESULT (WINAPI *get_thread_description_fn)(HANDLE, PWSTR *);
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-    set_thread_description_fn set_description =
-        (set_thread_description_fn)GetProcAddress(kernel, "SetThreadDescription");
-    get_thread_description_fn get_description =
-        (get_thread_description_fn)GetProcAddress(kernel, "GetThreadDescription");
+    /* Copy the function pointer representation instead of casting FARPROC
+     * across incompatible prototypes (-Wcast-function-type). */
+    FARPROC raw_set = GetProcAddress(kernel, "SetThreadDescription");
+    FARPROC raw_get = GetProcAddress(kernel, "GetThreadDescription");
+    set_thread_description_fn set_description = NULL;
+    get_thread_description_fn get_description = NULL;
+    __builtin_memcpy(&set_description, &raw_set, sizeof(set_description));
+    __builtin_memcpy(&get_description, &raw_get, sizeof(get_description));
     static const WCHAR full_name[] = L"Nombre-ä-01234567890123456789";
     PWSTR name_copy = NULL;
     if (set_description == NULL || get_description == NULL ||
