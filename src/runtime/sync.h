@@ -43,6 +43,7 @@ nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
                                          uintptr_t *target);
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void);
 uint32_t NT_MS_ABI nt_GetProcessId(uintptr_t handle);
+uintptr_t NT_MS_ABI nt_OpenProcess(uint32_t access, int32_t inherit, uint32_t process_id);
 uint32_t NT_MS_ABI nt_GetProcessIdOfThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_QueueUserAPC(void (NT_MS_ABI *callback)(uintptr_t),
                                    uintptr_t handle, uintptr_t data);
