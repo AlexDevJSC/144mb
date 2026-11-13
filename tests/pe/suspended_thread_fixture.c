@@ -203,5 +203,29 @@ int import_fixture_entry(void)
         SetThreadAffinityMask(GetCurrentThread(), 0) != 0 ||
         GetLastError() != ERROR_INVALID_PARAMETER)
         return 42;
+    /* Native-backed priority controls: changing nice=2 must be visible
+     * in the test guest, not simply stored in a fake Win32 field. */
+    HANDLE low = CreateThread(NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL);
+    if (low == NULL || GetThreadPriority(low) != THREAD_PRIORITY_NORMAL ||
+        !SetThreadPriority(low, THREAD_PRIORITY_BELOW_NORMAL) ||
+        GetThreadPriority(low) != THREAD_PRIORITY_BELOW_NORMAL)
+        return 43;
+    DWORD low_id = GetThreadId(low);
+    HANDLE limited = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, low_id);
+    SetLastError(0);
+    if (limited == NULL || SetThreadPriority(limited, THREAD_PRIORITY_NORMAL) ||
+        GetLastError() != ERROR_ACCESS_DENIED ||
+        GetThreadPriority(limited) != THREAD_PRIORITY_BELOW_NORMAL ||
+        !CloseHandle(limited))
+        return 44;
+    SetLastError(0);
+    if (SetThreadPriority(low, 12) || GetLastError() != ERROR_INVALID_PARAMETER ||
+        ResumeThread(low) != 1 || WaitForSingleObject(low, 5000) != WAIT_OBJECT_0 ||
+        !CloseHandle(low))
+        return 45;
+    SetLastError(0);
+    if (GetThreadPriority(NULL) != THREAD_PRIORITY_ERROR_RETURN ||
+        GetLastError() != ERROR_INVALID_HANDLE)
+        return 46;
     return 0;
 }
