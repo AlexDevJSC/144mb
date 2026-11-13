@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "compat.h"
+#include "winfile.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -278,6 +279,10 @@ static void check_files(void)
     BOUND(KERNEL, DeleteFileA);
     BOUND(KERNEL, RemoveDirectoryA);
     BOUND(KERNEL, MoveFileExA);
+    BOUND(KERNEL, MoveFileA);
+    BOUND(KERNEL, MoveFileW);
+    BOUND(KERNEL, CopyFileA);
+    BOUND(KERNEL, CopyFileW);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
     CRT_BOUND("stdio", "fopen", nt_fopen);
     CRT_BOUND("stdio", "fclose", nt_fclose);
@@ -366,6 +371,36 @@ static void check_files(void)
 
     raw = nt_fopen("data/target.txt", "wb");
     CHECK(raw != NULL && nt_fclose(raw) == 0);
+    /* Native copy does not invoke cp(1), create an alternate drive, or
+     * duplicate files merely because the Windows caller changes case. */
+    CHECK(nt_CopyFileA("C:\\DATA\\SCORES.TXT", "C:\\data\\Backup.TXT", 1) != 0);
+    CHECK(nt_CopyFileA("data/scores.txt", "DATA/backup.txt", 1) == 0 &&
+          last_error() == NT_ERROR_FILE_EXISTS);
+    CHECK(nt_CopyFileA("data/SCORES.TXT", "DATA/BACKUP.txt", 0) != 0);
+    CHECK(nt_CopyFileA("data/scores.txt", "DATA/SCORES.TXT", 0) == 0);
+    CHECK(nt_MoveFileA("DATA/backup.txt", "data/Copied.TXT") != 0);
+    folded = nt_fopen("data/cOPIED.txt", "rb");
+    char copied[6] = {0};
+    CHECK(folded != NULL && nt_fread(copied, 1, 6, folded) == 6 &&
+          memcmp(copied, "a\\r\\nb\\r\\n", 6) == 0 && nt_fclose(folded) == 0);
+    CHECK(nt_DeleteFileA("DATA/COPIED.txt") != 0);
+
+    static const uint16_t wide_from[] = {
+        'C', ':', '\\\\', 'd', 'a', 't', 'a', '\\\\',
+        's', 'c', 'o', 'r', 'e', 's', '.', 't', 'x', 't', 0
+    };
+    static const uint16_t wide_copy[] = {
+        'C', ':', '\\\\', 'D', 'A', 'T', 'A', '\\\\',
+        'W', 'I', 'D', 'E', '.', 'T', 'X', 'T', 0
+    };
+    static const uint16_t wide_moved[] = {
+        'C', ':', '\\\\', 'd', 'a', 't', 'a', '\\\\',
+        'w', 'i', 'd', 'e', '-', 'f', 'i', 'n', 'a', 'l', '.', 't', 'x', 't', 0
+    };
+    CHECK(nt_CopyFileW(wide_from, wide_copy, 1) != 0);
+    CHECK(nt_MoveFileW(wide_copy, wide_moved) != 0);
+    CHECK(nt_DeleteFileA("C:\\DATA\\WIDE-FINAL.TXT") != 0);
+
     CHECK(nt_MoveFileExA("data/scores.txt", "data/target.txt", 0) == 0 &&
           last_error() == NT_ERROR_ALREADY_EXISTS);
     CHECK(nt_MoveFileExA("DATA/SCORES.TXT", "data/TARGET.TXT", 1) != 0);
