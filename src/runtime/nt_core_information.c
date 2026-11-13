@@ -24,9 +24,10 @@ _Static_assert(sizeof(struct nt_thread_basic_information) == 48,
 _Static_assert(offsetof(struct nt_thread_basic_information, client_id) == 16,
                "THREAD_BASIC_INFORMATION ClientId offset");
 
-static bool local_process(uintptr_t process)
+static nt_status local_process(uintptr_t process, uint32_t required_access)
 {
-    return process == UINTPTR_MAX; /* NtCurrentProcess pseudo-handle */
+    /* Real handles from OpenProcess(self) obey the class-specific rights. */
+    return nt_runtime_check_self_process(process, required_access);
 }
 
 static bool local_thread(uintptr_t thread)
@@ -59,8 +60,9 @@ nt_status NT_MS_ABI nt_NtQueryInformationProcess(uintptr_t process, uint32_t inf
                                                   void *buffer, uint32_t length,
                                                   uint32_t *returned_length)
 {
-    if (!local_process(process))
-        return NT_STATUS_INVALID_HANDLE;
+    const nt_status access = local_process(process, 0x1400u);
+    if (access != NT_STATUS_SUCCESS)
+        return access;
     if (info_class == NT_PROCESS_WOW64_INFORMATION_CLASS) {
         const nt_status status = require_buffer(buffer, length, sizeof(uintptr_t), returned_length);
         if (status == NT_STATUS_SUCCESS) {
@@ -151,8 +153,9 @@ static bool page_round(size_t size, size_t *rounded)
 nt_status NT_MS_ABI nt_NtAllocateVirtualMemory(uintptr_t process, void **base, uintptr_t zero_bits,
                                                 size_t *size, uint32_t type, uint32_t protection)
 {
-    if (!local_process(process))
-        return NT_STATUS_INVALID_HANDLE;
+    const nt_status access = local_process(process, 0x8u);
+    if (access != NT_STATUS_SUCCESS)
+        return access;
     if (base == NULL || size == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
     size_t rounded = 0;
@@ -174,8 +177,9 @@ nt_status NT_MS_ABI nt_NtAllocateVirtualMemory(uintptr_t process, void **base, u
 nt_status NT_MS_ABI nt_NtFreeVirtualMemory(uintptr_t process, void **base,
                                             size_t *size, uint32_t type)
 {
-    if (!local_process(process))
-        return NT_STATUS_INVALID_HANDLE;
+    const nt_status access = local_process(process, 0x8u);
+    if (access != NT_STATUS_SUCCESS)
+        return access;
     if (base == NULL || size == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
     if (type != NT_VM_RELEASE && type != 0x4000)
@@ -200,8 +204,9 @@ nt_status NT_MS_ABI nt_NtFreeVirtualMemory(uintptr_t process, void **base,
 nt_status NT_MS_ABI nt_NtProtectVirtualMemory(uintptr_t process, void **base, size_t *size,
                                                uint32_t protection, uint32_t *previous)
 {
-    if (!local_process(process))
-        return NT_STATUS_INVALID_HANDLE;
+    const nt_status access = local_process(process, 0x8u);
+    if (access != NT_STATUS_SUCCESS)
+        return access;
     if (base == NULL || size == NULL || previous == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
     const uintptr_t raw = (uintptr_t)*base;
@@ -226,8 +231,9 @@ nt_status NT_MS_ABI nt_NtQueryVirtualMemory(uintptr_t process, const void *addre
                                              uint32_t info_class, void *buffer,
                                              size_t length, size_t *returned_length)
 {
-    if (!local_process(process))
-        return NT_STATUS_INVALID_HANDLE;
+    const nt_status access = local_process(process, 0x410u);
+    if (access != NT_STATUS_SUCCESS)
+        return access;
     if (info_class != NT_BASIC_INFORMATION_CLASS)
         return NT_STATUS_INVALID_INFO_CLASS;
     if (returned_length != NULL)

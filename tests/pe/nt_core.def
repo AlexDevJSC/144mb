@@ -14,5 +14,10 @@ EXPORTS
     NtOpenSemaphore
     NtQuerySemaphore
     NtReleaseSemaphore
+    NtOpenProcess
+    NtTerminateProcess
+    NtCreateThreadEx
+    NtTerminateThread
+    NtOpenThread
     NtSuspendThread
     NtResumeThread

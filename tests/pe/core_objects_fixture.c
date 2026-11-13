@@ -41,6 +41,9 @@ __declspec(dllimport) LONG NTAPI NtOpenSemaphore(HANDLE *, ACCESS_MASK,
 __declspec(dllimport) LONG NTAPI NtReleaseSemaphore(HANDLE, LONG, LONG *);
 __declspec(dllimport) LONG NTAPI NtQuerySemaphore(HANDLE, ULONG, void *, ULONG, ULONG *);
 __declspec(dllimport) LONG NTAPI NtQueryInformationThread(HANDLE, ULONG, void *, ULONG, ULONG *);
+struct win_client_id { uintptr_t process, thread; };
+__declspec(dllimport) LONG NTAPI NtOpenThread(HANDLE *, ACCESS_MASK,
+    const struct win_object_attributes *, const struct win_client_id *);
 
 static DWORD WINAPI stopped_thread(void *context)
 {
@@ -138,12 +141,61 @@ static int test_thread_handles(void)
     HANDLE original = CreateThread(NULL, 0, stopped_thread, (void *)&ran,
                                    CREATE_SUSPENDED, &created_id);
     if (original == NULL || created_id == 0 || ran != 0 ||
-        GetThreadId(original) != created_id)
+        GetThreadId(original) != created_id ||
+        GetProcessId(GetCurrentProcess()) != GetCurrentProcessId() ||
+        GetProcessIdOfThread(GetCurrentThread()) != GetCurrentProcessId() ||
+        GetProcessIdOfThread(original) != GetCurrentProcessId())
         return 30;
     HANDLE alias = OpenThread(QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
                               FALSE, created_id);
-    if (alias == NULL || alias == original || GetThreadId(alias) != created_id)
+    if (alias == NULL || alias == original || GetThreadId(alias) != created_id ||
+        GetProcessIdOfThread(alias) != GetCurrentProcessId())
         return 31;
+    const struct win_client_id ids = {GetCurrentProcessId(), created_id};
+    const struct win_object_attributes attributes = {sizeof(attributes), 0, NULL, 0, NULL, NULL};
+    HANDLE native = NULL;
+    SetLastError(0x7abcu);
+    if (NtOpenThread(&native, QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                     &attributes, &ids) != ST_OK || native == NULL ||
+        native == original || native == alias || GetThreadId(native) != created_id ||
+        GetLastError() != 0x7abcu)
+        return 39;
+    if (NtOpenThread(NULL, QUERY_LIMITED_INFORMATION, &attributes, &ids) !=
+        (LONG)0xc0000005u || GetLastError() != 0x7abcu)
+        return 40;
+    struct win_client_id remote = {GetCurrentProcessId() + 123u, created_id};
+    if (NtOpenThread(&native, QUERY_LIMITED_INFORMATION, &attributes, &remote) !=
+        (LONG)0xc00000bbu || GetLastError() != 0x7abcu)
+        return 41;
+    HANDLE no_query = OpenThread(THREAD_SUSPEND_RESUME_ACCESS, FALSE, created_id);
+    SetLastError(0);
+    if (no_query == NULL || GetProcessIdOfThread(no_query) != 0 ||
+        GetLastError() != ERROR_ACCESS_DENIED || !CloseHandle(no_query))
+        return 42;
+
+    typedef HRESULT (WINAPI *set_thread_description_fn)(HANDLE, PCWSTR);
+    typedef HRESULT (WINAPI *get_thread_description_fn)(HANDLE, PWSTR *);
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    /* Copy the function pointer representation instead of casting FARPROC
+     * across incompatible prototypes (-Wcast-function-type). */
+    FARPROC raw_set = GetProcAddress(kernel, "SetThreadDescription");
+    FARPROC raw_get = GetProcAddress(kernel, "GetThreadDescription");
+    set_thread_description_fn set_description = NULL;
+    get_thread_description_fn get_description = NULL;
+    __builtin_memcpy(&set_description, &raw_set, sizeof(set_description));
+    __builtin_memcpy(&get_description, &raw_get, sizeof(get_description));
+    static const WCHAR full_name[] = L"Nombre-ä-01234567890123456789";
+    PWSTR name_copy = NULL;
+    if (set_description == NULL || get_description == NULL ||
+        set_description(alias, full_name) != (HRESULT)0x80070005u ||
+        set_description(original, full_name) != S_OK ||
+        get_description(alias, &name_copy) != S_OK || name_copy == NULL)
+        return 43;
+    for (unsigned int i = 0; i < sizeof(full_name) / sizeof(full_name[0]); ++i)
+        if (name_copy[i] != full_name[i])
+            return 44;
+    if (LocalFree(name_copy) != NULL)
+        return 45;
 
     struct win_thread_basic basic = {0};
     ULONG returned = 0;
@@ -167,7 +219,15 @@ static int test_thread_handles(void)
     if (NtQueryInformationThread(alias, 0, &basic, sizeof(basic), NULL) != ST_OK ||
         basic.status != 0x144 || basic.teb != NULL)
         return 36;
-    if (!CloseHandle(original) || !CloseHandle(alias))
+    name_copy = NULL;
+    if (get_description(native, &name_copy) != S_OK || name_copy == NULL)
+        return 46;
+    for (unsigned int i = 0; i < sizeof(full_name) / sizeof(full_name[0]); ++i)
+        if (name_copy[i] != full_name[i])
+            return 47;
+    if (LocalFree(name_copy) != NULL)
+        return 48;
+    if (!CloseHandle(original) || !CloseHandle(alias) || !CloseHandle(native))
         return 37;
 
     if (GetThreadId((HANDLE)(uintptr_t)15) != 0 ||

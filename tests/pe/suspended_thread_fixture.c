@@ -5,6 +5,9 @@
 
 __declspec(dllimport) LONG NTAPI NtSuspendThread(HANDLE, ULONG *);
 __declspec(dllimport) LONG NTAPI NtResumeThread(HANDLE, ULONG *);
+__declspec(dllimport) LONG NTAPI NtCreateThreadEx(HANDLE *, ACCESS_MASK, void *,
+    HANDLE, DWORD (WINAPI *)(void *), void *, ULONG, SIZE_T, SIZE_T, SIZE_T, void *);
+__declspec(dllimport) LONG NTAPI NtTerminateThread(HANDLE, LONG);
 
 #define STATUS_ACCESS_DENIED ((LONG)0xc0000022u)
 #define STATUS_THREAD_IS_TERMINATING ((LONG)0xc000004bu)
@@ -20,6 +23,13 @@ static DWORD WINAPI worker(void *unused)
     (void)unused;
     entered = 1;
     return 0x144;
+}
+
+static DWORD WINAPI native_exit_worker(void *unused)
+{
+    (void)unused;
+    NtTerminateThread(GetCurrentThread(), 0x7788u);
+    return 0x1199u; /* must never run */
 }
 
 static DWORD WINAPI running_worker(void *unused)
@@ -113,5 +123,51 @@ int import_fixture_entry(void)
     if (CreateThread(NULL, 0, worker, NULL, 0x10000u, NULL) != NULL ||
         GetLastError() != ERROR_NOT_SUPPORTED)
         return 29;
+
+    /* NtCreateThreadEx shares the native TEB/handles/startup gate. */
+    HANDLE native = NULL;
+    SetLastError(0x778u);
+    if (NtCreateThreadEx(&native, THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                         NULL, GetCurrentProcess(), native_exit_worker, NULL,
+                         1, 0, 0, 0, NULL) != 0 || native == NULL ||
+        GetLastError() != 0x778u || WaitForSingleObject(native, 0) != WAIT_TIMEOUT)
+        return 31;
+    DWORD id = GetThreadId(native);
+    HANDLE supervisor = OpenThread(THREAD_SUSPEND_RESUME, FALSE, id);
+    SetLastError(0);
+    if (supervisor == NULL || ResumeThread(native) != 0xffffffffu ||
+        GetLastError() != ERROR_ACCESS_DENIED)
+        return 32;
+    if (ResumeThread(supervisor) != 1 || WaitForSingleObject(native, 5000) != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(native, &exit_code) || exit_code != 0x7788u ||
+        !CloseHandle(supervisor) || !CloseHandle(native))
+        return 33;
+    native = (HANDLE)(uintptr_t)0x10u;
+    if (NtCreateThreadEx(&native, THREAD_ALL_ACCESS, NULL, GetCurrentProcess(),
+                         native_exit_worker, NULL, 2, 0, 0, 0, NULL) != STATUS_NOT_SUPPORTED ||
+        native != NULL)
+        return 34;
+    if (NtTerminateThread((HANDLE)(uintptr_t)0x123u, 0) != (LONG)0xc0000008u)
+        return 35;
+
+    /* Cancellation at CREATE_SUSPENDED is safe: no guest entry or TLS
+     * attach callback may execute for the cancelled worker. */
+    entered = 0;
+    HANDLE aborting = CreateThread(NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL);
+    if (aborting == NULL || entered != 0 ||
+        !TerminateThread(aborting, 0x9911u) ||
+        WaitForSingleObject(aborting, 5000) != WAIT_OBJECT_0 ||
+        entered != 0 || !GetExitCodeThread(aborting, &exit_code) || exit_code != 0x9911u ||
+        !CloseHandle(aborting))
+        return 36;
+    entered = 0;
+    aborting = CreateThread(NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL);
+    SetLastError(0x77bu);
+    if (aborting == NULL || NtTerminateThread(aborting, 0x9922u) != 0 ||
+        GetLastError() != 0x77bu ||
+        WaitForSingleObject(aborting, 5000) != WAIT_OBJECT_0 ||
+        entered != 0 || !GetExitCodeThread(aborting, &exit_code) || exit_code != 0x9922u ||
+        !CloseHandle(aborting))
+        return 37;
     return 0;
 }

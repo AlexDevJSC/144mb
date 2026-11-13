@@ -123,7 +123,7 @@ static int NT_MS_ABI guest_entry(void)
     return status;
 }
 
-static bool worker_ready(bool child)
+static bool worker_ready(bool child, bool suspended)
 {
     struct statfs root;
     if ((child ? getpid() == 1 || getppid() <= 1 : getpid() != 1) ||
@@ -138,13 +138,14 @@ static bool worker_ready(bool child)
     /* Drop setup descriptors before loading guest code. A host directory fd
      * would otherwise retain access beyond the sandbox's filesystem root.
      */
-    if (close_range(child ? 5 : 3, UINT_MAX, 0) != 0) {
+    if (close_range(child ? (suspended ? 6u : 5u) : 3u, UINT_MAX, 0) != 0) {
         perror("Cannot close sandbox setup descriptors");
         return false;
     }
     if (child) {
         struct stat pipe;
-        if (fstat(4, &pipe) != 0 || !S_ISFIFO(pipe.st_mode))
+        if (fstat(4, &pipe) != 0 || !S_ISFIFO(pipe.st_mode) ||
+            (suspended && (fstat(5, &pipe) != 0 || !S_ISFIFO(pipe.st_mode))))
             return false;
     }
     return true;
@@ -229,15 +230,26 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
 }
 
 static int launch_child(int fd, const char *dos_path, const char *command,
-                        const char *directory, pid_t *pid, int *status_fd)
+                        const char *directory, bool suspended, pid_t *pid,
+                        int *status_fd, int *start_fd)
 {
     int pipe_fds[2];
     if (pipe2(pipe_fds, O_CLOEXEC | O_NONBLOCK) != 0)
         return errno;
-    int image = fcntl(fd, F_DUPFD_CLOEXEC, 5);
+    int gate[2] = {-1, -1};
+    if (suspended && pipe2(gate, O_CLOEXEC) != 0) {
+        const int error = errno;
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return error;
+    }
+    int image = fcntl(fd, F_DUPFD_CLOEXEC, 6);
     int error = image < 0 ? errno : 0;
-    int status = error ? -1 : fcntl(pipe_fds[1], F_DUPFD_CLOEXEC, 5);
+    int status = error ? -1 : fcntl(pipe_fds[1], F_DUPFD_CLOEXEC, 6);
     if (!error && status < 0)
+        error = errno;
+    int start_reader = error || !suspended ? -1 : fcntl(gate[0], F_DUPFD_CLOEXEC, 6);
+    if (!error && suspended && start_reader < 0)
         error = errno;
     if (!error) {
         posix_spawn_file_actions_t actions;
@@ -246,9 +258,11 @@ static int launch_child(int fd, const char *dos_path, const char *command,
             error = posix_spawn_file_actions_adddup2(&actions, image, 3);
             if (!error)
                 error = posix_spawn_file_actions_adddup2(&actions, status, 4);
+            if (!error && suspended)
+                error = posix_spawn_file_actions_adddup2(&actions, start_reader, 5);
             if (!error) {
-                char *const args[] = {"/runner", "--child", (char *)dos_path,
-                                      (char *)command, (char *)directory, NULL};
+                char *const args[] = {"/runner", suspended ? "--child-suspended" : "--child",
+                                      (char *)dos_path, (char *)command, (char *)directory, NULL};
                 error = posix_spawn(pid, "/runner", &actions, NULL, args, environ);
             }
             posix_spawn_file_actions_destroy(&actions);
@@ -258,17 +272,25 @@ static int launch_child(int fd, const char *dos_path, const char *command,
         close(image);
     if (status >= 0)
         close(status);
+    if (start_reader >= 0)
+        close(start_reader);
+    if (gate[0] >= 0)
+        close(gate[0]);
     close(pipe_fds[1]);
-    if (error)
+    if (error) {
         close(pipe_fds[0]);
-    else
+        if (gate[1] >= 0)
+            close(gate[1]);
+    } else {
         *status_fd = pipe_fds[0];
+        *start_fd = gate[1];
+    }
     return error;
 }
 
 static int run_worker(const char *name, const char *command)
 {
-    if (!worker_ready(false))
+    if (!worker_ready(false, false))
         return 125;
     if (strncmp(name, "/game/", 6) != 0 || strchr(name + 6, '/') != NULL ||
         strchr(name + 6, '\\') != NULL || strstr(name + 6, "..") != NULL)
@@ -477,8 +499,25 @@ int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--worker") == 0)
         return argc == 4 ? run_worker(argv[2], argv[3]) : 125;
-    if (argc == 5 && strcmp(argv[1], "--child") == 0)
-        return worker_ready(true) ? execute_pe(3, argv[2], argv[3], argv[4], 4) : 125;
+    if (argc == 5 &&
+        (strcmp(argv[1], "--child") == 0 || strcmp(argv[1], "--child-suspended") == 0)) {
+        const bool suspended = strcmp(argv[1], "--child-suspended") == 0;
+        if (!worker_ready(true, suspended))
+            return 125;
+        if (suspended) {
+            /* A trusted parent must release the startup gate. EOF must
+             * not accidentally execute the guest, even if the parent dies. */
+            unsigned char token = 0;
+            ssize_t count;
+            do {
+                count = read(5, &token, 1);
+            } while (count < 0 && errno == EINTR);
+            close(5);
+            if (count != 1 || token != 'G')
+                return 125;
+        }
+        return execute_pe(3, argv[2], argv[3], argv[4], 4);
+    }
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
         usage(argv[0]);
         return 0;

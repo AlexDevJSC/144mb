@@ -17,6 +17,7 @@
 #define NT_STATUS_OBJECT_NAME_EXISTS ((nt_status)UINT32_C(0x40000000))
 #define NT_STATUS_OBJECT_NAME_NOT_FOUND ((nt_status)UINT32_C(0xc0000034))
 #define NT_STATUS_INVALID_HANDLE ((nt_status)UINT32_C(0xc0000008))
+#define NT_STATUS_INVALID_CID ((nt_status)UINT32_C(0xc000000b))
 #define NT_STATUS_INVALID_PARAMETER ((nt_status)UINT32_C(0xc000000d))
 #define NT_STATUS_NO_MEMORY ((nt_status)UINT32_C(0xc0000017))
 #define NT_STATUS_ACCESS_DENIED ((nt_status)UINT32_C(0xc0000022))
@@ -94,6 +95,19 @@ nt_status NT_MS_ABI nt_NtOpenSemaphore(uintptr_t *handle, uint32_t access,
 nt_status NT_MS_ABI nt_NtQuerySemaphore(uintptr_t handle, uint32_t information_class,
                                         void *buffer, uint32_t length, uint32_t *returned_length);
 nt_status NT_MS_ABI nt_NtReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous);
+struct nt_client_id;
+nt_status NT_MS_ABI nt_NtTerminateProcess(uintptr_t process, nt_status exit_code);
+struct nt_client_id;
+nt_status NT_MS_ABI nt_NtOpenProcess(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, const struct nt_client_id *client_id);
+typedef uint32_t (NT_MS_ABI *nt_guest_start_routine)(void *);
+nt_status NT_MS_ABI nt_NtCreateThreadEx(uintptr_t *handle, uint32_t desired_access,
+    const struct nt_object_attributes *attributes, uintptr_t process,
+    nt_guest_start_routine start, void *argument, uint32_t flags, size_t zero_bits,
+    size_t stack_commit, size_t stack_reserve, void *attribute_list);
+nt_status NT_MS_ABI nt_NtTerminateThread(uintptr_t thread, nt_status exit_code);
+nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, const struct nt_client_id *client_id);
 nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtSetEvent(uintptr_t handle, int32_t *previous);
