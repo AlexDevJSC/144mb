@@ -44,6 +44,7 @@ nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void);
 uint32_t NT_MS_ABI nt_GetProcessId(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_OpenProcess(uint32_t access, int32_t inherit, uint32_t process_id);
+nt_status nt_runtime_check_self_process(uintptr_t handle, uint32_t any_access);
 uint32_t NT_MS_ABI nt_GetProcessIdOfThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_QueueUserAPC(void (NT_MS_ABI *callback)(uintptr_t),
                                    uintptr_t handle, uintptr_t data);
@@ -57,6 +58,7 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
 uint32_t NT_MS_ABI nt_SuspendThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);
 void NT_MS_ABI nt_ExitThread(uint32_t code);
+int32_t NT_MS_ABI nt_TerminateThread(uintptr_t thread, uint32_t code);
 void NT_MS_ABI nt_FreeLibraryAndExitThread(uintptr_t module, uint32_t code);
 int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t thread, uint32_t *code);
 int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t thread, const uint16_t *description);

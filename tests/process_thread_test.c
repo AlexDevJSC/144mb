@@ -41,6 +41,19 @@ int main(void)
     check(info.process && info.thread && info.process_id == (uint32_t)child,
           "child handles and ID");
     check(nt_GetProcessId(UINTPTR_MAX) == (uint32_t)getpid(), "current process ID");
+    uintptr_t self = nt_OpenProcess(0x101000u, 0, (uint32_t)getpid());
+    check(self != 0 && nt_GetProcessId(self) == (uint32_t)getpid(),
+          "OpenProcess(current PID) returns real alias");
+    uintptr_t wow64 = 1;
+    uint32_t length = 0;
+    check(nt_NtQueryInformationProcess(self, 26, &wow64, sizeof(wow64), &length) ==
+          NT_STATUS_SUCCESS && wow64 == 0 && length == sizeof(wow64),
+          "native process query accepts real self handle");
+    nt_SetLastError(0);
+    check(!nt_TerminateProcess(self, 44) &&
+          nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
+          "self alias without terminate right");
+    check(nt_runtime_close_waitable(self), "release self process alias");
     check(nt_GetProcessId(info.process) == (uint32_t)child, "child process ID");
     check(nt_GetProcessIdOfThread(info.thread) == (uint32_t)child, "child thread owner");
     uintptr_t restricted = 0;

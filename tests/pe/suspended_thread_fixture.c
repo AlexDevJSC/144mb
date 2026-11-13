@@ -147,7 +147,27 @@ int import_fixture_entry(void)
                          native_exit_worker, NULL, 2, 0, 0, 0, NULL) != STATUS_NOT_SUPPORTED ||
         native != NULL)
         return 34;
-    if (NtTerminateThread((HANDLE)(uintptr_t)0x123u, 0) != STATUS_NOT_SUPPORTED)
+    if (NtTerminateThread((HANDLE)(uintptr_t)0x123u, 0) != (LONG)0xc0000008u)
         return 35;
+
+    /* Cancellation at CREATE_SUSPENDED is safe: no guest entry or TLS
+     * attach callback may execute for the cancelled worker. */
+    entered = 0;
+    HANDLE aborting = CreateThread(NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL);
+    if (aborting == NULL || entered != 0 ||
+        !TerminateThread(aborting, 0x9911u) ||
+        WaitForSingleObject(aborting, 5000) != WAIT_OBJECT_0 ||
+        entered != 0 || !GetExitCodeThread(aborting, &exit_code) || exit_code != 0x9911u ||
+        !CloseHandle(aborting))
+        return 36;
+    entered = 0;
+    aborting = CreateThread(NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL);
+    SetLastError(0x77bu);
+    if (aborting == NULL || NtTerminateThread(aborting, 0x9922u) != 0 ||
+        GetLastError() != 0x77bu ||
+        WaitForSingleObject(aborting, 5000) != WAIT_OBJECT_0 ||
+        entered != 0 || !GetExitCodeThread(aborting, &exit_code) || exit_code != 0x9922u ||
+        !CloseHandle(aborting))
+        return 37;
     return 0;
 }

@@ -40,12 +40,16 @@ Estimación registrada tras la integración de la PR #68, **13 de noviembre de 2
 | 1. Cargador PE y DLL | 55 % | En espera de su fase |
 | 2. PEB/TEB | 40 % | En espera de su fase |
 | 3. Objetos NT | 30 % | En espera de su fase |
-| **4. Procesos e hilos** | **35 %** | **Activo; PR #68 integrada** |
+| **4. Procesos e hilos** | **35 %** | **Línea base histórica; fase actual activa** |
 | 5. Memoria virtual | 35 % | Siguiente fase |
 | 6. SEH/VEH | 25 % | En espera de su fase |
 | 7. API NTDLL/Win32 | 20 % | En espera de su fase |
 
 A partir de esta línea base, toda variación porcentual debe anotarse junto a la entrega que la justifique. Si el trabajo revela limitaciones previamente desconocidas o regresiones, **el porcentaje también puede disminuir**.
+
+### Registro de evolución
+
+- **13-11-2026, PR #71 (propuesta en revisión): componente 4 — 35 % → 55 % (+20 puntos estimados, sujeto a validación completa).** Nuevas rutas de apertura e identidad de procesos/hilos, `NtCreateThreadEx`, terminación antes de entrada de hilo, terminación acotada de hijos por pidfd, `CREATE_SUSPENDED` de procesos hijo mediante puerta del lanzador, nombres completos UTF-16 y pruebas de ciclo de vida. Quedan especialmente suspensión asíncrona y contexto de hilos activos, herencia de handles, seguridad/token NT, servicios generales entre procesos, planificación, interacciones complejas de APC y tests diferenciales Windows. **Esta mejora es de madurez del subconjunto, no de rendimiento (no hay benchmark 2×).** Si falla la CI o se rechaza un contrato, ajustar el porcentaje antes de fusionar.
 
 ### Formato de cierre para cambios futuros
 
