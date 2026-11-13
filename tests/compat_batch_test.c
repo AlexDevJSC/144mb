@@ -382,19 +382,19 @@ static void check_files(void)
     folded = nt_fopen("data/cOPIED.txt", "rb");
     char copied[6] = {0};
     CHECK(folded != NULL && nt_fread(copied, 1, 6, folded) == 6 &&
-          memcmp(copied, "a\\r\\nb\\r\\n", 6) == 0 && nt_fclose(folded) == 0);
+          memcmp(copied, "a\r\nb\r\n", 6) == 0 && nt_fclose(folded) == 0);
     CHECK(nt_DeleteFileA("DATA/COPIED.txt") != 0);
 
     static const uint16_t wide_from[] = {
-        'C', ':', '\\\\', 'd', 'a', 't', 'a', '\\\\',
+        'C', ':', '\\', 'd', 'a', 't', 'a', '\\',
         's', 'c', 'o', 'r', 'e', 's', '.', 't', 'x', 't', 0
     };
     static const uint16_t wide_copy[] = {
-        'C', ':', '\\\\', 'D', 'A', 'T', 'A', '\\\\',
+        'C', ':', '\\', 'D', 'A', 'T', 'A', '\\',
         'W', 'I', 'D', 'E', '.', 'T', 'X', 'T', 0
     };
     static const uint16_t wide_moved[] = {
-        'C', ':', '\\\\', 'd', 'a', 't', 'a', '\\\\',
+        'C', ':', '\\', 'd', 'a', 't', 'a', '\\',
         'w', 'i', 'd', 'e', '-', 'f', 'i', 'n', 'a', 'l', '.', 't', 'x', 't', 0
     };
     CHECK(nt_CopyFileW(wide_from, wide_copy, 1) != 0);
