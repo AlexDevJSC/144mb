@@ -203,8 +203,14 @@ static int test_thread_handles(void)
     if (NtQueryInformationThread(alias, 0, &basic, sizeof(basic), &returned) != ST_OK ||
         returned != sizeof(basic) || basic.teb == NULL ||
         basic.id.thread != created_id || basic.id.process != GetCurrentProcessId() ||
-        basic.status != 259 || GetLastError() != 0x755)
+        basic.status != 259 || basic.affinity == 0 ||
+        basic.priority != 8 || basic.base_priority != 8 ||
+        GetLastError() != 0x755)
         return 32;
+    if (!SetThreadPriority(original, THREAD_PRIORITY_BELOW_NORMAL) ||
+        NtQueryInformationThread(alias, 0, &basic, sizeof(basic), NULL) != ST_OK ||
+        basic.priority != 7 || basic.base_priority != 7 || basic.affinity == 0)
+        return 49;
 
     if (NtQueryInformationThread(alias, 0, &basic, 2, &returned) != ST_INFO_LENGTH_MISMATCH ||
         returned != sizeof(basic) ||
@@ -217,7 +223,8 @@ static int test_thread_handles(void)
         WaitForSingleObject(alias, 5000) != WAIT_OBJECT_0 || ran != 1)
         return 35;
     if (NtQueryInformationThread(alias, 0, &basic, sizeof(basic), NULL) != ST_OK ||
-        basic.status != 0x144 || basic.teb != NULL)
+        basic.status != 0x144 || basic.teb != NULL ||
+        basic.priority != 7 || basic.base_priority != 7 || basic.affinity == 0)
         return 36;
     name_copy = NULL;
     if (get_description(native, &name_copy) != S_OK || name_copy == NULL)
