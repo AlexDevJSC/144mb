@@ -60,6 +60,10 @@ uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask);
 int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority);
 int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle);
+int32_t NT_MS_ABI nt_GetThreadTimes(uintptr_t handle, struct nt_file_time *created,
+    struct nt_file_time *exited, struct nt_file_time *kernel, struct nt_file_time *user);
+int32_t NT_MS_ABI nt_GetProcessTimes(uintptr_t handle, struct nt_file_time *created,
+    struct nt_file_time *exited, struct nt_file_time *kernel, struct nt_file_time *user);
 int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *process_mask,
                                             uintptr_t *system_mask);
 void NT_MS_ABI nt_ExitThread(uint32_t code);
