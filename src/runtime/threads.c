@@ -267,7 +267,7 @@ static struct waitable *new_waitable(enum waitable_kind kind)
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         if (waitables[i].refs == 0 && waitables[i].links == 0) {
             waitables[i] = (struct waitable){.handle = next_handle++, .refs = 1, .kind = kind,
-                                             .access = SYNCHRONIZE};
+                                             .access = SYNCHRONIZE, .pidfd = -1};
             return &waitables[i];
         }
     }
