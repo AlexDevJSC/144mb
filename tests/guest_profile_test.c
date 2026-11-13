@@ -80,6 +80,23 @@ int main(void)
     CHECK(profile_dir >= 0);
     CHECK(renameat(profile_dir, "C:", profile_dir, "drive-c") == 0);
     CHECK(fstatat(profile_dir, "C:", &info, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
+    /* Multiple launchers must migrate the same old profile only once. */
+    pid_t children[4];
+    for (size_t i = 0; i < sizeof(children) / sizeof(children[0]); ++i) {
+        children[i] = fork();
+        CHECK(children[i] >= 0);
+        if (children[i] == 0) {
+            const int opened = nt_open_guest_profile(state, NULL);
+            if (opened >= 0)
+                close(opened);
+            _exit(opened >= 0 ? 0 : 1);
+        }
+    }
+    for (size_t i = 0; i < sizeof(children) / sizeof(children[0]); ++i) {
+        int status;
+        CHECK(waitpid(children[i], &status, 0) == children[i] &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
     drive = nt_open_guest_profile(state, NULL);
     CHECK(drive >= 0);
     CHECK(fstatat(profile_dir, "drive-c", &info, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
@@ -92,6 +109,12 @@ int main(void)
     CHECK(mkdirat(profile_dir, "drive-c", 0700) == 0);
     CHECK(nt_open_guest_profile(state, NULL) < 0 && errno == EEXIST);
     CHECK(unlinkat(profile_dir, "drive-c", AT_REMOVEDIR) == 0);
+    /* A crafted C: symlink must never redirect writes outside the root. */
+    CHECK(renameat(profile_dir, "C:", profile_dir, "C.saved") == 0);
+    CHECK(symlinkat(other, profile_dir, "C:") == 0);
+    CHECK(nt_open_guest_profile(state, NULL) < 0);
+    CHECK(unlinkat(profile_dir, "C:", 0) == 0);
+    CHECK(renameat(profile_dir, "C.saved", profile_dir, "C:") == 0);
     CHECK(close(profile_dir) == 0);
     CHECK(drive >= 0);
     config = openat(drive, file, O_RDONLY | O_CLOEXEC);
@@ -99,7 +122,6 @@ int main(void)
     CHECK(config >= 0 && read(config, saved, sizeof(saved)) == 8 &&
           memcmp(saved, "settings", 8) == 0 && close(config) == 0);
 
-    pid_t children[4];
     for (size_t i = 0; i < sizeof(children) / sizeof(children[0]); ++i) {
         children[i] = fork();
         CHECK(children[i] >= 0);
