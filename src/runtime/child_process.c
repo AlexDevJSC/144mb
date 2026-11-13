@@ -128,7 +128,7 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         return 0;
     }
     if (!launch_child || process_security || thread_security || inherit_handles || environment ||
-        flags || startup->reserved || startup->reserved_bytes || startup->reserved_data ||
+        (flags & ~4u) || startup->reserved || startup->reserved_bytes || startup->reserved_data ||
         (startup->flags & ~1u)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
@@ -152,16 +152,19 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
     }
     snprintf(default_command, sizeof(default_command), "\"%s\"", path);
     pid_t pid = 0;
-    int status_fd = -1;
-    int error = launch_child(fd, path, converted ? converted : default_command, workdir, &pid, &status_fd);
+    int status_fd = -1, start_fd = -1;
+    int error = launch_child(fd, path, converted ? converted : default_command, workdir,
+                             (flags & 4u) != 0, &pid, &status_fd, &start_fd);
     free(converted);
     close(fd);
     if (error) {
         nt_SetLastError(error == ENOMEM || error == EAGAIN ? NT_ERROR_NOT_ENOUGH_MEMORY : NT_ERROR_GEN_FAILURE);
         return 0;
     }
-    if (!nt_runtime_watch_child(pid, status_fd, info)) {
+    if (!nt_runtime_watch_child(pid, status_fd, start_fd, info)) {
         close(status_fd);
+        if (start_fd >= 0)
+            close(start_fd);
         kill(pid, SIGKILL);
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);

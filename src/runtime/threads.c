@@ -3,24 +3,29 @@
 #include "sync.h"
 #include "child_process.h"
 #include "nt_services.h"
+#include "nt_core_information.h"
 #include "winbase.h"
 #include "ntnative/guest_thread.h"
 
 #include <errno.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <signal.h>
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128,
        STILL_ACTIVE = 259, MAX_PENDING_APC = 64, MAXIMUM_SUSPEND_COUNT = 127 };
 enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
        SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
+       PROCESS_QUERY_INFORMATION = 0x400, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000,
+       PROCESS_ALL_ACCESS = 0x1fffff,
        THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
        THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
 enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
@@ -46,6 +51,7 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started;
+    bool termination_requested, child_guest;
     int32_t semaphore_count, semaphore_maximum;
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
@@ -53,11 +59,14 @@ struct waitable {
     uint32_t access;
     pthread_t host;
     uint32_t thread_id, exit_code, owner_pid;
+    uint32_t requested_exit_code;
+    int pidfd, start_gate_fd;
     nt_thread_start start;
     void *parameter;
     /* Canonical named event/semaphore entries own a name. Aliases share
      * the same state, and the object vanishes after the last close. */
     char object_name[128];
+    uint16_t *thread_description;
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
@@ -70,6 +79,7 @@ static _Thread_local sigjmp_buf thread_exit;
 /* A guest's primary thread is not represented by a waitable. Its own
  * pseudo-handle has a strictly thread-local queue, never a host TID. */
 static _Thread_local struct guest_apc_queue primary_apcs;
+static _Thread_local uint16_t *primary_thread_description;
 static struct waitable *find_waitable(uintptr_t handle);
 static struct waitable *wait_state(struct waitable *handle);
 
@@ -259,7 +269,7 @@ static struct waitable *new_waitable(enum waitable_kind kind)
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         if (waitables[i].refs == 0 && waitables[i].links == 0) {
             waitables[i] = (struct waitable){.handle = next_handle++, .refs = 1, .kind = kind,
-                                             .access = SYNCHRONIZE};
+                                             .access = SYNCHRONIZE, .pidfd = -1, .start_gate_fd = -1};
             return &waitables[i];
         }
     }
@@ -275,8 +285,19 @@ static struct waitable *wait_state(struct waitable *handle)
  * from the canonical slot. All mutations occur under wait_lock. */
 static void release_waitable(struct waitable *object)
 {
-    if (--object->refs == 0 && object->shared)
-        --object->shared->links;
+    if (--object->refs != 0)
+        return;
+    if (object->shared != NULL) {
+        struct waitable *canonical = object->shared;
+        --canonical->links;
+        if (canonical->refs == 0 && canonical->links == 0) {
+            free(canonical->thread_description);
+            canonical->thread_description = NULL;
+        }
+    } else if (object->links == 0) {
+        free(object->thread_description);
+        object->thread_description = NULL;
+    }
 }
 
 bool nt_runtime_close_waitable(uintptr_t handle)
@@ -1009,17 +1030,28 @@ static void *reap_child(void *context)
     }
     close(watch->status_fd);
     pthread_mutex_lock(&wait_lock);
+    if (watch->process->termination_requested)
+        code = watch->process->requested_exit_code;
+    if (watch->thread->start_gate_fd >= 0) {
+        close(watch->thread->start_gate_fd);
+        watch->thread->start_gate_fd = -1;
+    }
+    if (watch->process->pidfd >= 0) {
+        close(watch->process->pidfd);
+        watch->process->pidfd = -1;
+    }
     watch->process->exit_code = watch->thread->exit_code = code;
     watch->process->signaled = watch->thread->signaled = true;
-    --watch->process->refs;
-    --watch->thread->refs;
+    release_waitable(watch->process);
+    release_waitable(watch->thread);
     pthread_cond_broadcast(&wait_changed);
     pthread_mutex_unlock(&wait_lock);
     free(watch);
     return NULL;
 }
 
-bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_information *info)
+bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
+                            struct nt_process_information *info)
 {
     struct child_watch *watch = malloc(sizeof(*watch));
     pthread_attr_t attr;
@@ -1039,6 +1071,16 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         thread->thread_id = (uint32_t)pid;
         thread->owner_pid = (uint32_t)pid;
         thread->access = THREAD_ALL_ACCESS;
+        thread->child_guest = true;
+        thread->start_gate_fd = start_fd;
+        thread->suspend_count = start_fd >= 0 ? 1u : 0u;
+        process->access = PROCESS_ALL_ACCESS;
+        process->owner_pid = (uint32_t)pid;
+        process->pidfd = -1;
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+        /* pidfd pins the child identity against PID reuse after waitpid. */
+        process->pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+#endif
         *watch = (struct child_watch){pid, status_fd, process, thread};
         pthread_t worker;
         error = pthread_create(&worker, &attr, reap_child, watch);
@@ -1049,8 +1091,11 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         error = ENOMEM;
     }
     if (error) {
-        if (process)
+        if (process) {
+            if (process->pidfd >= 0)
+                close(process->pidfd);
             *process = (struct waitable){0};
+        }
         if (thread)
             *thread = (struct waitable){0};
         free(watch);
@@ -1058,6 +1103,39 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
     pthread_mutex_unlock(&wait_lock);
     pthread_attr_destroy(&attr);
     return error == 0;
+}
+
+/* Only processes launched by our trusted host have a pidfd and an
+ * observed child reaper. Never signal an arbitrary user-supplied PID.
+ * The reaper retains the requested 32-bit Windows exit status. */
+nt_status nt_runtime_terminate_child_process(uintptr_t handle, uint32_t code)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object->kind != PROCESS)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(object->access & 1u)) /* PROCESS_TERMINATE */
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(object);
+        if (state->signaled)
+            status = NT_STATUS_ACCESS_DENIED;
+        else if (state->pidfd < 0)
+            status = NT_STATUS_NOT_SUPPORTED;
+#if defined(SYS_pidfd_send_signal)
+        else if (syscall(SYS_pidfd_send_signal, state->pidfd, SIGKILL, NULL, 0) == 0) {
+            state->termination_requested = true;
+            state->requested_exit_code = code;
+        } else {
+            status = errno == ESRCH ? NT_STATUS_ACCESS_DENIED : NT_STATUS_UNSUCCESSFUL;
+        }
+#endif
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
 }
 
 int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
@@ -1072,18 +1150,139 @@ int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
     }
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = find_waitable(handle);
-    bool valid = object && object->kind == PROCESS;
-    if (valid) {
-        const struct waitable *state = wait_state(object);
-        *code = state->signaled ? state->exit_code : STILL_ACTIVE;
+    uint32_t error = NT_ERROR_INVALID_HANDLE;
+    if (object != NULL && object->kind == PROCESS) {
+        if (!(object->access & (PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION)))
+            error = NT_ERROR_ACCESS_DENIED;
+        else {
+            const struct waitable *state = wait_state(object);
+            *code = state->signaled ? state->exit_code : STILL_ACTIVE;
+            error = 0;
+        }
     }
     pthread_mutex_unlock(&wait_lock);
-    if (!valid)
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-    return valid;
+    if (error != 0)
+        nt_SetLastError(error);
+    return error == 0;
+}
+
+/* Reopen an owned child by PID without confusing the numeric PID with
+ * the guest HANDLE. The runtime does not expose arbitrary host processes. */
+static nt_status open_local_process(uintptr_t *result, uint32_t access,
+                                    bool inherit, uint32_t pid)
+{
+    if (result == NULL || pid == 0 || (access & ~PROCESS_ALL_ACCESS) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *original = NULL;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+        struct waitable *item = &waitables[i];
+        if (item->kind == PROCESS && item->shared == NULL &&
+            (item->refs != 0 || item->links != 0) && item->owner_pid == pid) {
+            original = item;
+            break;
+        }
+    }
+    nt_status status = NT_STATUS_INVALID_CID;
+    if (original != NULL) {
+        if (access & ~original->access)
+            status = NT_STATUS_ACCESS_DENIED;
+        else {
+            struct waitable *alias = new_waitable(PROCESS);
+            if (alias == NULL)
+                status = NT_STATUS_NO_MEMORY;
+            else {
+                ++original->links;
+                alias->shared = original;
+                alias->access = access;
+                alias->handle_flags = inherit ? 1u : 0u;
+                *result = alias->handle;
+                status = NT_STATUS_SUCCESS;
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+uintptr_t NT_MS_ABI nt_OpenProcess(uint32_t access, int32_t inherit, uint32_t pid)
+{
+    uintptr_t opened = 0;
+    const nt_status status = open_local_process(&opened, access, inherit != 0, pid);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(status == NT_STATUS_INVALID_CID ?
+                        NT_ERROR_INVALID_PARAMETER : nt_runtime_nt_error(status));
+    return opened;
+}
+
+nt_status NT_MS_ABI nt_NtOpenProcess(uintptr_t *handle, uint32_t access,
+                                   const struct nt_object_attributes *attributes,
+                                   const struct nt_client_id *client_id)
+{
+    if (handle == NULL || client_id == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (attributes != NULL) {
+        if (attributes->size != sizeof(*attributes))
+            return NT_STATUS_INVALID_PARAMETER;
+        if (attributes->name != NULL || attributes->root != 0 ||
+            attributes->security != NULL || attributes->qos != NULL ||
+            (attributes->attributes & ~2u) != 0)
+            return NT_STATUS_NOT_SUPPORTED;
+    }
+    if (client_id->unique_thread != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    return open_local_process(handle, access,
+                              attributes != NULL && (attributes->attributes & 2u) != 0,
+                              (uint32_t)client_id->unique_process);
 }
 
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void) { return UINTPTR_MAX - 1; }
+
+/* Identity is taken from the canonical object, not from its numerical
+ * HANDLE. In particular a child-process handle is never a host PID. */
+uint32_t NT_MS_ABI nt_GetProcessId(uintptr_t handle)
+{
+    if (handle == UINTPTR_MAX)
+        return (uint32_t)getpid();
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    uint32_t pid = 0;
+    uint32_t error = NT_ERROR_INVALID_HANDLE;
+    if (object != NULL && object->kind == PROCESS) {
+        if (!(object->access & (PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION)))
+            error = NT_ERROR_ACCESS_DENIED;
+        else {
+            pid = wait_state(object)->owner_pid;
+            error = 0;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (error != 0)
+        nt_SetLastError(error);
+    return pid;
+}
+
+uint32_t NT_MS_ABI nt_GetProcessIdOfThread(uintptr_t handle)
+{
+    if (handle == UINTPTR_MAX - 1)
+        return (uint32_t)getpid();
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    uint32_t pid = 0;
+    uint32_t error = NT_ERROR_INVALID_HANDLE;
+    if (object != NULL && object->kind == THREAD) {
+        if (!(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
+            error = NT_ERROR_ACCESS_DENIED;
+        else {
+            pid = wait_state(object)->owner_pid;
+            error = 0;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (error != 0)
+        nt_SetLastError(error);
+    return pid;
+}
 /* Thread metadata is kept in the same canonical table as wait handles, so
  * OpenThread and native queries observe the same guest TEB and thread ID.
  * No host pthread_t is returned as a Win32 HANDLE. */
@@ -1125,12 +1324,11 @@ uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle)
     return status == NT_STATUS_SUCCESS ? id : 0;
 }
 
-uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
+static nt_status open_thread_local(uintptr_t *result, uint32_t access,
+                                   bool inherit, uint32_t id)
 {
-    if (id == 0 || (access & ~THREAD_ALL_ACCESS) != 0) {
-        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
-        return 0;
-    }
+    if (result == NULL || id == 0 || (access & ~THREAD_ALL_ACCESS) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
     pthread_mutex_lock(&wait_lock);
     struct waitable *original = NULL;
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
@@ -1142,28 +1340,60 @@ uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
             break;
         }
     }
-    uintptr_t result = 0;
-    uint32_t error = NT_ERROR_INVALID_PARAMETER;
+    nt_status status = NT_STATUS_INVALID_CID;
     if (original != NULL) {
         if (access & ~original->access) {
-            error = NT_ERROR_ACCESS_DENIED;
+            status = NT_STATUS_ACCESS_DENIED;
         } else {
             struct waitable *alias = new_waitable(THREAD);
             if (alias == NULL)
-                error = NT_ERROR_NOT_ENOUGH_MEMORY;
+                status = NT_STATUS_NO_MEMORY;
             else {
                 ++original->links;
                 alias->shared = original;
                 alias->access = access;
-                alias->handle_flags = inherit != 0 ? 1u : 0u;
-                result = alias->handle;
+                alias->handle_flags = inherit ? 1u : 0u;
+                *result = alias->handle;
+                status = NT_STATUS_SUCCESS;
             }
         }
     }
     pthread_mutex_unlock(&wait_lock);
-    if (result == 0)
-        nt_SetLastError(error);
-    return result;
+    return status;
+}
+
+uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
+{
+    uintptr_t opened = 0;
+    const nt_status status = open_thread_local(&opened, access, inherit != 0, id);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(status == NT_STATUS_INVALID_CID ?
+                        NT_ERROR_INVALID_PARAMETER : nt_runtime_nt_error(status));
+    return opened;
+}
+
+/* No directory names or security descriptors on this bounded, same-process
+ * NtOpenThread profile. Native calls never touch the guest's LastError. */
+nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
+                                  const struct nt_object_attributes *attributes,
+                                  const struct nt_client_id *client_id)
+{
+    if (handle == NULL || client_id == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (attributes != NULL) {
+        if (attributes->size != sizeof(*attributes))
+            return NT_STATUS_INVALID_PARAMETER;
+        if (attributes->root != 0 || attributes->name != NULL ||
+            attributes->security != NULL || attributes->qos != NULL ||
+            (attributes->attributes & ~2u) != 0)
+            return NT_STATUS_NOT_SUPPORTED;
+    }
+    if (client_id->unique_process != 0 &&
+        client_id->unique_process != (uintptr_t)getpid())
+        return NT_STATUS_NOT_SUPPORTED;
+    return open_thread_local(handle, access,
+                             attributes != NULL && (attributes->attributes & 2u) != 0,
+                             (uint32_t)client_id->unique_thread);
 }
 
 
@@ -1180,7 +1410,7 @@ static void finish_thread(void *state)
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     clear_apcs_locked(&running_thread->apcs);
     running_thread->signaled = true;
-    --running_thread->refs;
+    release_waitable(running_thread);
     pthread_cond_broadcast(&wait_changed);
     pthread_mutex_unlock(&wait_lock);
 }
@@ -1256,6 +1486,65 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     return handle;
 }
 
+/* Native thread creation is a bounded adapter over the same owned
+ * pthread/TEB path as CreateThread. Unsupported extended attributes must
+ * fail before the thread is started. Native entrypoints preserve LastError. */
+nt_status NT_MS_ABI nt_NtCreateThreadEx(uintptr_t *handle, uint32_t desired_access,
+                                       const struct nt_object_attributes *attributes,
+                                       uintptr_t process, nt_thread_start start,
+                                       void *argument, uint32_t flags,
+                                       size_t zero_bits, size_t stack_commit,
+                                       size_t stack_reserve, void *attribute_list)
+{
+    if (handle == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    *handle = 0;
+    if (process != UINTPTR_MAX)
+        return NT_STATUS_INVALID_HANDLE;
+    if (start == NULL || desired_access & ~THREAD_ALL_ACCESS)
+        return NT_STATUS_INVALID_PARAMETER;
+    if (attributes != NULL) {
+        if (attributes->size != sizeof(*attributes))
+            return NT_STATUS_INVALID_PARAMETER;
+        if (attributes->name != NULL || attributes->root != 0 ||
+            attributes->security != NULL || attributes->qos != NULL ||
+            attributes->attributes != 0)
+            return NT_STATUS_NOT_SUPPORTED;
+    }
+    if ((flags & ~1u) != 0 || zero_bits != 0 || stack_reserve != 0 ||
+        attribute_list != NULL)
+        return NT_STATUS_NOT_SUPPORTED;
+    const uint32_t old_error = nt_GetLastError();
+    uintptr_t created = nt_CreateThread(NULL, stack_commit, start, argument,
+                                        (flags & 1u) ? 4u : 0u, NULL);
+    const uint32_t error = nt_GetLastError();
+    nt_SetLastError(old_error);
+    if (created == 0)
+        return error == NT_ERROR_NOT_ENOUGH_MEMORY ? NT_STATUS_NO_MEMORY :
+               error == NT_ERROR_NOT_SUPPORTED ? NT_STATUS_NOT_SUPPORTED :
+               NT_STATUS_INVALID_PARAMETER;
+    if (desired_access != THREAD_ALL_ACCESS) {
+        uintptr_t reduced = 0;
+        nt_status status = nt_runtime_duplicate_waitable(created, desired_access, 0, 0, &reduced);
+        nt_runtime_close_waitable(created);
+        if (status != NT_STATUS_SUCCESS)
+            return status;
+        created = reduced;
+    }
+    *handle = created;
+    return NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtTerminateThread(uintptr_t thread, nt_status exit_code)
+{
+    /* Terminating an unrelated pthread while it owns runtime locks would
+     * corrupt Linux state. Only self-termination is currently safe. */
+    if (thread != nt_GetCurrentThread())
+        return NT_STATUS_NOT_SUPPORTED;
+    nt_ExitThread((uint32_t)exit_code);
+    return NT_STATUS_SUCCESS; /* not reached */
+}
+
 /* Suspension is deliberately restricted to the startup gate. It can
  * increase the count of a thread already created suspended, but it never
  * pauses guest instructions or calls pthread signals on a running thread.
@@ -1273,7 +1562,7 @@ static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
         status = NT_STATUS_ACCESS_DENIED;
     else {
         struct waitable *state = wait_state(thread);
-        if (state->owner_pid != (uint32_t)getpid())
+        if (state->owner_pid != (uint32_t)getpid() && !state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled)
             status = NT_STATUS_THREAD_IS_TERMINATING;
@@ -1318,7 +1607,7 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
         status = NT_STATUS_ACCESS_DENIED;
     else {
         struct waitable *state = wait_state(thread);
-        if (state->owner_pid != (uint32_t)getpid())
+        if (state->owner_pid != (uint32_t)getpid() && !state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled)
             status = NT_STATUS_THREAD_IS_TERMINATING;
@@ -1326,8 +1615,24 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
             if (previous != NULL)
                 *previous = state->suspend_count;
             if (state->suspend_count != 0) {
-                --state->suspend_count;
-                pthread_cond_broadcast(&wait_changed);
+                /* For a child created suspended, release the private fd5
+                 * execution gate only on the final ResumeThread. Never
+                 * reuse a PID or send SIGCONT to an unrelated process. */
+                if (state->suspend_count == 1 && state->child_guest) {
+                    const unsigned char token = 'G';
+                    ssize_t written;
+                    do {
+                        written = write(state->start_gate_fd, &token, 1);
+                    } while (written < 0 && errno == EINTR);
+                    close(state->start_gate_fd);
+                    state->start_gate_fd = -1;
+                    if (written != 1)
+                        status = NT_STATUS_THREAD_IS_TERMINATING;
+                }
+                if (status == NT_STATUS_SUCCESS) {
+                    --state->suspend_count;
+                    pthread_cond_broadcast(&wait_changed);
+                }
             }
         }
     }
@@ -1392,16 +1697,24 @@ int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t handle, uint32_t *code)
     return error == 0;
 }
 
+/* The complete UTF-16 name belongs to the NT thread object. The Linux
+ * pthread name is only a best-effort 15-byte diagnostic abbreviation. */
 int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t handle, const uint16_t *description)
 {
     if (description == NULL)
         return (int32_t)UINT32_C(0x80070057);
     const size_t length = nt_runtime_wide_length(description, 32767);
-    if (length == 32767)
+    if (length == 32767 || length > (SIZE_MAX / sizeof(uint16_t)) - 1)
         return (int32_t)UINT32_C(0x80070057);
-    char *name = nt_runtime_utf16_to_utf8(description, length);
-    if (name == NULL)
+    uint16_t *copy = malloc((length + 1) * sizeof(*copy));
+    if (copy == NULL)
         return (int32_t)UINT32_C(0x8007000e);
+    memcpy(copy, description, (length + 1) * sizeof(*copy));
+    char *name = nt_runtime_utf16_to_utf8(description, length);
+    if (name == NULL) {
+        free(copy);
+        return (int32_t)UINT32_C(0x80070057);
+    }
     size_t bytes = strlen(name);
     if (bytes > 15) {
         bytes = 15;
@@ -1410,16 +1723,69 @@ int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t handle, const uint16_t *desc
         name[bytes] = '\0';
     }
     pthread_mutex_lock(&wait_lock);
-    const struct waitable *thread = find_waitable(handle);
-    int error = ESRCH;
-    if (handle == nt_GetCurrentThread())
-        error = pthread_setname_np(pthread_self(), name);
-    else if (thread != NULL && thread->kind == THREAD &&
-             !wait_state((struct waitable *)thread)->signaled)
-        error = pthread_setname_np(wait_state((struct waitable *)thread)->host, name);
+    struct waitable *object = handle == nt_GetCurrentThread() ? running_thread : find_waitable(handle);
+    int error = 0;
+    if (handle != nt_GetCurrentThread() && (object == NULL || object->kind != THREAD))
+        error = (int)UINT32_C(0x80070006);
+    else if (object != NULL && handle != nt_GetCurrentThread() &&
+             !(object->access & (0x20u | 0x400u))) /* THREAD_SET_INFORMATION/_LIMITED */
+        error = (int)UINT32_C(0x80070005);
+    else if (object != NULL && wait_state(object)->owner_pid != (uint32_t)getpid())
+        error = (int)UINT32_C(0x80070032); /* ERROR_NOT_SUPPORTED */
+    else if (object != NULL && wait_state(object)->signaled)
+        error = (int)UINT32_C(0x80070006);
+    else {
+        pthread_t host = object != NULL ? wait_state(object)->host : pthread_self();
+        if (pthread_setname_np(host, name) != 0) {
+            error = (int)UINT32_C(0x80070006);
+        } else {
+            uint16_t **slot = object != NULL ? &wait_state(object)->thread_description :
+                                              &primary_thread_description;
+            free(*slot);
+            *slot = copy;
+            copy = NULL;
+        }
+    }
     pthread_mutex_unlock(&wait_lock);
+    free(copy);
     free(name);
-    return error == 0 ? 0 : (int32_t)UINT32_C(0x80070006);
+    return error;
+}
+
+int32_t NT_MS_ABI nt_GetThreadDescription(uintptr_t handle, uint16_t **description)
+{
+    if (description == NULL)
+        return (int32_t)UINT32_C(0x80070057);
+    *description = NULL;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = handle == nt_GetCurrentThread() ? running_thread : find_waitable(handle);
+    int32_t result = 0;
+    if (handle != nt_GetCurrentThread() && (object == NULL || object->kind != THREAD))
+        result = (int32_t)UINT32_C(0x80070006);
+    else if (object != NULL && handle != nt_GetCurrentThread() &&
+             !(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
+        result = (int32_t)UINT32_C(0x80070005);
+    else if (object != NULL && wait_state(object)->owner_pid != (uint32_t)getpid())
+        result = (int32_t)UINT32_C(0x80070032);
+    else {
+        const uint16_t *source = object != NULL ? wait_state(object)->thread_description :
+                                                 primary_thread_description;
+        size_t length = 0;
+        if (source != NULL)
+            while (source[length] != 0)
+                ++length;
+        uint16_t *allocated = (uint16_t *)nt_LocalAlloc(0, (length + 1) * sizeof(uint16_t));
+        if (allocated == NULL)
+            result = (int32_t)UINT32_C(0x8007000e);
+        else {
+            if (source != NULL)
+                memcpy(allocated, source, length * sizeof(uint16_t));
+            allocated[length] = 0;
+            *description = allocated;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return result;
 }
 
 struct fls_slot { nt_fls_callback callback; bool used; };

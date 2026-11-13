@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "winbase.h"
 #include "winfile.h"
+#include "child_process.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -500,8 +501,17 @@ int32_t NT_MS_ABI nt_TerminateProcess(uintptr_t process, uint32_t code)
 {
     if (process == UINTPTR_MAX && worker_status_fd >= 0)
         finish_worker(code);
-    nt_SetLastError(process == UINTPTR_MAX ? NT_ERROR_ACCESS_DENIED : NT_ERROR_INVALID_HANDLE);
-    return 0;
+    const nt_status status = nt_runtime_terminate_child_process(process, code);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtTerminateProcess(uintptr_t process, nt_status exit_code)
+{
+    if (process == UINTPTR_MAX && worker_status_fd >= 0)
+        finish_worker((uint32_t)exit_code);
+    return nt_runtime_terminate_child_process(process, (uint32_t)exit_code);
 }
 
 void NT_MS_ABI nt_ExitProcess(uint32_t code)
