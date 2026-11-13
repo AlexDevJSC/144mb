@@ -38,6 +38,11 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 
 ## Madurez del componente
 
-Línea base de la evaluación anterior: **35 % estimado**.
+- **Anterior: 35 %** (línea base tras PR #68).
+- **Propuesto tras PR #71: 55 %** (estimación, **+20 puntos porcentuales**, pendiente de la validación final de la PR).
+- **Justificación:** ahora existen rutas conectadas de creación, apertura, identidad, consulta, suspensión de arranque, terminación y cierre tanto para hilos como para procesos hijo, y pruebas Win64/host que recorren varias de ellas.
+- **Por qué no 70 % ni 100 %:** faltan contratos sustanciales de suspensión/terminación remota, captura y restauración de contextos AMD64, tokens y permisos NT, herencia de handles, servicios entre procesos, prioridades/afinidad y comparación de comportamiento con Windows real.
 
-No se asigna 100 % (ni 70 %) por la mera incorporación de los símbolos anteriores. Siguen sin implementarse grandes bloques de contexto, planificación, suspensión asíncrona, herencia y seguridad NT. El porcentaje actualizado, su variación y su evidencia se registran al cerrar la entrega, conforme a la hoja de ruta.
+Este número **no mide aceleración de CPU**. No se ha realizado ni demostrado una mejora 2× en rendimiento; «duplicar porcentaje» y «duplicar rendimiento» son objetivos distintos.
+
+Las pruebas de GitHub Actions, en particular el job Linux con UBSan, el RPM Fedora y cualquier test de aislamiento omitido, deben acompañar la entrega. Un fallo obliga a corregir o a retirar la estimación de madurez antes de cerrar la PR.
