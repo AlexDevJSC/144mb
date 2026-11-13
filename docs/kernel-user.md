@@ -129,6 +129,16 @@ software canalizadas por `RaiseException`, antes del recorrido SEH.
 No traducen por sí mismos señales síncronas Linux en excepciones Windows.
 Véase [estado de los siete componentes](nt-core-readiness.md).
 
+## Procesos e hilos — ampliación de fase 4
+
+La prioridad del núcleo es **procesos e hilos** según el [orden fijado](nt-core-development-order.md). Se han añadido `NtCreateThreadEx`, `NtOpenThread`, `NtTerminateThread`, `TerminateThread`, `OpenProcess`, `NtOpenProcess`, `NtTerminateProcess`, `GetProcessId`, `GetProcessIdOfThread` y `GetThreadDescription`, bajo contratos acotados al runtime.
+
+Los hijos ejecutables PE admiten `CREATE_SUSPENDED` mediante una puerta de inicio protegida por un descriptor del propio lanzador. El hijo no ejecuta instrucciones del PE hasta que el padre reduzca su contador de suspensión a cero. No se presenta esto como capacidad de parar un hilo que ya está en marcha. Para terminar un proceso hijo, el runtime necesita `pidfd` y nunca emplea `kill(pid)` sobre PID suministrado por el invitado. Los handles siguen siendo números NT privados, distintos del PID Linux. Las operaciones nativas conservan `LastError`.
+
+`GetThreadDescription` devuelve una copia de UTF-16 liberable mediante `LocalFree`; los alias de un mismo hilo comparten el nombre completo y deben acreditar derechos suficientes. `NtCreateThreadEx` solo opera sobre el proceso actual, sin estructuras extendidas; `TerminateThread` limita la terminación de otros hilos a los que aún no han empezado la ejecución invitada. **Quedan fuera del perfil** la suspensión asíncrona, la terminación de hilos activos ajenos, herencia arbitraria, tokens de seguridad y contexto remoto.
+
+Detalle de contratos, pruebas y límites en [fase 4](nt-stage4-process-threads.md).
+
 ## Verificación
 
 `make -j2 check check-pe check-pe-import check-pe-kernel-user` ejecuta dos
