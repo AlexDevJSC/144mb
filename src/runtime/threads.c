@@ -26,7 +26,7 @@ enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
        SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
        PROCESS_QUERY_INFORMATION = 0x400, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000,
        PROCESS_ALL_ACCESS = 0x1fffff,
-       THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
+       THREAD_TERMINATE = 1, THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
        THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
 enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
 typedef void (NT_MS_ABI *guest_user_apc)(uintptr_t);
@@ -51,7 +51,7 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started;
-    bool termination_requested, child_guest;
+    bool termination_requested, child_guest, terminate_at_start;
     int32_t semaphore_count, semaphore_maximum;
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
@@ -1397,12 +1397,14 @@ nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
 }
 
 
-static void finish_thread(void *state)
+static void finish_thread(struct nt_guest_thread *guest, bool attached)
 {
-    struct nt_guest_thread *guest = state;
     nt_runtime_run_fls_cleanup();
     if (guest->entered) {
-        nt_runtime_notify_tls(3); /* DLL_THREAD_DETACH */
+        /* A thread killed while CREATE_SUSPENDED has not yet executed
+         * TLS callbacks or DLL_THREAD_ATTACH. It must not send DETACH. */
+        if (attached)
+            nt_runtime_notify_tls(3); /* DLL_THREAD_DETACH */
         nt_guest_thread_leave(guest);
     }
     pthread_mutex_lock(&wait_lock);
@@ -1429,15 +1431,22 @@ static void *thread_main(void *context)
     pthread_cond_broadcast(&wait_changed);
     /* CREATE_SUSPENDED must prevent guest instructions, TLS callbacks and
      * the user's thread entry from running until ResumeThread. */
-    while (running_thread->suspend_count != 0)
+    while (running_thread->suspend_count != 0 && !running_thread->terminate_at_start)
         pthread_cond_wait(&wait_changed, &wait_lock);
+    const bool cancelled = running_thread->terminate_at_start;
+    const uint32_t cancel_code = running_thread->requested_exit_code;
     pthread_mutex_unlock(&wait_lock);
-    if (sigsetjmp(thread_exit, 1) == 0) {
-        if (guest.entered)
+    bool attached = false;
+    if (cancelled) {
+        thread_result = cancel_code;
+    } else if (sigsetjmp(thread_exit, 1) == 0) {
+        if (guest.entered) {
             nt_runtime_notify_tls(2); /* DLL_THREAD_ATTACH */
+            attached = true;
+        }
         thread_result = ready ? running_thread->start(running_thread->parameter) : NT_ERROR_GEN_FAILURE;
     }
-    finish_thread(&guest);
+    finish_thread(&guest, attached);
     return NULL;
 }
 
@@ -1535,14 +1544,55 @@ nt_status NT_MS_ABI nt_NtCreateThreadEx(uintptr_t *handle, uint32_t desired_acce
     return NT_STATUS_SUCCESS;
 }
 
+static nt_status terminate_suspended_thread(uintptr_t handle, uint32_t exit_code)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(object->access & THREAD_TERMINATE))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(object);
+        if (state->owner_pid != (uint32_t)getpid())
+            status = NT_STATUS_NOT_SUPPORTED;
+        else if (state->signaled || state->terminate_at_start)
+            status = NT_STATUS_THREAD_IS_TERMINATING;
+        else if (state->suspend_count == 0)
+            status = NT_STATUS_NOT_SUPPORTED;
+        else {
+            state->terminate_at_start = true;
+            state->requested_exit_code = exit_code;
+            state->suspend_count = 0;
+            pthread_cond_broadcast(&wait_changed);
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+int32_t NT_MS_ABI nt_TerminateThread(uintptr_t thread, uint32_t exit_code)
+{
+    /* Win32 does not support the pseudo-handle's self-termination path:
+     * use ExitThread for safe self-exit. */
+    const nt_status status = terminate_suspended_thread(thread, exit_code);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
+}
+
 nt_status NT_MS_ABI nt_NtTerminateThread(uintptr_t thread, nt_status exit_code)
 {
-    /* Terminating an unrelated pthread while it owns runtime locks would
-     * corrupt Linux state. Only self-termination is currently safe. */
-    if (thread != nt_GetCurrentThread())
-        return NT_STATUS_NOT_SUPPORTED;
-    nt_ExitThread((uint32_t)exit_code);
-    return NT_STATUS_SUCCESS; /* not reached */
+    if (thread == nt_GetCurrentThread()) {
+        nt_ExitThread((uint32_t)exit_code);
+        return NT_STATUS_SUCCESS; /* not reached */
+    }
+    /* Remote running pthreads cannot be cancelled without violating
+     * their lock ownership. The startup gate is the only safe target. */
+    return terminate_suspended_thread(thread, (uint32_t)exit_code);
 }
 
 /* Suspension is deliberately restricted to the startup gate. It can
