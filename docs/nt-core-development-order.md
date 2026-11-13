@@ -57,7 +57,9 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **13-11-2026, PR #78 integrada — consultas nativas: 66 % → 68 % (+2 puntos porcentuales estimados).** `NtQueryInformationThread(ThreadBasicInformation)` deja de devolver prioridad 8 y afinidad 1 ficticias; consulta el planificador Linux para hilos activos y usa una captura final del propio hilo para consultas posteriores a su terminación. El perfil sigue acotado a CPU group 0 y valores de prioridad representables.
 
-- **13-11-2026, fase 4 creación remota al proceso propio (PR en curso): 68 % → 70 % (+2 puntos estimados, pendientes de CI).** `CreateRemoteThread`, `CreateRemoteThreadEx` y `NtCreateThreadEx` aceptan el proceso actual a través de handles reales con `PROCESS_CREATE_THREAD`; nunca habilitan la inyección en otro proceso Linux o Windows, ni atributos extendidos no implementados. Se prueban creación suspendida y derechos.
+- **13-11-2026, PR #79 fusionada — creación de hilos en el proceso propio: 68 % → 70 % (+2 puntos porcentuales estimados, CI Linux/UBSan/Fedora correcta).** `CreateRemoteThread`, `CreateRemoteThreadEx` y `NtCreateThreadEx` aceptan el proceso actual a través de handles reales con `PROCESS_CREATE_THREAD`; nunca habilitan la inyección en otro proceso Linux o Windows, ni atributos extendidos no implementados. Se prueban creación suspendida y derechos.
+
+- **13-11-2026, preparación de pruebas físicas Fedora (esta PR): 70 % → 70 % (+0 puntos).** Se añade `scripts/fedora-check-stage4.sh`, que ejecuta pruebas de runtime Linux, PE Windows, UBSan y procesos hijo aislados, y rechaza explícitamente suites omitidas (`SKIP`). Un script de pruebas no añade contratos al runtime y no justifica aumentar el porcentaje.
 
 ### Formato de cierre para cambios futuros
 
