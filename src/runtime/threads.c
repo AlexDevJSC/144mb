@@ -3,6 +3,7 @@
 #include "sync.h"
 #include "child_process.h"
 #include "nt_services.h"
+#include "nt_core_information.h"
 #include "winbase.h"
 #include "ntnative/guest_thread.h"
 
@@ -21,6 +22,8 @@ enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128,
        STILL_ACTIVE = 259, MAX_PENDING_APC = 64, MAXIMUM_SUSPEND_COUNT = 127 };
 enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
        SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
+       PROCESS_QUERY_INFORMATION = 0x400, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000,
+       PROCESS_ALL_ACCESS = 0x1fffff,
        THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
        THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
 enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
@@ -1039,6 +1042,8 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         thread->thread_id = (uint32_t)pid;
         thread->owner_pid = (uint32_t)pid;
         thread->access = THREAD_ALL_ACCESS;
+        process->access = PROCESS_ALL_ACCESS;
+        process->owner_pid = (uint32_t)pid;
         *watch = (struct child_watch){pid, status_fd, process, thread};
         pthread_t worker;
         error = pthread_create(&worker, &attr, reap_child, watch);
@@ -1084,6 +1089,52 @@ int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
 }
 
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void) { return UINTPTR_MAX - 1; }
+
+/* Identity is taken from the canonical object, not from its numerical
+ * HANDLE. In particular a child-process handle is never a host PID. */
+uint32_t NT_MS_ABI nt_GetProcessId(uintptr_t handle)
+{
+    if (handle == UINTPTR_MAX)
+        return (uint32_t)getpid();
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    uint32_t pid = 0;
+    uint32_t error = NT_ERROR_INVALID_HANDLE;
+    if (object != NULL && object->kind == PROCESS) {
+        if (!(object->access & (PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION)))
+            error = NT_ERROR_ACCESS_DENIED;
+        else {
+            pid = wait_state(object)->owner_pid;
+            error = 0;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (error != 0)
+        nt_SetLastError(error);
+    return pid;
+}
+
+uint32_t NT_MS_ABI nt_GetProcessIdOfThread(uintptr_t handle)
+{
+    if (handle == UINTPTR_MAX - 1)
+        return (uint32_t)getpid();
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    uint32_t pid = 0;
+    uint32_t error = NT_ERROR_INVALID_HANDLE;
+    if (object != NULL && object->kind == THREAD) {
+        if (!(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
+            error = NT_ERROR_ACCESS_DENIED;
+        else {
+            pid = wait_state(object)->owner_pid;
+            error = 0;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (error != 0)
+        nt_SetLastError(error);
+    return pid;
+}
 /* Thread metadata is kept in the same canonical table as wait handles, so
  * OpenThread and native queries observe the same guest TEB and thread ID.
  * No host pthread_t is returned as a Win32 HANDLE. */
@@ -1125,12 +1176,11 @@ uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle)
     return status == NT_STATUS_SUCCESS ? id : 0;
 }
 
-uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
+static nt_status open_thread_local(uintptr_t *result, uint32_t access,
+                                   bool inherit, uint32_t id)
 {
-    if (id == 0 || (access & ~THREAD_ALL_ACCESS) != 0) {
-        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
-        return 0;
-    }
+    if (result == NULL || id == 0 || (access & ~THREAD_ALL_ACCESS) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
     pthread_mutex_lock(&wait_lock);
     struct waitable *original = NULL;
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
@@ -1142,28 +1192,60 @@ uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
             break;
         }
     }
-    uintptr_t result = 0;
-    uint32_t error = NT_ERROR_INVALID_PARAMETER;
+    nt_status status = NT_STATUS_INVALID_CID;
     if (original != NULL) {
         if (access & ~original->access) {
-            error = NT_ERROR_ACCESS_DENIED;
+            status = NT_STATUS_ACCESS_DENIED;
         } else {
             struct waitable *alias = new_waitable(THREAD);
             if (alias == NULL)
-                error = NT_ERROR_NOT_ENOUGH_MEMORY;
+                status = NT_STATUS_NO_MEMORY;
             else {
                 ++original->links;
                 alias->shared = original;
                 alias->access = access;
-                alias->handle_flags = inherit != 0 ? 1u : 0u;
-                result = alias->handle;
+                alias->handle_flags = inherit ? 1u : 0u;
+                *result = alias->handle;
+                status = NT_STATUS_SUCCESS;
             }
         }
     }
     pthread_mutex_unlock(&wait_lock);
-    if (result == 0)
-        nt_SetLastError(error);
-    return result;
+    return status;
+}
+
+uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
+{
+    uintptr_t opened = 0;
+    const nt_status status = open_thread_local(&opened, access, inherit != 0, id);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(status == NT_STATUS_INVALID_CID ?
+                        NT_ERROR_INVALID_PARAMETER : nt_runtime_nt_error(status));
+    return opened;
+}
+
+/* No directory names or security descriptors on this bounded, same-process
+ * NtOpenThread profile. Native calls never touch the guest's LastError. */
+nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
+                                  const struct nt_object_attributes *attributes,
+                                  const struct nt_client_id *client_id)
+{
+    if (handle == NULL || client_id == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (attributes != NULL) {
+        if (attributes->size != sizeof(*attributes))
+            return NT_STATUS_INVALID_PARAMETER;
+        if (attributes->root != 0 || attributes->name != NULL ||
+            attributes->security != NULL || attributes->qos != NULL ||
+            (attributes->attributes & ~2u) != 0)
+            return NT_STATUS_NOT_SUPPORTED;
+    }
+    if (client_id->unique_process != 0 &&
+        client_id->unique_process != (uintptr_t)getpid())
+        return NT_STATUS_NOT_SUPPORTED;
+    return open_thread_local(handle, access,
+                             attributes != NULL && (attributes->attributes & 2u) != 0,
+                             (uint32_t)client_id->unique_thread);
 }
 
 
