@@ -42,7 +42,7 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 
 - **Anterior: 35 %** (línea base tras PR #68).
 - **Actual tras PR #71 y #72 fusionadas: 55 %** (estimación, **+20 puntos porcentuales**).
-- **Propuesto en esta entrega (afinidad, PR pendiente): 60 %** (estimación, **+5 puntos porcentuales** respecto al 55 %). Sujeta a las pruebas Linux y Fedora del commit final. No se afirma cobertura de prioridades, CPU groups ni suspensión arbitraria.
+- **Actual tras PR #74 fusionada: 60 %** (estimación, **+5 puntos porcentuales** respecto al 55 % anterior). [CI Linux, UBSan y Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43346528358), incluida la ruta positiva de afinidad CPU real y 48 ciclos de hilos. No se afirma cobertura de prioridades, processor groups múltiples ni suspensión arbitraria.
 - **Justificación:** ahora existen rutas conectadas de creación, apertura, identidad, consulta, suspensión de arranque, terminación y cierre tanto para hilos como para procesos hijo, y pruebas Win64/host que recorren varias de ellas.
 - **Por qué no 70 % ni 100 %:** faltan contratos sustanciales de suspensión/terminación remota, captura y restauración de contextos AMD64, tokens y permisos NT, herencia de handles, servicios entre procesos, prioridades/afinidad y comparación de comportamiento con Windows real.
 
