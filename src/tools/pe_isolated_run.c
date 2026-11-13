@@ -461,10 +461,16 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
 
 static void usage(const char *command)
 {
-    fprintf(stderr, "Usage: %s [--share Folder=/absolute/linux/path]... [--] path/to/program.exe [argument...]\n"
-            "Folders with read/write access: Desktop, Documents, Downloads, Music, Pictures, Videos.\n"
+    fprintf(stderr,
+            "Usage: %s [--share Folder=/absolute/linux/path]... [--] path/to/program.exe [argument...]\n"
+            "       %s --remember-share Folder=/absolute/linux/path\n"
+            "       %s --forget-share Folder\n"
+            "Mappings: Desktop, Documents, Downloads, Music, Pictures, Videos.\n"
+            "Remembered grants are stored in private $XDG_CONFIG_HOME/nt-native-linux/shares.conf\n"
+            "(or $HOME/.config/nt-native-linux/shares.conf) and apply to every launch.\n"
+            "A per-launch --share overrides a remembered mapping for that folder.\n"
             "Requires bubblewrap + Wayland. For headless smoke tests use SDL_VIDEODRIVER=offscreen.\n",
-            command);
+            command, command, command);
 }
 
 int main(int argc, char **argv)
@@ -477,6 +483,43 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 0;
     }
+    const char *names[NT_USER_FOLDER_COUNT];
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i)
+        names[i] = nt_user_folders[i].name;
+    const char *home = getenv("HOME");
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    if (argc >= 2 && (strcmp(argv[1], "--remember-share") == 0 ||
+                      strcmp(argv[1], "--forget-share") == 0)) {
+        const bool remember = strcmp(argv[1], "--remember-share") == 0;
+        if (argc != 3) {
+            usage(argv[0]);
+            return 2;
+        }
+        const char *folder = argv[2];
+        const char *directory = NULL;
+        char name[64];
+        if (remember) {
+            const char *equals = strchr(argv[2], '=');
+            const size_t length = equals != NULL ? (size_t)(equals - argv[2]) : 0;
+            if (length == 0 || length >= sizeof(name) || equals[1] != '/') {
+                usage(argv[0]);
+                return 2;
+            }
+            memcpy(name, folder, length);
+            name[length] = '\0';
+            folder = name;
+            directory = equals + 1;
+        }
+        if (nt_guest_share_update(config_home, home, names, NT_USER_FOLDER_COUNT,
+                                  folder, directory) != 0) {
+            fprintf(stderr, "Cannot update native folder grant: %s\n", strerror(errno));
+            return 2;
+        }
+        fprintf(stderr, "%s native folder grant: %s\n", remember ? "Remembered" : "Removed",
+                folder);
+        return 0;
+    }
+
     const char *folders[NT_USER_FOLDER_COUNT] = {0};
     int arg = 1;
     while (arg + 1 < argc && strcmp(argv[arg], "--share") == 0) {
@@ -508,5 +551,15 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
-    return run_isolated(argv[arg], folders, argc - arg - 1, argv + arg + 1);
+    char *remembered[NT_USER_FOLDER_COUNT] = {0};
+    if (nt_guest_share_load(config_home, home, names, NT_USER_FOLDER_COUNT, remembered) != 0) {
+        fprintf(stderr, "Cannot load native folder grants: %s\n", strerror(errno));
+        return 2;
+    }
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i)
+        if (folders[i] == NULL)
+            folders[i] = remembered[i];
+    const int result = run_isolated(argv[arg], folders, argc - arg - 1, argv + arg + 1);
+    nt_guest_share_free(remembered, NT_USER_FOLDER_COUNT);
+    return result;
 }
