@@ -467,8 +467,8 @@ check-pe-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe
 
-$(BUILD_DIR)/child-parent-fixture.exe: tests/pe/child_process_fixture.c | $(BUILD_DIR)
-	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lkernel32
+$(BUILD_DIR)/child-parent-fixture.exe: tests/pe/child_process_fixture.c $(BUILD_DIR)/fixture-nt_core.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< $(BUILD_DIR)/fixture-nt_core.a -lkernel32
 
 $(BUILD_DIR)/child-fixture.exe: tests/pe/child_process_fixture.c | $(BUILD_DIR)
 	$(MINGW_CC) -DNT_CHILD_FIXTURE $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lkernel32
