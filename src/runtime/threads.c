@@ -18,7 +18,7 @@
 #include <unistd.h>
 
 enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128,
-       STILL_ACTIVE = 259, MAX_PENDING_APC = 64 };
+       STILL_ACTIVE = 259, MAX_PENDING_APC = 64, MAXIMUM_SUSPEND_COUNT = 127 };
 enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
        SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
        THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
@@ -1256,8 +1256,55 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     return handle;
 }
 
-/* A bounded startup-suspension contract. Running-thread asynchronous
- * suspension needs a separate guest scheduler and is not implemented. */
+/* Suspension is deliberately restricted to the startup gate. It can
+ * increase the count of a thread already created suspended, but it never
+ * pauses guest instructions or calls pthread signals on a running thread.
+ * The gate and its count are protected by wait_lock. */
+static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *thread = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (thread == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (thread->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(thread->access & THREAD_SUSPEND_RESUME))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(thread);
+        if (state->owner_pid != (uint32_t)getpid())
+            status = NT_STATUS_NOT_SUPPORTED;
+        else if (state->signaled)
+            status = NT_STATUS_THREAD_IS_TERMINATING;
+        else if (state->suspend_count == 0)
+            status = NT_STATUS_NOT_SUPPORTED;
+        else if (state->suspend_count == MAXIMUM_SUSPEND_COUNT)
+            status = NT_STATUS_SUSPEND_COUNT_EXCEEDED;
+        else {
+            if (previous != NULL)
+                *previous = state->suspend_count;
+            ++state->suspend_count;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+uint32_t NT_MS_ABI nt_SuspendThread(uintptr_t handle)
+{
+    uint32_t previous = UINT32_MAX;
+    const nt_status status = suspend_guest_thread(handle, &previous);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS ? previous : UINT32_MAX;
+}
+
+nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous)
+{
+    return suspend_guest_thread(handle, previous);
+}
+
 static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
 {
     pthread_mutex_lock(&wait_lock);
@@ -1267,15 +1314,21 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
         status = NT_STATUS_INVALID_HANDLE;
     else if (thread->kind != THREAD)
         status = NT_STATUS_OBJECT_TYPE_MISMATCH;
-    else if (!(thread->access & THREAD_SUSPEND_RESUME)) {
+    else if (!(thread->access & THREAD_SUSPEND_RESUME))
         status = NT_STATUS_ACCESS_DENIED;
-    } else {
+    else {
         struct waitable *state = wait_state(thread);
-        if (previous != NULL)
-            *previous = state->suspend_count;
-        if (state->suspend_count != 0) {
-            --state->suspend_count;
-            pthread_cond_broadcast(&wait_changed);
+        if (state->owner_pid != (uint32_t)getpid())
+            status = NT_STATUS_NOT_SUPPORTED;
+        else if (state->signaled)
+            status = NT_STATUS_THREAD_IS_TERMINATING;
+        else {
+            if (previous != NULL)
+                *previous = state->suspend_count;
+            if (state->suspend_count != 0) {
+                --state->suspend_count;
+                pthread_cond_broadcast(&wait_changed);
+            }
         }
     }
     pthread_mutex_unlock(&wait_lock);
@@ -1324,15 +1377,19 @@ int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t handle, uint32_t *code)
     }
     pthread_mutex_lock(&wait_lock);
     const struct waitable *thread = find_waitable(handle);
-    const bool valid = thread != NULL && thread->kind == THREAD;
-    if (valid) {
+    uint32_t error = 0;
+    if (thread == NULL || thread->kind != THREAD) {
+        error = NT_ERROR_INVALID_HANDLE;
+    } else if (!(thread->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION))) {
+        error = NT_ERROR_ACCESS_DENIED;
+    } else {
         const struct waitable *state = wait_state((struct waitable *)thread);
         *code = state->signaled ? state->exit_code : STILL_ACTIVE;
     }
     pthread_mutex_unlock(&wait_lock);
-    if (!valid)
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-    return valid;
+    if (error != 0)
+        nt_SetLastError(error);
+    return error == 0;
 }
 
 int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t handle, const uint16_t *description)

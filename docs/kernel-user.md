@@ -111,9 +111,17 @@ NTSTATUS. No se permiten operaciones sobre procesos remotos ni vistas de
 sección no gestionadas.
 
 `CREATE_SUSPENDED` bloquea un hilo antes de ejecutar código invitado.
-`ResumeThread` y `NtResumeThread` liberan esa espera y devuelven el
-contador anterior. Esto no equivale a suspender asíncronamente un hilo
-que ya está ejecutándose.
+`SuspendThread` y `NtSuspendThread` aumentan el contador de ese hilo
+mientras siga en la puerta de arranque (máximo 127); `ResumeThread` y
+`NtResumeThread` lo reducen y devuelven el contador anterior. Todos los
+cambios se serializan con el mutex de la tabla de hilos y validan derechos
+`THREAD_SUSPEND_RESUME`. Un hilo activo, ya liberado de esa puerta, recibe
+`STATUS_NOT_SUPPORTED` / `ERROR_NOT_SUPPORTED` al solicitar una nueva
+suspensión. Los hilos ya terminados rechazan la operación NT. **Esto no
+equivale a suspender asíncronamente un hilo que ya está ejecutándose.**
+La prueba `check-pe-suspended-thread` recorre hasta 127 suspensiones,
+comprueba accesos denegados, no ejecución hasta la última reanudación,
+fallos explícitos sobre hilos activos y códigos de terminación.
 
 Los manejadores VEH registrados con `AddVectoredExceptionHandler` y
 `RemoveVectoredExceptionHandler` se invocan en orden para las excepciones
