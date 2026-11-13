@@ -4,6 +4,7 @@
 
 #ifndef NT_CHILD_FIXTURE
 __declspec(dllimport) LONG NTAPI NtTerminateProcess(HANDLE, LONG);
+__declspec(dllimport) LONG NTAPI NtSuspendThread(HANDLE, ULONG *);
 #endif
 
 #ifdef NT_CHILD_FIXTURE
@@ -60,6 +61,25 @@ int import_fixture_entry(void)
     if (CreateProcessW(L"C:\\ChildDir", NULL, NULL, NULL, FALSE, 0, NULL, directory, &startup, &process) ||
         GetLastError() != ERROR_FILE_NOT_FOUND)
         return 22;
+
+    /* The child receives a private startup gate: not even its PE entry
+     * executes until the initial thread's suspension count reaches zero. */
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, CREATE_SUSPENDED,
+                        NULL, directory, &startup, &process))
+        return 31;
+    if (WaitForSingleObject(process.hProcess, 0) != WAIT_TIMEOUT ||
+        GetProcessIdOfThread(process.hThread) != process.dwProcessId)
+        return 32;
+    ULONG prior = 0;
+    if (NtSuspendThread(process.hThread, &prior) != 0 || prior != 1 ||
+        ResumeThread(process.hThread) != 2 ||
+        WaitForSingleObject(process.hThread, 0) != WAIT_TIMEOUT ||
+        ResumeThread(process.hThread) != 1 ||
+        WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u)
+        return 33;
+    if (!CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 34;
 
     WCHAR hold[] = L"\"C:\\Test child.exe\" /nt-hold";
     if (!CreateProcessW(NULL, hold, NULL, NULL, FALSE, 0, NULL, directory, &startup, &process))
