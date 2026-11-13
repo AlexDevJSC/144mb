@@ -183,8 +183,20 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         if (length == 0 || (length == 1 && component[0] == '.'))
             continue;
         if (length == 2 && memcmp(component, "..", 2) == 0) {
-            /* Parent navigation may never escape the guest root. */
-            if (used == 0) {
+            /* A shared known-folder root is a separate security grant.
+             * Do not turn Documents/../secret into an unshared C: path. */
+            bool at_share_boundary = false;
+            pthread_mutex_lock(&root_lock);
+            for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+                const char *prefix = nt_user_folders[i].relative;
+                if (folder_roots[i].active && strlen(prefix) == used &&
+                    strncasecmp(output, prefix, used) == 0) {
+                    at_share_boundary = true;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&root_lock);
+            if (used == 0 || at_share_boundary) {
                 errno = EACCES;
                 return false;
             }
