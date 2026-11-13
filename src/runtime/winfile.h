@@ -34,6 +34,8 @@ int32_t NT_MS_ABI nt_CreateDirectoryW(const uint16_t *path, const void *security
 int32_t NT_MS_ABI nt_RemoveDirectoryW(const uint16_t *path);
 int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path);
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags);
+int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination);
+int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destination, int32_t fail_if_exists);
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer);
 int32_t NT_MS_ABI nt_SetCurrentDirectoryW(const uint16_t *path);
 uint32_t NT_MS_ABI nt_GetFullPathNameW(const uint16_t *path, uint32_t size, uint16_t *buffer,
