@@ -40,9 +40,13 @@ Puedes usar la ruta absoluta si tu escritorio carece de `xdg-user-dir`.
 El programa accede a esos mismos archivos mediante `C:\Users\guest\Documents`.
 Consulta las [carpetas disponibles](../../docs/isolated-loader.md#carpetas-de-linux-compartidas).
 
-Las aplicaciones comparten un disco C: persistente del usuario en
-`$XDG_STATE_HOME/nt-native-linux/drive-c`, con
-`$HOME/.local/state/nt-native-linux/drive-c` como ubicación predeterminada.
+Las aplicaciones comparten una carpeta Linux normal llamada `C:` en
+`$XDG_STATE_HOME/nt-native-linux/C:`, con
+`$HOME/.local/state/nt-native-linux/C:` como ubicación predeterminada.
+El lanzador transcribe rutas como `C:\Program Files\Aplicacion` a
+subdirectorios del mismo árbol Linux, sin emular una unidad NTFS. Al actualizar,
+una carpeta `drive-c` antigua se renombra a `C:` sin copiar datos; si ambas
+existen el inicio falla para evitar sobrescribir una instalación.
 El lanzador proporciona las rutas de perfil y datos de aplicación para
 guardar y recuperar preferencias entre sesiones.
 
