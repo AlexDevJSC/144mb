@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,7 +27,8 @@ enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
        SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
        PROCESS_QUERY_INFORMATION = 0x400, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000,
        PROCESS_ALL_ACCESS = 0x1fffff,
-       THREAD_TERMINATE = 1, THREAD_SUSPEND_RESUME = 2, THREAD_QUERY_INFORMATION = 0x40,
+       THREAD_TERMINATE = 1, THREAD_SUSPEND_RESUME = 2,
+       THREAD_SET_INFORMATION = 0x20, THREAD_QUERY_INFORMATION = 0x40,
        THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
 enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
 typedef void (NT_MS_ABI *guest_user_apc)(uintptr_t);
@@ -1742,6 +1744,143 @@ uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle)
 nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous)
 {
     return resume_guest_thread(handle, previous);
+}
+
+/* A Win64 SetThreadAffinityMask operates on one 64-bit processor group.
+ * Do not silently truncate a Linux cpuset that has CPU IDs outside group 0.
+ * We intentionally do not invent a Windows processor-group scheduler.
+ * The Linux kernel owns the actual placement; no virtual affinity cache. */
+static nt_status set_guest_thread_affinity(uintptr_t handle, uintptr_t requested,
+                                           uintptr_t *previous)
+{
+    if (requested == 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = handle == nt_GetCurrentThread() ?
+                              running_thread : find_waitable(handle);
+    nt_status result = NT_STATUS_SUCCESS;
+    if (handle != nt_GetCurrentThread() && object == NULL)
+        result = NT_STATUS_INVALID_HANDLE;
+    else if (object != NULL && object->kind != THREAD)
+        result = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (object != NULL && handle != nt_GetCurrentThread() &&
+             !(object->access & THREAD_SET_INFORMATION))
+        result = NT_STATUS_ACCESS_DENIED;
+    else if (object != NULL && wait_state(object)->owner_pid != (uint32_t)getpid())
+        result = NT_STATUS_NOT_SUPPORTED;
+    else if (object != NULL && wait_state(object)->signaled)
+        result = NT_STATUS_THREAD_IS_TERMINATING;
+    else {
+        const pthread_t host = object != NULL ? wait_state(object)->host : pthread_self();
+        cpu_set_t before, after, wanted;
+        int err = pthread_getaffinity_np(host, sizeof(before), &before);
+        if (err != 0)
+            result = err == ESRCH ? NT_STATUS_THREAD_IS_TERMINATING : NT_STATUS_UNSUCCESSFUL;
+        else {
+            uintptr_t old = 0;
+            bool outside_group = false;
+            for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+                if (!CPU_ISSET(cpu, &before))
+                    continue;
+                if (cpu >= 64)
+                    outside_group = true;
+                else
+                    old |= (uintptr_t)UINT64_C(1) << cpu;
+            }
+            if (outside_group)
+                result = NT_STATUS_NOT_SUPPORTED;
+            else {
+                CPU_ZERO(&wanted);
+                for (int cpu = 0; cpu < 64; ++cpu)
+                    if (requested & ((uintptr_t)UINT64_C(1) << cpu))
+                        CPU_SET(cpu, &wanted);
+                err = pthread_setaffinity_np(host, sizeof(wanted), &wanted);
+                if (err == EPERM || err == EACCES)
+                    result = NT_STATUS_ACCESS_DENIED;
+                else if (err == ESRCH)
+                    result = NT_STATUS_THREAD_IS_TERMINATING;
+                else if (err != 0)
+                    result = NT_STATUS_INVALID_PARAMETER;
+                else if (pthread_getaffinity_np(host, sizeof(after), &after) != 0) {
+                    (void)pthread_setaffinity_np(host, sizeof(before), &before);
+                    result = NT_STATUS_UNSUCCESSFUL;
+                } else if (!CPU_EQUAL(&after, &wanted)) {
+                    /* sched_setaffinity may intersect the requested mask
+                     * with cgroup restrictions. Reject partial success. */
+                    (void)pthread_setaffinity_np(host, sizeof(before), &before);
+                    result = NT_STATUS_INVALID_PARAMETER;
+                } else if (previous != NULL)
+                    *previous = old;
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return result;
+}
+
+uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask)
+{
+    uintptr_t previous = 0;
+    const nt_status status = set_guest_thread_affinity(handle, mask, &previous);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS ? previous : 0;
+}
+
+/* ThreadAffinityMask (class 4): only the native x64 64-bit mask profile.
+ * Native NTSTATUS calls do not alter Win32 LastError. */
+nt_status NT_MS_ABI nt_NtSetInformationThread(uintptr_t thread, uint32_t info_class,
+                                              const void *data, uint32_t length)
+{
+    if (info_class != 4u)
+        return NT_STATUS_INVALID_INFO_CLASS;
+    if (data == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (length != sizeof(uintptr_t))
+        return NT_STATUS_INFO_LENGTH_MISMATCH;
+    uintptr_t mask = 0;
+    memcpy(&mask, data, sizeof(mask));
+    return set_guest_thread_affinity(thread, mask, NULL);
+}
+
+int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *process_mask,
+                                            uintptr_t *system_mask)
+{
+    if (process_mask == NULL || system_mask == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    /* Only the current sandboxed process is representable. Other PIDs
+     * never pass to sched_getaffinity via an untrusted Windows handle. */
+    const nt_status status = nt_runtime_check_self_process(process, 0x1400u);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    cpu_set_t allowed;
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    uintptr_t mask = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &allowed))
+            continue;
+        if (cpu >= 64) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        mask |= (uintptr_t)UINT64_C(1) << cpu;
+    }
+    if (mask == 0) {
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    /* Within the bounded sandbox processor group, the guest-visible
+     * system mask is the same restricted cpuset seen by the process. */
+    *process_mask = mask;
+    *system_mask = mask;
+    return 1;
 }
 
 void NT_MS_ABI nt_ExitThread(uint32_t code)
