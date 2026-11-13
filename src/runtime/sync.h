@@ -57,6 +57,7 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
 uint32_t NT_MS_ABI nt_SuspendThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);
 void NT_MS_ABI nt_ExitThread(uint32_t code);
+int32_t NT_MS_ABI nt_TerminateThread(uintptr_t thread, uint32_t code);
 void NT_MS_ABI nt_FreeLibraryAndExitThread(uintptr_t module, uint32_t code);
 int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t thread, uint32_t *code);
 int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t thread, const uint16_t *description);
