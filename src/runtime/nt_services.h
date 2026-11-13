@@ -97,6 +97,9 @@ nt_status NT_MS_ABI nt_NtQuerySemaphore(uintptr_t handle, uint32_t information_c
 nt_status NT_MS_ABI nt_NtReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *previous);
 struct nt_client_id;
 nt_status NT_MS_ABI nt_NtTerminateProcess(uintptr_t process, nt_status exit_code);
+struct nt_client_id;
+nt_status NT_MS_ABI nt_NtOpenProcess(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, const struct nt_client_id *client_id);
 typedef uint32_t (NT_MS_ABI *nt_guest_start_routine)(void *);
 nt_status NT_MS_ABI nt_NtCreateThreadEx(uintptr_t *handle, uint32_t desired_access,
     const struct nt_object_attributes *attributes, uintptr_t process,
