@@ -289,6 +289,12 @@ static void check_files(void)
     CHECK(mkdtemp(root) != NULL && nt_runtime_set_file_root(root));
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
     CHECK(nt_CreateDirectoryA("data", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
+    CHECK(nt_CreateDirectoryA("DATA", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
+    CHECK(nt_CreateDirectoryA("data\\nested", NULL) != 0);
+    CHECK(nt_CreateDirectoryA("DATA\\Nested", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
+    CHECK(nt_CreateDirectoryA("data\\nested\\..\\subfolder", NULL) != 0);
+    CHECK(nt_RemoveDirectoryA("DATA\\SUBFOLDER") != 0);
+    CHECK(nt_RemoveDirectoryA("DATA\\NESTED") != 0);
     /* The guest sees a DOS path, while Linux receives a normal directory
      * entry. The path is not a separately emulated disk or a copied file. */
     CHECK(nt_CreateDirectoryA("C:\\Program Files", NULL) != 0);
@@ -303,7 +309,18 @@ static void check_files(void)
     char installed_bytes[5] = {0};
     CHECK(native != NULL && fread(installed_bytes, 1, 5, native) == 5 &&
           memcmp(installed_bytes, "local", 5) == 0 && fclose(native) == 0);
-    CHECK(nt_DeleteFileA("C:\\Program Files\\Demo App\\settings.ini") != 0);
+    void *folded = nt_fopen("c:\\pROGRAM fILES\\dEMO aPP\\SETTINGS.INI", "rb");
+    char folded_bytes[5] = {0};
+    CHECK(folded != NULL && nt_fread(folded_bytes, 1, 5, folded) == 5 &&
+          memcmp(folded_bytes, "local", 5) == 0 && nt_fclose(folded) == 0);
+    folded = nt_fopen("C:\\PROGRAM FILES\\DEMO APP\\Settings.ini", "ab");
+    CHECK(folded != NULL && nt_fwrite("!", 1, 1, folded) == 1 &&
+          nt_fclose(folded) == 0);
+    native = fopen(host_installed, "rb");
+    char appended[6] = {0};
+    CHECK(native != NULL && fread(appended, 1, 6, native) == 6 &&
+          memcmp(appended, "local!", 6) == 0 && fclose(native) == 0);
+    CHECK(nt_DeleteFileA("C:\\PROGRAM FILES\\DEMO APP\\SETTINGS.ini") != 0);
     CHECK(nt_RemoveDirectoryA("C:\\Program Files\\Demo App") != 0);
     CHECK(nt_RemoveDirectoryA("C:\\Program Files") != 0);
 
@@ -313,7 +330,22 @@ static void check_files(void)
     snprintf(link, sizeof(link), "%s/link", root);
     CHECK(symlink("data", link) == 0);
     CHECK(nt_fopen("link\\outside", "wb") == NULL && errno == ELOOP);
+    CHECK(nt_fopen("LINK\\outside", "wb") == NULL && errno == ELOOP);
     CHECK(unlink(link) == 0);
+
+    /* Exact spelling wins; two non-exact ASCII-folded host names are
+     * ambiguous, never candidates for an arbitrary selection. */
+    char upper_name[512], lower_name[512];
+    CHECK(snprintf(upper_name, sizeof(upper_name), "%s/Ambiguous", root) > 0);
+    CHECK(snprintf(lower_name, sizeof(lower_name), "%s/ambiguous", root) > 0);
+    native = fopen(upper_name, "wb");
+    CHECK(native != NULL && fclose(native) == 0);
+    native = fopen(lower_name, "wb");
+    CHECK(native != NULL && fclose(native) == 0);
+    CHECK(nt_fopen("AMBIGUOUS", "rb") == NULL && errno == EEXIST);
+    folded = nt_fopen("Ambiguous", "rb");
+    CHECK(folded != NULL && nt_fclose(folded) == 0);
+    CHECK(unlink(upper_name) == 0 && unlink(lower_name) == 0);
 
     void *text = nt_fopen("C:\\data\\scores.txt", "w");
     CHECK(text != NULL && nt_fwrite("a\nb\n", 2, 2, text) == 2);
@@ -336,10 +368,16 @@ static void check_files(void)
     CHECK(raw != NULL && nt_fclose(raw) == 0);
     CHECK(nt_MoveFileExA("data/scores.txt", "data/target.txt", 0) == 0 &&
           last_error() == NT_ERROR_ALREADY_EXISTS);
-    CHECK(nt_MoveFileExA("data/scores.txt", "data/target.txt", 1) != 0);
+    CHECK(nt_MoveFileExA("DATA/SCORES.TXT", "data/TARGET.TXT", 1) != 0);
     CHECK(nt_DeleteFileA("data/scores.txt") == 0 && last_error() == NT_ERROR_FILE_NOT_FOUND);
+    CHECK(nt_MoveFileExA("data/target.txt", "DATA/TARGET.txt", 0) != 0);
+    char renamed[512];
+    CHECK(snprintf(renamed, sizeof(renamed), "%s/data/TARGET.txt", root) > 0);
+    CHECK(access(renamed, F_OK) == 0);
+    folded = nt_fopen("data/target.txt", "rb");
+    CHECK(folded != NULL && nt_fclose(folded) == 0);
     CHECK(nt_RemoveDirectoryA("data") == 0 && last_error() == NT_ERROR_DIR_NOT_EMPTY);
-    CHECK(nt_DeleteFileA("data/target.txt") != 0 && nt_RemoveDirectoryA("data") != 0);
+    CHECK(nt_DeleteFileA("DATA/TARGET.TXT") != 0 && nt_RemoveDirectoryA("DATA") != 0);
     CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS scoped files, text and binary I/O, and denied paths");
 }
