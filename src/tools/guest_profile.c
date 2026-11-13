@@ -237,12 +237,17 @@ static int load_share_config(int dir, const char *const *names, size_t count, ch
     if (fd < 0)
         return errno == ENOENT ? 0 : -1;
     struct stat info;
-    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
-        info.st_uid != geteuid() || (info.st_mode & 0077) != 0 ||
-        info.st_size < 0 || info.st_size > NT_SHARE_MAX_BYTES) {
-        const int error = errno == 0 ? EACCES : errno;
+    if (fstat(fd, &info) != 0) {
+        const int error = errno;
         close(fd);
         errno = error;
+        return -1;
+    }
+    if (!S_ISREG(info.st_mode) || info.st_uid != geteuid() ||
+        (info.st_mode & 0077) != 0 || info.st_size < 0 ||
+        info.st_size > NT_SHARE_MAX_BYTES) {
+        close(fd);
+        errno = info.st_size > NT_SHARE_MAX_BYTES ? EFBIG : EACCES;
         return -1;
     }
     char data[NT_SHARE_MAX_BYTES + 1];
@@ -340,8 +345,11 @@ static bool share_write_all(int fd, const char *data, size_t length)
         const ssize_t written = write(fd, data, length);
         if (written < 0 && errno == EINTR)
             continue;
-        if (written <= 0)
+        if (written <= 0) {
+            if (written == 0)
+                errno = EIO;
             return false;
+        }
         data += written;
         length -= (size_t)written;
     }
