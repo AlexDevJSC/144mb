@@ -52,9 +52,24 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 
 `CreateRemoteThread` y `CreateRemoteThreadEx` aceptan un seudohandle o HANDLE real del proceso actual con derecho `PROCESS_CREATE_THREAD`. `NtCreateThreadEx` comparte esa validación. Se prueba con un PE AMD64 que las tres rutas pueden crear hilos suspendidos, reanudarlos y observar el código de salida; los handles de solo consulta o los atributos no implementados devuelven error.
 
+### Puerta de aceptación en un Fedora físico
+
+Se incorpora `scripts/fedora-check-stage4.sh` para una ejecución manual, sin privilegios de administrador, en Fedora x86_64 con las dependencias de compilación ya instaladas. Ejecuta:
+
+- `make check`, incluidas las pruebas de TID, prioridad, afinidad, FILETIME y 48 ciclos de vida de hilos.
+- Fixtures PE AMD64 del cargador de procesos, suspensión, APC, TEB/TLS e información nativa del hilo.
+- Una repetición de los contratos de núcleo con UBSan.
+- `make check-pe-isolated` a través del sandbox Bubblewrap; si hay `SKIP` o no se ejecuta el test positivo de procesos hijo, el script devuelve estado **incompleto**.
+
+Uso desde la raíz del repositorio: `bash scripts/fedora-check-stage4.sh`.
+
+**No se ha ejecutado este script en el Fedora físico del usuario.** La CI usa un contenedor Fedora RPM; esto no equivale a probar el escritorio, hardware y política de namespaces del equipo destino.
+
+**El objetivo del 100 % solicitado significa que todos los contratos de procesos/hilos deben estar implementados, probados en CI y que únicamente reste esta puerta final de Fedora físico. Aún no se cumple:** siguen sin implementarse suspensión/terminación arbitrarias de hilos activos, contextos AMD64 remotos, herencia general de handles, tokens y permisos NT, procesos ajenos, APC completas y equivalencia del planificador. No se considera 100 % por el mero éxito del script ni por los fixtures sintéticos existentes.
+
 ## Madurez del componente
 
-- **Propuesta adicional tras esta PR: 68 % → 70 % (+2 puntos porcentuales estimados, pendiente de CI).** El soporte remoto sigue limitado al proceso actual.
+- **Actual tras PR #79 fusionada: 70 %** (estimación, **+2 puntos porcentuales** respecto a 68 %; [CI Linux/UBSan/Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43485165821)). El soporte remoto sigue limitado al proceso actual.
 
 
 - **Actual tras PR #78 fusionada: 68 %** (estimación, **+2 puntos porcentuales** respecto a 66 %; [CI Linux, UBSan y Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43484452467)). Corrige campos nativos previamente falsos. No completa contextos AMD64, suspensión arbitraria ni herencia general.
