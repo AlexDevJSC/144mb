@@ -1,0 +1,71 @@
+# Carpetas nativas de Fedora 45 para ejecutables Windows
+
+Este subsistema **traduce las rutas que pide un ejecutable Windows hacia directorios reales de Linux**. No monta un NTFS emulado, no copia el contenido a un directorio temporal y no reemplaza el gestor de archivos del kernel Linux.
+
+## Qué existe
+
+- Un perfil persistente privado para los datos propios del invitado: C:\Users\guest\AppData\..., almacenado bajo $XDG_STATE_HOME/nt-native-linux/drive-c (o $HOME/.local/state/nt-native-linux/drive-c).
+- Carpetas explícitamente autorizadas con acceso **directo de lectura/escritura**: Desktop, Documents, Downloads, Music, Pictures, Videos. La ruta Windows C:\Users\guest\Documents se corresponde con el directorio Linux autorizado.
+- A partir de este cambio, los permisos de carpeta se pueden **recordar una sola vez por usuario**. Cada ejecución posterior utiliza esa configuración sin repetir --share para cada programa.
+
+Esta autorización no es automática. No exponemos todo $HOME ni la raíz / del host. Bubblewrap conserva el aislamiento actual, y se mantienen las comprobaciones openat2 que impiden escapar de una raíz autorizada a través de enlaces simbólicos o cruces de montaje.
+
+## Uso en Fedora 45
+
+En una instalación con pe-isolated-run accesible:
+
+~~~sh
+# Autorizar los Documentos nativos del usuario una sola vez:
+pe-isolated-run --remember-share "Documents=$(xdg-user-dir DOCUMENTS)"
+
+# Autorizar también Descargas:
+pe-isolated-run --remember-share "Downloads=$(xdg-user-dir DOWNLOAD)"
+
+# Ejecutar programas sin repetir esas autorizaciones:
+pe-isolated-run /ruta/a/aplicacion-windows.exe
+
+# Autorización temporal que sustituye solo durante esa ejecución la carpeta Documents recordada:
+pe-isolated-run --share "Documents=/ruta/alternativa" /ruta/a/aplicacion-windows.exe
+
+# Revocar la autorización persistente:
+pe-isolated-run --forget-share Documents
+~~~
+
+Si xdg-user-dir devuelve el propio $HOME (carpeta XDG deshabilitada), el programa rechaza la autorización: no se permite compartir todo el directorio personal por accidente. Las carpetas deben existir y las rutas del host deben ser absolutas.
+
+## Formato y duración
+
+Las autorizaciones se almacenan en:
+
+- $XDG_CONFIG_HOME/nt-native-linux/shares.conf cuando XDG_CONFIG_HOME es absoluto.
+- $HOME/.config/nt-native-linux/shares.conf en caso contrario.
+
+El directorio nt-native-linux es privado (0700) y el archivo shares.conf es privado (0600). La lectura rechaza enlaces simbólicos, permisos inseguros, nombres duplicados o desconocidos, rutas no absolutas y archivos excesivos. La escritura toma un bloqueo entre procesos, usa archivo temporal del mismo directorio, sincroniza y sustituye con renameat para no exponer actualizaciones a medio escribir.
+
+Formato de texto sencillo, una línea por permiso:
+
+~~~text
+Documents=/home/usuario/Documentos
+Downloads=/home/usuario/Descargas
+~~~
+
+Las opciones --remember-share y --forget-share cambian la política guardada; --share solo modifica el lanzamiento actual. Una configuración inválida o un directorio que ha desaparecido provoca un error explícito y no una apertura de otra ubicación.
+
+**Persistencia no significa duplicación:** las modificaciones que haga el programa sobre un archivo compartido son modificaciones del mismo archivo del host. Se aplican los permisos Linux y las políticas SELinux del usuario. Los datos exclusivos del invitado permanecen en el perfil privado.
+
+## Límites actuales
+
+Esta mejora no proporciona paridad completa con NTFS. Las búsquedas de rutas siguen condicionadas por las reglas de mayúsculas/minúsculas del filesystem Linux, la gestión de Unicode del runtime todavía es parcial y quedan pendientes enlaces simbólicos, junctions/reparse points, rutas UNC, semántica NT completa de borrado/compartición y otros comportamientos de archivos. No se altera el cargador PE, las implementaciones del núcleo NT ni la política de red.
+
+## Verificación
+
+~~~sh
+make build/guest-profile-test
+build/guest-profile-test
+make -j2 check check-pe
+make check-pe-isolated
+~~~
+
+El test de perfil comprueba persistencia entre aperturas, actualización concurrente de permisos, acceso al fichero real del host, permisos privados, rechazo de compartición de $HOME y de configuraciones enlazadas simbólicamente. make check-pe-isolated necesita los requisitos del sandbox de la CI y puede indicar SKIP si el entorno no permite los namespaces necesarios.
+
+El sistema de archivos se coordina con el lanzador y los handles NT existentes, pero no se modifican sus contratos generales. Cualquier extensión futura debe partir de pruebas con fixtures PE propios y evidencia de comportamiento Windows, distinguiendo cobertura del símbolo de compatibilidad funcional.
