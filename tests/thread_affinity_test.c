@@ -8,6 +8,9 @@
 #include "winbase.h"
 
 #include <sched.h>
+#include <sys/resource.h>
+#include <errno.h>
+#include <sys/syscall.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +38,14 @@ static uint32_t NT_MS_ABI affinity_worker(void *unused)
         !CPU_EQUAL(&current, &expected))
         return 0x1441u;
     return 0x144u;
+}
+
+static uint32_t NT_MS_ABI low_priority_worker(void *unused)
+{
+    (void)unused;
+    errno = 0;
+    int value = getpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid));
+    return errno == 0 && value == 2 ? 0x144u : 0x1441u;
 }
 
 int main(void)
@@ -129,6 +140,45 @@ int main(void)
     check(nt_GetExitCodeThread(thread, &code) && code == 0x144u,
           "worker observed real CPU affinity");
     check(nt_runtime_close_waitable(thread), "release first thread");
+    /* Only decrease Linux priority: restoring a lower nice value may
+     * require CAP_SYS_NICE, so test on a disposable suspended thread. */
+    id = 0;
+    thread = nt_CreateThread(NULL, 0, low_priority_worker, NULL, 4, &id);
+    check(thread && id, "create priority test worker");
+    if (thread) {
+        check(nt_GetThreadPriority(thread) == 0,
+              "fresh worker inherits host nice=0 and Win32 NORMAL");
+        query_only = nt_OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, id);
+        nt_SetLastError(0);
+        check(query_only && !nt_SetThreadPriority(query_only, -1) &&
+              nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
+              "query-only thread handle cannot change scheduling");
+        check(nt_SetThreadPriority(thread, -1), "set BELOW_NORMAL via Linux nice=2");
+        check(nt_GetThreadPriority(thread) == -1, "read real Linux priority mapping");
+        nt_SetLastError(0);
+        check(!nt_SetThreadPriority(thread, 3) &&
+              nt_GetLastError() == NT_ERROR_INVALID_PARAMETER,
+              "reject unknown Win32 priority");
+        uintptr_t set_only = nt_OpenThread(THREAD_SET_INFORMATION, 0, id);
+        nt_SetLastError(0);
+        check(set_only && nt_GetThreadPriority(set_only) == INT32_MAX &&
+              nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
+              "set-only handle cannot query scheduling");
+        check(nt_ResumeThread(thread) == 1 &&
+              nt_WaitForSingleObject(thread, 5000) == 0,
+              "release priority-test worker");
+        uint32_t low_code = 0;
+        check(nt_GetExitCodeThread(thread, &low_code) && low_code == 0x144u,
+              "worker observes real nice=2 on its own Linux TID");
+        check(nt_runtime_close_waitable(query_only) &&
+              nt_runtime_close_waitable(set_only) &&
+              nt_runtime_close_waitable(thread),
+              "close priority worker and restricted handles");
+    }
+    nt_SetLastError(0);
+    check(nt_GetThreadPriority(0) == INT32_MAX &&
+          nt_GetLastError() == NT_ERROR_INVALID_HANDLE, "invalid thread query");
+
 
     /* Drop the original handle while a worker still owns the canonical
      * thread state. Open/duplicate/close/wait cannot recycle a live slot. */
@@ -152,6 +202,6 @@ int main(void)
     check(sched_setaffinity(0, sizeof(original), &original) == 0,
           "restore original host affinity");
     if (!failures)
-        puts("PASS stage-4 real CPU affinity, access rights, NTSTATUS and 48 thread lifetimes");
+        puts("PASS stage-4 real CPU affinity, Win32 nice priorities, access rights, NTSTATUS and 48 thread lifetimes");
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
