@@ -24,9 +24,10 @@ _Static_assert(sizeof(struct nt_thread_basic_information) == 48,
 _Static_assert(offsetof(struct nt_thread_basic_information, client_id) == 16,
                "THREAD_BASIC_INFORMATION ClientId offset");
 
-static bool local_process(uintptr_t process)
+static nt_status local_process(uintptr_t process)
 {
-    return process == UINTPTR_MAX; /* NtCurrentProcess pseudo-handle */
+    /* Real handles from OpenProcess(self) obey their granted query rights. */
+    return nt_runtime_check_self_process(process, 0x1400u);
 }
 
 static bool local_thread(uintptr_t thread)
@@ -59,8 +60,9 @@ nt_status NT_MS_ABI nt_NtQueryInformationProcess(uintptr_t process, uint32_t inf
                                                   void *buffer, uint32_t length,
                                                   uint32_t *returned_length)
 {
-    if (!local_process(process))
-        return NT_STATUS_INVALID_HANDLE;
+    const nt_status access = local_process(process);
+    if (access != NT_STATUS_SUCCESS)
+        return access;
     if (info_class == NT_PROCESS_WOW64_INFORMATION_CLASS) {
         const nt_status status = require_buffer(buffer, length, sizeof(uintptr_t), returned_length);
         if (status == NT_STATUS_SUCCESS) {
