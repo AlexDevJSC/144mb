@@ -205,11 +205,23 @@ int import_fixture_entry(void)
         return 42;
     /* Native-backed priority controls: changing nice=2 must be visible
      * in the test guest, not simply stored in a fake Win32 field. */
+    FILETIME created = {0}, exited = {0}, kernel_time = {0}, user_time = {0};
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel_time, &user_time) ||
+        (created.dwLowDateTime == 0 && created.dwHighDateTime == 0) ||
+        exited.dwLowDateTime || exited.dwHighDateTime ||
+        !GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel_time, &user_time) ||
+        exited.dwLowDateTime || exited.dwHighDateTime)
+        return 47;
+
     HANDLE low = CreateThread(NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL);
     if (low == NULL || GetThreadPriority(low) != THREAD_PRIORITY_NORMAL ||
         !SetThreadPriority(low, THREAD_PRIORITY_BELOW_NORMAL) ||
         GetThreadPriority(low) != THREAD_PRIORITY_BELOW_NORMAL)
         return 43;
+    if (!GetThreadTimes(low, &created, &exited, &kernel_time, &user_time) ||
+        (created.dwLowDateTime == 0 && created.dwHighDateTime == 0) ||
+        exited.dwLowDateTime || exited.dwHighDateTime)
+        return 48;
     DWORD low_id = GetThreadId(low);
     HANDLE limited = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, low_id);
     SetLastError(0);
@@ -220,9 +232,12 @@ int import_fixture_entry(void)
         return 44;
     SetLastError(0);
     if (SetThreadPriority(low, 12) || GetLastError() != ERROR_INVALID_PARAMETER ||
-        ResumeThread(low) != 1 || WaitForSingleObject(low, 5000) != WAIT_OBJECT_0 ||
-        !CloseHandle(low))
+        ResumeThread(low) != 1 || WaitForSingleObject(low, 5000) != WAIT_OBJECT_0)
         return 45;
+    if (!GetThreadTimes(low, &created, &exited, &kernel_time, &user_time) ||
+        (exited.dwLowDateTime == 0 && exited.dwHighDateTime == 0) ||
+        !CloseHandle(low))
+        return 49;
     SetLastError(0);
     if (GetThreadPriority(NULL) != THREAD_PRIORITY_ERROR_RETURN ||
         GetLastError() != ERROR_INVALID_HANDLE)
