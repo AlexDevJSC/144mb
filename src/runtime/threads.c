@@ -12,6 +12,8 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sched.h>
+#include <sys/resource.h>
+#include <stdio.h>
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +71,7 @@ struct waitable {
      * the same state, and the object vanishes after the last close. */
     char object_name[128];
     uint16_t *thread_description;
+    uint64_t create_filetime, exit_filetime, user_cpu_100ns, kernel_cpu_100ns;
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
@@ -83,6 +86,91 @@ static _Thread_local sigjmp_buf thread_exit;
  * pseudo-handle has a strictly thread-local queue, never a host TID. */
 static _Thread_local struct guest_apc_queue primary_apcs;
 static _Thread_local uint16_t *primary_thread_description;
+/* Windows FILETIME counts 100 ns intervals since 1601-01-01 UTC. */
+static uint64_t windows_ticks(struct timespec clock)
+{
+    return ((uint64_t)clock.tv_sec + UINT64_C(11644473600)) * UINT64_C(10000000) +
+           (uint64_t)clock.tv_nsec / 100;
+}
+
+static uint64_t filetime_now(void)
+{
+    struct timespec realtime;
+    return clock_gettime(CLOCK_REALTIME, &realtime) == 0 ? windows_ticks(realtime) : 0;
+}
+
+static uint64_t usage_ticks(struct timeval time)
+{
+    return (uint64_t)time.tv_sec * UINT64_C(10000000) +
+           (uint64_t)time.tv_usec * UINT64_C(10);
+}
+
+/* Linux stat's comm field may contain spaces or ')' characters; parse
+ * fields only after the final ')' and validate the expected numeric
+ * fields, never using a host PID taken from a Windows HANDLE. */
+static bool proc_task_times(const char *path, uint64_t *user, uint64_t *kernel,
+                            uint64_t *start_filetime)
+{
+    char buffer[4096];
+    FILE *file = fopen(path, "r");
+    if (file == NULL)
+        return false;
+    const bool read = fgets(buffer, sizeof(buffer), file) != NULL;
+    fclose(file);
+    if (!read)
+        return false;
+    char *tail = strrchr(buffer, ')');
+    if (tail == NULL || tail[1] != ' ')
+        return false;
+    uint64_t utime = 0, stime = 0, startup = 0;
+    char *state = NULL, *save = NULL;
+    for (int field = 3; field <= 22; ++field) {
+        char *token = field == 3 ? strtok_r(tail + 2, " \n", &save) :
+                                   strtok_r(NULL, " \n", &save);
+        if (token == NULL)
+            return false;
+        if (field == 3) {
+            state = token;
+            continue;
+        }
+        if (field != 14 && field != 15 && field != 22)
+            continue;
+        errno = 0;
+        char *end = NULL;
+        unsigned long long value = strtoull(token, &end, 10);
+        if (errno || end == token || *end != '\0')
+            return false;
+        if (field == 14) utime = (uint64_t)value;
+        if (field == 15) stime = (uint64_t)value;
+        if (field == 22) startup = (uint64_t)value;
+    }
+    (void)state;
+    const long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0)
+        return false;
+    if (user != NULL) *user = utime * UINT64_C(10000000) / (uint64_t)hz;
+    if (kernel != NULL) *kernel = stime * UINT64_C(10000000) / (uint64_t)hz;
+    if (start_filetime != NULL) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_BOOTTIME, &now) != 0)
+            return false;
+        const uint64_t elapsed = (uint64_t)now.tv_sec * UINT64_C(10000000) +
+                                  (uint64_t)now.tv_nsec / 100 -
+                                  startup * UINT64_C(10000000) / (uint64_t)hz;
+        const uint64_t current = filetime_now();
+        if (current == 0 || current < elapsed)
+            return false;
+        *start_filetime = current - elapsed;
+    }
+    return true;
+}
+
+static void write_filetime(struct nt_file_time *output, uint64_t value)
+{
+    output->low = (uint32_t)value;
+    output->high = (uint32_t)(value >> 32);
+}
+
 static struct waitable *find_waitable(uintptr_t handle);
 static struct waitable *wait_state(struct waitable *handle);
 
@@ -1016,9 +1104,10 @@ static void *reap_child(void *context)
 {
     struct child_watch *watch = context;
     int status = 0;
+    struct rusage usage = {0};
     pid_t result;
     do {
-        result = waitpid(watch->pid, &status, 0);
+        result = wait4(watch->pid, &status, 0, &usage);
     } while (result < 0 && errno == EINTR);
     uint32_t code = NT_ERROR_GEN_FAILURE;
     if (result == watch->pid && WIFEXITED(status)) {
@@ -1044,6 +1133,11 @@ static void *reap_child(void *context)
         watch->process->pidfd = -1;
     }
     watch->process->exit_code = watch->thread->exit_code = code;
+    watch->process->exit_filetime = watch->thread->exit_filetime = filetime_now();
+    if (result == watch->pid) {
+        watch->process->user_cpu_100ns = usage_ticks(usage.ru_utime);
+        watch->process->kernel_cpu_100ns = usage_ticks(usage.ru_stime);
+    }
     watch->process->signaled = watch->thread->signaled = true;
     release_waitable(watch->process);
     release_waitable(watch->thread);
@@ -1074,6 +1168,8 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
         thread->thread_id = (uint32_t)pid;
         thread->owner_pid = (uint32_t)pid;
         thread->access = THREAD_ALL_ACCESS;
+        thread->create_filetime = filetime_now();
+        process->create_filetime = thread->create_filetime;
         thread->child_guest = true;
         thread->start_gate_fd = start_fd;
         thread->suspend_count = start_fd >= 0 ? 1u : 0u;
@@ -1450,6 +1546,12 @@ static void finish_thread(struct nt_guest_thread *guest, bool attached)
         nt_guest_thread_leave(guest);
     }
     pthread_mutex_lock(&wait_lock);
+    struct rusage usage;
+    if (getrusage(RUSAGE_THREAD, &usage) == 0) {
+        running_thread->user_cpu_100ns = usage_ticks(usage.ru_utime);
+        running_thread->kernel_cpu_100ns = usage_ticks(usage.ru_stime);
+    }
+    running_thread->exit_filetime = filetime_now();
     running_thread->exit_code = thread_result;
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     clear_apcs_locked(&running_thread->apcs);
@@ -1514,6 +1616,7 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     uintptr_t handle = 0;
     if (thread != NULL) {
         thread->start = start;
+        thread->create_filetime = filetime_now();
         thread->parameter = parameter;
         thread->access = THREAD_ALL_ACCESS;
         thread->suspend_count = (flags & 4u) ? 1u : 0u;
@@ -1880,6 +1983,248 @@ int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *proces
      * system mask is the same restricted cpuset seen by the process. */
     *process_mask = mask;
     *system_mask = mask;
+    return 1;
+}
+
+/* Bounded native-backed Windows priority classes. Linux nice is per-TID
+ * on current Fedora/Ubuntu kernels; a change to another thread requires
+ * proper THREAD_SET_INFORMATION and host scheduler permission.
+ *
+ * Windows REALTIME_PRIORITY_CLASS and dynamic boosts have no equivalent
+ * here: do not return fabricated success for those contracts. */
+static bool guest_priority_nice(int32_t guest, int *nice)
+{
+    switch (guest) {
+    case -15: *nice = 10; return true; /* IDLE */
+    case -2:  *nice = 4; return true;  /* LOWEST */
+    case -1:  *nice = 2; return true;  /* BELOW_NORMAL */
+    case 0:   *nice = 0; return true;  /* NORMAL */
+    case 1:   *nice = -2; return true; /* ABOVE_NORMAL */
+    case 2:   *nice = -4; return true; /* HIGHEST */
+    case 15:  *nice = -10; return true;/* TIME_CRITICAL */
+    default: return false;
+    }
+}
+
+static bool host_nice_priority(int nice, int32_t *guest)
+{
+    switch (nice) {
+    case 10: *guest = -15; return true;
+    case 4:  *guest = -2; return true;
+    case 2:  *guest = -1; return true;
+    case 0:  *guest = 0; return true;
+    case -2: *guest = 1; return true;
+    case -4: *guest = 2; return true;
+    case -10: *guest = 15; return true;
+    default: return false;
+    }
+}
+
+/* Read process-local TIDs from the canonical thread object; a numerical
+ * Windows HANDLE never becomes a Linux process identifier. */
+static nt_status priority_thread_tid(uintptr_t handle, uint32_t rights, pid_t *tid)
+{
+    if (handle == nt_GetCurrentThread()) {
+        *tid = gettid();
+        return NT_STATUS_SUCCESS;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *thread = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (thread == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (thread->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(thread->access & rights))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(thread);
+        if (state->owner_pid != (uint32_t)getpid())
+            status = NT_STATUS_NOT_SUPPORTED;
+        else if (state->signaled)
+            status = NT_STATUS_THREAD_IS_TERMINATING;
+        else
+            *tid = (pid_t)state->thread_id;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority)
+{
+    int requested = 0;
+    if (!guest_priority_nice(priority, &requested)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pid_t tid = 0;
+    const nt_status status = priority_thread_tid(handle, THREAD_SET_INFORMATION, &tid);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    /* Avoid relying on getpriority's ambiguous -1 return on success. */
+    errno = 0;
+    const int previous = getpriority(PRIO_PROCESS, (id_t)tid);
+    if (previous == -1 && errno != 0) {
+        nt_SetLastError(errno == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    if (previous == requested)
+        return 1;
+    if (setpriority(PRIO_PROCESS, (id_t)tid, requested) != 0) {
+        nt_SetLastError(errno == EACCES || errno == EPERM ? NT_ERROR_ACCESS_DENIED :
+                        errno == ESRCH ? NT_ERROR_INVALID_HANDLE :
+                        errno == EINVAL ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle)
+{
+    pid_t tid = 0;
+    const nt_status status = priority_thread_tid(handle,
+                           THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, &tid);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return INT32_MAX; /* THREAD_PRIORITY_ERROR_RETURN */
+    }
+    errno = 0;
+    const int value = getpriority(PRIO_PROCESS, (id_t)tid);
+    if (value == -1 && errno != 0) {
+        nt_SetLastError(errno == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
+        return INT32_MAX;
+    }
+    int32_t priority = 0;
+    if (!host_nice_priority(value, &priority)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return INT32_MAX;
+    }
+    return priority;
+}
+
+/* Windows GetThreadTimes / GetProcessTimes, bounded to threads and
+ * child processes that this runtime owns. Closed or unauthorized handles
+ * cannot be repurposed as arbitrary /proc PIDs. */
+int32_t NT_MS_ABI nt_GetThreadTimes(uintptr_t handle,
+                                   struct nt_file_time *created, struct nt_file_time *exited,
+                                   struct nt_file_time *kernel, struct nt_file_time *user)
+{
+    if (created == NULL || exited == NULL || kernel == NULL || user == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    uint64_t beginning = 0, ending = 0, kernel_time = 0, user_time = 0;
+    nt_status status = NT_STATUS_SUCCESS;
+    pthread_mutex_lock(&wait_lock);
+    if (handle == nt_GetCurrentThread() && running_thread == NULL) {
+        char path[80];
+        (void)snprintf(path, sizeof(path), "/proc/self/task/%ld/stat", (long)gettid());
+        struct rusage usage;
+        if (!proc_task_times(path, NULL, NULL, &beginning) ||
+            getrusage(RUSAGE_THREAD, &usage) != 0)
+            status = NT_STATUS_NOT_SUPPORTED;
+        else {
+            kernel_time = usage_ticks(usage.ru_stime);
+            user_time = usage_ticks(usage.ru_utime);
+        }
+    } else {
+        struct waitable *object = handle == nt_GetCurrentThread() ?
+                                   running_thread : find_waitable(handle);
+        if (object == NULL)
+            status = NT_STATUS_INVALID_HANDLE;
+        else if (object->kind != THREAD)
+            status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+        else if (handle != nt_GetCurrentThread() &&
+                 !(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
+            status = NT_STATUS_ACCESS_DENIED;
+        else {
+            struct waitable *thread = wait_state(object);
+            if (thread->owner_pid != (uint32_t)getpid())
+                status = NT_STATUS_NOT_SUPPORTED;
+            else {
+                beginning = thread->create_filetime;
+                ending = thread->exit_filetime;
+                if (thread->signaled) {
+                    kernel_time = thread->kernel_cpu_100ns;
+                    user_time = thread->user_cpu_100ns;
+                } else {
+                    char path[80];
+                    (void)snprintf(path, sizeof(path), "/proc/self/task/%u/stat",
+                                   thread->thread_id);
+                    if (!proc_task_times(path, &user_time, &kernel_time, NULL))
+                        status = NT_STATUS_NOT_SUPPORTED;
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (status != NT_STATUS_SUCCESS || beginning == 0) {
+        nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
+                        nt_runtime_nt_error(status));
+        return 0;
+    }
+    write_filetime(created, beginning);
+    write_filetime(exited, ending);
+    write_filetime(kernel, kernel_time);
+    write_filetime(user, user_time);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetProcessTimes(uintptr_t handle,
+                                    struct nt_file_time *created, struct nt_file_time *exited,
+                                    struct nt_file_time *kernel, struct nt_file_time *user)
+{
+    if (created == NULL || exited == NULL || kernel == NULL || user == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    uint64_t beginning = 0, ending = 0, kernel_time = 0, user_time = 0;
+    nt_status status = NT_STATUS_SUCCESS;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = handle == UINTPTR_MAX ? current_process_state :
+                               find_waitable(handle);
+    if (handle != UINTPTR_MAX && object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object != NULL && object->kind != PROCESS)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (handle != UINTPTR_MAX &&
+             !(object->access & (PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION)))
+        status = NT_STATUS_ACCESS_DENIED;
+    else if (handle == UINTPTR_MAX || object == NULL || wait_state(object)->self_process) {
+        struct rusage usage;
+        if (!proc_task_times("/proc/self/stat", NULL, NULL, &beginning) ||
+            getrusage(RUSAGE_SELF, &usage) != 0)
+            status = NT_STATUS_NOT_SUPPORTED;
+        else {
+            kernel_time = usage_ticks(usage.ru_stime);
+            user_time = usage_ticks(usage.ru_utime);
+        }
+    } else {
+        struct waitable *process = wait_state(object);
+        beginning = process->create_filetime;
+        ending = process->exit_filetime;
+        if (process->signaled) {
+            kernel_time = process->kernel_cpu_100ns;
+            user_time = process->user_cpu_100ns;
+        } else {
+            char path[80];
+            (void)snprintf(path, sizeof(path), "/proc/%u/stat", process->owner_pid);
+            if (!proc_task_times(path, &user_time, &kernel_time, NULL))
+                status = NT_STATUS_NOT_SUPPORTED;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (status != NT_STATUS_SUCCESS || beginning == 0) {
+        nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
+                        nt_runtime_nt_error(status));
+        return 0;
+    }
+    write_filetime(created, beginning);
+    write_filetime(exited, ending);
+    write_filetime(kernel, kernel_time);
+    write_filetime(user, user_time);
     return 1;
 }
 
