@@ -401,6 +401,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(ReleaseSemaphore),
     WIN_EXPORT(CreateFile2),
     WIN_EXPORT(CreateFileW),
+    WIN_EXPORT(CopyFileW),
+    WIN_EXPORT(MoveFileW),
     WIN_EXPORT(CreateThread),
     WIN_EXPORT(TerminateThread),
     WIN_EXPORT(SuspendThread),
