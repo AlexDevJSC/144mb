@@ -82,7 +82,72 @@ int main(void)
     CHECK(fchmod(drive, 0700) == 0 && close(drive) == 0);
     drive = nt_open_guest_profile("relative", root);
     CHECK(drive >= 0 && close(drive) == 0);
+
+    /* Per-user native directory grants survive a new process/launch. */
+    const char *const names[] = {"Desktop", "Documents", "Downloads",
+                                  "Music", "Pictures", "Videos"};
+    char *paths[6] = {0};
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) == 0);
+    for (size_t i = 0; i < 6; ++i)
+        CHECK(paths[i] == NULL);
+    CHECK(nt_guest_share_update(NULL, root, names, 6, "Documents", other) == 0);
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) == 0);
+    CHECK(paths[1] != NULL && strcmp(paths[1], other) == 0);
+    nt_guest_share_free(paths, 6);
+
+    /* The granted native directory contains the actual file, not a copy. */
+    shared = nt_open_shared_folder(other, root);
+    CHECK(shared >= 0);
+    int native_file = openat(shared, "fedora-native.txt", O_WRONLY | O_CREAT | O_EXCL, 0600);
+    CHECK(native_file >= 0 && write(native_file, "native", 6) == 6);
+    CHECK(close(native_file) == 0 && close(shared) == 0);
+    char native_path[512];
+    CHECK(snprintf(native_path, sizeof(native_path), "%s/fedora-native.txt", other) > 0);
+    CHECK(stat(native_path, &info) == 0 && info.st_size == 6);
+
+    /* Concurrent updates must preserve independent grants. */
+    for (size_t i = 0; i < 2; ++i) {
+        children[i] = fork();
+        CHECK(children[i] >= 0);
+        if (children[i] == 0)
+            _exit(nt_guest_share_update(NULL, root, names, 6,
+                    i == 0 ? "Desktop" : "Pictures", other) == 0 ? 0 : 1);
+    }
+    for (size_t i = 0; i < 2; ++i) {
+        int status;
+        CHECK(waitpid(children[i], &status, 0) == children[i] &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) == 0);
+    CHECK(paths[0] != NULL && paths[1] != NULL && paths[4] != NULL);
+    nt_guest_share_free(paths, 6);
+
+    CHECK(nt_guest_share_update(NULL, root, names, 6, "Documents", NULL) == 0);
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) == 0);
+    CHECK(paths[1] == NULL && paths[0] != NULL && paths[4] != NULL);
+    nt_guest_share_free(paths, 6);
+
+    CHECK(nt_guest_share_update(NULL, root, names, 6, "Documents", root) < 0 &&
+          errno == EACCES);
+    CHECK(nt_guest_share_update(NULL, root, names, 6, "Documents", "relative") < 0 &&
+          errno == EINVAL);
+    CHECK(nt_guest_share_update(NULL, root, names, 6, "InvalidFolder", other) < 0 &&
+          errno == EINVAL);
+
+    char config_path[512];
+    CHECK(snprintf(config_path, sizeof(config_path),
+                   "%s/.config/nt-native-linux/shares.conf", root) > 0);
+    CHECK(stat(config_path, &info) == 0 && S_ISREG(info.st_mode) &&
+          (info.st_mode & 0077) == 0 && info.st_uid == geteuid());
+    CHECK(chmod(config_path, 0644) == 0);
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) < 0 && errno == EACCES);
+    CHECK(chmod(config_path, 0600) == 0);
+    CHECK(unlink(config_path) == 0);
+    CHECK(symlink(native_path, config_path) == 0);
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) < 0);
+    CHECK(unlink(config_path) == 0);
+
     CHECK(nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
-    puts("PASS persistent user profile, XDG fallback, concurrent opens and explicit shared directories");
+    puts("PASS persistent profile, native folder grants, atomic concurrent updates and symlink denial");
     return 0;
 }
