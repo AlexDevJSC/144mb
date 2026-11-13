@@ -66,6 +66,7 @@ struct waitable {
     /* Canonical named event/semaphore entries own a name. Aliases share
      * the same state, and the object vanishes after the last close. */
     char object_name[128];
+    uint16_t *thread_description;
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
@@ -78,6 +79,7 @@ static _Thread_local sigjmp_buf thread_exit;
 /* A guest's primary thread is not represented by a waitable. Its own
  * pseudo-handle has a strictly thread-local queue, never a host TID. */
 static _Thread_local struct guest_apc_queue primary_apcs;
+static _Thread_local uint16_t *primary_thread_description;
 static struct waitable *find_waitable(uintptr_t handle);
 static struct waitable *wait_state(struct waitable *handle);
 
@@ -283,8 +285,19 @@ static struct waitable *wait_state(struct waitable *handle)
  * from the canonical slot. All mutations occur under wait_lock. */
 static void release_waitable(struct waitable *object)
 {
-    if (--object->refs == 0 && object->shared)
-        --object->shared->links;
+    if (--object->refs != 0)
+        return;
+    if (object->shared != NULL) {
+        struct waitable *canonical = object->shared;
+        --canonical->links;
+        if (canonical->refs == 0 && canonical->links == 0) {
+            free(canonical->thread_description);
+            canonical->thread_description = NULL;
+        }
+    } else if (object->links == 0) {
+        free(object->thread_description);
+        object->thread_description = NULL;
+    }
 }
 
 bool nt_runtime_close_waitable(uintptr_t handle)
@@ -1025,8 +1038,8 @@ static void *reap_child(void *context)
     }
     watch->process->exit_code = watch->thread->exit_code = code;
     watch->process->signaled = watch->thread->signaled = true;
-    --watch->process->refs;
-    --watch->thread->refs;
+    release_waitable(watch->process);
+    release_waitable(watch->thread);
     pthread_cond_broadcast(&wait_changed);
     pthread_mutex_unlock(&wait_lock);
     free(watch);
@@ -1314,7 +1327,7 @@ static void finish_thread(void *state)
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     clear_apcs_locked(&running_thread->apcs);
     running_thread->signaled = true;
-    --running_thread->refs;
+    release_waitable(running_thread);
     pthread_cond_broadcast(&wait_changed);
     pthread_mutex_unlock(&wait_lock);
 }
@@ -1526,16 +1539,24 @@ int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t handle, uint32_t *code)
     return error == 0;
 }
 
+/* The complete UTF-16 name belongs to the NT thread object. The Linux
+ * pthread name is only a best-effort 15-byte diagnostic abbreviation. */
 int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t handle, const uint16_t *description)
 {
     if (description == NULL)
         return (int32_t)UINT32_C(0x80070057);
     const size_t length = nt_runtime_wide_length(description, 32767);
-    if (length == 32767)
+    if (length == 32767 || length > (SIZE_MAX / sizeof(uint16_t)) - 1)
         return (int32_t)UINT32_C(0x80070057);
-    char *name = nt_runtime_utf16_to_utf8(description, length);
-    if (name == NULL)
+    uint16_t *copy = malloc((length + 1) * sizeof(*copy));
+    if (copy == NULL)
         return (int32_t)UINT32_C(0x8007000e);
+    memcpy(copy, description, (length + 1) * sizeof(*copy));
+    char *name = nt_runtime_utf16_to_utf8(description, length);
+    if (name == NULL) {
+        free(copy);
+        return (int32_t)UINT32_C(0x80070057);
+    }
     size_t bytes = strlen(name);
     if (bytes > 15) {
         bytes = 15;
@@ -1544,16 +1565,69 @@ int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t handle, const uint16_t *desc
         name[bytes] = '\0';
     }
     pthread_mutex_lock(&wait_lock);
-    const struct waitable *thread = find_waitable(handle);
-    int error = ESRCH;
-    if (handle == nt_GetCurrentThread())
-        error = pthread_setname_np(pthread_self(), name);
-    else if (thread != NULL && thread->kind == THREAD &&
-             !wait_state((struct waitable *)thread)->signaled)
-        error = pthread_setname_np(wait_state((struct waitable *)thread)->host, name);
+    struct waitable *object = handle == nt_GetCurrentThread() ? running_thread : find_waitable(handle);
+    int error = 0;
+    if (handle != nt_GetCurrentThread() && (object == NULL || object->kind != THREAD))
+        error = (int)UINT32_C(0x80070006);
+    else if (object != NULL && handle != nt_GetCurrentThread() &&
+             !(object->access & (0x20u | 0x400u))) /* THREAD_SET_INFORMATION/_LIMITED */
+        error = (int)UINT32_C(0x80070005);
+    else if (object != NULL && wait_state(object)->owner_pid != (uint32_t)getpid())
+        error = (int)UINT32_C(0x80070032); /* ERROR_NOT_SUPPORTED */
+    else if (object != NULL && wait_state(object)->signaled)
+        error = (int)UINT32_C(0x80070006);
+    else {
+        pthread_t host = object != NULL ? wait_state(object)->host : pthread_self();
+        if (pthread_setname_np(host, name) != 0) {
+            error = (int)UINT32_C(0x80070006);
+        } else {
+            uint16_t **slot = object != NULL ? &wait_state(object)->thread_description :
+                                              &primary_thread_description;
+            free(*slot);
+            *slot = copy;
+            copy = NULL;
+        }
+    }
     pthread_mutex_unlock(&wait_lock);
+    free(copy);
     free(name);
-    return error == 0 ? 0 : (int32_t)UINT32_C(0x80070006);
+    return error;
+}
+
+int32_t NT_MS_ABI nt_GetThreadDescription(uintptr_t handle, uint16_t **description)
+{
+    if (description == NULL)
+        return (int32_t)UINT32_C(0x80070057);
+    *description = NULL;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = handle == nt_GetCurrentThread() ? running_thread : find_waitable(handle);
+    int32_t result = 0;
+    if (handle != nt_GetCurrentThread() && (object == NULL || object->kind != THREAD))
+        result = (int32_t)UINT32_C(0x80070006);
+    else if (object != NULL && handle != nt_GetCurrentThread() &&
+             !(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
+        result = (int32_t)UINT32_C(0x80070005);
+    else if (object != NULL && wait_state(object)->owner_pid != (uint32_t)getpid())
+        result = (int32_t)UINT32_C(0x80070032);
+    else {
+        const uint16_t *source = object != NULL ? wait_state(object)->thread_description :
+                                                 primary_thread_description;
+        size_t length = 0;
+        if (source != NULL)
+            while (source[length] != 0)
+                ++length;
+        uint16_t *allocated = (uint16_t *)nt_LocalAlloc(0, (length + 1) * sizeof(uint16_t));
+        if (allocated == NULL)
+            result = (int32_t)UINT32_C(0x8007000e);
+        else {
+            if (source != NULL)
+                memcpy(allocated, source, length * sizeof(uint16_t));
+            allocated[length] = 0;
+            *description = allocated;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return result;
 }
 
 struct fls_slot { nt_fls_callback callback; bool used; };
