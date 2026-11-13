@@ -36,7 +36,7 @@ int main(void)
     }
     close(channel[1]);
     struct nt_process_information info = {0};
-    check(nt_runtime_watch_child(child, channel[0], &info), "watch child");
+    check(nt_runtime_watch_child(child, channel[0], -1, &info), "watch child");
     check(info.process && info.thread && info.process_id == (uint32_t)child,
           "child handles and ID");
     check(nt_GetProcessId(UINTPTR_MAX) == (uint32_t)getpid(), "current process ID");
@@ -79,5 +79,48 @@ int main(void)
     check(nt_runtime_close_waitable(restricted), "close restricted alias");
     check(nt_runtime_close_waitable(info.thread), "close child thread");
     check(nt_runtime_close_waitable(info.process), "close child process");
+
+    /* A separate fork models the trusted runner's pre-entry fd5 gate. */
+    int gate[2], exit_pipe[2];
+    check(pipe(gate) == 0 && pipe(exit_pipe) == 0, "child startup pipes");
+    pid_t gated = fork();
+    check(gated >= 0, "fork gated child");
+    if (gated == 0) {
+        close(gate[1]);
+        close(exit_pipe[0]);
+        alarm(15);
+        unsigned char token = 0;
+        ssize_t bytes = read(gate[0], &token, 1);
+        close(gate[0]);
+        if (bytes != 1 || token != 'G')
+            _Exit(41);
+        const uint32_t result = UINT32_C(0x55667788);
+        if (write(exit_pipe[1], &result, sizeof(result)) != sizeof(result))
+            _Exit(42);
+        close(exit_pipe[1]);
+        _Exit(0);
+    }
+    close(gate[0]);
+    close(exit_pipe[1]);
+    info = (struct nt_process_information){0};
+    check(nt_runtime_watch_child(gated, exit_pipe[0], gate[1], &info),
+          "watch gated child");
+    check(nt_WaitForSingleObject(info.process, 0) == NT_STATUS_TIMEOUT,
+          "suspended child cannot exit");
+    uint32_t previous = 0;
+    check(nt_NtSuspendThread(info.thread, &previous) == NT_STATUS_SUCCESS &&
+          previous == 1, "increment child initial suspension");
+    check(nt_NtResumeThread(info.thread, &previous) == NT_STATUS_SUCCESS &&
+          previous == 2, "decrement without releasing child");
+    check(nt_WaitForSingleObject(info.process, 0) == NT_STATUS_TIMEOUT,
+          "child still blocked");
+    check(nt_NtResumeThread(info.thread, &previous) == NT_STATUS_SUCCESS &&
+          previous == 1, "release final child gate");
+    check(nt_WaitForSingleObject(info.process, 5000) == 0, "gated child finished");
+    uint32_t code = 0;
+    check(nt_GetExitCodeProcess(info.process, &code) && code == 0x55667788,
+          "child exit after resume");
+    check(nt_runtime_close_waitable(info.thread) &&
+          nt_runtime_close_waitable(info.process), "close resumed child handles");
     return EXIT_SUCCESS;
 }
