@@ -30,6 +30,11 @@ static void check(int value, const char *label)
     }
 }
 
+static uint64_t filetime_value(const struct nt_file_time *stamp)
+{
+    return ((uint64_t)stamp->high << 32) | stamp->low;
+}
+
 static uint32_t NT_MS_ABI affinity_worker(void *unused)
 {
     (void)unused;
@@ -53,6 +58,13 @@ int main(void)
     cpu_set_t original;
     if (sched_getaffinity(0, sizeof(original), &original) != 0)
         return EXIT_FAILURE;
+    struct nt_file_time created = {0}, ended = {0}, kernel_time = {0}, user_time = {0};
+    check(nt_GetThreadTimes(nt_GetCurrentThread(), &created, &ended, &kernel_time, &user_time) &&
+          filetime_value(&created) != 0 && filetime_value(&ended) == 0,
+          "native current-thread FILETIME and CPU accounting");
+    check(nt_GetProcessTimes(UINTPTR_MAX, &created, &ended, &kernel_time, &user_time) &&
+          filetime_value(&created) != 0 && filetime_value(&ended) == 0,
+          "native current-process FILETIME and CPU accounting");
     int selected = -1;
     for (int i = 0; i < 64; ++i)
         if (CPU_ISSET(i, &original)) {
@@ -101,6 +113,10 @@ int main(void)
     uint32_t id = 0;
     uintptr_t thread = nt_CreateThread(NULL, 0, affinity_worker, NULL, 4, &id);
     check(thread && id, "create suspended worker");
+    struct nt_file_time t_created = {0}, t_exited = {0}, t_kernel = {0}, t_user = {0};
+    check(nt_GetThreadTimes(thread, &t_created, &t_exited, &t_kernel, &t_user) &&
+          filetime_value(&t_created) != 0 && filetime_value(&t_exited) == 0,
+          "suspended thread has creation time, not exit time");
     uintptr_t query_only = nt_OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, id);
     nt_SetLastError(0);
     check(query_only && !nt_SetThreadAffinityMask(query_only, cpu_mask) &&
@@ -170,6 +186,14 @@ int main(void)
         uint32_t low_code = 0;
         check(nt_GetExitCodeThread(thread, &low_code) && low_code == 0x144u,
               "worker observes real nice=2 on its own Linux TID");
+        check(nt_GetThreadTimes(thread, &t_created, &t_exited, &t_kernel, &t_user) &&
+              filetime_value(&t_exited) >= filetime_value(&t_created) &&
+              filetime_value(&t_exited) != 0,
+              "terminated thread retains exact exit timestamp and rusage");
+        nt_SetLastError(0);
+        check(!nt_GetThreadTimes(set_only, &t_created, &t_exited, &t_kernel, &t_user) &&
+              nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
+              "set-only handle cannot query thread times");
         check(nt_runtime_close_waitable(query_only) &&
               nt_runtime_close_waitable(set_only) &&
               nt_runtime_close_waitable(thread),
@@ -202,6 +226,6 @@ int main(void)
     check(sched_setaffinity(0, sizeof(original), &original) == 0,
           "restore original host affinity");
     if (!failures)
-        puts("PASS stage-4 real CPU affinity, Win32 nice priorities, access rights, NTSTATUS and 48 thread lifetimes");
+        puts("PASS stage-4 CPU affinity, priorities, FILETIME/rusage, handle rights, and 48 thread lifetimes");
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
