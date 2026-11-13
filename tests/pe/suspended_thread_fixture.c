@@ -147,7 +147,7 @@ int import_fixture_entry(void)
                          native_exit_worker, NULL, 2, 0, 0, 0, NULL) != STATUS_NOT_SUPPORTED ||
         native != NULL)
         return 34;
-    if (NtTerminateThread((HANDLE)(uintptr_t)0x123u, 0) != STATUS_NOT_SUPPORTED)
+    if (NtTerminateThread((HANDLE)(uintptr_t)0x123u, 0) != (LONG)0xc0000008u)
         return 35;
 
     /* Cancellation at CREATE_SUSPENDED is safe: no guest entry or TLS
