@@ -19,6 +19,41 @@ Este archivo fija el orden de prioridad para **los siete componentes críticos d
 
 La expresión «por completo» es una meta de desarrollo, no una declaración de que pueda alcanzarse una paridad universal con Windows en un único cambio. Antes de cambiar de prioridad, desarrollar el componente activo hasta el máximo viable y medible. Si un requisito de un componente anterior depende de otro componente todavía no priorizado, implementar **únicamente la interfaz mínima transversal necesaria**, sin trasladar silenciosamente la prioridad principal. Documentar los bloqueos irresolubles, los riesgos de seguridad y los casos sin prueba antes de avanzar. Nunca declarar un componente «100 %» por contar importaciones, superar CI o pasar un fixture controlado.
 
+## Seguimiento porcentual obligatorio en cada entrega
+
+Tras **cada entrega con cambios en GitHub** (PR, fusión o commit que se comunique al usuario), la respuesta final debe especificar el componente del núcleo NT/Win32 afectado y presentar explícitamente:
+
+- **Porcentaje anterior → porcentaje actualizado (variación en puntos porcentuales)**, p. ej. «35 % → 38 % (+3 puntos)».
+- **Razón concreta del cambio**: contratos añadidos o corregidos, evidencia de pruebas y límites que permanecen.
+- **Referencia verificable** del cambio (PR o commit) y estado de CI. No afirmar que las pruebas han pasado cuando sigan pendientes.
+- **Si la entrega no mejora funcionalidad** (documentación, refactor sin nuevas garantías o prueba fallida), reflejar «sin cambio (+0 puntos)». No forzar aumentos artificiales.
+- Si un cambio afecta a varios componentes, registrar el antes/después de cada uno, manteniendo **4** como prioridad principal mientras dure su fase.
+
+Los porcentajes son **estimaciones de madurez técnica** y no una medición automática de compatibilidad con programas Windows; el margen de error del diagnóstico inicial es considerable. No confundir «API exportada», «test verde» o «PR fusionada» con compatibilidad universal. El porcentaje debe revisarse a partir de cobertura de contratos, pruebas negativas, concurrencia, manejo de errores y comportamiento de software real.
+
+### Línea base del seguimiento
+
+Estimación registrada tras la integración de la PR #68, **13 de noviembre de 2026**, usando como punto de partida los porcentajes de la última evaluación arquitectónica. No se asigna retrospectivamente un incremento numérico a la PR #68 porque no se realizó una reevaluación ponderada de sus criterios en ese momento.
+
+| Componente | Línea base estimada | Estado |
+| --- | ---: | --- |
+| 1. Cargador PE y DLL | 55 % | En espera de su fase |
+| 2. PEB/TEB | 40 % | En espera de su fase |
+| 3. Objetos NT | 30 % | En espera de su fase |
+| **4. Procesos e hilos** | **35 %** | **Activo; PR #68 integrada** |
+| 5. Memoria virtual | 35 % | Siguiente fase |
+| 6. SEH/VEH | 25 % | En espera de su fase |
+| 7. API NTDLL/Win32 | 20 % | En espera de su fase |
+
+A partir de esta línea base, toda variación porcentual debe anotarse junto a la entrega que la justifique. Si el trabajo revela limitaciones previamente desconocidas o regresiones, **el porcentaje también puede disminuir**.
+
+### Formato de cierre para cambios futuros
+
+> **Componente 4 — Procesos e hilos:** 35 % → XX % (**+N puntos porcentuales**, estimación).\
+> **Avances:** [contratos demostrados].\
+> **Pendientes:** [limitaciones reales].\
+> **Verificación:** [pruebas ejecutadas, resultado y enlace a PR/CI].
+
 ## Criterios de avance y salida de fase
 
 1. Listar contratos implementados, contratos sin implementar, supuestos y limitaciones explícitas.
