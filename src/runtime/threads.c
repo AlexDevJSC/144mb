@@ -1403,6 +1403,65 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     return handle;
 }
 
+/* Native thread creation is a bounded adapter over the same owned
+ * pthread/TEB path as CreateThread. Unsupported extended attributes must
+ * fail before the thread is started. Native entrypoints preserve LastError. */
+nt_status NT_MS_ABI nt_NtCreateThreadEx(uintptr_t *handle, uint32_t desired_access,
+                                       const struct nt_object_attributes *attributes,
+                                       uintptr_t process, nt_thread_start start,
+                                       void *argument, uint32_t flags,
+                                       size_t zero_bits, size_t stack_commit,
+                                       size_t stack_reserve, void *attribute_list)
+{
+    if (handle == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    *handle = 0;
+    if (process != UINTPTR_MAX)
+        return NT_STATUS_INVALID_HANDLE;
+    if (start == NULL || desired_access & ~THREAD_ALL_ACCESS)
+        return NT_STATUS_INVALID_PARAMETER;
+    if (attributes != NULL) {
+        if (attributes->size != sizeof(*attributes))
+            return NT_STATUS_INVALID_PARAMETER;
+        if (attributes->name != NULL || attributes->root != 0 ||
+            attributes->security != NULL || attributes->qos != NULL ||
+            attributes->attributes != 0)
+            return NT_STATUS_NOT_SUPPORTED;
+    }
+    if ((flags & ~1u) != 0 || zero_bits != 0 || stack_reserve != 0 ||
+        attribute_list != NULL)
+        return NT_STATUS_NOT_SUPPORTED;
+    const uint32_t old_error = nt_GetLastError();
+    uintptr_t created = nt_CreateThread(NULL, stack_commit, start, argument,
+                                        (flags & 1u) ? 4u : 0u, NULL);
+    const uint32_t error = nt_GetLastError();
+    nt_SetLastError(old_error);
+    if (created == 0)
+        return error == NT_ERROR_NOT_ENOUGH_MEMORY ? NT_STATUS_NO_MEMORY :
+               error == NT_ERROR_NOT_SUPPORTED ? NT_STATUS_NOT_SUPPORTED :
+               NT_STATUS_INVALID_PARAMETER;
+    if (desired_access != THREAD_ALL_ACCESS) {
+        uintptr_t reduced = 0;
+        nt_status status = nt_runtime_duplicate_waitable(created, desired_access, 0, 0, &reduced);
+        nt_runtime_close_waitable(created);
+        if (status != NT_STATUS_SUCCESS)
+            return status;
+        created = reduced;
+    }
+    *handle = created;
+    return NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtTerminateThread(uintptr_t thread, nt_status exit_code)
+{
+    /* Terminating an unrelated pthread while it owns runtime locks would
+     * corrupt Linux state. Only self-termination is currently safe. */
+    if (thread != nt_GetCurrentThread())
+        return NT_STATUS_NOT_SUPPORTED;
+    nt_ExitThread((uint32_t)exit_code);
+    return NT_STATUS_SUCCESS; /* not reached */
+}
+
 /* Suspension is deliberately restricted to the startup gate. It can
  * increase the count of a thread already created suspended, but it never
  * pauses guest instructions or calls pthread signals on a running thread.
