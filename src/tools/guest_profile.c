@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: MIT */
-#define _XOPEN_SOURCE 700
+#define _GNU_SOURCE
 #include "guest_profile.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/fs.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,14 +52,25 @@ static int open_state_directory(char *path)
     return fd;
 }
 
-static bool prepare_user_directories(int drive)
+/*
+ * The host directory named "C:" is an ordinary Linux directory, not an
+ * NTFS volume. All guest DOS paths are mapped to entries beneath its fd.
+ * Keep the directory layout only; do not ship fake Windows DLLs or data.
+ */
+static bool prepare_tree_entry(int root, const char *relative)
 {
-    const char *const path[] = {"Users", "guest", "AppData"};
-    int parent = dup(drive);
+    char path[128];
+    if (snprintf(path, sizeof(path), "%s", relative) >= (int)sizeof(path)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    int parent = fcntl(root, F_DUPFD_CLOEXEC, 0);
     if (parent < 0)
         return false;
-    for (size_t i = 0; i < sizeof(path) / sizeof(path[0]); ++i) {
-        const int next = open_directory(parent, path[i], true);
+    char *cursor = NULL;
+    for (char *part = strtok_r(path, "/", &cursor); part != NULL;
+         part = strtok_r(NULL, "/", &cursor)) {
+        const int next = open_directory(parent, part, true);
         const int error = errno;
         close(parent);
         if (next < 0) {
@@ -67,23 +79,71 @@ static bool prepare_user_directories(int drive)
         }
         parent = next;
     }
-    const int roaming = open_directory(parent, "Roaming", true);
-    const int local = roaming >= 0 ? open_directory(parent, "Local", true) : -1;
-    const int error = errno;
-    if (roaming >= 0)
-        close(roaming);
-    if (local >= 0)
-        close(local);
-    close(parent);
-    if (local < 0) {
-        errno = error;
-        return false;
-    }
-    const int temp = open_directory(drive, "Temp", true);
-    if (temp < 0)
-        return false;
-    close(temp);
+    return close(parent) == 0;
+}
+
+static bool prepare_user_directories(int drive)
+{
+    static const char *const tree[] = {
+        "Windows", "Windows/System32", "Windows/SysWOW64",
+        "Windows/Fonts", "Windows/Temp",
+        "Program Files", "Program Files (x86)", "ProgramData",
+        "Users/guest", "Users/guest/AppData",
+        "Users/guest/AppData/Roaming", "Users/guest/AppData/Local",
+        "Users/guest/Desktop", "Users/guest/Documents", "Users/guest/Downloads",
+        "Users/guest/Music", "Users/guest/Pictures", "Users/guest/Videos",
+        "Users/Public", "Temp"
+    };
+    for (size_t i = 0; i < sizeof(tree) / sizeof(tree[0]); ++i)
+        if (!prepare_tree_entry(drive, tree[i]))
+            return false;
     return true;
+}
+
+/*
+ * Migrate the former "drive-c" directory in place, preserving all original
+ * files and inode identities. Never merge two independent profiles silently.
+ * A runtime-directory lock makes concurrent launches of this implementation
+ * choose the same root; RENAME_NOREPLACE protects against other writers.
+ */
+static int open_transcribed_c_directory(int runtime)
+{
+    if (flock(runtime, LOCK_EX) != 0)
+        return -1;
+    struct stat modern, legacy;
+    const bool has_modern = fstatat(runtime, "C:", &modern, AT_SYMLINK_NOFOLLOW) == 0;
+    int error = errno;
+    if (!has_modern && error != ENOENT)
+        goto fail;
+    const bool has_legacy = fstatat(runtime, "drive-c", &legacy, AT_SYMLINK_NOFOLLOW) == 0;
+    error = errno;
+    if (!has_legacy && error != ENOENT)
+        goto fail;
+    if (has_modern && has_legacy) {
+        error = EEXIST; /* Explicit manual choice: do not discard either tree. */
+        goto fail;
+    }
+    if (has_legacy) {
+        if (!S_ISDIR(legacy.st_mode) || legacy.st_uid != geteuid() ||
+            (legacy.st_mode & 0077) != 0) {
+            error = EACCES;
+            goto fail;
+        }
+        if (renameat2(runtime, "drive-c", runtime, "C:", RENAME_NOREPLACE) != 0) {
+            error = errno;
+            goto fail;
+        }
+    }
+    const int drive = open_directory(runtime, "C:", true);
+    error = errno;
+    (void)flock(runtime, LOCK_UN);
+    errno = error;
+    return drive;
+
+fail:
+    (void)flock(runtime, LOCK_UN);
+    errno = error;
+    return -1;
 }
 
 int nt_open_guest_profile(const char *state_home, const char *home)
@@ -112,7 +172,7 @@ int nt_open_guest_profile(const char *state_home, const char *home)
         errno = error;
         return -1;
     }
-    const int drive = open_directory(runtime, "drive-c", true);
+    const int drive = open_transcribed_c_directory(runtime);
     error = errno;
     close(runtime);
     if (drive < 0) {
