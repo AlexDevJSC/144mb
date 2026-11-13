@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "winbase.h"
 #include "winfile.h"
+#include "child_process.h"
 
 #include <errno.h>
 #include <limits.h>
