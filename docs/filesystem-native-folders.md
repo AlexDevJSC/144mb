@@ -101,6 +101,17 @@ original: las operaciones usan descriptores de directorio y `openat2` con
 
 Se aplica a lectura, escritura, creación, eliminación, cambios de nombre,
 atributos y apertura de directorios, incluyendo los componentes intermedios.
+
+También están exportadas `CopyFileA`, `CopyFileW`, `MoveFileA` y
+`MoveFileW` en KERNEL32/KERNELBASE. La copia utiliza el mismo registro
+de handles Win32 y las mismas comprobaciones de compartición, sin invocar
+`cp` ni utilizar un directorio temporal. Se comprueba la opción
+`bFailIfExists`, el contenido binario y que copiar a una variante del
+mismo archivo no trunque el original. Un fallo de escritura elimina una
+copia creada incompleta; la sustitución de una copia preexistente **no
+es transaccional** y puede dejar contenido parcial si falla el disco.
+No se garantiza todavía la reproducción de todos los metadatos NT,
+flujos alternativos o atributos extendidos al copiar.
 Las rutas relativas admiten `..` **solo cuando permanecen dentro de la
 raíz concedida**; si intentan subir por encima, fallan.
 
