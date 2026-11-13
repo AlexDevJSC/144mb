@@ -59,6 +59,7 @@ void NT_MS_ABI nt_ExitThread(uint32_t code);
 void NT_MS_ABI nt_FreeLibraryAndExitThread(uintptr_t module, uint32_t code);
 int32_t NT_MS_ABI nt_GetExitCodeThread(uintptr_t thread, uint32_t *code);
 int32_t NT_MS_ABI nt_SetThreadDescription(uintptr_t thread, const uint16_t *description);
+int32_t NT_MS_ABI nt_GetThreadDescription(uintptr_t thread, uint16_t **description);
 uint32_t NT_MS_ABI nt_FlsAlloc(nt_fls_callback callback);
 int32_t NT_MS_ABI nt_FlsFree(uint32_t index);
 void *NT_MS_ABI nt_FlsGetValue(uint32_t index);
