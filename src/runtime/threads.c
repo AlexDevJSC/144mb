@@ -1150,15 +1150,90 @@ int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
     }
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = find_waitable(handle);
-    bool valid = object && object->kind == PROCESS;
-    if (valid) {
-        const struct waitable *state = wait_state(object);
-        *code = state->signaled ? state->exit_code : STILL_ACTIVE;
+    uint32_t error = NT_ERROR_INVALID_HANDLE;
+    if (object != NULL && object->kind == PROCESS) {
+        if (!(object->access & (PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION)))
+            error = NT_ERROR_ACCESS_DENIED;
+        else {
+            const struct waitable *state = wait_state(object);
+            *code = state->signaled ? state->exit_code : STILL_ACTIVE;
+            error = 0;
+        }
     }
     pthread_mutex_unlock(&wait_lock);
-    if (!valid)
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
-    return valid;
+    if (error != 0)
+        nt_SetLastError(error);
+    return error == 0;
+}
+
+/* Reopen an owned child by PID without confusing the numeric PID with
+ * the guest HANDLE. The runtime does not expose arbitrary host processes. */
+static nt_status open_local_process(uintptr_t *result, uint32_t access,
+                                    bool inherit, uint32_t pid)
+{
+    if (result == NULL || pid == 0 || (access & ~PROCESS_ALL_ACCESS) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *original = NULL;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+        struct waitable *item = &waitables[i];
+        if (item->kind == PROCESS && item->shared == NULL &&
+            (item->refs != 0 || item->links != 0) && item->owner_pid == pid) {
+            original = item;
+            break;
+        }
+    }
+    nt_status status = NT_STATUS_INVALID_CID;
+    if (original != NULL) {
+        if (access & ~original->access)
+            status = NT_STATUS_ACCESS_DENIED;
+        else {
+            struct waitable *alias = new_waitable(PROCESS);
+            if (alias == NULL)
+                status = NT_STATUS_NO_MEMORY;
+            else {
+                ++original->links;
+                alias->shared = original;
+                alias->access = access;
+                alias->handle_flags = inherit ? 1u : 0u;
+                *result = alias->handle;
+                status = NT_STATUS_SUCCESS;
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+uintptr_t NT_MS_ABI nt_OpenProcess(uint32_t access, int32_t inherit, uint32_t pid)
+{
+    uintptr_t opened = 0;
+    const nt_status status = open_local_process(&opened, access, inherit != 0, pid);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(status == NT_STATUS_INVALID_CID ?
+                        NT_ERROR_INVALID_PARAMETER : nt_runtime_nt_error(status));
+    return opened;
+}
+
+nt_status NT_MS_ABI nt_NtOpenProcess(uintptr_t *handle, uint32_t access,
+                                   const struct nt_object_attributes *attributes,
+                                   const struct nt_client_id *client_id)
+{
+    if (handle == NULL || client_id == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (attributes != NULL) {
+        if (attributes->size != sizeof(*attributes))
+            return NT_STATUS_INVALID_PARAMETER;
+        if (attributes->name != NULL || attributes->root != 0 ||
+            attributes->security != NULL || attributes->qos != NULL ||
+            (attributes->attributes & ~2u) != 0)
+            return NT_STATUS_NOT_SUPPORTED;
+    }
+    if (client_id->unique_thread != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    return open_local_process(handle, access,
+                              attributes != NULL && (attributes->attributes & 2u) != 0,
+                              (uint32_t)client_id->unique_process);
 }
 
 uintptr_t NT_MS_ABI nt_GetCurrentThread(void) { return UINTPTR_MAX - 1; }
