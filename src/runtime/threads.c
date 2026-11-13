@@ -1267,6 +1267,8 @@ nt_status NT_MS_ABI nt_NtOpenProcess(uintptr_t *handle, uint32_t access,
     }
     if (client_id->unique_thread != 0)
         return NT_STATUS_INVALID_PARAMETER;
+    if (client_id->unique_process > UINT32_MAX)
+        return NT_STATUS_INVALID_CID;
     return open_local_process(handle, access,
                               attributes != NULL && (attributes->attributes & 2u) != 0,
                               (uint32_t)client_id->unique_process);
@@ -1427,6 +1429,8 @@ nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
     if (client_id->unique_process != 0 &&
         client_id->unique_process != (uintptr_t)getpid())
         return NT_STATUS_NOT_SUPPORTED;
+    if (client_id->unique_thread > UINT32_MAX)
+        return NT_STATUS_INVALID_CID;
     return open_thread_local(handle, access,
                              attributes != NULL && (attributes->attributes & 2u) != 0,
                              (uint32_t)client_id->unique_thread);
