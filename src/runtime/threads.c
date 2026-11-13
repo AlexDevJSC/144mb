@@ -1222,16 +1222,23 @@ static nt_status open_local_process(uintptr_t *result, uint32_t access,
     return status;
 }
 
-bool nt_runtime_is_self_process_handle(uintptr_t handle)
+nt_status nt_runtime_check_self_process(uintptr_t handle, uint32_t any_access)
 {
     if (handle == UINTPTR_MAX)
-        return true;
+        return NT_STATUS_SUCCESS;
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = find_waitable(handle);
-    const bool self = object != NULL && object->kind == PROCESS &&
-                      wait_state(object)->self_process;
+    nt_status status = NT_STATUS_SUCCESS;
+    if (object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object->kind != PROCESS)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!wait_state(object)->self_process)
+        status = NT_STATUS_NOT_SUPPORTED;
+    else if (any_access != 0 && !(object->access & any_access))
+        status = NT_STATUS_ACCESS_DENIED;
     pthread_mutex_unlock(&wait_lock);
-    return self;
+    return status;
 }
 
 uintptr_t NT_MS_ABI nt_OpenProcess(uint32_t access, int32_t inherit, uint32_t pid)
