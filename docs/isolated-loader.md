@@ -118,12 +118,18 @@ y no debe emplearse para ejecutar software malicioso.
 
 ### Perfil persistente del usuario
 
-El lanzador usa `$XDG_STATE_HOME/nt-native-linux/drive-c`. Cuando la variable
-está vacía o contiene una ruta relativa, usa
-`$HOME/.local/state/nt-native-linux/drive-c`. El directorio es compartido por
-las aplicaciones del usuario y conserva preferencias y otros archivos de C:
-entre procesos. La carpeta personal de Linux mantiene su ubicación habitual
-fuera del sistema de archivos invitado.
+El lanzador usa la carpeta Linux ordinaria `$XDG_STATE_HOME/nt-native-linux/C:`.
+Si esa variable no es absoluta, usa `$HOME/.local/state/nt-native-linux/C:`.
+**No es un volumen Windows emulado**: el runtime retira el prefijo `C:`,
+convierte las barras invertidas a separadores `/` y accede a los archivos
+reales del host con las llamadas Linux confinadas. Una carpeta `drive-c`
+preexistente se renombra a `C:` sin copiar datos; si ambas existen el
+arranque se rechaza para evitar una fusión destructiva.
+Se crea un esqueleto vacío (`Windows`, `Program Files`, `Program Files (x86)`,
+`ProgramData`, `Users/guest`, `Temp` y carpetas habituales), sin inventar
+el contenido del sistema Windows. Véase [Transcripción de rutas Linux]
+(filesystem-native-folders.md). La carpeta personal del anfitrión
+mantiene su ubicación normal fuera del perfil.
 
 | Variable invitada | Ruta Windows |
 | --- | --- |

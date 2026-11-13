@@ -289,6 +289,24 @@ static void check_files(void)
     CHECK(mkdtemp(root) != NULL && nt_runtime_set_file_root(root));
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
     CHECK(nt_CreateDirectoryA("data", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
+    /* The guest sees a DOS path, while Linux receives a normal directory
+     * entry. The path is not a separately emulated disk or a copied file. */
+    CHECK(nt_CreateDirectoryA("C:\\Program Files", NULL) != 0);
+    CHECK(nt_CreateDirectoryA("C:\\Program Files\\Demo App", NULL) != 0);
+    void *installed = nt_fopen("C:\\Program Files\\Demo App\\settings.ini", "wb");
+    CHECK(installed != NULL && nt_fwrite("local", 1, 5, installed) == 5 &&
+          nt_fclose(installed) == 0);
+    char host_installed[512];
+    CHECK(snprintf(host_installed, sizeof(host_installed),
+                   "%s/Program Files/Demo App/settings.ini", root) > 0);
+    FILE *native = fopen(host_installed, "rb");
+    char installed_bytes[5] = {0};
+    CHECK(native != NULL && fread(installed_bytes, 1, 5, native) == 5 &&
+          memcmp(installed_bytes, "local", 5) == 0 && fclose(native) == 0);
+    CHECK(nt_DeleteFileA("C:\\Program Files\\Demo App\\settings.ini") != 0);
+    CHECK(nt_RemoveDirectoryA("C:\\Program Files\\Demo App") != 0);
+    CHECK(nt_RemoveDirectoryA("C:\\Program Files") != 0);
+
     CHECK(nt_CreateDirectoryA("missing\\nested", NULL) == 0 && last_error() == NT_ERROR_PATH_NOT_FOUND);
     CHECK(nt_CreateDirectoryA("..\\escape", NULL) == 0 && last_error() == NT_ERROR_ACCESS_DENIED);
     char link[128];

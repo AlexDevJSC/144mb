@@ -30,7 +30,7 @@ expected=P
 for attempt in 1 2; do
   XDG_STATE_HOME="$profile_state" SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
     timeout 30s "$runner" "$profile_fixture"
-  saved="$profile_state/nt-native-linux/drive-c/Users/guest/AppData/Roaming/nt-native-profile-fixture.dat"
+  saved="$profile_state/nt-native-linux/C:/Users/guest/AppData/Roaming/nt-native-profile-fixture.dat"
   test "$(cat "$saved")" = "$expected"
   expected="${expected}P"
 done
@@ -43,7 +43,7 @@ XDG_STATE_HOME="$profile_state" SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELE
 test "$(cat "$native_folder/shared.txt")" = LW
 echo "PASS PE known folder resolves to the original Linux file"
 if [ "$#" -ge 6 ]; then
-  drive="$profile_state/nt-native-linux/drive-c"
+  drive="$profile_state/nt-native-linux/C:"
   mkdir -- "$drive/ChildDir"
   cp -- "$6" "$drive/Test child.exe"
   XDG_STATE_HOME="$profile_state" SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
