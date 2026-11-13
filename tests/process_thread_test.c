@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include "child_process.h"
 #include "nt_services.h"
+#include "nt_core_information.h"
 #include "sync.h"
 #include "winbase.h"
 #include <stdint.h>
@@ -46,6 +47,21 @@ int main(void)
     check(nt_runtime_duplicate_waitable(info.process, 0x1000u, 0, 0, &restricted) ==
           NT_STATUS_SUCCESS && restricted != 0, "restricted process alias");
     check(nt_GetProcessId(restricted) == (uint32_t)child, "query alias ID");
+    uintptr_t by_pid = nt_OpenProcess(0x101000u, 0, (uint32_t)child);
+    check(by_pid && by_pid != info.process && nt_GetProcessId(by_pid) == (uint32_t)child,
+          "reopen child process by PID with SYNCHRONIZE and query");
+    struct nt_client_id ids = {(uintptr_t)child, 0};
+    struct nt_object_attributes attrs = {.size = sizeof(attrs)};
+    uintptr_t native = 0;
+    nt_SetLastError(0x717u);
+    check(nt_NtOpenProcess(&native, 0x101000u, &attrs, &ids) == NT_STATUS_SUCCESS &&
+          native && native != by_pid && nt_GetLastError() == 0x717u,
+          "native NtOpenProcess preserves LastError");
+    check(nt_runtime_terminate_child_process(native, 12) == NT_STATUS_ACCESS_DENIED,
+          "native restricted process cannot terminate child");
+    check(nt_runtime_close_waitable(native) && nt_runtime_close_waitable(by_pid),
+          "close reopened child handles");
+
     nt_SetLastError(0);
     check(!nt_TerminateProcess(restricted, 11) &&
           nt_GetLastError() == NT_ERROR_ACCESS_DENIED, "deny termination via query-only handle");
