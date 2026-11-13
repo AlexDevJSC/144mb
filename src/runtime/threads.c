@@ -72,6 +72,9 @@ struct waitable {
     char object_name[128];
     uint16_t *thread_description;
     uint64_t create_filetime, exit_filetime, user_cpu_100ns, kernel_cpu_100ns;
+    uintptr_t final_group0_affinity;
+    int final_nice;
+    bool final_nice_valid;
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
@@ -169,6 +172,20 @@ static void write_filetime(struct nt_file_time *output, uint64_t value)
 {
     output->low = (uint32_t)value;
     output->high = (uint32_t)(value >> 32);
+}
+
+/* Windows THREAD_BASIC_INFORMATION has one KAFFINITY group mask. Only
+ * group zero (Linux CPUs 0..63) is representable in this runtime. */
+static uintptr_t linux_group0_affinity(pthread_t host)
+{
+    cpu_set_t allowed;
+    if (pthread_getaffinity_np(host, sizeof(allowed), &allowed) != 0)
+        return 0;
+    uintptr_t mask = 0;
+    for (int cpu = 0; cpu < 64; ++cpu)
+        if (CPU_ISSET(cpu, &allowed))
+            mask |= (uintptr_t)UINT64_C(1) << cpu;
+    return mask;
 }
 
 static struct waitable *find_waitable(uintptr_t handle);
@@ -1552,6 +1569,10 @@ static void finish_thread(struct nt_guest_thread *guest, bool attached)
         running_thread->kernel_cpu_100ns = usage_ticks(usage.ru_stime);
     }
     running_thread->exit_filetime = filetime_now();
+    running_thread->final_group0_affinity = linux_group0_affinity(pthread_self());
+    errno = 0;
+    running_thread->final_nice = getpriority(PRIO_PROCESS, (id_t)gettid());
+    running_thread->final_nice_valid = errno == 0;
     running_thread->exit_code = thread_result;
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     clear_apcs_locked(&running_thread->apcs);
@@ -2045,6 +2066,56 @@ static nt_status priority_thread_tid(uintptr_t handle, uint32_t rights, pid_t *t
             status = NT_STATUS_THREAD_IS_TERMINATING;
         else
             *tid = (pid_t)state->thread_id;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+/* Native KPRIORITY values for the subset of Windows relative priorities
+ * actually mapped onto the Linux nice scheduler. Dynamic boosts and
+ * realtime scheduling are not implemented. */
+nt_status nt_runtime_query_thread_scheduling(uintptr_t handle, uintptr_t *affinity,
+                                             int32_t *priority)
+{
+    if (affinity == NULL || priority == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = handle == nt_GetCurrentThread() ?
+                              running_thread : find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (handle != nt_GetCurrentThread() && object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object != NULL && object->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (object != NULL && handle != nt_GetCurrentThread() &&
+             !(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
+        status = NT_STATUS_ACCESS_DENIED;
+    else if (object != NULL && wait_state(object)->owner_pid != (uint32_t)getpid())
+        status = NT_STATUS_NOT_SUPPORTED;
+    else {
+        struct waitable *state = object != NULL ? wait_state(object) : NULL;
+        uintptr_t mask = 0;
+        int nice = 0;
+        bool valid = true;
+        if (state != NULL && state->signaled) {
+            mask = state->final_group0_affinity;
+            nice = state->final_nice;
+            valid = state->final_nice_valid;
+        } else {
+            const pthread_t host = state != NULL ? state->host : pthread_self();
+            const pid_t tid = state != NULL ? (pid_t)state->thread_id : gettid();
+            mask = linux_group0_affinity(host);
+            errno = 0;
+            nice = getpriority(PRIO_PROCESS, (id_t)tid);
+            valid = errno == 0;
+        }
+        int32_t relative = 0;
+        if (!valid || mask == 0 || !host_nice_priority(nice, &relative))
+            status = NT_STATUS_NOT_SUPPORTED;
+        else {
+            *affinity = mask;
+            *priority = relative == -15 ? 1 : relative == 15 ? 15 : 8 + relative;
+        }
     }
     pthread_mutex_unlock(&wait_lock);
     return status;

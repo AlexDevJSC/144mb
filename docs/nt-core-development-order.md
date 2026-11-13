@@ -53,7 +53,9 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **13-11-2026, PR #74 fusionada — afinidad y ciclo de vida: 55 % → 60 % (+5 puntos porcentuales estimados, CI validada).** `SetThreadAffinityMask`, `NtSetInformationThread` clase 4 y `GetProcessAffinityMask` aplican y consultan afinidad real Linux en el perfil representable de 64 CPU, con derechos y errores explícitos; prueba de 48 hilos y alias. Sigue pendiente la compatibilidad con múltiples processor groups, prioridades y contextos de hilos activos. Resultados: [Linux, UBSan y Fedora correctos (run 43346528358)](https://github.com/AlexDevJSC/144mb/actions/runs/43346528358). Prueba positiva de afinidad Linux y 48 ciclos de vida ejecutada sin SKIP; ello no demuestra grupos Windows múltiples ni planificación completa.
 
-- **13-11-2026, fase 4 planificación y tiempos (PR en curso): 60 % → 66 % (+6 puntos estimados, condicionados a CI).** Añade prioridades reales de hilos por `nice` con derechos, `GetThreadTimes` y `GetProcessTimes` con FILETIME y tiempos CPU de Linux. No se incluyen contextos arbitrarios, suspensión asíncrona ni herencia general. Reemplazar esta anotación provisional una vez verificada la CI.
+- **13-11-2026, PR #76 fusionada — planificación y tiempos: 60 % → 66 % (+6 puntos porcentuales estimados).** Añade prioridades reales de hilos por `nice` con derechos, `GetThreadTimes` y `GetProcessTimes` con FILETIME y tiempos CPU de Linux. No se incluyen contextos arbitrarios, suspensión asíncrona ni herencia general. [CI Linux/UBSan/Fedora superada (run 43483478807)](https://github.com/AlexDevJSC/144mb/actions/runs/43483478807).
+
+- **13-11-2026, fase 4 consultas nativas (PR pendiente): 66 % → 68 % (+2 puntos estimados, sujetos a CI).** `NtQueryInformationThread(ThreadBasicInformation)` deja de devolver prioridad 8 y afinidad 1 ficticias; consulta el planificador Linux para hilos activos y usa una captura final del propio hilo para consultas posteriores a su terminación. El perfil sigue acotado a CPU group 0 y valores de prioridad representables.
 
 ### Formato de cierre para cambios futuros
 
