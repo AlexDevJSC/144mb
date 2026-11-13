@@ -51,6 +51,8 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **13-11-2026, PR #71 y PR #72 fusionadas: componente 4 — 35 % → 55 % (+20 puntos porcentuales estimados).** Nuevas rutas de apertura e identidad de procesos/hilos, `NtCreateThreadEx`, terminación antes de entrada de hilo, terminación acotada de hijos por pidfd, `CREATE_SUSPENDED` de procesos hijo mediante puerta del lanzador, nombres completos UTF-16 y pruebas de ciclo de vida. Quedan especialmente suspensión asíncrona y contexto de hilos activos, herencia de handles, seguridad/token NT, servicios generales entre procesos, planificación, interacciones complejas de APC y tests diferenciales Windows. **Esta mejora es de madurez del subconjunto, no de rendimiento (no hay benchmark 2×).** Pruebas Linux y Fedora de la rama de PR #72: exitosas en [CI 43341757354](https://github.com/AlexDevJSC/144mb/actions/runs/43341757354). Este resultado no valida los casos explícitamente pendientes ni los tests omitidos por limitaciones del entorno.
 
+- **13-11-2026, nueva fase 4 — afinidad y ciclo de vida (PR pendiente): 55 % → 60 % (+5 puntos estimados, sujeto a CI).** `SetThreadAffinityMask`, `NtSetInformationThread` clase 4 y `GetProcessAffinityMask` aplican y consultan afinidad real Linux en el perfil representable de 64 CPU, con derechos y errores explícitos; prueba de 48 hilos y alias. Sigue pendiente la compatibilidad con múltiples processor groups, prioridades y contextos de hilos activos. Actualizar el enlace y resultado de CI al fusionar.
+
 ### Formato de cierre para cambios futuros
 
 > **Componente 4 — Procesos e hilos:** 35 % → XX % (**+N puntos porcentuales**, estimación).\

@@ -8,6 +8,7 @@ __declspec(dllimport) LONG NTAPI NtResumeThread(HANDLE, ULONG *);
 __declspec(dllimport) LONG NTAPI NtCreateThreadEx(HANDLE *, ACCESS_MASK, void *,
     HANDLE, DWORD (WINAPI *)(void *), void *, ULONG, SIZE_T, SIZE_T, SIZE_T, void *);
 __declspec(dllimport) LONG NTAPI NtTerminateThread(HANDLE, LONG);
+__declspec(dllimport) LONG NTAPI NtSetInformationThread(HANDLE, ULONG, const void *, ULONG);
 
 #define STATUS_ACCESS_DENIED ((LONG)0xc0000022u)
 #define STATUS_THREAD_IS_TERMINATING ((LONG)0xc000004bu)
@@ -169,5 +170,38 @@ int import_fixture_entry(void)
         entered != 0 || !GetExitCodeThread(aborting, &exit_code) || exit_code != 0x9922u ||
         !CloseHandle(aborting))
         return 37;
+
+    /* Linux backs affinity with a real CPU set. The x64 processor-group
+     * profile is deliberately bounded to masks representable in 64 bits. */
+    DWORD_PTR process_mask = 0, system_mask = 0;
+    SetLastError(0x756u);
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) {
+        if (process_mask == 0 || (process_mask & ~system_mask) != 0 ||
+            GetLastError() != 0x756u ||
+            SetThreadAffinityMask(GetCurrentThread(), process_mask) != process_mask)
+            return 38;
+        SetLastError(0x757u);
+        if (NtSetInformationThread(GetCurrentThread(), 4, &process_mask,
+                                   sizeof(process_mask)) != 0 ||
+            GetLastError() != 0x757u)
+            return 39;
+    } else if (GetLastError() != ERROR_NOT_SUPPORTED) {
+        return 40;
+    }
+    SetLastError(0x758u);
+    if (NtSetInformationThread(GetCurrentThread(), 4, NULL,
+                                sizeof(DWORD_PTR)) != (LONG)0xc0000005u ||
+        NtSetInformationThread(GetCurrentThread(), 4, &process_mask, 1) !=
+                                (LONG)0xc0000004u ||
+        NtSetInformationThread(GetCurrentThread(), 41, &process_mask,
+                                sizeof(DWORD_PTR)) != (LONG)0xc0000003u ||
+        GetLastError() != 0x758u)
+        return 41;
+    SetLastError(0);
+    if (GetProcessAffinityMask(GetCurrentProcess(), NULL, &system_mask) ||
+        GetLastError() != ERROR_INVALID_PARAMETER ||
+        SetThreadAffinityMask(GetCurrentThread(), 0) != 0 ||
+        GetLastError() != ERROR_INVALID_PARAMETER)
+        return 42;
     return 0;
 }

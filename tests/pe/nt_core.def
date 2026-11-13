@@ -19,5 +19,6 @@ EXPORTS
     NtCreateThreadEx
     NtTerminateThread
     NtOpenThread
+    NtSetInformationThread
     NtSuspendThread
     NtResumeThread

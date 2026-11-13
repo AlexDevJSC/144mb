@@ -57,6 +57,9 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
                                    void *parameter, uint32_t flags, uint32_t *thread_id);
 uint32_t NT_MS_ABI nt_SuspendThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);
+uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask);
+int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *process_mask,
+                                            uintptr_t *system_mask);
 void NT_MS_ABI nt_ExitThread(uint32_t code);
 int32_t NT_MS_ABI nt_TerminateThread(uintptr_t thread, uint32_t code);
 void NT_MS_ABI nt_FreeLibraryAndExitThread(uintptr_t module, uint32_t code);

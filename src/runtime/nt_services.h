@@ -108,6 +108,8 @@ nt_status NT_MS_ABI nt_NtCreateThreadEx(uintptr_t *handle, uint32_t desired_acce
 nt_status NT_MS_ABI nt_NtTerminateThread(uintptr_t thread, nt_status exit_code);
 nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
     const struct nt_object_attributes *attributes, const struct nt_client_id *client_id);
+nt_status NT_MS_ABI nt_NtSetInformationThread(uintptr_t thread, uint32_t info_class,
+                                              const void *buffer, uint32_t length);
 nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtSetEvent(uintptr_t handle, int32_t *previous);
