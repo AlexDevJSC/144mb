@@ -10,12 +10,14 @@
 #include <errno.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <signal.h>
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 enum { WAITABLE_COUNT = 256, MAXIMUM_WAIT_OBJECTS = 64, FLS_COUNT = 128,
@@ -49,6 +51,7 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started;
+    bool termination_requested;
     int32_t semaphore_count, semaphore_maximum;
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
@@ -56,6 +59,8 @@ struct waitable {
     uint32_t access;
     pthread_t host;
     uint32_t thread_id, exit_code, owner_pid;
+    uint32_t requested_exit_code;
+    int pidfd;
     nt_thread_start start;
     void *parameter;
     /* Canonical named event/semaphore entries own a name. Aliases share
@@ -1012,6 +1017,12 @@ static void *reap_child(void *context)
     }
     close(watch->status_fd);
     pthread_mutex_lock(&wait_lock);
+    if (watch->process->termination_requested)
+        code = watch->process->requested_exit_code;
+    if (watch->process->pidfd >= 0) {
+        close(watch->process->pidfd);
+        watch->process->pidfd = -1;
+    }
     watch->process->exit_code = watch->thread->exit_code = code;
     watch->process->signaled = watch->thread->signaled = true;
     --watch->process->refs;
@@ -1044,6 +1055,11 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         thread->access = THREAD_ALL_ACCESS;
         process->access = PROCESS_ALL_ACCESS;
         process->owner_pid = (uint32_t)pid;
+        process->pidfd = -1;
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+        /* pidfd pins the child identity against PID reuse after waitpid. */
+        process->pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+#endif
         *watch = (struct child_watch){pid, status_fd, process, thread};
         pthread_t worker;
         error = pthread_create(&worker, &attr, reap_child, watch);
@@ -1054,8 +1070,11 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
         error = ENOMEM;
     }
     if (error) {
-        if (process)
+        if (process) {
+            if (process->pidfd >= 0)
+                close(process->pidfd);
             *process = (struct waitable){0};
+        }
         if (thread)
             *thread = (struct waitable){0};
         free(watch);
@@ -1063,6 +1082,39 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, struct nt_process_informat
     pthread_mutex_unlock(&wait_lock);
     pthread_attr_destroy(&attr);
     return error == 0;
+}
+
+/* Only processes launched by our trusted host have a pidfd and an
+ * observed child reaper. Never signal an arbitrary user-supplied PID.
+ * The reaper retains the requested 32-bit Windows exit status. */
+nt_status nt_runtime_terminate_child_process(uintptr_t handle, uint32_t code)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object->kind != PROCESS)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(object->access & 1u)) /* PROCESS_TERMINATE */
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(object);
+        if (state->signaled)
+            status = NT_STATUS_ACCESS_DENIED;
+        else if (state->pidfd < 0)
+            status = NT_STATUS_NOT_SUPPORTED;
+#if defined(SYS_pidfd_send_signal)
+        else if (syscall(SYS_pidfd_send_signal, state->pidfd, SIGKILL, NULL, 0) == 0) {
+            state->termination_requested = true;
+            state->requested_exit_code = code;
+        } else {
+            status = errno == ESRCH ? NT_STATUS_ACCESS_DENIED : NT_STATUS_UNSUCCESSFUL;
+        }
+#endif
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
 }
 
 int32_t NT_MS_ABI nt_GetExitCodeProcess(uintptr_t handle, uint32_t *code)
