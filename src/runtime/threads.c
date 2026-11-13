@@ -1441,8 +1441,8 @@ static void *thread_main(void *context)
         thread_result = cancel_code;
     } else if (sigsetjmp(thread_exit, 1) == 0) {
         if (guest.entered) {
-            nt_runtime_notify_tls(2); /* DLL_THREAD_ATTACH */
             attached = true;
+            nt_runtime_notify_tls(2); /* DLL_THREAD_ATTACH */
         }
         thread_result = ready ? running_thread->start(running_thread->parameter) : NT_ERROR_GEN_FAILURE;
     }
