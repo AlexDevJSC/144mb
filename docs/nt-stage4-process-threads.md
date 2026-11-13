@@ -15,6 +15,8 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 | Procesos hijo | `CreateProcessW`, `GetExitCodeProcess`, `GetProcessId`, `OpenProcess`, `NtOpenProcess` | Ejecuta PE x64 del volumen invitado bajo el mismo sandbox; handles y códigos de salida DWORD; nombres/argumentos Unicode y carpeta de trabajo, `CREATE_SUSPENDED` con puerta fd5 validada por el lanzador |
 | Terminación de hijos | `TerminateProcess`, `NtTerminateProcess` | Solamente hijos gestionados por el runtime. Usa `pidfd_open` y `pidfd_send_signal`, y almacena el código DWORD pedido para las consultas del padre. Sin pidfd, falla explícitamente; jamás usa un PID arbitrario como sustituto. |
 | Proceso actual | `OpenProcess` con el PID propio, `GetCurrentProcess` y consultas nativas | HANDLE real con vida útil estable y derechos separados de seudohandles. Los adaptadores de memoria NT requieren acceso apropiado (operar/consultar). |
+| Prioridades de hilos | `SetThreadPriority`, `GetThreadPriority` | Mapeo explícito de las siete prioridades Win32 admitidas a valores `nice` Linux por TID. La modificación requiere derechos `THREAD_SET_INFORMATION` y capacidad real del kernel: elevar prioridad puede devolver `ACCESS_DENIED`. Los valores `nice` no representables no se clasifican arbitrariamente. No se afirma equivalencia de prioridades dinámicas Windows ni de clases de prioridad del proceso. |
+| Tiempos de proceso e hilo | `GetThreadTimes`, `GetProcessTimes` | FILETIME de creación y terminación, contabilidad de CPU de usuario/kernel desde `getrusage(RUSAGE_THREAD/SELF)`, `wait4` para hijos propios y `/proc` para hilos aún ejecutándose. Rechaza handles sin permisos, procesos ajenos, y consultas no disponibles en el entorno Linux. Los tiempos de creación del hijo parten de la inscripción en el runtime, no del instante exacto de `fork`/`exec`. |
 | Afinidad real de CPU | `SetThreadAffinityMask`, `NtSetInformationThread` (clase `ThreadAffinityMask` 4), `GetProcessAffinityMask` | Mapeo directo al conjunto de CPU Linux del hilo o proceso actual, comprobación de derechos, estado y máscara solicitada; los resultados reflejan la afinidad aplicada por el kernel. Perfil AMD64 limitado a grupo 0 con CPUs Linux 0–63: si la afinidad original contiene CPUs superiores, devuelve `NOT_SUPPORTED` sin truncarla. No se simulan grupos Windows adicionales. |
 | APC, FLS y esperas | `QueueUserAPC`, `NtQueueApcThread`, `NtTestAlert`, `SleepEx`, `WaitFor*Ex`, `Fls*`, `Tls*` | Subconjuntos ya presentes: colas acotadas, despacho en el hilo de destino durante esperas alertables, independencia por hilo y liberación de recursos al finalizar |
 
@@ -25,11 +27,14 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 3. **Contextos AMD64 de terceros:** faltan `GetThreadContext`, `SetThreadContext`, contextos de hilos suspendidos en ejecución y sincronización completa con SEH.
 4. **Procesos externos y tokens NT:** no se abren procesos ajenos al runtime. Falta seguridad NT, herencia general de HANDLE, sesiones, permisos por token, procesos de diferentes usuarios, impersonación y broker entre procesos.
 5. **Creación avanzada:** faltan atributos extendidos de `NtCreateThreadEx`/`CreateProcessW`, flags generales, espacios remotos y compatibilidad x86/WOW64.
-6. **Planificación:** la afinidad de hilos en un grupo de 64 CPU ahora usa el planificador Linux. Siguen faltando grupos de procesadores mayores de 64, prioridades Windows, afinidad de procesos remotos, quantum y equivalencia completa de planificación.
+6. **Planificación:** la afinidad de hilos en un grupo de 64 CPU usa el planificador Linux; se admiten prioridades Win32 discretas mediante `nice`. Siguen faltando los grupos de procesadores mayores de 64, prioridades dinámicas de Windows, clases de prioridad del proceso, afinidad remota, quantum y equivalencia completa de planificación.
 7. **APC y señalización completas:** variantes de APC de kernel, `NtQueueApcThreadEx`, E/S asíncrona con APC, `IoCompletionPort`, suspensión de hilos remotos y carreras de desconexión.
 8. **Concurrencia y seguridad:** queda una batería de estrés, pruebas diferenciales Windows reales, auditoría del sandbox y casos de carreras de salida/descarga del loader. Un fixture sintético y una CI verde no equivalen a paridad total.
 
 ### Verificación de esta entrega
+
+- `make check`: amplía `thread_affinity_test.c` con modificación real de nice en un TID, límites de permisos, tiempos FILETIME del hilo activo/terminado y CPU de usuario/kernel. Se amplía `process_thread_test.c` con FILETIME/`wait4` del hijo activo y terminado; los PE AMD64 verifican contratos de tiempo y prioridad.
+
 
 - `make check`: incluye `tests/thread_affinity_test.c` para verificar `sched_getaffinity` real, derechos, NTSTATUS/LastError, preservación de máscaras y 48 ciclos de vida de hilos con alias. El test informa `SKIP` del caso positivo si el host no expone ninguna CPU Linux por debajo de 64; el fallo explícito del grupo no representable sí se comprueba.
 - `make check`: añade `tests/process_thread_test.c`, que crea hijos Linux verdaderos, verifica `pidfd`, apertura/reapertura de handles, derechos, códigos de terminación, la puerta de inicio y el desbloqueo contado.
@@ -39,6 +44,9 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 - El estado final de los jobs Linux/UBSan/Fedora y los hallazgos de seguridad deben acompañar la PR de esta fase; no confundir compilación con validación de las rutas funcionales.
 
 ## Madurez del componente
+
+- **Actualización propuesta en PR de prioridades y tiempos: 60 % → 66 % (+6 puntos porcentuales estimados, pendiente de CI).** El incremento corresponde a planificación discreta con efectos reales en Linux y telemetría de procesos/hilos, no a suspensión asíncrona, contextos completos o herencia de handles.
+
 
 - **Anterior: 35 %** (línea base tras PR #68).
 - **Actual tras PR #71 y #72 fusionadas: 55 %** (estimación, **+20 puntos porcentuales**).
