@@ -316,6 +316,20 @@ static void check_files(void)
                               absolute_path, &base_name) == strlen("C:\\data\\scores.txt") &&
           strcmp(absolute_path, "C:\\data\\scores.txt") == 0 &&
           base_name != NULL && strcmp(base_name, "scores.txt") == 0);
+    CHECK(nt_GetFullPathNameA("C:drive-relative.txt", sizeof(absolute_path),
+                              absolute_path, NULL) ==
+          strlen("C:\\DATA\\drive-relative.txt") &&
+          strcmp(absolute_path, "C:\\DATA\\drive-relative.txt") == 0);
+    CHECK(nt_CreateDirectoryA("C:relative-child", NULL) != 0);
+    CHECK(nt_RemoveDirectoryA("C:\\DATA\\RELATIVE-CHILD") != 0);
+    CHECK(nt_GetFullPathNameA("\\\\?\\C:\\DATA\\hello.txt",
+                              sizeof(absolute_path), absolute_path, &base_name) ==
+          strlen("C:\\DATA\\hello.txt") &&
+          strcmp(absolute_path, "C:\\DATA\\hello.txt") == 0 &&
+          base_name != NULL && strcmp(base_name, "hello.txt") == 0);
+    CHECK(nt_GetFullPathNameA("\\\\remote\\share", sizeof(absolute_path),
+                              absolute_path, NULL) == 0 &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
     CHECK(nt_SetCurrentDirectoryA("C:\\") != 0);
     CHECK((nt_GetFileAttributesA("C:\\DATA") & 0x10u) != 0);
     struct nt_file_attribute_data folder_attributes;
