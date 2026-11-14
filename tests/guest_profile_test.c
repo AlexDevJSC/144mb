@@ -228,6 +228,42 @@ int main(void)
         CHECK(paths[i] == NULL);
     nt_guest_share_free(paths, 6);
 
+    /* DOS drives D:-Z: have independently revocable persistent mappings.
+     * They must not alter the existing known-folder grants or expose HOME. */
+    char *saved_drives[NT_GUEST_EXTRA_DRIVES] = {0};
+    CHECK(nt_guest_drive_load(NULL, root, saved_drives) == 0);
+    for (size_t i = 0; i < NT_GUEST_EXTRA_DRIVES; ++i)
+        CHECK(saved_drives[i] == NULL);
+    CHECK(nt_guest_drive_update(NULL, root, 'D', other) == 0);
+    CHECK(nt_guest_drive_update(NULL, root, 'z', other) == 0);
+    CHECK(nt_guest_drive_load(NULL, root, saved_drives) == 0);
+    CHECK(saved_drives[0] != NULL && strcmp(saved_drives[0], other) == 0);
+    CHECK(saved_drives[NT_GUEST_EXTRA_DRIVES - 1] != NULL &&
+          strcmp(saved_drives[NT_GUEST_EXTRA_DRIVES - 1], other) == 0);
+    for (size_t i = 1; i + 1 < NT_GUEST_EXTRA_DRIVES; ++i)
+        CHECK(saved_drives[i] == NULL);
+    nt_guest_share_free(saved_drives, NT_GUEST_EXTRA_DRIVES);
+    CHECK(nt_guest_drive_update(NULL, root, 'C', other) < 0 && errno == EINVAL);
+    CHECK(nt_guest_drive_update(NULL, root, 'D', root) < 0 && errno == EACCES);
+    CHECK(nt_guest_drive_update(NULL, root, 'D', "relative") < 0 && errno == EINVAL);
+    char drives_config[512];
+    CHECK(snprintf(drives_config, sizeof(drives_config),
+                   "%s/.config/nt-native-linux/drives.conf", root) > 0);
+    CHECK(stat(drives_config, &info) == 0 && S_ISREG(info.st_mode) &&
+          info.st_uid == geteuid() && (info.st_mode & 0077) == 0);
+    CHECK(nt_guest_drive_update(NULL, root, 'D', NULL) == 0);
+    CHECK(nt_guest_drive_load(NULL, root, saved_drives) == 0);
+    CHECK(saved_drives[0] == NULL && saved_drives[NT_GUEST_EXTRA_DRIVES - 1] != NULL);
+    nt_guest_share_free(saved_drives, NT_GUEST_EXTRA_DRIVES);
+    CHECK(nt_guest_drive_update(NULL, root, 'Z', NULL) == 0);
+    CHECK(nt_guest_drive_load(NULL, root, saved_drives) == 0);
+    for (size_t i = 0; i < NT_GUEST_EXTRA_DRIVES; ++i)
+        CHECK(saved_drives[i] == NULL);
+    nt_guest_share_free(saved_drives, NT_GUEST_EXTRA_DRIVES);
+    CHECK(chmod(drives_config, 0644) == 0);
+    CHECK(nt_guest_drive_load(NULL, root, saved_drives) < 0 && errno == EACCES);
+    CHECK(chmod(drives_config, 0600) == 0);
+
     char config_path[512];
     CHECK(snprintf(config_path, sizeof(config_path),
                    "%s/.config/nt-native-linux/shares.conf", root) > 0);
@@ -242,6 +278,6 @@ int main(void)
     CHECK(unlink(config_path) == 0);
 
     CHECK(nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
-    puts("PASS persistent profile, native folder grants, atomic concurrent updates and symlink denial");
+    puts("PASS persistent profile, known-folder and DOS drive grants, atomic updates and symlink denial");
     return 0;
 }
