@@ -1198,9 +1198,55 @@ struct security_attributes {
 
 _Static_assert(sizeof(struct security_attributes) == 24, "SECURITY_ATTRIBUTES layout");
 
-uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t share,
-                                  const void *security, uint32_t disposition, uint32_t flags,
-                                  uintptr_t template_file)
+/* A narrow Win32 pathname may be supplied as UTF-8 by a modern guest
+ * or CP1252 by a legacy guest. Invalid UTF-8 was already converted to ACP
+ * by normalize_path(). When the bytes are valid UTF-8 *and* the requested
+ * existing file is absent, check the other CP1252 spelling before failing.
+ *
+ * Never apply this heuristic to W calls: they are unambiguously UTF-16,
+ * converted to UTF-8 by wide_path(). Never guess for CREATE_NEW or other
+ * mutating dispositions; this fallback cannot silently create a different
+ * filename. The Linux permission checks still govern the final open. */
+static void existing_ansi_path_fallback(const char *input, char path[PATH_MAX])
+{
+    bool has_nonascii = false;
+    for (const unsigned char *p = (const unsigned char *)input; *p; ++p)
+        if (*p & 0x80u) {
+            has_nonascii = true;
+            break;
+        }
+    if (!has_nonascii || nt_MultiByteToWideChar(65001, 8, input, -1, NULL, 0) == 0)
+        return;
+
+    char *encoded = nt_runtime_ansi_to_utf8(input, strlen(input));
+    if (!encoded)
+        return;
+    char alternative[PATH_MAX];
+    const bool valid = guest_path(encoded, alternative);
+    free(encoded);
+    if (!valid || strcmp(path, alternative) == 0)
+        return;
+
+    char dos_name[PATH_MAX];
+    bool exists = false;
+    if (nt_runtime_check_guest_file(path, dos_name, sizeof(dos_name), &exists) && exists)
+        return;
+    /* Inaccessible existing objects must not be bypassed by trying a
+     * different encoding. A missing permitted path is the only fallback. */
+    const int earlier = errno;
+    if (earlier != ENOENT && earlier != 0 &&
+        earlier != ENOTDIR && earlier != EINVAL)
+        return;
+    bool alternate_exists = false;
+    if (nt_runtime_check_guest_file(alternative, dos_name, sizeof(dos_name),
+                                    &alternate_exists) && alternate_exists)
+        memcpy(path, alternative, strlen(alternative) + 1);
+}
+
+static uintptr_t create_file_common(const char *input, uint32_t desired,
+                                    uint32_t share, const void *security,
+                                    uint32_t disposition, uint32_t flags,
+                                    uintptr_t template_file, bool from_wide)
 {
     const uint32_t generic_read = UINT32_C(0x80000000), generic_write = UINT32_C(0x40000000);
     const struct security_attributes *attributes = security;
@@ -1228,6 +1274,8 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
     }
+    if (!from_wide && disposition == OPEN_EXISTING)
+        existing_ansi_path_fallback(input, path);
     const char *resolved = path;
     const int root = duplicate_root(&resolved);
     if (root < 0) {
@@ -1287,6 +1335,14 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     else if (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
         nt_SetLastError(created ? NT_ERROR_SUCCESS : NT_ERROR_ALREADY_EXISTS);
     return result;
+}
+
+uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t share,
+                                  const void *security, uint32_t disposition, uint32_t flags,
+                                  uintptr_t template_file)
+{
+    return create_file_common(input, desired, share, security, disposition,
+                              flags, template_file, false);
 }
 
 static int close_file(struct guest_file *file)
@@ -2634,7 +2690,8 @@ uintptr_t NT_MS_ABI nt_CreateFileW(const uint16_t *path, uint32_t access, uint32
 {
     char narrow[PATH_MAX];
     return wide_path(path, narrow) ?
-           nt_CreateFileA(narrow, access, share, security, disposition, flags, template_file) : UINTPTR_MAX;
+           create_file_common(narrow, access, share, security, disposition,
+                              flags, template_file, true) : UINTPTR_MAX;
 }
 
 _Static_assert(sizeof(struct nt_io_status_block) == 16 &&
