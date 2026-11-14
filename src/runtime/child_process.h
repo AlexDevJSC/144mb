@@ -21,9 +21,12 @@ struct nt_startup_info {
 };
 
 typedef int (*nt_child_launcher)(int fd, const char *dos_path, const char *command,
-                                const char *directory, bool suspended,
+                                const char *directory, bool suspended, int environment_fd,
                                 pid_t *pid, int *status_fd, int *start_fd);
 void nt_runtime_set_child_launcher(nt_child_launcher launcher);
+/* Sealed, bounded UTF-8 guest environment payload; not host envp. */
+uint32_t nt_runtime_build_child_environment(const uint16_t *block, int *fd);
+bool nt_runtime_read_child_environment(int fd, char ***entries, char **storage);
 bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
                             struct nt_process_information *info);
 nt_status nt_runtime_terminate_child_process(uintptr_t handle, uint32_t exit_code);
