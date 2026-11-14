@@ -135,11 +135,56 @@ tiene prioridad. Una petición `FOO` sin coincidencia exacta se rechaza por
 ambigüedad en lugar de seleccionar un archivo arbitrariamente. Los enlaces
 simbólicos no se siguen, aunque coincidan mediante variaciones de mayúsculas.
 
+## Revisión: mayúsculas Unicode y metadatos Windows
+
+La resolución de rutas ya usa el plegado Unicode simple de ICU, sin
+depender del `locale` de la máquina Linux. Se pliegan caracteres UTF-8
+completos en todos los componentes de la ruta, además de los patrones de
+enumeración `*` y `?`. Estos comodines actúan por **carácter Unicode**,
+no por byte UTF-8. Se conserva prioridad de coincidencia exacta; si Linux
+contiene varias entradas con el mismo nombre tras plegado, se rechaza una
+petición no exacta para evitar elegir una al azar. Los nombres UTF-8
+inválidos solo se pueden buscar por su escritura exacta, nunca mediante un
+plegado inventado. Los cambios de mayúsculas en un renombrado siguen
+operando sobre el mismo directorio y el mismo inodo.
+
+`FindFirstFileA`, `FindFirstFileExA` y `FindNextFileA` se añaden a
+los métodos `W`, con nombres de salida codificados según el ACP
+actualmente implementado (Windows-1252). Se admite también
+`FindExSearchLimitToDirectories` sobre la enumeración Windows. El dato
+devuelto incluye atributos, tamaño de 64 bits y marcas temporales
+Win32, consultadas sobre el inodo real.
+
+`GetFileInformationByHandle`, `GetFileSize`, `GetFileTime` y
+`SetFileTime` complementan las consultas de información por handle
+existentes. Se admiten ahora READONLY, HIDDEN, SYSTEM y ARCHIVE en
+`SetFileAttributesA/W`, tanto para archivos como para carpetas
+(conservando los permisos de escritura de las carpetas). HIDDEN,
+SYSTEM, ARCHIVE y la fecha de creación establecida expresamente por
+Windows se persisten en los atributos extendidos Linux
+`user.ntnative.winattrs` y `user.ntnative.birthtime` del **mismo
+archivo físico**, no en un volumen o una copia Windows. La copia nativa
+reproduce esos metadatos. Las operaciones que requieran un xattr y no
+puedan realizarse en el filesystem del host deben devolver error.
+
+**Alcance del cierre de estos dos bloques:** búsqueda insensible a
+mayúsculas para caracteres Unicode simples y patrones `*`/`?`;
+enumeración Win32 básica A/W, identificación, tamaños, fechas y
+atributos estándar sobre archivos y directorios reales, con
+comprobaciones automatizadas de regresión. Cuando esos tests y la
+compilación Fedora final sean correctos, quedan listos para el
+*approve* manual del usuario.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
-mayúsculas implementada es **ASCII**, no el plegado ni la normalización Unicode
-completos (NFC/NFD, `É/é`, etc.). La creación de nombres que solo difieren
+mayúsculas incluye ahora Unicode **simple** mediante ICU; no supone
+normalización Unicode NFC/NFD, ni equivalencias con expansión a varias
+letras, ni identidad garantizada con todas las versiones de la tabla de
+mayúsculas de NTFS. Las páginas de códigos ANSI de otras API del runtime,
+la generación de nombres cortos 8.3, permisos/ACL NTFS y atributos
+avanzados (reparse, cifrado, sparse, compresión) permanecen fuera de
+los dos bloques básicos de esta entrega. La creación de nombres que solo difieren
 por mayúsculas todavía puede sufrir una carrera entre procesos o programas
 Linux que escriban simultáneamente en el directorio; la protección de
 `openat2` garantiza confinamiento, no atomicidad case-insensitive de nombres.
