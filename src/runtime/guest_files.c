@@ -2718,6 +2718,7 @@ struct directory_search {
     uintptr_t handle;
     DIR *directory;
     char pattern[PATH_MAX];
+    bool directories_only;
 };
 static struct directory_search searches[FIND_LIMIT];
 static uintptr_t next_search = 0x75000001;
@@ -2758,6 +2759,10 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
         struct stat stat_info;
         const bool valid = fstat(fd, &stat_info) == 0 &&
                            (S_ISREG(stat_info.st_mode) || S_ISDIR(stat_info.st_mode));
+        if (valid && search->directories_only && !S_ISDIR(stat_info.st_mode)) {
+            close(fd);
+            continue;
+        }
         if (valid)
             result.info = file_attributes(fd, &stat_info);
         close(fd);
@@ -2771,7 +2776,7 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
 uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, struct nt_find_data_w *data,
                                        int32_t operation, void *filter, uint32_t flags)
 {
-    if (data == NULL || (level != 0 && level != 1) || operation != 0 ||
+    if (data == NULL || (level != 0 && level != 1) || (operation != 0 && operation != 1) ||
         filter != NULL || (flags & ~2u) != 0) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return UINTPTR_MAX;
@@ -2784,11 +2789,11 @@ uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, str
         if (separator(*cursor))
             pattern = cursor + 1;
     }
-    if (*pattern == '\0' || strchr(pattern, ':') != NULL || strchr(pattern, '[') != NULL) {
+    if (*pattern == '\0' || strchr(pattern, ':') != NULL) {
         nt_SetLastError(NT_ERROR_INVALID_NAME);
         return UINTPTR_MAX;
     }
-    struct directory_search search = {0};
+    struct directory_search search = {.directories_only = operation == 1};
     strcpy(search.pattern, pattern);
     if (pattern != narrow)
         *pattern = '\0';
@@ -2845,6 +2850,65 @@ int32_t NT_MS_ABI nt_FindNextFileW(uintptr_t handle, struct nt_find_data_w *data
     if (result != -1)
         nt_SetLastError(result == 0 ? NT_ERROR_NO_MORE_FILES : path_error(result, false));
     return result == -1;
+}
+
+/* ANSI enumeration uses the process ACP (currently Windows-1252);
+ * filename scanning itself remains Unicode via the W implementation. */
+static bool narrow_find_data(const struct nt_find_data_w *wide,
+                             struct nt_find_data_a *ansi)
+{
+    struct nt_find_data_a result = {0};
+    result.info = wide->info;
+    memcpy(result.reserved, wide->reserved, sizeof(result.reserved));
+    if (!nt_WideCharToMultiByte(nt_GetACP(), 0, wide->name, -1,
+                                result.name, sizeof(result.name), NULL, NULL))
+        return false;
+    if (wide->alternate[0] &&
+        !nt_WideCharToMultiByte(nt_GetACP(), 0, wide->alternate, -1,
+                               result.alternate, sizeof(result.alternate), NULL, NULL))
+        return false;
+    *ansi = result;
+    return true;
+}
+
+uintptr_t NT_MS_ABI nt_FindFirstFileExA(const char *path, int32_t level,
+                                       struct nt_find_data_a *data, int32_t operation,
+                                       void *filter, uint32_t flags)
+{
+    if (!path || !data) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return UINTPTR_MAX;
+    }
+    uint16_t wide_path_buf[PATH_MAX];
+    if (!nt_MultiByteToWideChar(nt_GetACP(), 0, path, -1, wide_path_buf, PATH_MAX))
+        return UINTPTR_MAX;
+    struct nt_find_data_w found;
+    const uintptr_t handle = nt_FindFirstFileExW(wide_path_buf, level, &found,
+                                                 operation, filter, flags);
+    if (handle == UINTPTR_MAX)
+        return handle;
+    if (!narrow_find_data(&found, data)) {
+        const uint32_t error = nt_GetLastError();
+        nt_FindClose(handle);
+        nt_SetLastError(error);
+        return UINTPTR_MAX;
+    }
+    return handle;
+}
+
+uintptr_t NT_MS_ABI nt_FindFirstFileA(const char *path, struct nt_find_data_a *data)
+{
+    return nt_FindFirstFileExA(path, 0, data, 0, NULL, 0);
+}
+
+int32_t NT_MS_ABI nt_FindNextFileA(uintptr_t handle, struct nt_find_data_a *data)
+{
+    if (!data) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_find_data_w next;
+    return nt_FindNextFileW(handle, &next) && narrow_find_data(&next, data);
 }
 
 int32_t NT_MS_ABI nt_FindClose(uintptr_t handle)
