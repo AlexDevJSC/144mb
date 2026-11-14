@@ -15,6 +15,7 @@
 #include "dxcompiler_path.h"
 #include "child_process.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -40,6 +41,61 @@ static const char *active_dos_path, *active_command, *active_directory;
 static char **active_child_environment;
 static int active_child_manifest = -1;
 static uintptr_t active_child_standard_handles[3];
+static const char *requested_drives[26];
+enum { EXTRA_UNC_LIMIT = 8 };
+static struct { char server[64], share[64]; const char *directory; } requested_unc[EXTRA_UNC_LIMIT];
+static size_t requested_unc_count;
+
+static bool valid_share_label(const char *value)
+{
+    if (!value || !*value || strlen(value) >= 64)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)value; *p; ++p)
+        if (!( (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+               (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' || *p == '.'))
+            return false;
+    return true;
+}
+
+static bool open_secondary_grants(void)
+{
+    for (char letter = 'A'; letter <= 'Z'; ++letter) {
+        if (letter == 'C')
+            continue;
+        char directory[48];
+        snprintf(directory, sizeof(directory), "/guest-drives/%c", letter);
+        if (access(directory, F_OK) == 0 &&
+            !nt_runtime_set_drive_root(letter, directory))
+            return false;
+    }
+    DIR *servers = opendir("/guest-unc");
+    if (!servers)
+        return errno == ENOENT;
+    struct dirent *server;
+    bool success = true;
+    while (success && (server = readdir(servers)) != NULL) {
+        if (server->d_name[0] == '.' || !valid_share_label(server->d_name))
+            continue;
+        char server_directory[192];
+        snprintf(server_directory, sizeof(server_directory), "/guest-unc/%s", server->d_name);
+        DIR *shares = opendir(server_directory);
+        if (!shares) {
+            success = false;
+            break;
+        }
+        struct dirent *share;
+        while (success && (share = readdir(shares)) != NULL) {
+            if (share->d_name[0] == '.' || !valid_share_label(share->d_name))
+                continue;
+            char path[320];
+            snprintf(path, sizeof(path), "%s/%s", server_directory, share->d_name);
+            success = nt_runtime_set_unc_root(server->d_name, share->d_name, path);
+        }
+        closedir(shares);
+    }
+    closedir(servers);
+    return success;
+}
 
 static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *context)
 {
@@ -59,6 +115,10 @@ static int NT_MS_ABI guest_entry(void)
                                                               active_child_environment : environ));
     if (!nt_runtime_set_file_root("/game"))
         return 118;
+    if (!open_secondary_grants()) {
+        perror("Cannot initialize secondary DOS/UNC roots");
+        return 118;
+    }
     if (active_child_manifest >= 0) {
         const bool restored =
             nt_runtime_inherited_standard_handles(active_child_manifest,
@@ -460,9 +520,9 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
     }
     char profile_source[64];
     snprintf(profile_source, sizeof(profile_source), "/proc/self/fd/%d", profile);
-    char *args[128];
+    char *args[256];
     size_t n = 0;
-#define ADD(x) do { if (!add_arg(args, &n, 128, (char *)(x))) return 2; } while (0)
+#define ADD(x) do { if (!add_arg(args, &n, 256, (char *)(x))) return 2; } while (0)
     ADD("bwrap");
     ADD("--die-with-parent"); ADD("--unshare-all"); ADD("--new-session"); ADD("--as-pid-1");
     ADD("--clearenv"); ADD("--setenv"); ADD("PATH"); ADD("/usr/bin:/bin");
@@ -529,6 +589,35 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
         snprintf(folder_targets[i], sizeof(folder_targets[i]), "%s/%s", NT_GUEST_FOLDER_MOUNTS, nt_user_folders[i].name);
         ADD("--bind"); ADD(folder_sources[i]); ADD(folder_targets[i]);
     }
+    /* Each extra DOS root is mapped directly from its authorized Linux
+     * descriptor. The guest sees only its dedicated /guest-drives or
+     * /guest-unc mount, never the original host directory pathname. */
+    char drive_sources[26][64], drive_targets[26][48];
+    for (size_t i = 0; i < 26; ++i) {
+        if (requested_drives[i] == NULL)
+            continue;
+        const int fd = inherit_mount_descriptor(nt_open_shared_folder(requested_drives[i], home));
+        if (fd < 0) {
+            fprintf(stderr, "Cannot authorize drive %c: %s\n", (int)('A' + i), strerror(errno));
+            return 2;
+        }
+        snprintf(drive_sources[i], sizeof(drive_sources[i]), "/proc/self/fd/%d", fd);
+        snprintf(drive_targets[i], sizeof(drive_targets[i]), "/guest-drives/%c", (int)('A' + i));
+        ADD("--bind"); ADD(drive_sources[i]); ADD(drive_targets[i]);
+    }
+    char unc_sources[EXTRA_UNC_LIMIT][64], unc_targets[EXTRA_UNC_LIMIT][320];
+    for (size_t i = 0; i < requested_unc_count; ++i) {
+        const int fd = inherit_mount_descriptor(nt_open_shared_folder(requested_unc[i].directory, home));
+        if (fd < 0) {
+            fprintf(stderr, "Cannot authorize UNC %s/%s: %s\n",
+                    requested_unc[i].server, requested_unc[i].share, strerror(errno));
+            return 2;
+        }
+        snprintf(unc_sources[i], sizeof(unc_sources[i]), "/proc/self/fd/%d", fd);
+        snprintf(unc_targets[i], sizeof(unc_targets[i]), "/guest-unc/%s/%s",
+                 requested_unc[i].server, requested_unc[i].share);
+        ADD("--bind"); ADD(unc_sources[i]); ADD(unc_targets[i]);
+    }
     ADD("--"); ADD("/runner"); ADD("--worker"); ADD(inside); ADD(command);
     args[n] = NULL;
 #undef ADD
@@ -543,13 +632,15 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
 static void usage(const char *command)
 {
     fprintf(stderr,
-            "Usage: %s [--share Folder=/absolute/linux/path]... [--] path/to/program.exe [argument...]\n"
+            "Usage: %s [--share Folder=/absolute/linux/path]... [--drive D=/absolute/linux/path]\n"
+            "          [--unc server/share=/absolute/linux/path]... [--] program.exe [arguments...]\n"
             "       %s --remember-share Folder=/absolute/linux/path\n"
             "       %s --forget-share Folder\n"
             "Mappings: Desktop, Documents, Downloads, Music, Pictures, Videos.\n"
             "Remembered grants are stored in private $XDG_CONFIG_HOME/nt-native-linux/shares.conf\n"
             "(or $HOME/.config/nt-native-linux/shares.conf) and apply to every launch.\n"
             "A per-launch --share overrides a remembered mapping for that folder.\n"
+            "--drive and --unc are explicit per-launch Linux directory grants, never automatic mounts.\n"
             "Requires bubblewrap + Wayland. For headless smoke tests use SDL_VIDEODRIVER=offscreen.\n",
             command, command, command);
 }
