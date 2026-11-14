@@ -144,6 +144,22 @@ static void check_user_folders(void)
     CHECK(host != NULL && fread(bytes, 1, 7, host) == 7 &&
           memcmp(bytes, "native!", 7) == 0 && fclose(host) == 0);
     CHECK(nt_DeleteFileA("C:/FROM-SHARED.txt") != 0);
+    /* An impossible copy+delete move must not leave an extra file in C:. */
+    uintptr_t held_source = nt_CreateFileA(filename, UINT32_C(0x80000000),
+                                           1u, NULL, 3u, 0x80u, 0);
+    CHECK(held_source != UINTPTR_MAX);
+    CHECK(!nt_MoveFileExA(filename, "C:/blocked-source.bin", 2u) &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_CloseHandle(held_source) != 0);
+    char refused[160];
+    CHECK(snprintf(refused, sizeof(refused), "%s/blocked-source.bin", drive) > 0);
+    CHECK(access(refused, F_OK) < 0 && errno == ENOENT);
+    CHECK(nt_SetFileAttributesA(filename, 1u) != 0);
+    CHECK(!nt_MoveFileExA(filename, "C:/readonly-source.bin", 2u) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_SetFileAttributesA(filename, 0x80u) != 0);
+    CHECK(snprintf(refused, sizeof(refused), "%s/readonly-source.bin", drive) > 0);
+    CHECK(access(refused, F_OK) < 0 && errno == ENOENT);
     CHECK(nt_MoveFileExA(filename, "C:/transferred.txt", 2u) != 0);
     CHECK(access(input, F_OK) < 0 && errno == ENOENT && access(moved, F_OK) == 0);
     CHECK(nt_MoveFileExA("C:/TRANSFERRED.txt", filename, 2u) != 0);
