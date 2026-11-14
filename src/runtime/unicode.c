@@ -83,11 +83,26 @@ int32_t NT_MS_ABI nt_IsValidCodePage(uint32_t page)
     return U_SUCCESS(err);
 }
 
+int32_t NT_MS_ABI nt_IsDBCSLeadByteEx(uint32_t page, uint8_t byte)
+{
+    if (page == CP_ACP)
+        page = nt_GetACP();
+    else if (page == CP_OEMCP)
+        page = nt_GetOEMCP();
+    if (!nt_IsValidCodePage(page)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (page == 932)
+        return (byte >= 0x81 && byte <= 0x9f) || (byte >= 0xe0 && byte <= 0xfc);
+    if (page == 936 || page == 949 || page == 950)
+        return byte >= 0x81 && byte <= 0xfe;
+    return 0;
+}
+
 int32_t NT_MS_ABI nt_IsDBCSLeadByte(uint8_t byte)
 {
-    /* The guest ANSI code page is single-byte. */
-    (void)byte;
-    return 0;
+    return nt_IsDBCSLeadByteEx(nt_GetACP(), byte);
 }
 
 static uint32_t effective_page(uint32_t page)
