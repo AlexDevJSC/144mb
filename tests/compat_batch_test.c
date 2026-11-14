@@ -287,6 +287,7 @@ static void check_files(void)
     BOUND(KERNEL, CopyFileW);
     BOUND(KERNEL, SetFileAttributesA);
     BOUND(KERNEL, SetFileAttributesW);
+    BOUND(KERNEL, GetFinalPathNameByHandleW);
     BOUND(KERNEL, GetCurrentDirectoryA);
     BOUND(KERNEL, SetCurrentDirectoryA);
     BOUND(KERNEL, GetFullPathNameA);
@@ -503,7 +504,34 @@ static void check_files(void)
           last_error() == NT_ERROR_ALREADY_EXISTS);
     CHECK(nt_MoveFileExA("DATA/SCORES.TXT", "data/TARGET.TXT", 1) != 0);
     CHECK(nt_DeleteFileA("data/scores.txt") == 0 && last_error() == NT_ERROR_FILE_NOT_FOUND);
+    uintptr_t path_handle = nt_CreateFileA("data/TARGET.txt", UINT32_C(0x80000000),
+                                            1u | 4u, NULL, 3u, 0x80u, 0);
+    CHECK(path_handle != UINTPTR_MAX);
     CHECK(nt_MoveFileExA("data/target.txt", "DATA/TARGET.txt", 0) != 0);
+    uint16_t final_path[256] = {0};
+    static const uint16_t expected_final[] = u"\\\\?\\C:\\DATA\\TARGET.txt";
+    CHECK(nt_GetFinalPathNameByHandleW(path_handle, final_path, 256, 0) ==
+          sizeof(expected_final) / sizeof(*expected_final) - 1 &&
+          memcmp(final_path, expected_final, sizeof(expected_final)) == 0);
+    CHECK(nt_CloseHandle(path_handle) != 0);
+
+    /* Moving a directory also updates names reported by open file handles
+     * beneath it without invalidating their original Linux descriptors. */
+    CHECK(nt_CreateDirectoryA("data\\nested-move", NULL) != 0);
+    void *nested_stream = nt_fopen("data\\nested-move\\file.bin", "wb");
+    CHECK(nested_stream != NULL && nt_fwrite("Z", 1, 1, nested_stream) == 1 &&
+          nt_fclose(nested_stream) == 0);
+    path_handle = nt_CreateFileA("data\\nested-move\\file.bin",
+                                 UINT32_C(0x80000000), 1u | 4u, NULL, 3u, 0x80u, 0);
+    CHECK(path_handle != UINTPTR_MAX);
+    CHECK(nt_MoveFileExA("data\\NESTED-MOVE", "DATA\\MovedDir", 0) != 0);
+    static const uint16_t expected_nested[] = u"\\\\?\\C:\\DATA\\MovedDir\\file.bin";
+    CHECK(nt_GetFinalPathNameByHandleW(path_handle, final_path, 256, 0) ==
+          sizeof(expected_nested) / sizeof(*expected_nested) - 1 &&
+          memcmp(final_path, expected_nested, sizeof(expected_nested)) == 0);
+    CHECK(nt_CloseHandle(path_handle) != 0);
+    CHECK(nt_DeleteFileA("data\\moveddir\\FILE.BIN") != 0 &&
+          nt_RemoveDirectoryA("DATA\\MOVEDDIR") != 0);
     char renamed[512];
     CHECK(snprintf(renamed, sizeof(renamed), "%s/data/TARGET.txt", root) > 0);
     CHECK(access(renamed, F_OK) == 0);
