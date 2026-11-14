@@ -412,6 +412,7 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         if (length == 0 || (length == 1 && component[0] == '.'))
             continue;
         if (length == 2 && memcmp(component, "..", 2) == 0) {
+            output[used] = '\0';
             /* A shared known-folder root is a separate security grant.
              * Do not turn Documents/../secret into an unshared C: path. */
             bool at_share_boundary = false;
@@ -770,14 +771,37 @@ int nt_runtime_read_guest_file(const char *path, size_t limit, void **data, size
 
 static bool copy_dos_path(const char *relative, char *output, size_t capacity)
 {
-    const size_t length = strlen(relative);
-    if (capacity < 4 || length > capacity - 4) {
+    const char *remainder = relative;
+    size_t used = 0;
+    if (strncmp(relative, "@UNC:/", 6) == 0) {
+        /* Canonical UNC namespace is \\\\server\\share\\path. */
+        if (capacity < 3) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        output[used++] = '\\';
+        output[used++] = '\\';
+        remainder += 6;
+    } else {
+        const char letter = relative[1] == ':' && relative[0] >= 'D' &&
+                            relative[0] <= 'Z' ? relative[0] : 'C';
+        if (capacity < 4) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        output[used++] = letter;
+        output[used++] = ':';
+        output[used++] = '\\';
+        if (letter != 'C')
+            remainder += 2 + (relative[2] == '/');
+    }
+    const size_t length = strlen(remainder);
+    if (length >= capacity - used) {
         errno = ENAMETOOLONG;
         return false;
     }
-    memcpy(output, "C:\\", 3);
     for (size_t i = 0; i <= length; ++i)
-        output[3 + i] = relative[i] == '/' ? '\\' : relative[i];
+        output[used + i] = remainder[i] == '/' ? '\\' : remainder[i];
     return true;
 }
 
@@ -2457,7 +2481,9 @@ static bool wide_path(const uint16_t *input, char output[PATH_MAX])
     if (nt_WideCharToMultiByte(65001, 0x80, input, -1, output, PATH_MAX, NULL, NULL) == 0)
         return false;
     if (strncmp(output, "\\\\?\\", 4) == 0 &&
-        (output[4] == 'C' || output[4] == 'c') && output[5] == ':' && separator(output[6]))
+        ((output[4] >= 'A' && output[4] <= 'Z') ||
+         (output[4] >= 'a' && output[4] <= 'z')) &&
+        output[5] == ':' && separator(output[6]))
         memmove(output, output + 4, strlen(output + 4) + 1);
     return true;
 }
