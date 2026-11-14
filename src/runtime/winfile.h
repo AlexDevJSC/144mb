@@ -4,6 +4,20 @@
 
 #include "compat.h"
 
+/* Start-up file HANDLE inheritance between PE children. The source FDs
+ * are private duplicates, pinned until posix_spawn has duplicated them.
+ * The target uses a sealed manifest and the exact guest HANDLE values. */
+enum { NT_CHILD_FILE_LIMIT = 32, NT_CHILD_FILE_FD_BASE = 32 };
+struct nt_child_file_transfer {
+    int manifest_fd;
+    int source_fds[NT_CHILD_FILE_LIMIT];
+    size_t count;
+};
+uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer);
+void nt_runtime_release_inherited_files(struct nt_child_file_transfer *transfer);
+bool nt_runtime_inherited_file_count(int manifest_fd, size_t *count);
+bool nt_runtime_restore_inherited_files(int manifest_fd);
+
 int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags);
 int32_t NT_MS_ABI nt_SetHandleInformation(uintptr_t handle, uint32_t mask, uint32_t flags);
 int32_t NT_MS_ABI nt_GetProcessHandleCount(uintptr_t process, uint32_t *count);
