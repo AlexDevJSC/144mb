@@ -938,7 +938,8 @@ enum {
     FILE_READ = 1, FILE_WRITE = 2, FILE_DELETE = 4, FILE_TABLE_SIZE = 256,
     HANDLE_FLAG_INHERIT = 1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 2,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
-    TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80
+    TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80,
+    FILE_FLAG_OVERLAPPED = 0x40000000
 };
 
 enum file_owner { FREE_FILE, WIN_HANDLE, CRT_DESCRIPTOR, CRT_STREAM };
@@ -952,6 +953,7 @@ struct guest_file {
     dev_t device;
     ino_t inode;
     bool text;
+    bool overlapped_io;
     char *path;
 };
 
@@ -1090,7 +1092,8 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     }
     if ((desired & ~(generic_read | generic_write)) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
-        (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
+        (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
+        (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED)) != 0 ||
         template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return UINTPTR_MAX;
@@ -1150,6 +1153,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
                 slot->owner = WIN_HANDLE;
                 slot->handle = result;
                 slot->handle_flags = attributes && attributes->inherit ? HANDLE_FLAG_INHERIT : 0;
+                slot->overlapped_io = (flags & FILE_FLAG_OVERLAPPED) != 0;
                 slot->path = saved_path;
                 saved_path = NULL;
             }
@@ -2480,6 +2484,7 @@ static nt_status nt_file_error(uint32_t error)
     case NT_ERROR_PATH_NOT_FOUND: return (nt_status)UINT32_C(0xc000003a);
     case NT_ERROR_FILE_EXISTS: return (nt_status)UINT32_C(0xc0000035);
     case NT_ERROR_SHARING_VIOLATION: return (nt_status)UINT32_C(0xc0000043);
+    case NT_ERROR_LOCK_VIOLATION: return (nt_status)UINT32_C(0xc0000054);
     case NT_ERROR_INVALID_NAME: return (nt_status)UINT32_C(0xc0000033);
     case NT_ERROR_INVALID_HANDLE: return NT_STATUS_INVALID_HANDLE;
     case NT_ERROR_BROKEN_PIPE: return (nt_status)UINT32_C(0xc000014b);
@@ -2959,12 +2964,179 @@ int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved,
                            (uint64_t)length_high << 32 | length_low, F_UNLCK, false);
 }
 
+/* A single bounded Linux worker performs actual asynchronous offset I/O.
+ * The caller keeps its OVERLAPPED and buffer alive until completion, as on
+ * Windows. Descriptors are independently duplicated so CloseHandle cannot
+ * invalidate an outstanding request. No kernel NT APC/IOCP is claimed. */
+enum { ASYNC_LIMIT = 32, ASYNC_PENDING = 0x103 };
+struct async_request {
+    bool occupied, queued;
+    int fd;
+    void *buffer;
+    uint32_t size;
+    off_t offset;
+    bool write_access;
+    struct nt_overlapped *completion;
+    uintptr_t event;
+};
+static struct async_request async_tasks[ASYNC_LIMIT];
+static pthread_mutex_t async_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t async_condition = PTHREAD_COND_INITIALIZER;
+static bool async_started;
+
+static void *async_worker_loop(void *argument)
+{
+    (void)argument;
+    for (;;) {
+        pthread_mutex_lock(&async_lock);
+        size_t index = 0;
+        for (;;) {
+            while (index < ASYNC_LIMIT && !async_tasks[index].queued)
+                ++index;
+            if (index < ASYNC_LIMIT)
+                break;
+            pthread_cond_wait(&async_condition, &async_lock);
+            index = 0;
+        }
+        struct async_request job = async_tasks[index];
+        async_tasks[index].queued = false;
+        pthread_mutex_unlock(&async_lock);
+
+        ssize_t result = -1;
+        int error = 0;
+        if (!range_unlocked(job.fd, (uint64_t)job.offset, job.size, job.write_access)) {
+            error = errno;
+        } else {
+            do {
+                result = job.write_access ?
+                    pwrite(job.fd, job.buffer, job.size, job.offset) :
+                    pread(job.fd, job.buffer, job.size, job.offset);
+            } while (result < 0 && errno == EINTR);
+            error = errno;
+        }
+        close(job.fd);
+        const uint32_t status = result >= 0 ? 0 :
+            (uint32_t)nt_file_error(path_error(error, false));
+        pthread_mutex_lock(&async_lock);
+        __atomic_store_n(&job.completion->internal_high,
+                         result > 0 ? (uintptr_t)result : 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&job.completion->internal, status, __ATOMIC_RELEASE);
+        async_tasks[index].occupied = false;
+        pthread_cond_broadcast(&async_condition);
+        pthread_mutex_unlock(&async_lock);
+        if (job.event)
+            (void)nt_SetEvent(job.event);
+    }
+    return NULL;
+}
+
+static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
+                                struct nt_overlapped *completion, bool write_access)
+{
+    if (size != 0 && buffer == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const uint64_t offset = (uint64_t)completion->offset_high << 32 | completion->offset;
+    if (offset > INT64_MAX || (uint64_t)size > (uint64_t)INT64_MAX - offset) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *entry = find_handle(handle);
+    const bool enabled = entry && entry->overlapped_io;
+    pthread_mutex_unlock(&file_lock);
+    if (!enabled) {
+        nt_SetLastError(entry == NULL ? NT_ERROR_INVALID_HANDLE : NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, write_access ? FILE_WRITE : FILE_READ);
+    if (fd < 0)
+        return file_result(fd, false);
+    if (completion->event && !nt_ResetEvent(completion->event)) {
+        close(fd);
+        return 0;
+    }
+
+    pthread_mutex_lock(&async_lock);
+    int slot = -1;
+    for (int i = 0; i < ASYNC_LIMIT; ++i) {
+        if (async_tasks[i].occupied && async_tasks[i].completion == completion) {
+            slot = -2;
+            break;
+        }
+        if (slot == -1 && !async_tasks[i].occupied)
+            slot = i;
+    }
+    if (slot >= 0 && !async_started) {
+        pthread_t worker;
+        if (pthread_create(&worker, NULL, async_worker_loop, NULL) == 0) {
+            pthread_detach(worker);
+            async_started = true;
+        } else {
+            slot = -1;
+        }
+    }
+    if (slot >= 0) {
+        async_tasks[slot] = (struct async_request) {
+            .occupied = true, .queued = true, .fd = fd, .buffer = buffer,
+            .size = size, .offset = (off_t)offset, .write_access = write_access,
+            .completion = completion, .event = completion->event
+        };
+        __atomic_store_n(&completion->internal_high, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&completion->internal, ASYNC_PENDING, __ATOMIC_RELEASE);
+        pthread_cond_signal(&async_condition);
+    }
+    pthread_mutex_unlock(&async_lock);
+    if (slot < 0) {
+        close(fd);
+        nt_SetLastError(slot == -2 ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    nt_SetLastError(NT_ERROR_IO_PENDING);
+    return 0;
+}
+
+int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *completion,
+                                        uint32_t *transferred, int32_t wait)
+{
+    if (!completion || !transferred) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
+    if (fd < 0)
+        return file_result(fd, false);
+    close(fd);
+    pthread_mutex_lock(&async_lock);
+    uintptr_t status = __atomic_load_n(&completion->internal, __ATOMIC_ACQUIRE);
+    while (status == ASYNC_PENDING && wait) {
+        pthread_cond_wait(&async_condition, &async_lock);
+        status = __atomic_load_n(&completion->internal, __ATOMIC_ACQUIRE);
+    }
+    const uintptr_t length = __atomic_load_n(&completion->internal_high, __ATOMIC_RELAXED);
+    pthread_mutex_unlock(&async_lock);
+    if (status == ASYNC_PENDING) {
+        nt_SetLastError(NT_ERROR_IO_INCOMPLETE);
+        return 0;
+    }
+    if (status != 0) {
+        nt_SetLastError((uint32_t)status == UINT32_C(0xc0000054) ?
+                        NT_ERROR_LOCK_VIOLATION : nt_runtime_nt_error((nt_status)status));
+        return 0;
+    }
+    *transferred = (uint32_t)length;
+    return 1;
+}
+
 int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size, uint32_t *done, void *overlap)
 {
     if (done != NULL)
         *done = 0;
-    if (done == NULL || (size != 0 && buffer == NULL) || overlap != NULL) {
-        nt_SetLastError(overlap != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+    if (overlap)
+        return begin_overlapped(handle, buffer, size, overlap, false);
+    if (done == NULL || (size != 0 && buffer == NULL)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
     const int fd = duplicate_handle(handle, FILE_READ);
@@ -2992,8 +3164,10 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
 {
     if (done != NULL)
         *done = 0;
-    if (done == NULL || (size != 0 && buffer == NULL) || overlap != NULL) {
-        nt_SetLastError(overlap != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+    if (overlap)
+        return begin_overlapped(handle, (void *)buffer, size, overlap, true);
+    if (done == NULL || (size != 0 && buffer == NULL)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
     const int fd = duplicate_handle(handle, FILE_WRITE);
