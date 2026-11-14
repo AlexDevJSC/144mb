@@ -175,6 +175,57 @@ comprobaciones automatizadas de regresión. Cuando esos tests y la
 compilación Fedora final sean correctos, quedan listos para el
 *approve* manual del usuario.
 
+## Ampliación del subsistema avanzado: conversiones, bloqueos, volúmenes y E/S
+
+Esta vuelta amplía **cuatro bloques que todavía no están cerrados**:
+
+**Unicode y páginas de códigos.** Además de UTF-8, CP1252 y CP437, las
+conversiones `MultiByteToWideChar` y `WideCharToMultiByte` reconocen ahora
+CP850, CP866, CP874, CP932, CP936, CP949, CP950 y CP1250/1251/1253–1258,
+respaldadas por los conversores ICU en vez de la configuración regional del
+host. Se comprueban secuencias DBCS (Shift-JIS/GBK), sustitución y decodificación
+estricta; `GetCPInfo` reconoce longitudes de dos bytes y los rangos de bytes
+iniciales, que también expone `IsDBCSLeadByteEx`. El ACP por defecto sigue
+siendo CP1252. Esto **no implica** que todas las API Win32 `A` de rutas
+hayan pasado de UTF-8 a la página ANSI del invitado; esa transición es un
+trabajo pendiente y no se presenta como concluido.
+
+**Bloqueos NT.** Las operaciones Win32 `LockFile`, `UnlockFile`,
+`LockFileEx` y `UnlockFileEx` utilizan bloqueos de intervalo OFD del
+kernel Linux (`F_OFD_SETLK` y `F_OFD_SETLKW`) con offset y longitud de
+64 bits; los bloqueos se mantienen mientras existe la descripción de archivo
+abierta. Se detectan conflictos incluso con otros descriptores del sistema
+Linux que participan en el protocolo de bloqueo. Son bloqueos Linux
+*advisory*, no una implementación completa de bloqueos obligatorios NT,
+compatibilidad entre procesos del modelo `FILE_SHARE_*`, `delete-pending`
+ni leases SMB.
+
+**Otras unidades y UNC.** El código ofrece los puntos de integración
+`nt_runtime_set_drive_root('D', host)` para D:–Z: y
+`nt_runtime_set_unc_root("server", "share", host)` para recursos UNC
+explícitos. Cada concesión abre un descriptor seguro del directorio Linux;
+la resolución posterior usa ese FD y prohíbe atravesar `..` fuera de su
+raíz, enlaces simbólicos y montajes no permitidos. El nombre del servidor
+UNC **no origina una conexión SMB**: designa una carpeta Linux autorizada.
+No se otorgan permisos automáticamente ni se lee todo el HOME. Se añaden
+`GetLogicalDrives` y `GetDriveTypeW`. Este es el nivel **runtime**;
+todavía faltan autorización y persistencia de esas nuevas raíces desde la
+interfaz/configuración del lanzador, así como cambios de directorio
+independientes por unidad (por ahora `D:relativa` se rechaza).
+Los enlaces simbólicos Linux pueden identificarse como
+`FILE_ATTRIBUTE_REPARSE_POINT` sin abrir ni seguir su destino;
+todavía no se crean junctions/reparse points NTFS ni se soporta
+`FSCTL_GET_REPARSE_POINT`.
+
+**E/S con offset y señalización.** `ReadFile` y `WriteFile` admiten
+`OVERLAPPED` para operaciones de archivo con offset explícito:
+`pread/pwrite` conserva el puntero compartido del handle, comunica bytes
+transferidos, señaliza el evento proporcionado y puede consultarse mediante
+`GetOverlappedResult`. `NtReadFile/NtWriteFile` también pueden señalizar
+un evento en su ruta de finalización inmediata. **Todas esas operaciones
+siguen completándose inmediatamente**: no hay aún un planificador real de
+peticiones pendientes, IOCP, APC asíncronas ni cancelación.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
@@ -205,9 +256,13 @@ un error de compartición. `DeleteFileA/W` también respeta el atributo de
 solo lectura. Esto aún no implementa por completo la semántica NT de
 `delete-pending` entre procesos o sobre archivos reabiertos por nombre.
 
-Siguen pendientes junctions/reparse points, rutas UNC, todos los modos de
-compartición y borrado NT, I/O asíncrono y otras funciones de ficheros. No
-se modifica el kernel NT, el cargador PE ni la red.
+Siguen pendientes la **implementación completa** de junctions/reparse
+points, UNC de red y unidades configurables desde el lanzador, compartición
+y borrado NT entre procesos, E/S asíncrona realmente pendiente, ACL y
+otras funciones de ficheros. La lectura de metadatos de un symlink y la
+asignación explícita de una carpeta host a un nombre UNC no equivalen a
+esas funcionalidades avanzadas. No se modifica el kernel NT, el cargador
+PE ni la red.
 
 ## Criterio de cierre
 
