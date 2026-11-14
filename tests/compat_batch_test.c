@@ -219,6 +219,8 @@ static void check_unicode_and_rects(void)
                                  international, 16) == 1 && international[0] == 0x3042);
     CHECK(nt_MultiByteToWideChar(932, 8, "\x82", 1, international, 16) == 0 &&
           last_error() == NT_ERROR_NO_UNICODE_TRANSLATION);
+    CHECK(nt_IsDBCSLeadByteEx(932, 0x82) && !nt_IsDBCSLeadByteEx(932, 0x40));
+    CHECK(nt_IsDBCSLeadByteEx(936, 0x81) && !nt_IsDBCSLeadByteEx(1251, 0x81));
 
     struct nt_rect first, second, result;
     CHECK(nt_SetRect(&first, -2, 1, 8, 9) && nt_SetRect(&second, 4, 2, 10, 7));
@@ -327,6 +329,7 @@ static void check_files(void)
     BOUND(KERNEL, SetFileTime);
     BOUND(KERNEL, GetLogicalDrives);
     BOUND(KERNEL, GetDriveTypeW);
+    BOUND(KERNEL, IsDBCSLeadByteEx);
     BOUND(KERNEL, LockFile);
     BOUND(KERNEL, UnlockFile);
     BOUND(KERNEL, LockFileEx);
