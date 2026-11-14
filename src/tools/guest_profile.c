@@ -430,16 +430,40 @@ int nt_guest_share_update(const char *config_home, const char *home,
         errno = EINVAL;
         return -1;
     }
+    char canonical[PATH_MAX];
     if (directory != NULL) {
         const int shared = nt_open_shared_folder(directory, home);
         if (shared < 0)
             return -1;
+        /* Freeze symbolic aliases at grant time: a later change to a
+         * symlink named in --remember-share must not silently redirect
+         * an already approved Documents/Downloads mapping. */
+        if (realpath(directory, canonical) == NULL) {
+            const int error = errno;
+            close(shared);
+            errno = error;
+            return -1;
+        }
+        const int verified = nt_open_shared_folder(canonical, home);
+        struct stat original, now;
+        const bool unchanged = verified >= 0 &&
+                               fstat(shared, &original) == 0 &&
+                               fstat(verified, &now) == 0 &&
+                               original.st_dev == now.st_dev &&
+                               original.st_ino == now.st_ino;
+        const int error = verified < 0 ? errno : EAGAIN;
         close(shared);
-        if (strchr(directory, '\n') || strchr(directory, '\r') ||
-            strlen(directory) >= PATH_MAX) {
+        if (verified >= 0)
+            close(verified);
+        if (!unchanged) {
+            errno = error;
+            return -1;
+        }
+        if (strchr(canonical, '\n') || strchr(canonical, '\r')) {
             errno = EINVAL;
             return -1;
         }
+        directory = canonical;
     }
     const int dir = share_config_directory(config_home, home, true);
     if (dir < 0)
