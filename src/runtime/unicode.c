@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include "compat.h"
 
+#include <unicode/ucnv.h>
+#include <unicode/ucnv_err.h>
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,9 +48,40 @@ static uint32_t cp437(unsigned char byte)
 uint32_t NT_MS_ABI nt_GetACP(void) { return CP_1252; }
 uint32_t NT_MS_ABI nt_GetOEMCP(void) { return CP_437; }
 
+static const char *converter_name(uint32_t page)
+{
+    switch (page) {
+    case 850: return "ibm-850";
+    case 866: return "ibm-866";
+    case 874: return "windows-874";
+    case 932: return "windows-932";
+    case 936: return "windows-936";
+    case 949: return "windows-949";
+    case 950: return "windows-950";
+    case 1250: return "windows-1250";
+    case 1251: return "windows-1251";
+    case 1253: return "windows-1253";
+    case 1254: return "windows-1254";
+    case 1255: return "windows-1255";
+    case 1256: return "windows-1256";
+    case 1257: return "windows-1257";
+    case 1258: return "windows-1258";
+    default: return NULL;
+    }
+}
+
 int32_t NT_MS_ABI nt_IsValidCodePage(uint32_t page)
 {
-    return page == CP_1252 || page == CP_437 || page == CP_UTF8;
+    if (page == CP_1252 || page == CP_437 || page == CP_UTF8)
+        return 1;
+    const char *name = converter_name(page);
+    if (!name)
+        return 0;
+    UErrorCode error = U_ZERO_ERROR;
+    UConverter *converter = ucnv_open(name, &error);
+    if (converter)
+        ucnv_close(converter);
+    return U_SUCCESS(error) && converter != NULL;
 }
 
 int32_t NT_MS_ABI nt_IsDBCSLeadByte(uint8_t byte)
@@ -195,11 +229,52 @@ static size_t convert(uint32_t page, bool strict, const unsigned char *cursor,
     return count;
 }
 
+static int32_t icu_to_wide(uint32_t page, uint32_t flags, const char *input,
+                            int32_t input_length, uint16_t *output, int32_t capacity)
+{
+    if (!input || input_length < -1 || input_length == 0 || capacity < 0 ||
+        (capacity > 0 && !output) || (flags & ~(MB_ERR_INVALID_CHARS | MB_PRECOMPOSED))) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    UErrorCode error = U_ZERO_ERROR;
+    UConverter *converter = ucnv_open(converter_name(page), &error);
+    if (!converter || U_FAILURE(error)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (flags & MB_ERR_INVALID_CHARS)
+        ucnv_setToUCallBack(converter, UCNV_TO_U_CALLBACK_STOP, NULL, NULL, NULL, &error);
+    const int32_t count = input_length == -1 ? (int32_t)strlen(input) + 1 : input_length;
+    if (capacity > 0) {
+        const uintptr_t src = (uintptr_t)input, dst = (uintptr_t)output;
+        if ((dst >= src && dst - src < (size_t)count) ||
+            (src > dst && src - dst < (size_t)capacity * sizeof(*output))) {
+            ucnv_close(converter);
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    }
+    const int32_t result = U_FAILURE(error) ? 0 :
+        ucnv_toUChars(converter, (UChar *)output, capacity, input, count, &error);
+    ucnv_close(converter);
+    if (error == U_BUFFER_OVERFLOW_ERROR && capacity == 0)
+        return result;
+    if (U_FAILURE(error)) {
+        nt_SetLastError(error == U_BUFFER_OVERFLOW_ERROR ? NT_ERROR_INSUFFICIENT_BUFFER :
+                        NT_ERROR_NO_UNICODE_TRANSLATION);
+        return 0;
+    }
+    return result;
+}
+
 int32_t NT_MS_ABI nt_MultiByteToWideChar(uint32_t code_page, uint32_t flags,
                                       const char *input, int32_t input_length,
                                       uint16_t *output, int32_t capacity)
 {
     code_page = effective_page(code_page);
+    if (converter_name(code_page))
+        return icu_to_wide(code_page, flags, input, input_length, output, capacity);
     const bool utf8 = code_page == CP_UTF8;
     if (input == NULL || input_length < -1 || input_length == 0 || capacity < 0 ||
         (capacity != 0 && output == NULL) ||
@@ -306,12 +381,72 @@ static size_t convert_wide(uint32_t page, bool strict, const uint16_t *input,
     return count;
 }
 
+static void U_CALLCONV count_substitutions(const void *context,
+    UConverterFromUnicodeArgs *arguments, const UChar *units, int32_t length,
+    UChar32 scalar, UConverterCallbackReason reason, UErrorCode *error)
+{
+    if (reason == UCNV_UNASSIGNED || reason == UCNV_ILLEGAL || reason == UCNV_IRREGULAR)
+        *(bool *)context = true;
+    UCNV_FROM_U_CALLBACK_SUBSTITUTE(NULL, arguments, units, length, scalar, reason, error);
+}
+
+static int32_t icu_from_wide(uint32_t page, uint32_t flags, const uint16_t *input,
+    int32_t input_length, char *output, int32_t capacity,
+    const char *default_character, int32_t *used_default)
+{
+    if (!input || input_length < -1 || input_length == 0 || capacity < 0 ||
+        (capacity && !output) || (flags & ~WC_NO_BEST_FIT_CHARS)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    UErrorCode error = U_ZERO_ERROR;
+    UConverter *converter = ucnv_open(converter_name(page), &error);
+    if (!converter || U_FAILURE(error)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    bool substituted = false;
+    ucnv_setFromUCallBack(converter, count_substitutions, &substituted, NULL, NULL, &error);
+    if (default_character)
+        ucnv_setSubstChars(converter, default_character, 1, &error);
+    const int32_t count = input_length == -1 ?
+        (int32_t)nt_runtime_wide_length(input, INT32_MAX) + 1 : input_length;
+    if (capacity > 0) {
+        const uintptr_t src = (uintptr_t)input, dst = (uintptr_t)output;
+        if ((dst >= src && dst - src < (size_t)count * sizeof(*input)) ||
+            (src > dst && src - dst < (size_t)capacity)) {
+            ucnv_close(converter);
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    }
+    const int32_t required = U_FAILURE(error) ? 0 :
+        ucnv_fromUChars(converter, output, capacity, (const UChar *)input, count, &error);
+    ucnv_close(converter);
+    if (error == U_BUFFER_OVERFLOW_ERROR && capacity == 0) {
+        if (used_default)
+            *used_default = substituted;
+        return required;
+    }
+    if (U_FAILURE(error)) {
+        nt_SetLastError(error == U_BUFFER_OVERFLOW_ERROR ? NT_ERROR_INSUFFICIENT_BUFFER :
+                        NT_ERROR_NO_UNICODE_TRANSLATION);
+        return 0;
+    }
+    if (used_default)
+        *used_default = substituted;
+    return required;
+}
+
 int32_t NT_MS_ABI nt_WideCharToMultiByte(uint32_t code_page, uint32_t flags,
                                        const uint16_t *input, int32_t input_length,
                                        char *output, int32_t capacity,
                                        const char *default_character, int32_t *used_default)
 {
     code_page = effective_page(code_page);
+    if (converter_name(code_page))
+        return icu_from_wide(code_page, flags, input, input_length, output, capacity,
+                             default_character, used_default);
     const bool utf8 = code_page == CP_UTF8;
     if (input == NULL || input_length < -1 || input_length == 0 || capacity < 0 ||
         (capacity != 0 && output == NULL) || !nt_IsValidCodePage(code_page) ||
