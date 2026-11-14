@@ -266,8 +266,14 @@ como `ERROR_SHARING_VIOLATION`. Los test Linux crean dos procesos reales:
 uno conserva abierto el archivo con denegación de borrado mientras el otro
 intenta borrarlo y renombrarlo; otro escenario demuestra que
 `FILE_SHARE_DELETE` permite borrar la entrada y seguir leyendo por el
-handle abierto. No se requiere root, un usuario NT privilegiado ni una
-modificación del kernel.
+handle abierto. Tras `unlinkat`, `NtQueryInformationFile`
+(`FileStandardInformation`) y `GetFileInformationByHandleEx`
+(`FileStandardInfo`) exponen `DeletePending=1` mientras el último
+enlace del inodo ya no existe y el handle sigue vivo. Se comprueba ese
+valor en el hijo PE simulado mediante proceso Linux real. Esta
+observación **no** equivale a disponer del estado de borrado pendiente
+previo al `unlinkat` que ofrece Windows. No se requiere root, un
+usuario NT privilegiado ni una modificación del kernel.
 
 **Límites que impiden declararlo completado:** esta barrera coordina
 `FILE_SHARE_DELETE`, **no** los conflictos de `FILE_SHARE_READ` y
