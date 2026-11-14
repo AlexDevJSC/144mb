@@ -349,7 +349,7 @@ static void check_files(void)
      * that directory would leave every relative C: path pointing nowhere. */
     CHECK(nt_CreateDirectoryA("data\\current", NULL) != 0);
     CHECK(nt_SetCurrentDirectoryA("C:\\DATA\\CURRENT") != 0);
-    CHECK(nt_MoveFileExA("DATA\\current", "data\\relocated", 0) == 0 &&
+    CHECK(nt_MoveFileExA("C:\\DATA\\current", "C:\\data\\relocated", 0) == 0 &&
           last_error() == NT_ERROR_SHARING_VIOLATION);
     CHECK(nt_SetCurrentDirectoryA("C:\\") != 0);
     CHECK(nt_MoveFileExA("DATA\\CURRENT", "data\\relocated", 0) != 0);
