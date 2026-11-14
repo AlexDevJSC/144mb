@@ -1229,13 +1229,13 @@ static void existing_ansi_path_fallback(const char *input, char path[PATH_MAX])
 
     char dos_name[PATH_MAX];
     bool exists = false;
-    if (nt_runtime_check_guest_file(path, dos_name, sizeof(dos_name), &exists) && exists)
+    const bool primary_checked =
+        nt_runtime_check_guest_file(path, dos_name, sizeof(dos_name), &exists);
+    if (primary_checked && exists)
         return;
-    /* Inaccessible existing objects must not be bypassed by trying a
-     * different encoding. A missing permitted path is the only fallback. */
-    const int earlier = errno;
-    if (earlier != ENOENT && earlier != 0 &&
-        earlier != ENOTDIR && earlier != EINVAL)
+    /* Never bypass an inaccessible existing object or an invalid guest
+     * path by interpreting the same bytes using a different encoding. */
+    if (!primary_checked && errno != ENOENT && errno != ENOTDIR)
         return;
     bool alternate_exists = false;
     if (nt_runtime_check_guest_file(alternative, dos_name, sizeof(dos_name),
