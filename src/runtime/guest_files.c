@@ -16,6 +16,7 @@
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -1035,6 +1036,69 @@ static bool file_blocks_delete(const struct stat *info)
     return false;
 }
 
+/* Each NT file HANDLE without FILE_SHARE_DELETE holds a Linux shared flock
+ * on the real inode. A separate fd obtained for DeleteFile/MoveFileEx takes
+ * an exclusive flock. Kernel lifetime tracking works across unrelated
+ * sandboxed PE processes, fork/exec, and duplicated/inherited file FDs;
+ * closing the final reference releases the lease even after a crash.
+ *
+ * All participating opens take the shared lock first, including opens that
+ * allow delete, so a concurrent in-progress unlink cannot be bypassed.
+ * Those allowing delete immediately unlock: Windows permits deleting an
+ * inode while such handles remain valid. This does NOT implement the other
+ * FILE_SHARE_READ/WRITE modes or Windows delete-pending name visibility.
+ * Host Linux writers not using this protocol remain outside its scope. */
+static bool acquire_open_delete_lease(int fd, unsigned int share)
+{
+    if (flock(fd, LOCK_SH | LOCK_NB) < 0) {
+        if (errno == EWOULDBLOCK || errno == EAGAIN)
+            errno = EBUSY;
+        return false;
+    }
+    if ((share & FILE_DELETE) != 0 && flock(fd, LOCK_UN) < 0)
+        return false;
+    return true;
+}
+
+/* Open a distinct description rather than dup() of an existing HANDLE:
+ * flock locks are per open-file description, so dup would bypass conflicts.
+ * Revalidate the inode while the exclusive lock is held. Never follow
+ * symlinks or cross an ungranted mount in order to obtain the guard.
+ *
+ * Linux does not allow flock() on O_PATH. Removal of an unreadable AND
+ * unwritable inode may therefore fail conservatively with EACCES even if
+ * its parent directory is writable; the broker-based NT ACL contract is
+ * still pending. */
+static int lock_delete_target(int parent, const char *leaf, const struct stat *expected)
+{
+    const int mode = S_ISDIR(expected->st_mode) ? O_RDONLY | O_DIRECTORY :
+                     S_ISREG(expected->st_mode) ? O_RDONLY : -1;
+    if (mode < 0) {
+        errno = EACCES;
+        return -1;
+    }
+    int fd = confined_open_raw(parent, leaf, mode | O_NONBLOCK, 0);
+    if (fd < 0 && errno == EACCES && S_ISREG(expected->st_mode))
+        fd = confined_open_raw(parent, leaf, O_WRONLY | O_NONBLOCK, 0);
+    if (fd < 0)
+        return -1;
+    int error = 0;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0)
+        error = errno == EWOULDBLOCK || errno == EAGAIN ? EBUSY : errno;
+    struct stat current;
+    if (error == 0 && fstatat(parent, leaf, &current, AT_SYMLINK_NOFOLLOW) != 0)
+        error = errno;
+    if (error == 0 &&
+        (current.st_dev != expected->st_dev || current.st_ino != expected->st_ino))
+        error = EBUSY;
+    if (error != 0) {
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    return fd;
+}
+
 /* Existing file handles continue to reference their Linux inode after a
  * rename. Their reported Windows pathname must also follow the move,
  * including files inside a directory being renamed. Prepare every string
@@ -1114,6 +1178,8 @@ static int open_shared(struct guest_file *slot, int parent, const char *path,
                                       (other->access & ~share) != 0))
             error = EBUSY;
     }
+    if (error == 0 && !acquire_open_delete_lease(fd, share))
+        error = errno;
     if (error != 0) {
         close(fd);
         errno = error;
@@ -1828,6 +1894,7 @@ static int32_t change_path(const char *input, enum path_operation operation)
 
     pthread_mutex_lock(&file_lock);
     int status;
+    int deletion_guard = -1;
     if (operation == MAKE_DIRECTORY) {
         status = mkdirat(parent, leaf, 0777);
     } else {
@@ -1846,10 +1913,17 @@ static int32_t change_path(const char *input, enum path_operation operation)
             errno = EBUSY;
             status = -1;
         }
+        if (status == 0) {
+            deletion_guard = lock_delete_target(parent, leaf, &info);
+            if (deletion_guard < 0)
+                status = -1;
+        }
         if (status == 0)
             status = unlinkat(parent, leaf, operation == REMOVE_DIRECTORY ? AT_REMOVEDIR : 0);
     }
     const int error = errno;
+    if (deletion_guard >= 0)
+        close(deletion_guard);
     pthread_mutex_unlock(&file_lock);
     close(parent);
     if (status != 0)
@@ -2039,16 +2113,38 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
             } else if (exists < 0 && errno != ENOENT) {
                 status = -1;
             } else {
-                char *updated[FILE_TABLE_SIZE] = {0};
-                if (!prepare_renamed_paths(source, destination, updated)) {
+                /* A rename consumes directory entries just as unlink does.
+                 * Guard the source and, on replacement, the target while
+                 * updating names for locally open NT handles. */
+                int source_guard = lock_delete_target(source_parent, source_leaf, &info);
+                int target_guard = -1;
+                if (source_guard < 0) {
                     status = -1;
-                } else {
-                    status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
-                                          destination_parent, rename_leaf,
-                                          (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+                } else if ((flags & 1u) != 0 && exists == 0 &&
+                           (target.st_dev != info.st_dev || target.st_ino != info.st_ino)) {
+                    target_guard = lock_delete_target(destination_parent, destination_leaf,
+                                                      &target);
+                    if (target_guard < 0)
+                        status = -1;
+                }
+                if (status == 0) {
+                    char *updated[FILE_TABLE_SIZE] = {0};
+                    if (!prepare_renamed_paths(source, destination, updated)) {
+                        status = -1;
+                    } else {
+                        status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
+                                              destination_parent, rename_leaf,
+                                              (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+                    }
+                    const int rename_error = errno;
+                    finish_renamed_paths(updated, status == 0);
+                    errno = rename_error;
                 }
                 const int rename_error = errno;
-                finish_renamed_paths(updated, status == 0);
+                if (target_guard >= 0)
+                    close(target_guard);
+                if (source_guard >= 0)
+                    close(source_guard);
                 errno = rename_error;
             }
         }
