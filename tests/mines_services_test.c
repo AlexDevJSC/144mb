@@ -3,6 +3,7 @@
 #include "compat.h"
 #include "user_folders.h"
 #include "winfile.h"
+#include "nt_services.h"
 
 #include <errno.h>
 #include <math.h>
@@ -74,6 +75,19 @@ static void check_crossprocess_delete_sharing(void)
                 _exit(63);
             char byte = 0;
             uint32_t count = 0;
+            /* An unlinked but still live NT HANDLE must report pending
+             * consistently in NtQueryInformationFile and Win32. This
+             * reflects Linux's st_nlink=0, not a full NT namespace broker. */
+            struct {
+                int64_t allocation_size, end_of_file;
+                uint32_t number_of_links;
+                uint8_t delete_pending, directory, padding[2];
+            } standard = {0};
+            struct nt_io_status_block io = {0};
+            if (nt_NtQueryInformationFile(handle, &io, &standard,
+                                          sizeof(standard), 5u) != NT_STATUS_SUCCESS ||
+                standard.delete_pending != (permit_delete != 0))
+                _exit(65);
             if (!nt_ReadFile(handle, &byte, 1, &count, NULL) ||
                 count != 1 || byte != 'D' || !nt_CloseHandle(handle))
                 _exit(64);
