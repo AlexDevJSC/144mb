@@ -133,6 +133,12 @@ static void check_user_folders(void)
     CHECK(symlink(input, link) == 0 && nt_fopen("C:/Users/guest/Documents/link.txt", "rb") == NULL);
     CHECK(nt_fopen("C:/Users/guest/Documents/../input.txt", "rb") == NULL && errno == EACCES);
     CHECK(nt_fopen("C:/Users/guest/DocumentsX/input.txt", "rb") == NULL);
+    /* An active host-folder grant remains attached to its stable DOS
+     * namespace; renaming its ancestors would silently orphan the grant. */
+    CHECK(nt_CreateDirectoryA("C:/Users", NULL));
+    CHECK(nt_CreateDirectoryA("C:/Users/guest", NULL));
+    CHECK(!nt_MoveFileExA("C:/Users", "C:/RelocatedUsers", 0) &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
     CHECK(!nt_MoveFileExA(filename, "C:/input.txt", 0) && last_error() == NT_ERROR_NOT_SAME_DEVICE);
     /* Two distinct authorized roots remain separate even when the copy is
      * allowed. The transfer must use native files, not a temporary drive. */
@@ -169,6 +175,7 @@ static void check_user_folders(void)
     CHECK(access(input, F_OK) < 0 && errno == ENOENT);
     CHECK(nt_DeleteFileA("C:/Users/guest/Documents/sub/output.txt") &&
           nt_RemoveDirectoryA("C:/Users/guest/Documents/sub"));
+    CHECK(nt_RemoveDirectoryA("C:/Users/guest") && nt_RemoveDirectoryA("C:/Users"));
     CHECK(nt_runtime_set_file_root(NULL) && nt_runtime_shared_user_folders() == 0);
     CHECK(unlink(link) == 0 && rmdir(native) == 0 && rmdir(drive) == 0);
     puts("PASS Windows known folders and direct Linux file access with separate roots");
