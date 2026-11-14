@@ -418,6 +418,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(SuspendThread),
     WIN_EXPORT(ResumeThread),
     WIN_EXPORT(QueueUserAPC),
+    WIN_EXPORT(CreateProcessA),
     WIN_EXPORT(CreateProcessW),
     WIN_EXPORT(GetExitCodeProcess),
     WIN_EXPORT(DeleteCriticalSection),
