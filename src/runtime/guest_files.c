@@ -600,7 +600,7 @@ static uint32_t path_error(int error, bool parent)
 }
 
 enum {
-    FILE_READ = 1, FILE_WRITE = 2, FILE_TABLE_SIZE = 256,
+    FILE_READ = 1, FILE_WRITE = 2, FILE_DELETE = 4, FILE_TABLE_SIZE = 256,
     HANDLE_FLAG_INHERIT = 1,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
     TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80
@@ -631,10 +631,14 @@ static bool same_file(const struct guest_file *file, const struct stat *info)
            file->inode == info->st_ino;
 }
 
-static bool file_in_use(const struct stat *info)
+/* Windows permits rename/unlink of an open file only when every existing
+ * handle explicitly grants FILE_SHARE_DELETE. Native Linux keeps its inode
+ * alive until the final descriptor is closed. A full NT delete-pending
+ * namespace broker is still outside this subsystem's current scope. */
+static bool file_blocks_delete(const struct stat *info)
 {
     for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
-        if (same_file(&files[i], info))
+        if (same_file(&files[i], info) && (files[i].share & FILE_DELETE) == 0)
             return true;
     }
     return false;
@@ -705,7 +709,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     }
     if ((desired & ~(generic_read | generic_write)) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
-        (share & ~(FILE_READ | FILE_WRITE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
+        (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
         template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return UINTPTR_MAX;
@@ -943,7 +947,7 @@ static int32_t change_path(const char *input, enum path_operation operation)
     } else {
         struct stat info;
         status = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW);
-        if (status == 0 && (S_ISLNK(info.st_mode) || file_in_use(&info))) {
+        if (status == 0 && (S_ISLNK(info.st_mode) || file_blocks_delete(&info))) {
             errno = S_ISLNK(info.st_mode) ? EACCES : EBUSY;
             status = -1;
         }
@@ -1058,7 +1062,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         if (S_ISLNK(info.st_mode)) {
             errno = EACCES;
             status = -1;
-        } else if (file_in_use(&info)) {
+        } else if (file_blocks_delete(&info)) {
             errno = EBUSY;
             status = -1;
         } else {
@@ -1068,7 +1072,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
             if (exists == 0 && S_ISLNK(target.st_mode)) {
                 errno = EACCES;
                 status = -1;
-            } else if (exists == 0 && (flags & 1u) != 0 && file_in_use(&target)) {
+            } else if (exists == 0 && (flags & 1u) != 0 && file_blocks_delete(&target)) {
                 errno = EBUSY;
                 status = -1;
             } else if (exists < 0 && errno != ENOENT) {
@@ -1605,7 +1609,7 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
     const uint32_t supported_access = UINT32_C(0xc0100003);
     if (!disposition || attributes->root || attributes->security || attributes->qos ||
         (attributes->attributes & ~0x42u) || (allocation && *allocation) || ea || ea_length ||
-        (access & ~supported_access) || (options & ~0x60u) || (share & ~3u) ||
+        (access & ~supported_access) || (options & ~0x60u) || (share & ~7u) ||
         (file_attributes & ~FILE_ATTRIBUTE_NORMAL))
         return NT_STATUS_NOT_SUPPORTED;
     if ((options & 0x20u) && !(access & 0x100000u))
