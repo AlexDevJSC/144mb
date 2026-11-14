@@ -183,8 +183,28 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         if (length == 0 || (length == 1 && component[0] == '.'))
             continue;
         if (length == 2 && memcmp(component, "..", 2) == 0) {
-            errno = EACCES;
-            return false;
+            /* A shared known-folder root is a separate security grant.
+             * Do not turn Documents/../secret into an unshared C: path. */
+            bool at_share_boundary = false;
+            pthread_mutex_lock(&root_lock);
+            for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+                const char *prefix = nt_user_folders[i].relative;
+                if (folder_roots[i].active && strlen(prefix) == used &&
+                    strncasecmp(output, prefix, used) == 0) {
+                    at_share_boundary = true;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&root_lock);
+            if (used == 0 || at_share_boundary) {
+                errno = EACCES;
+                return false;
+            }
+            while (used != 0 && output[used - 1] != '/')
+                --used;
+            if (used != 0)
+                --used;
+            continue;
         }
         if (component[length - 1] == '.' || component[length - 1] == ' ' ||
             device_name(component, length)) {
@@ -213,7 +233,23 @@ static bool guest_path(const char *input, char output[PATH_MAX])
     return normalize_path(input, output, false);
 }
 
-static int confined_open(int root, const char *path, int flags, unsigned int mode)
+/* Windows ASCII case folding on ordinary Linux files, resolved by FD.
+ * Keep non-ASCII UTF-8 bytes exact until Unicode folding is implemented. */
+static unsigned char lower_ascii(unsigned char byte)
+{
+    return byte >= 'A' && byte <= 'Z' ? (unsigned char)(byte + 'a' - 'A') : byte;
+}
+
+static bool same_ascii_name(const char *left, const char *right)
+{
+    while (*left && *right) {
+        if (lower_ascii((unsigned char)*left++) != lower_ascii((unsigned char)*right++))
+            return false;
+    }
+    return *left == '\0' && *right == '\0';
+}
+
+static int confined_open_raw(int root, const char *path, int flags, unsigned int mode)
 {
     const struct open_how how = {
         .flags = (uint64_t)(flags | O_CLOEXEC),
@@ -221,6 +257,126 @@ static int confined_open(int root, const char *path, int flags, unsigned int mod
         .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV
     };
     return (int)syscall(SYS_openat2, root, path, &how, sizeof(how));
+}
+
+/* Exact spelling wins, including a symlink (the actual open rejects it).
+ * Two differently-cased alternatives without an exact match are ambiguous. */
+static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1])
+{
+    const size_t length = strlen(asked);
+    if (!length || length > NAME_MAX) {
+        errno = length ? ENAMETOOLONG : EINVAL;
+        return -1;
+    }
+    struct stat stat_info;
+    if (fstatat(parent, asked, &stat_info, AT_SYMLINK_NOFOLLOW) == 0) {
+        memcpy(actual, asked, length + 1);
+        return 1;
+    }
+    if (errno != ENOENT)
+        return -1;
+    const int scan_fd = confined_open_raw(parent, ".", O_RDONLY | O_DIRECTORY, 0);
+    if (scan_fd < 0)
+        return -1;
+    DIR *dir = fdopendir(scan_fd);
+    if (!dir) {
+        int error = errno;
+        close(scan_fd);
+        errno = error;
+        return -1;
+    }
+    int matches = 0, error = 0;
+    for (;;) {
+        errno = 0;
+        const struct dirent *entry = readdir(dir);
+        if (!entry) {
+            error = errno;
+            break;
+        }
+        if (same_ascii_name(asked, entry->d_name)) {
+            if (++matches > 1) {
+                error = EEXIST;
+                break;
+            }
+            strcpy(actual, entry->d_name);
+        }
+    }
+    if (closedir(dir) != 0 && !error)
+        error = errno;
+    if (error) {
+        errno = error;
+        return -1;
+    }
+    if (!matches)
+        memcpy(actual, asked, length + 1);
+    return matches;
+}
+
+/* Walk under verified directory FDs; intermediates must exist and cannot
+ * escape the allowed root through symlinks, mounts or textual traversal. */
+static int open_parent(int root, const char *path, char leaf[NAME_MAX + 1])
+{
+    if (!path || !*path || strcmp(path, ".") == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    int parent = fcntl(root, F_DUPFD_CLOEXEC, 0);
+    if (parent < 0)
+        return -1;
+    const char *cursor = path;
+    for (;;) {
+        const char *slash = strchr(cursor, '/');
+        const size_t length = slash ? (size_t)(slash - cursor) : strlen(cursor);
+        if (!length || length > NAME_MAX) {
+            const int error = length ? ENAMETOOLONG : EINVAL;
+            close(parent);
+            errno = error;
+            return -1;
+        }
+        char asked[NAME_MAX + 1], actual[NAME_MAX + 1];
+        memcpy(asked, cursor, length);
+        asked[length] = '\0';
+        const int found = resolve_name(parent, asked, actual);
+        if (found < 0) {
+            const int error = errno;
+            close(parent);
+            errno = error;
+            return -1;
+        }
+        if (!slash) {
+            strcpy(leaf, actual);
+            return parent;
+        }
+        if (!found) {
+            close(parent);
+            errno = ENOENT;
+            return -1;
+        }
+        const int child = confined_open_raw(parent, actual, O_PATH | O_DIRECTORY, 0);
+        const int error = errno;
+        close(parent);
+        if (child < 0) {
+            errno = error;
+            return -1;
+        }
+        parent = child;
+        cursor = slash + 1;
+    }
+}
+
+static int confined_open(int root, const char *path, int flags, unsigned int mode)
+{
+    if (strcmp(path, ".") == 0)
+        return confined_open_raw(root, ".", flags, mode);
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, path, leaf);
+    if (parent < 0)
+        return -1;
+    const int fd = confined_open_raw(parent, leaf, flags, mode);
+    const int error = errno;
+    close(parent);
+    errno = error;
+    return fd;
 }
 
 static int open_regular(int root, const char *path, int flags, bool *created)
@@ -321,21 +477,6 @@ int nt_runtime_read_guest_file(const char *path, size_t limit, void **data, size
     return 0;
 }
 
-static int open_parent(int root, const char *path, const char **leaf)
-{
-    const char *slash = strrchr(path, '/');
-    if (slash == NULL) {
-        *leaf = path;
-        return fcntl(root, F_DUPFD_CLOEXEC, 0);
-    }
-    char parent[PATH_MAX];
-    const size_t length = (size_t)(slash - path);
-    memcpy(parent, path, length);
-    parent[length] = '\0';
-    *leaf = slash + 1;
-    return confined_open(root, parent, O_PATH | O_DIRECTORY, 0);
-}
-
 static bool copy_dos_path(const char *relative, char *output, size_t capacity)
 {
     const size_t length = strlen(relative);
@@ -404,8 +545,8 @@ bool nt_runtime_check_guest_file(const char *path, char *output, size_t capacity
         found = valid;
         close(fd);
     } else if (errno == ENOENT) {
-        const char *leaf;
-        fd = open_parent(root, resolved, &leaf);
+        char leaf[NAME_MAX + 1];
+        fd = open_parent(root, resolved, leaf);
         if (fd >= 0) {
             valid = true;
             close(fd);
@@ -573,8 +714,8 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
     }
-    const char *leaf;
-    const int parent = open_parent(root, resolved, &leaf);
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, resolved, leaf);
     const int parent_error = errno;
     close(root);
     if (parent < 0) {
@@ -774,8 +915,8 @@ static int32_t change_path(const char *input, enum path_operation operation)
         nt_SetLastError(path_error(errno, true));
         return 0;
     }
-    const char *leaf;
-    const int parent = open_parent(root, resolved, &leaf);
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, resolved, leaf);
     const int parent_error = errno;
     close(root);
     if (parent < 0) {
@@ -824,6 +965,11 @@ int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path)
     return change_path(path, REMOVE_DIRECTORY);
 }
 
+int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
+{
+    return nt_MoveFileExA(from, to, 0);
+}
+
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags)
 {
     char source[PATH_MAX], destination[PATH_MAX];
@@ -848,10 +994,10 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
                         source_root != destination_root ? NT_ERROR_NOT_SAME_DEVICE : path_error(root_error, true));
         return 0;
     }
-    const char *source_leaf, *destination_leaf;
-    const int source_parent = open_parent(root, resolved_source, &source_leaf);
+    char source_leaf[NAME_MAX + 1], destination_leaf[NAME_MAX + 1];
+    const int source_parent = open_parent(root, resolved_source, source_leaf);
     const int source_error = errno;
-    const int destination_parent = open_parent(root, resolved_destination, &destination_leaf);
+    const int destination_parent = open_parent(root, resolved_destination, destination_leaf);
     const int destination_error = errno;
     close(root);
     if (source_parent < 0 || destination_parent < 0) {
@@ -862,6 +1008,17 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         nt_SetLastError(path_error(source_parent < 0 ? source_error : destination_error, true));
         return 0;
     }
+
+    /* A case-only rename must use the requested casing, not the resolved
+     * Linux name, or the rename would become a no-op. */
+    const char *rename_leaf = destination_leaf;
+    const char *wanted = strrchr(resolved_destination, '/');
+    wanted = wanted ? wanted + 1 : resolved_destination;
+    struct stat src_dir, dst_dir;
+    if (strcmp(source_leaf, wanted) != 0 && same_ascii_name(source_leaf, wanted) &&
+        fstat(source_parent, &src_dir) == 0 && fstat(destination_parent, &dst_dir) == 0 &&
+        src_dir.st_dev == dst_dir.st_dev && src_dir.st_ino == dst_dir.st_ino)
+        rename_leaf = wanted;
 
     pthread_mutex_lock(&file_lock);
     struct stat info;
@@ -874,7 +1031,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
             status = -1;
         } else {
             status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
-                                  destination_parent, destination_leaf,
+                                  destination_parent, rename_leaf,
                                   flags == 0 ? RENAME_NOREPLACE : 0);
         }
     }
@@ -1487,6 +1644,19 @@ int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destina
     return wide_path(source, from) && wide_path(destination, to) && nt_MoveFileExA(from, to, flags);
 }
 
+int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination)
+{
+    return nt_MoveFileExW(source, destination, 0);
+}
+
+int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destination,
+                              int32_t fail_if_exists)
+{
+    char from[PATH_MAX], to[PATH_MAX];
+    return wide_path(source, from) && wide_path(destination, to) &&
+           nt_CopyFileA(from, to, fail_if_exists);
+}
+
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer)
 {
     char path[PATH_MAX + 3];
@@ -1536,6 +1706,109 @@ uint32_t NT_MS_ABI nt_GetFullPathNameW(const uint16_t *path, uint32_t size, uint
         *leaf = buffer + index;
     }
     return length;
+}
+
+/* ANSI entry points are UTF-8 at this stage of the native bridge:
+ * the true Windows ACP/OEM codepage model is tracked separately. */
+static bool utf8_guest_to_wide(const char *path, uint16_t result[PATH_MAX])
+{
+    if (!path) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    return nt_MultiByteToWideChar(65001, 8, path, -1, result, PATH_MAX) != 0;
+}
+
+uint32_t NT_MS_ABI nt_GetCurrentDirectoryA(uint32_t size, char *buffer)
+{
+    char full[PATH_MAX + 3];
+    pthread_mutex_lock(&root_lock);
+    const bool valid = copy_dos_path(guest_cwd, full, sizeof(full));
+    pthread_mutex_unlock(&root_lock);
+    if (!valid) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const size_t required = strlen(full) + 1;
+    if (size < required)
+        return (uint32_t)required;
+    if (!buffer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    memcpy(buffer, full, required);
+    return (uint32_t)required - 1;
+}
+
+int32_t NT_MS_ABI nt_SetCurrentDirectoryA(const char *path)
+{
+    uint16_t wide[PATH_MAX];
+    return utf8_guest_to_wide(path, wide) && nt_SetCurrentDirectoryW(wide);
+}
+
+uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size,
+                                      char *buffer, char **leaf)
+{
+    char relative[PATH_MAX], full[PATH_MAX + 3];
+    if (leaf)
+        *leaf = NULL;
+    if (!normalize_path(path, relative, true) ||
+        !copy_dos_path(relative, full, sizeof(full))) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const size_t required = strlen(full) + 1;
+    if (size < required)
+        return (uint32_t)required;
+    if (!buffer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    memcpy(buffer, full, required);
+    if (leaf && relative[0] != '\0') {
+        char *slash = strrchr(buffer, '\\');
+        *leaf = slash ? slash + 1 : NULL;
+    }
+    return (uint32_t)required - 1;
+}
+
+uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path)
+{
+    uint16_t wide[PATH_MAX];
+    return utf8_guest_to_wide(path, wide) ?
+           nt_GetFileAttributesW(wide) : UINT32_MAX;
+}
+
+int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
+                                         struct nt_file_attribute_data *info)
+{
+    uint16_t wide[PATH_MAX];
+    return utf8_guest_to_wide(path, wide) &&
+           nt_GetFileAttributesExW(wide, level, info);
+}
+
+uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer)
+{
+    uint16_t wide[PATH_MAX];
+    const uint32_t count = nt_GetTempPathW(PATH_MAX, wide);
+    if (count == 0 || count >= PATH_MAX) {
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    const int32_t required = nt_WideCharToMultiByte(65001, 0x80, wide, -1,
+                                                    NULL, 0, NULL, NULL);
+    if (required <= 0)
+        return 0;
+    if (size < (uint32_t)required)
+        return (uint32_t)required;
+    if (!buffer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (nt_WideCharToMultiByte(65001, 0x80, wide, -1, buffer, required,
+                               NULL, NULL) != required)
+        return 0;
+    return (uint32_t)required - 1;
 }
 
 static int duplicate_handle(uintptr_t handle, unsigned int access)
@@ -1610,6 +1883,102 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
     if (written >= 0)
         *done = (uint32_t)written;
     return file_result(fd, written >= 0);
+}
+
+/* CopyFile is built on the same guest HANDLE table and path confinement
+ * as CreateFile. In particular, OPEN_ALWAYS does not truncate until
+ * both descriptors are safely opened and the source/destination inodes
+ * have been checked for identity. */
+int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
+                              int32_t fail_if_exists)
+{
+    const uint32_t generic_read = UINT32_C(0x80000000);
+    const uint32_t generic_write = UINT32_C(0x40000000);
+    const uintptr_t from = nt_CreateFileA(source, generic_read, FILE_READ, NULL,
+                                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    if (from == UINTPTR_MAX)
+        return 0;
+
+    const uintptr_t to = nt_CreateFileA(destination, generic_write, 0, NULL,
+                                       fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
+                                       FILE_ATTRIBUTE_NORMAL, 0);
+    if (to == UINTPTR_MAX) {
+        const uint32_t error = nt_GetLastError();
+        nt_CloseHandle(from);
+        nt_SetLastError(error);
+        return 0;
+    }
+    const bool created = fail_if_exists || nt_GetLastError() != NT_ERROR_ALREADY_EXISTS;
+
+    /* Hard links and different casings of the same path are equally
+     * forbidden as a copy destination: never truncate the source inode. */
+    bool identical = false;
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *read_file = find_handle(from);
+    const struct guest_file *write_file = find_handle(to);
+    if (read_file && write_file)
+        identical = read_file->device == write_file->device &&
+                    read_file->inode == write_file->inode;
+    pthread_mutex_unlock(&file_lock);
+
+    uint32_t error = NT_ERROR_SUCCESS;
+    int32_t success = 0;
+    unsigned char *buffer = NULL;
+    if (identical) {
+        error = NT_ERROR_ACCESS_DENIED;
+    } else if ((buffer = malloc(64u * 1024u)) == NULL) {
+        error = NT_ERROR_NOT_ENOUGH_MEMORY;
+    } else if (!nt_SetEndOfFile(to)) {
+        error = nt_GetLastError();
+    } else {
+        bool finished = false;
+        for (;;) {
+            uint32_t received = 0;
+            if (!nt_ReadFile(from, buffer, 64u * 1024u, &received, NULL)) {
+                error = nt_GetLastError();
+                break;
+            }
+            if (received == 0) {
+                finished = true;
+                break;
+            }
+            uint32_t position = 0;
+            while (position < received) {
+                uint32_t written = 0;
+                if (!nt_WriteFile(to, buffer + position, received - position, &written, NULL)) {
+                    error = nt_GetLastError();
+                    break;
+                }
+                if (written == 0) {
+                    error = NT_ERROR_GEN_FAILURE;
+                    break;
+                }
+                position += written;
+            }
+            if (error != NT_ERROR_SUCCESS)
+                break;
+        }
+        if (finished && nt_FlushFileBuffers(to))
+            success = 1;
+        else if (finished)
+            error = nt_GetLastError();
+    }
+    free(buffer);
+    if (!nt_CloseHandle(to) && success) {
+        success = 0;
+        error = nt_GetLastError();
+    }
+    if (!nt_CloseHandle(from) && success) {
+        success = 0;
+        error = nt_GetLastError();
+    }
+    if (!success) {
+        /* A newly created partial destination is not a valid copy. */
+        if (created)
+            nt_DeleteFileA(destination);
+        nt_SetLastError(error);
+    }
+    return success;
 }
 
 /* Native NTDLL file operations use the same guest HANDLE table and the

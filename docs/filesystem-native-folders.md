@@ -90,9 +90,55 @@ Las opciones --remember-share y --forget-share cambian la política guardada; --
 
 **Persistencia no significa duplicación:** las modificaciones que haga el programa sobre un archivo compartido son modificaciones del mismo archivo del host. Se aplican los permisos Linux y las políticas SELinux del usuario. Los datos exclusivos del invitado permanecen en el perfil privado.
 
+## Resolución segura de nombres sobre carpetas Linux reales
+
+El runtime ahora resuelve los nombres de las carpetas y archivos **sin distinguir
+las letras ASCII mayúsculas/minúsculas**. Por ejemplo, `C:\\Program Files\\Mi App\\Data.ini`
+y `c:\\program files\\MI APP\\data.INI` apuntan al mismo archivo físico si
+solo hay una entrada compatible. No se copia ni se renombra el archivo
+original: las operaciones usan descriptores de directorio y `openat2` con
+`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV`.
+
+Se aplica a lectura, escritura, creación, eliminación, cambios de nombre,
+atributos y apertura de directorios, incluyendo los componentes intermedios.
+
+También están exportadas `CopyFileA`, `CopyFileW`, `MoveFileA` y
+`MoveFileW` en KERNEL32/KERNELBASE. La copia utiliza el mismo registro
+de handles Win32 y las mismas comprobaciones de compartición, sin invocar
+`cp` ni utilizar un directorio temporal. Se comprueba la opción
+`bFailIfExists`, el contenido binario y que copiar a una variante del
+mismo archivo no trunque el original. Un fallo de escritura elimina una
+copia creada incompleta; la sustitución de una copia preexistente **no
+es transaccional** y puede dejar contenido parcial si falla el disco.
+No se garantiza todavía la reproducción de todos los metadatos NT,
+flujos alternativos o atributos extendidos al copiar.
+
+Además, se han añadido las variantes `GetCurrentDirectoryA`,
+`SetCurrentDirectoryA`, `GetFullPathNameA`, `GetFileAttributesA`,
+`GetFileAttributesExA` y `GetTempPathA`, junto a las funciones `W` ya
+disponibles. El modo «ANSI» de esta primera implementación **acepta UTF-8**
+(y lo convierte a UTF-16 para las funciones `W`); falta implementar
+correctamente la página de códigos ANSI configurada por Windows.
+Las rutas relativas admiten `..` **solo cuando permanecen dentro de la
+raíz concedida**; si intentan subir por encima, fallan.
+
+En directorios Linux que ya contienen `Foo` y `foo`, la coincidencia exacta
+tiene prioridad. Una petición `FOO` sin coincidencia exacta se rechaza por
+ambigüedad en lugar de seleccionar un archivo arbitrariamente. Los enlaces
+simbólicos no se siguen, aunque coincidan mediante variaciones de mayúsculas.
+
 ## Límites actuales
 
-Esta mejora no proporciona paridad completa con NTFS. Las búsquedas de rutas siguen condicionadas por las reglas de mayúsculas/minúsculas del filesystem Linux, la gestión de Unicode del runtime todavía es parcial y quedan pendientes enlaces simbólicos, junctions/reparse points, rutas UNC, semántica NT completa de borrado/compartición y otros comportamientos de archivos. No se altera el cargador PE, las implementaciones del núcleo NT ni la política de red.
+Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
+mayúsculas implementada es **ASCII**, no el plegado ni la normalización Unicode
+completos (NFC/NFD, `É/é`, etc.). La creación de nombres que solo difieren
+por mayúsculas todavía puede sufrir una carrera entre procesos o programas
+Linux que escriban simultáneamente en el directorio; la protección de
+`openat2` garantiza confinamiento, no atomicidad case-insensitive de nombres.
+
+Siguen pendientes junctions/reparse points, rutas UNC, todos los modos de
+compartición y borrado NT, I/O asíncrono y otras funciones de ficheros. No
+se modifica el kernel NT, el cargador PE ni la red.
 
 ## Verificación
 
