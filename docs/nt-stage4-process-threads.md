@@ -9,6 +9,7 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 | --- | --- | --- |
 | Creación remota acotada | `CreateRemoteThread`, `CreateRemoteThreadEx`, `NtCreateThreadEx` con HANDLE real | Admite la creación de hilos exclusivamente en el proceso actual, validando `PROCESS_CREATE_THREAD` y reutilizando la puerta `CREATE_SUSPENDED` y el TEB/TLS de los hilos propios. Los procesos hijo o ajenos, los atributos extendidos y los espacios de direcciones externos no son compatibles. |
 | Creación de hilos | `CreateThread`, `NtCreateThreadEx` | Hilos pthread del proceso actual, ABI x64, TEB/TLS de invitado, opción `CREATE_SUSPENDED`, handles con derechos; `NtCreateThreadEx` admite solo proceso actual, sin lista extendida de atributos ni flags no probadas |
+| Metadatos y duplicación de handles | `GetHandleInformation`, `SetHandleInformation`, `DuplicateHandle`/`NtDuplicateObject`, `GetProcessHandleCount` | Flags por HANDLE (`INHERIT` y `PROTECT_FROM_CLOSE`) independientes entre alias, cierres protegidos rechazados, consulta de handles vivos y duplicación dentro del proceso actual a través de handles reales con `PROCESS_DUP_HANDLE`. Los flags de herencia **no suponen que la herencia a procesos hijo ya funcione**: falta una tabla serializable y broker/IPC entre procesos. |
 | Abrir e identificar hilos | `OpenThread`, `NtOpenThread`, `GetThreadId`, `GetProcessIdOfThread`, `NtQueryInformationThread` (Basic) | IDs locales, alias de HANDLE independientes, `CLIENT_ID` y derechos de consulta; no se confunde un HANDLE con un PID/TID Linux |
 | Descripción Unicode | `SetThreadDescription`, `GetThreadDescription` | Conserva el nombre UTF-16 completo en el objeto canónico y entrega búfer liberable con `LocalFree`. El nombre abreviado de pthread es solo diagnóstico. |
 | Terminación de hilos | `ExitThread`, `NtTerminateThread`, `TerminateThread`, `GetExitCodeThread` | Salida normal o nativa del propio hilo; terminación solicitada sobre un hilo en su puerta de arranque, sin ejecutar la entrada ni callbacks de adjunción que no correspondan. Nunca se cancela arbitrariamente un pthread activo. |
@@ -26,7 +27,7 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 1. **Suspensión asíncrona de un hilo activo:** no implementada. Sin un mecanismo seguro de contexto, aparcar otro pthread desde una señal Linux mientras posee locks internos puede romper el runtime. No usar `SIGSTOP`, `pthread_cancel` ni manipular GS desde otro hilo como solución ficticia.
 2. **Terminación remota de hilos activos:** no implementada. `TerminateThread` solo admite la puerta de arranque; `NtTerminateThread` admite además la terminación del propio hilo.
 3. **Contextos AMD64 de terceros:** faltan `GetThreadContext`, `SetThreadContext`, contextos de hilos suspendidos en ejecución y sincronización completa con SEH.
-4. **Procesos externos y tokens NT:** no se abren procesos ajenos al runtime. Falta seguridad NT, herencia general de HANDLE, sesiones, permisos por token, procesos de diferentes usuarios, impersonación y broker entre procesos.
+4. **Procesos externos y tokens NT:** no se abren procesos ajenos al runtime. Falta seguridad NT, transferencia real de handles marcados `INHERIT` a procesos hijo, sesiones, permisos por token, procesos de diferentes usuarios, impersonación y broker entre procesos.
 5. **Creación avanzada:** faltan atributos extendidos de `NtCreateThreadEx`/`CreateProcessW`, flags generales, espacios remotos y compatibilidad x86/WOW64.
 6. **Planificación:** la afinidad de hilos en un grupo de 64 CPU usa el planificador Linux; se admiten prioridades Win32 discretas mediante `nice`. Siguen faltando los grupos de procesadores mayores de 64, prioridades dinámicas de Windows, clases de prioridad del proceso, afinidad remota, quantum y equivalencia completa de planificación.
 7. **APC y señalización completas:** variantes de APC de kernel, `NtQueueApcThreadEx`, E/S asíncrona con APC, `IoCompletionPort`, suspensión de hilos remotos y carreras de desconexión.
@@ -68,6 +69,9 @@ Uso desde la raíz del repositorio: `bash scripts/fedora-check-stage4.sh`.
 **El objetivo del 100 % solicitado significa que todos los contratos de procesos/hilos deben estar implementados, probados en CI y que únicamente reste esta puerta final de Fedora físico. Aún no se cumple:** siguen sin implementarse suspensión/terminación arbitrarias de hilos activos, contextos AMD64 remotos, herencia general de handles, tokens y permisos NT, procesos ajenos, APC completas y equivalencia del planificador. No se considera 100 % por el mero éxito del script ni por los fixtures sintéticos existentes.
 
 ## Madurez del componente
+
+- **Entrega de metadatos de handles (PR en revisión): 70 % → 72 % (+2 puntos porcentuales estimados, sujeto a CI).** Incorpora flags independientes por handle, rechazo de cierre protegido, duplicación con permiso `PROCESS_DUP_HANDLE` usando handles reales y contabilización de handles. **No** implementa la herencia entre procesos ni permisos NT avanzados.
+
 
 - **Actual tras PR #79 fusionada: 70 %** (estimación, **+2 puntos porcentuales** respecto a 68 %; [CI Linux/UBSan/Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43485165821)). El soporte remoto sigue limitado al proceso actual.
 
