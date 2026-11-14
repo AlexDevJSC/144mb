@@ -43,6 +43,47 @@ int import_fixture_entry(void)
         Sleep(30000);
         return 0x766u;
     }
+    /* The HANDLE is the guest's numeric token, not a host FD or PID.
+     * The child inherits its real Linux open-file description. */
+    static const WCHAR prefix[] = L"/nt-file-handle=";
+    if (contains_command_marker(command, prefix)) {
+        const WCHAR *p = command;
+        for (; *p != 0; ++p) {
+            const WCHAR *q = p, *name = prefix;
+            while (*q && *name && *q == *name) {
+                ++q;
+                ++name;
+            }
+            if (*name == 0) {
+                uintptr_t handle = 0;
+                for (unsigned int digit = 0; digit < 16; ++digit) {
+                    WCHAR c = q[digit];
+                    unsigned int value = c >= L'0' && c <= L'9' ? (unsigned int)(c - L'0') :
+                                         c >= L'A' && c <= L'F' ? (unsigned int)(c - L'A') + 10u : 16u;
+                    if (value >= 16u)
+                        return 103;
+                    handle = (handle << 4) | value;
+                }
+                DWORD flags = 0;
+                if (contains_command_marker(command, L"/nt-file-no-inherit")) {
+                    SetLastError(0);
+                    return GetHandleInformation((HANDLE)handle, &flags) ||
+                           GetLastError() != ERROR_INVALID_HANDLE ? 104 : 0x12345678u;
+                }
+                if (!GetHandleInformation((HANDLE)handle, &flags) ||
+                    (flags & HANDLE_FLAG_INHERIT) == 0)
+                    return 105;
+                char bytes[6] = {0};
+                DWORD read_bytes = 0;
+                if (!ReadFile((HANDLE)handle, bytes, 5, &read_bytes, NULL) ||
+                    read_bytes != 5 || __builtin_memcmp(bytes, "HELLO", 5) != 0 ||
+                    !CloseHandle((HANDLE)handle))
+                    return 106;
+                return 0x12345678u;
+            }
+        }
+        return 107;
+    }
     WCHAR env[80];
     if (contains_command_marker(command, L"/nt-env-custom")) {
         if (GetEnvironmentVariableW(L"NT_CHILD_CUSTOM", env, 80) != 5 ||
@@ -152,6 +193,60 @@ int import_fixture_entry(void)
                        (void *)environment, directory, &startup, &process) ||
         GetLastError() != ERROR_NOT_SUPPORTED)
         return 101;
+    /* A regular file can be inherited with its Windows HANDLE identity,
+     * rights and shared offset. Inheritance disabled must not leak it. */
+    static const WCHAR file_path[] = L"C:\\ChildDir\\nt-stage4-inherit.bin";
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
+    HANDLE shared = CreateFileW(file_path, GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, &security,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (shared == INVALID_HANDLE_VALUE)
+        return 108;
+    DWORD written = 0;
+    if (!WriteFile(shared, "HELLO", 5, &written, NULL) || written != 5 ||
+        !SetFilePointerEx(shared, (LARGE_INTEGER){.QuadPart = 0}, NULL, FILE_BEGIN))
+        return 109;
+    WCHAR command_with_handle[128] = L"\"C:\\Test child.exe\" /nt-file-handle=";
+    size_t at = 0;
+    while (command_with_handle[at])
+        ++at;
+    static const WCHAR hex[] = L"0123456789ABCDEF";
+    uintptr_t token = (uintptr_t)shared;
+    for (int digit = 15; digit >= 0; --digit)
+        command_with_handle[at++] = hex[(token >> (unsigned)(digit * 4)) & 15u];
+    command_with_handle[at] = 0;
+    if (!CreateProcessW(NULL, command_with_handle, NULL, NULL, TRUE, 0, NULL,
+                        directory, &startup, &process))
+        return 110;
+    if (WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 111;
+    LARGE_INTEGER position;
+    if (!SetFilePointerEx(shared, (LARGE_INTEGER){.QuadPart = 0}, &position, FILE_CURRENT) ||
+        position.QuadPart != 5)
+        return 112;
+    static const WCHAR no_suffix[] = L" /nt-file-no-inherit";
+    for (size_t i = 0; no_suffix[i]; ++i)
+        command_with_handle[at++] = no_suffix[i];
+    command_with_handle[at] = 0;
+    if (!CreateProcessW(NULL, command_with_handle, NULL, NULL, FALSE, 0, NULL,
+                        directory, &startup, &process))
+        return 113;
+    if (WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 114;
+    if (!CloseHandle(shared) || !DeleteFileW(file_path))
+        return 115;
+    HANDLE unshareable = CreateEventW(&security, TRUE, FALSE, NULL);
+    if (unshareable == NULL)
+        return 116;
+    SetLastError(0);
+    if (CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL,
+                       directory, &startup, &process) ||
+        GetLastError() != ERROR_NOT_SUPPORTED || !CloseHandle(unshareable))
+        return 117;
     if (!SetEnvironmentVariableW(L"NT_CHILD_INHERITED", NULL))
         return 102;
     return 0;

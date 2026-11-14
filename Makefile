@@ -175,6 +175,10 @@ $(BUILD_DIR)/process-thread-test: tests/process_thread_test.c $(RUNTIME_OBJECTS)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
+$(BUILD_DIR)/inherited-file-test: tests/inherited_file_test.c $(RUNTIME_OBJECTS) src/runtime/winfile.h src/runtime/child_process.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
 $(BUILD_DIR)/thread-affinity-test: tests/thread_affinity_test.c $(RUNTIME_OBJECTS) src/runtime/sync.h src/runtime/nt_services.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -210,7 +214,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
-check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test \
+check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/inherited-file-test \
        $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1
@@ -219,6 +223,7 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	$(BUILD_DIR)/runtime-test
 	timeout 20s $(BUILD_DIR)/process-thread-test
 	timeout 20s $(BUILD_DIR)/thread-affinity-test
+	timeout 20s $(BUILD_DIR)/inherited-file-test
 	$(BUILD_DIR)/compat-batch-test
 	$(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test

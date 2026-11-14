@@ -65,6 +65,8 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **14-11-2026, fase 4 — entornos de procesos hijo (PR en revisión): 72 % → 78 % (+6 puntos estimados, sujetos a CI).** `CreateProcessW` admite snapshot de entorno Unicode o bloque explícito `CREATE_UNICODE_ENVIRONMENT`; memfd sellado/validado sin exportar variables al `envp` del host; tests de herencia, sustitución, Unicode, rechazo de buffers erróneos. La validación de PE hijo aislado requiere un Fedora con namespace/bwrap operativo; los `SKIP` no cuentan. Siguen pendientes contextos asíncronos de hilos y herencia general de HANDLE.
 
+- **14-11-2026, fase 4 — herencia real de HANDLE de archivo (PR en revisión): 78 % → 84 % (+6 puntos estimados, sujetos a CI).** `CreateProcessW(bInheritHandles=TRUE)` captura y transmite hasta 32 handles de archivos con flags `INHERIT`, número de HANDLE, permisos y descripción abierta compartida. La transferencia se limita a descriptores del sandbox mediante manifiesto sellado y FDs controlados. Se añade prueba Linux `posix_spawn`/`exec` + UBSan y fixture PE. Se rechaza explícitamente la herencia de objetos NT no transferibles. Siguen pendientes su broker, la seguridad NT completa y el control asíncrono de hilos.
+
 ### Formato de cierre para cambios futuros
 
 > **Componente 4 — Procesos e hilos:** 35 % → XX % (**+N puntos porcentuales**, estimación).\
