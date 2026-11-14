@@ -20,6 +20,8 @@ IMAGE_LIBS ?= $(shell $(PKG_CONFIG) --libs SDL2_image 2>/dev/null)
 VKD3D_PACKAGES = 'libvkd3d >= 1.2' 'libvkd3d-utils >= 1.2' vulkan
 VKD3D_CFLAGS ?= $(patsubst -I%,-isystem %,$(shell $(PKG_CONFIG) --cflags $(VKD3D_PACKAGES) 2>/dev/null))
 VKD3D_LIBS ?= $(shell $(PKG_CONFIG) --libs $(VKD3D_PACKAGES) 2>/dev/null)
+ICU_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags icu-uc)
+ICU_LIBS ?= $(shell $(PKG_CONFIG) --libs icu-uc)
 RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process shell console
