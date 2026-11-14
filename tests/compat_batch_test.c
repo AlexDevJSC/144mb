@@ -419,6 +419,28 @@ static void check_files(void)
     CHECK(raw != NULL && nt_fclose(raw) == 0);
     /* Native copy does not invoke cp(1), create an alternate drive, or
      * duplicate files merely because the Windows caller changes case. */
+    /* An open handle without delete sharing blocks the operation; an
+     * explicitly shared-delete handle keeps the original Linux inode alive. */
+    void *delete_stream = nt_fopen("data/delete-me.bin", "wb");
+    CHECK(delete_stream != NULL && nt_fwrite("X", 1, 1, delete_stream) == 1 &&
+          nt_fclose(delete_stream) == 0);
+    uintptr_t delete_handle = nt_CreateFileA("DATA/DELETE-ME.BIN",
+        UINT32_C(0x80000000), 1u, NULL, 3u, 0x80u, 0);
+    CHECK(delete_handle != UINTPTR_MAX);
+    CHECK(nt_DeleteFileA("data/delete-me.bin") == 0 &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_CloseHandle(delete_handle) != 0);
+    delete_handle = nt_CreateFileA("data/delete-me.bin",
+        UINT32_C(0x80000000), 1u | 4u, NULL, 3u, 0x80u, 0);
+    CHECK(delete_handle != UINTPTR_MAX);
+    CHECK(nt_DeleteFileA("DATA/DELETE-ME.BIN") != 0);
+    char still_open = 0;
+    uint32_t got_delete = 0;
+    CHECK(nt_ReadFile(delete_handle, &still_open, 1, &got_delete, NULL) != 0 &&
+          got_delete == 1 && still_open == 'X');
+    CHECK(nt_CloseHandle(delete_handle) != 0);
+    CHECK(nt_GetFileAttributesA("data/delete-me.bin") == UINT32_MAX);
+
     CHECK(nt_CopyFileA("C:\\DATA\\SCORES.TXT", "C:\\data\\Backup.TXT", 1) != 0);
     CHECK(nt_CopyFileA("data/scores.txt", "DATA/backup.txt", 1) == 0 &&
           last_error() == NT_ERROR_FILE_EXISTS);
