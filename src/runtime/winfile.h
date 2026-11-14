@@ -48,6 +48,12 @@ struct nt_find_data_a {
     uint32_t reserved[2];
     char name[260], alternate[14];
 };
+struct nt_overlapped {
+    uintptr_t internal, internal_high;
+    uint32_t offset, offset_high;
+    uintptr_t event;
+};
+
 struct nt_handle_file_info {
     uint32_t attributes;
     struct nt_file_time created, accessed, written;
@@ -65,6 +71,8 @@ int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path);
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags);
 int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination);
 int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destination, int32_t fail_if_exists);
+uint32_t NT_MS_ABI nt_GetLogicalDrives(void);
+uint32_t NT_MS_ABI nt_GetDriveTypeW(const uint16_t *root);
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer);
 int32_t NT_MS_ABI nt_SetCurrentDirectoryW(const uint16_t *path);
 uint32_t NT_MS_ABI nt_GetFullPathNameW(const uint16_t *path, uint32_t size, uint16_t *buffer,
@@ -85,6 +93,16 @@ int32_t NT_MS_ABI nt_FindNextFileA(uintptr_t handle, struct nt_find_data_a *data
 int32_t NT_MS_ABI nt_FindClose(uintptr_t handle);
 int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size, uint32_t *done, void *overlap);
 int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t size, uint32_t *done, void *overlap);
+int32_t NT_MS_ABI nt_LockFile(uintptr_t handle, uint32_t offset_low, uint32_t offset_high,
+                              uint32_t length_low, uint32_t length_high);
+int32_t NT_MS_ABI nt_UnlockFile(uintptr_t handle, uint32_t offset_low, uint32_t offset_high,
+                                uint32_t length_low, uint32_t length_high);
+int32_t NT_MS_ABI nt_LockFileEx(uintptr_t handle, uint32_t flags, uint32_t reserved,
+                                uint32_t length_low, uint32_t length_high, struct nt_overlapped *overlap);
+int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved, uint32_t length_low,
+                                  uint32_t length_high, struct nt_overlapped *overlap);
+int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,
+                                         uint32_t *done, int32_t wait);
 int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle);
 int32_t NT_MS_ABI nt_GetFileSizeEx(uintptr_t handle, int64_t *size);
 int32_t NT_MS_ABI nt_SetFilePointerEx(uintptr_t handle, int64_t offset, int64_t *position, uint32_t method);

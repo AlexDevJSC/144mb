@@ -31,6 +31,90 @@
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 static int drive_root = -1;
 static char guest_cwd[PATH_MAX];
+static struct { int fd; bool active; } drive_roots[26];
+enum { UNC_LIMIT = 8, UNC_PART_MAX = 63 };
+static struct {
+    int fd;
+    char server[UNC_PART_MAX + 1], share[UNC_PART_MAX + 1];
+    bool active;
+} unc_roots[UNC_LIMIT];
+
+/* Each drive/share requires an explicit host root grant; no host drive,
+ * /mnt share or network resource is exposed by inference. */
+static bool unc_part(const char *text)
+{
+    const size_t n = strnlen(text, UNC_PART_MAX + 2);
+    if (!n || n > UNC_PART_MAX || strcmp(text, ".") == 0 || strcmp(text, "..") == 0)
+        return false;
+    for (size_t i = 0; i < n; ++i)
+        if (!((text[i] >= 'a' && text[i] <= 'z') ||
+              (text[i] >= 'A' && text[i] <= 'Z') ||
+              (text[i] >= '0' && text[i] <= '9') ||
+              text[i] == '-' || text[i] == '_' || text[i] == '.'))
+            return false;
+    return true;
+}
+
+bool nt_runtime_set_drive_root(char letter, const char *directory)
+{
+    if (letter >= 'a' && letter <= 'z')
+        letter = (char)(letter - 'a' + 'A');
+    if (letter <= 'C' || letter > 'Z') {
+        errno = EINVAL;
+        return false;
+    }
+    const int fd = directory ? open(directory, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (directory && fd < 0)
+        return false;
+    pthread_mutex_lock(&root_lock);
+    const size_t index = (size_t)(letter - 'A');
+    if (drive_roots[index].active)
+        close(drive_roots[index].fd);
+    drive_roots[index].fd = fd;
+    drive_roots[index].active = fd >= 0;
+    pthread_mutex_unlock(&root_lock);
+    return true;
+}
+
+bool nt_runtime_set_unc_root(const char *server, const char *share, const char *directory)
+{
+    if (!server || !share || !unc_part(server) || !unc_part(share)) {
+        errno = EINVAL;
+        return false;
+    }
+    const int fd = directory ? open(directory, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (directory && fd < 0)
+        return false;
+    pthread_mutex_lock(&root_lock);
+    size_t index = UNC_LIMIT;
+    size_t empty = UNC_LIMIT;
+    for (size_t i = 0; i < UNC_LIMIT; ++i) {
+        if (unc_roots[i].active && strcasecmp(unc_roots[i].server, server) == 0 &&
+            strcasecmp(unc_roots[i].share, share) == 0) {
+            index = i;
+            break;
+        }
+        if (!unc_roots[i].active && empty == UNC_LIMIT)
+            empty = i;
+    }
+    if (index == UNC_LIMIT)
+        index = empty;
+    if (index == UNC_LIMIT) {
+        pthread_mutex_unlock(&root_lock);
+        if (fd >= 0)
+            close(fd);
+        errno = ENOSPC;
+        return false;
+    }
+    if (unc_roots[index].active)
+        close(unc_roots[index].fd);
+    unc_roots[index].fd = fd;
+    unc_roots[index].active = fd >= 0;
+    snprintf(unc_roots[index].server, sizeof(unc_roots[index].server), "%s", server);
+    snprintf(unc_roots[index].share, sizeof(unc_roots[index].share), "%s", share);
+    pthread_mutex_unlock(&root_lock);
+    return true;
+}
 static struct { int fd; bool active; } folder_roots[NT_USER_FOLDER_COUNT];
 
 bool nt_runtime_set_file_root(const char *directory)
@@ -41,6 +125,16 @@ bool nt_runtime_set_file_root(const char *directory)
     pthread_mutex_lock(&root_lock);
     const int previous = drive_root;
     drive_root = next;
+    for (size_t i = 0; i < 26; ++i)
+        if (drive_roots[i].active) {
+            close(drive_roots[i].fd);
+            drive_roots[i].active = false;
+        }
+    for (size_t i = 0; i < UNC_LIMIT; ++i)
+        if (unc_roots[i].active) {
+            close(unc_roots[i].fd);
+            unc_roots[i].active = false;
+        }
     guest_cwd[0] = '\0';
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         if (folder_roots[i].active) {
@@ -87,6 +181,43 @@ unsigned int nt_runtime_shared_user_folders(void)
 /* The caller holds root_lock while resolving paths and duplicating the root. */
 static int path_root(const char **path)
 {
+    if ((*path)[0] >= 'D' && (*path)[0] <= 'Z' && (*path)[1] == ':' &&
+        ((*path)[2] == '/' || (*path)[2] == '\0')) {
+        const int drive = (*path)[0] - 'A';
+        if (!drive_roots[drive].active) {
+            errno = EACCES;
+            return -1;
+        }
+        *path = (*path)[2] == '/' ? *path + 3 : ".";
+        if (**path == '\0')
+            *path = ".";
+        return drive_roots[drive].fd;
+    }
+    if (strncmp(*path, "@UNC:/", 6) == 0) {
+        const char *name = *path + 6;
+        const char *slash = strchr(name, '/');
+        if (!slash) {
+            errno = EACCES;
+            return -1;
+        }
+        const char *end = strchr(slash + 1, '/');
+        if (!end)
+            end = slash + strlen(slash);
+        for (size_t i = 0; i < UNC_LIMIT; ++i) {
+            if (unc_roots[i].active &&
+                strlen(unc_roots[i].server) == (size_t)(slash - name) &&
+                strlen(unc_roots[i].share) == (size_t)(end - slash - 1) &&
+                strncasecmp(unc_roots[i].server, name, (size_t)(slash - name)) == 0 &&
+                strncasecmp(unc_roots[i].share, slash + 1, (size_t)(end - slash - 1)) == 0) {
+                *path = *end == '/' ? end + 1 : ".";
+                if (**path == '\0')
+                    *path = ".";
+                return unc_roots[i].fd;
+            }
+        }
+        errno = EACCES;
+        return -1;
+    }
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         if (!folder_roots[i].active)
             continue;
@@ -97,6 +228,8 @@ static int path_root(const char **path)
             return folder_roots[i].fd;
         }
     }
+    if (drive_root < 0)
+        errno = ENOENT;
     return drive_root;
 }
 
@@ -107,7 +240,7 @@ static int duplicate_root(const char **path)
     int result = -1;
     if (root >= 0)
         result = fcntl(root, F_DUPFD_CLOEXEC, 0);
-    else
+    else if (errno == 0)
         errno = ENOENT;
     const int error = errno;
     pthread_mutex_unlock(&root_lock);
@@ -137,6 +270,22 @@ static bool device_name(const char *name, size_t size)
             (memcmp(stem, "COM", 3) == 0 || memcmp(stem, "LPT", 3) == 0));
 }
 
+/* Internal DOS root markers use names impossible to type as ordinary
+ * Windows path components, so a C: directory cannot impersonate a grant. */
+static size_t root_boundary(const char *path)
+{
+    if (path[0] >= 'D' && path[0] <= 'Z' && path[1] == ':')
+        return 2;
+    if (strncmp(path, "@UNC:/", 6) == 0) {
+        const char *share = strchr(path + 6, '/');
+        if (!share)
+            return 0;
+        const char *end = strchr(share + 1, '/');
+        return end ? (size_t)(end - path) : strlen(path);
+    }
+    return 0;
+}
+
 static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_root)
 {
     if (input == NULL || *input == '\0') {
@@ -151,32 +300,99 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         errno = EINVAL;
         return false;
     }
-    /* Windows ANSI extended DOS prefix; UNC and NT device namespaces
-     * remain deliberately unsupported rather than accessing host paths. */
-    bool extended = false;
+    /* Plain \\\\server\\share and extended \\\\?\\UNC\\server\\share
+     * resolve only through an explicit descriptor-backed UNC grant. */
+    bool extended = false, network = false;
     if (input[0] == '\\' && input[1] == '\\' &&
         input[2] == '?' && input[3] == '\\') {
         extended = true;
         input += 4;
+        if (strncasecmp(input, "UNC\\", 4) == 0) {
+            network = true;
+            input += 4;
+        }
+    } else if (separator(input[0]) && separator(input[1])) {
+        network = true;
+        input += 2;
     }
-    const bool has_drive = input[1] == ':';
-    const bool absolute = has_drive ? separator(input[2]) : separator(input[0]);
-    if (has_drive) {
-        if ((*input != 'C' && *input != 'c') ||
-            (extended && !separator(input[2]))) {
+    const bool has_drive = !network && input[1] == ':';
+    const bool absolute = network || (has_drive ? separator(input[2]) : separator(input[0]));
+    size_t used = 0;
+    if (network) {
+        const char *server = input;
+        while (*input && !separator(*input))
+            ++input;
+        const size_t server_len = (size_t)(input - server);
+        if (!separator(*input) || server_len == 0 || server_len > UNC_PART_MAX) {
+            errno = EACCES;
+            return false;
+        }
+        ++input;
+        const char *share = input;
+        while (*input && !separator(*input))
+            ++input;
+        const size_t share_len = (size_t)(input - share);
+        if (share_len == 0 || share_len > UNC_PART_MAX) {
+            errno = EACCES;
+            return false;
+        }
+        char host[UNC_PART_MAX + 1], volume[UNC_PART_MAX + 1];
+        memcpy(host, server, server_len);
+        host[server_len] = '\0';
+        memcpy(volume, share, share_len);
+        volume[share_len] = '\0';
+        if (!unc_part(host) || !unc_part(volume)) {
             errno = EINVAL;
             return false;
         }
-        /* C:relative follows the current C: directory. C:\relative and
-         * \relative are rooted at the physical guest C: directory. */
+        pthread_mutex_lock(&root_lock);
+        bool granted = false;
+        for (size_t i = 0; i < UNC_LIMIT; ++i)
+            if (unc_roots[i].active && strcasecmp(unc_roots[i].server, host) == 0 &&
+                strcasecmp(unc_roots[i].share, volume) == 0)
+                granted = true;
+        pthread_mutex_unlock(&root_lock);
+        if (!granted) {
+            errno = EACCES;
+            return false;
+        }
+        used = (size_t)snprintf(output, PATH_MAX, "@UNC:/%s/%s", host, volume);
+    } else if (has_drive) {
+        char drive = *input;
+        if (drive >= 'a' && drive <= 'z')
+            drive = (char)(drive - 'a' + 'A');
+        if (drive < 'C' || drive > 'Z' || (extended && !absolute)) {
+            errno = EINVAL;
+            return false;
+        }
+        if (drive != 'C') {
+            pthread_mutex_lock(&root_lock);
+            const bool granted = drive_roots[drive - 'A'].active;
+            pthread_mutex_unlock(&root_lock);
+            if (!granted) {
+                errno = EACCES;
+                return false;
+            }
+            if (!absolute) {
+                errno = EINVAL; /* No independent D: per-drive CWD yet. */
+                return false;
+            }
+            output[0] = drive;
+            output[1] = ':';
+            used = 2;
+        } else if (!absolute) {
+            pthread_mutex_lock(&root_lock);
+            if (guest_cwd[0] != '@' && !(guest_cwd[1] == ':' && guest_cwd[0] != 'C')) {
+                used = strlen(guest_cwd);
+                memcpy(output, guest_cwd, used);
+            }
+            pthread_mutex_unlock(&root_lock);
+        }
         input += 2;
-    } else if (extended || (separator(input[0]) && separator(input[1]))) {
+    } else if (extended) {
         errno = EACCES;
         return false;
-    }
-
-    size_t used = 0;
-    if (!absolute) {
+    } else if (!absolute) {
         pthread_mutex_lock(&root_lock);
         used = strlen(guest_cwd);
         memcpy(output, guest_cwd, used);
@@ -198,6 +414,7 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         if (length == 0 || (length == 1 && component[0] == '.'))
             continue;
         if (length == 2 && memcmp(component, "..", 2) == 0) {
+            output[used] = '\0';
             /* A shared known-folder root is a separate security grant.
              * Do not turn Documents/../secret into an unshared C: path. */
             bool at_share_boundary = false;
@@ -211,7 +428,7 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
                 }
             }
             pthread_mutex_unlock(&root_lock);
-            if (used == 0 || at_share_boundary) {
+            if (used <= root_boundary(output) || at_share_boundary) {
                 errno = EACCES;
                 return false;
             }
@@ -556,14 +773,37 @@ int nt_runtime_read_guest_file(const char *path, size_t limit, void **data, size
 
 static bool copy_dos_path(const char *relative, char *output, size_t capacity)
 {
-    const size_t length = strlen(relative);
-    if (capacity < 4 || length > capacity - 4) {
+    const char *remainder = relative;
+    size_t used = 0;
+    if (strncmp(relative, "@UNC:/", 6) == 0) {
+        /* Canonical UNC namespace is \\\\server\\share\\path. */
+        if (capacity < 3) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        output[used++] = '\\';
+        output[used++] = '\\';
+        remainder += 6;
+    } else {
+        const char letter = relative[1] == ':' && relative[0] >= 'D' &&
+                            relative[0] <= 'Z' ? relative[0] : 'C';
+        if (capacity < 4) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        output[used++] = letter;
+        output[used++] = ':';
+        output[used++] = '\\';
+        if (letter != 'C')
+            remainder += 2 + (relative[2] == '/');
+    }
+    const size_t length = strlen(remainder);
+    if (length >= capacity - used) {
         errno = ENAMETOOLONG;
         return false;
     }
-    memcpy(output, "C:\\", 3);
     for (size_t i = 0; i <= length; ++i)
-        output[3 + i] = relative[i] == '/' ? '\\' : relative[i];
+        output[used + i] = remainder[i] == '/' ? '\\' : remainder[i];
     return true;
 }
 
@@ -2243,7 +2483,9 @@ static bool wide_path(const uint16_t *input, char output[PATH_MAX])
     if (nt_WideCharToMultiByte(65001, 0x80, input, -1, output, PATH_MAX, NULL, NULL) == 0)
         return false;
     if (strncmp(output, "\\\\?\\", 4) == 0 &&
-        (output[4] == 'C' || output[4] == 'c') && output[5] == ':' && separator(output[6]))
+        ((output[4] >= 'A' && output[4] <= 'Z') ||
+         (output[4] >= 'a' && output[4] <= 'z')) &&
+        output[5] == ':' && separator(output[6]))
         memmove(output, output + 4, strlen(output + 4) + 1);
     return true;
 }
@@ -2403,6 +2645,37 @@ int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destinati
     char from[PATH_MAX], to[PATH_MAX];
     return wide_path(source, from) && wide_path(destination, to) &&
            nt_CopyFileA(from, to, fail_if_exists);
+}
+
+uint32_t NT_MS_ABI nt_GetLogicalDrives(void)
+{
+    pthread_mutex_lock(&root_lock);
+    uint32_t bits = drive_root >= 0 ? UINT32_C(1) << 2 : 0;
+    for (unsigned int letter = 3; letter < 26; ++letter)
+        if (drive_roots[letter].active)
+            bits |= UINT32_C(1) << letter;
+    pthread_mutex_unlock(&root_lock);
+    return bits;
+}
+
+uint32_t NT_MS_ABI nt_GetDriveTypeW(const uint16_t *input)
+{
+    if (!input) {
+        pthread_mutex_lock(&root_lock);
+        const uint32_t result = guest_cwd[0] == '@' ? 4u :
+                                guest_cwd[1] == ':' ? 3u : drive_root >= 0 ? 3u : 1u;
+        pthread_mutex_unlock(&root_lock);
+        return result;
+    }
+    char path[PATH_MAX], relative[PATH_MAX];
+    if (!wide_path(input, path) || !normalize_path(path, relative, true))
+        return 1; /* DRIVE_NO_ROOT_DIR, never infer a host mount. */
+    const char *part = relative[0] ? relative : ".";
+    const int root = duplicate_root(&part);
+    if (root < 0)
+        return 1;
+    close(root);
+    return strncmp(relative, "@UNC:/", 6) == 0 ? 4u : 3u; /* REMOTE / FIXED */
 }
 
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer)
@@ -2653,51 +2926,199 @@ static int32_t file_result(int fd, bool success)
     return success;
 }
 
-int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size, uint32_t *done, void *overlap)
+_Static_assert(sizeof(struct nt_overlapped) == 32, "Win64 OVERLAPPED layout");
+_Static_assert(offsetof(struct nt_overlapped, event) == 24, "Win64 OVERLAPPED.hEvent offset");
+
+/* Offset-based OVERLAPPED operations can complete synchronously, exactly
+ * as Windows permits. A true pending work queue/IOCP is not implemented.
+ * The explicit offset never changes the shared file pointer. */
+static int32_t file_io(uintptr_t handle, void *buffer, uint32_t size,
+                      uint32_t *done, struct nt_overlapped *overlap, bool writing)
 {
-    if (done != NULL)
+    if (done)
         *done = 0;
-    if (done == NULL || (size != 0 && buffer == NULL) || overlap != NULL) {
-        nt_SetLastError(overlap != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+    if ((done == NULL && overlap == NULL) || (size && buffer == NULL)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    const int fd = duplicate_handle(handle, FILE_READ);
-    if (fd < 0)
-        return file_result(fd, false);
-    ssize_t received;
+    if (overlap) {
+        overlap->internal = NT_ERROR_IO_PENDING;
+        overlap->internal_high = 0;
+        if (overlap->event != 0 && !nt_ResetEvent(overlap->event)) {
+            overlap->internal = nt_GetLastError();
+            return 0;
+        }
+    }
+    const int fd = duplicate_handle(handle, writing ? FILE_WRITE : FILE_READ);
+    if (fd < 0) {
+        const uint32_t err = path_error(errno, false);
+        if (overlap)
+            overlap->internal = err;
+        nt_SetLastError(err);
+        return 0;
+    }
+    uint64_t offset = 0;
+    if (overlap) {
+        offset = (uint64_t)overlap->offset_high << 32 | overlap->offset;
+        if (offset > INT64_MAX) {
+            close(fd);
+            overlap->internal = NT_ERROR_INVALID_PARAMETER;
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    }
+    ssize_t count;
     do {
-        received = read(fd, buffer, size);
-    } while (received < 0 && errno == EINTR);
-    if (received == 0 && size != 0) {
+        count = writing ? (overlap ? pwrite(fd, buffer, size, (off_t)offset) :
+                                     write(fd, buffer, size)) :
+                          (overlap ? pread(fd, buffer, size, (off_t)offset) :
+                                     read(fd, buffer, size));
+    } while (count < 0 && errno == EINTR);
+    if (count == 0 && size && !writing) {
         struct stat info;
         if (fstat(fd, &info) == 0 && S_ISFIFO(info.st_mode)) {
             errno = EPIPE;
-            received = -1;
+            count = -1;
         }
     }
-    if (received >= 0)
-        *done = (uint32_t)received;
-    return file_result(fd, received >= 0);
-}
-
-int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t size, uint32_t *done, void *overlap)
-{
-    if (done != NULL)
-        *done = 0;
-    if (done == NULL || (size != 0 && buffer == NULL) || overlap != NULL) {
-        nt_SetLastError(overlap != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+    const int saved_error = errno;
+    close(fd);
+    if (count < 0) {
+        const uint32_t err = path_error(saved_error, false);
+        if (overlap) {
+            overlap->internal = err;
+            if (overlap->event)
+                (void)nt_SetEvent(overlap->event);
+        }
+        nt_SetLastError(err);
         return 0;
     }
-    const int fd = duplicate_handle(handle, FILE_WRITE);
+    if (done)
+        *done = (uint32_t)count;
+    if (overlap) {
+        overlap->internal = NT_ERROR_SUCCESS;
+        overlap->internal_high = (uintptr_t)count;
+        if (overlap->event)
+            (void)nt_SetEvent(overlap->event);
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size,
+                              uint32_t *done, void *overlap)
+{
+    return file_io(handle, buffer, size, done, overlap, false);
+}
+
+int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t size,
+                               uint32_t *done, void *overlap)
+{
+    return file_io(handle, (void *)buffer, size, done, overlap, true);
+}
+
+int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,
+                                         uint32_t *done, int32_t wait)
+{
+    if (!overlap || !done) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
     if (fd < 0)
         return file_result(fd, false);
-    ssize_t written;
+    close(fd);
+    if (overlap->internal == NT_ERROR_IO_PENDING) {
+        if (!wait || !overlap->event) {
+            nt_SetLastError(NT_ERROR_IO_INCOMPLETE);
+            return 0;
+        }
+        if (nt_WaitForSingleObject(overlap->event, UINT32_MAX) != 0) {
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+    }
+    if (overlap->internal != NT_ERROR_SUCCESS) {
+        nt_SetLastError((uint32_t)overlap->internal);
+        return 0;
+    }
+    *done = (uint32_t)overlap->internal_high;
+    return 1;
+}
+
+static int32_t range_lock(uintptr_t handle, uint64_t offset, uint64_t length,
+                          bool unlock, bool shared, bool wait)
+{
+    if (!length || offset > INT64_MAX || length > INT64_MAX ||
+        offset > INT64_MAX - length) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, unlock ? 0 : shared ? FILE_READ : FILE_WRITE);
+    if (fd < 0)
+        return file_result(fd, false);
+    struct flock request = {
+        .l_type = unlock ? F_UNLCK : shared ? F_RDLCK : F_WRLCK,
+        .l_whence = SEEK_SET, .l_start = (off_t)offset, .l_len = (off_t)length
+    };
+    int status;
     do {
-        written = write(fd, buffer, size);
-    } while (written < 0 && errno == EINTR);
-    if (written >= 0)
-        *done = (uint32_t)written;
-    return file_result(fd, written >= 0);
+        status = fcntl(fd, wait ? F_OFD_SETLKW : F_OFD_SETLK, &request);
+    } while (status < 0 && errno == EINTR && wait);
+    const int error = errno;
+    close(fd);
+    if (status < 0) {
+        nt_SetLastError(error == EAGAIN || error == EACCES ? NT_ERROR_LOCK_VIOLATION :
+                        error == ENOLCK ? NT_ERROR_LOCK_FAILED : path_error(error, false));
+        return 0;
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_LockFile(uintptr_t handle, uint32_t low, uint32_t high,
+                              uint32_t length_low, uint32_t length_high)
+{
+    return range_lock(handle, (uint64_t)high << 32 | low,
+                      (uint64_t)length_high << 32 | length_low, false, false, false);
+}
+
+int32_t NT_MS_ABI nt_UnlockFile(uintptr_t handle, uint32_t low, uint32_t high,
+                                uint32_t length_low, uint32_t length_high)
+{
+    return range_lock(handle, (uint64_t)high << 32 | low,
+                      (uint64_t)length_high << 32 | length_low, true, false, false);
+}
+
+int32_t NT_MS_ABI nt_LockFileEx(uintptr_t handle, uint32_t flags, uint32_t reserved,
+                                uint32_t low, uint32_t high, struct nt_overlapped *overlap)
+{
+    if (reserved || (flags & ~3u) || !overlap) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int32_t ok = range_lock(handle, (uint64_t)overlap->offset_high << 32 | overlap->offset,
+                                   (uint64_t)high << 32 | low, false,
+                                   (flags & 2u) == 0, (flags & 1u) == 0);
+    overlap->internal = ok ? NT_ERROR_SUCCESS : nt_GetLastError();
+    overlap->internal_high = 0;
+    if (overlap->event)
+        (void)nt_SetEvent(overlap->event);
+    return ok;
+}
+
+int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved,
+                                  uint32_t low, uint32_t high, struct nt_overlapped *overlap)
+{
+    if (reserved || !overlap) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int32_t ok = range_lock(handle, (uint64_t)overlap->offset_high << 32 | overlap->offset,
+                                   (uint64_t)high << 32 | low, true, false, false);
+    overlap->internal = ok ? NT_ERROR_SUCCESS : nt_GetLastError();
+    overlap->internal_high = 0;
+    if (overlap->event)
+        (void)nt_SetEvent(overlap->event);
+    return ok;
 }
 
 /* CopyFile is built on the same guest HANDLE table and path confinement
@@ -2912,11 +3333,34 @@ static nt_status nt_guest_io(uintptr_t handle, uintptr_t event, void *apc, void 
     return nt_file_complete(io, NT_STATUS_SUCCESS, (uintptr_t)transferred);
 }
 
+/* NT may complete an offset I/O synchronously while still honoring
+ * the supplied event. APC dispatch and genuinely pending I/O remain outside
+ * this immediate-completion subset. */
+static nt_status guest_io_with_event(uintptr_t handle, uintptr_t event, void *apc,
+    void *apc_context, struct nt_io_status_block *io, void *buffer,
+    uint32_t length, const int64_t *offset, const uint32_t *key, bool write_operation)
+{
+    /* NTDLL calls return NTSTATUS without modifying the Win32 thread's
+     * GetLastError, even when the event belongs to the Win32 broker. */
+    const uint32_t last_error = nt_GetLastError();
+    if (event && !nt_ResetEvent(event)) {
+        nt_SetLastError(last_error);
+        return nt_file_complete(io, NT_STATUS_NOT_SUPPORTED, 0);
+    }
+    const nt_status status = nt_guest_io(handle, 0, apc, apc_context, io,
+                                        buffer, length, offset, key, write_operation);
+    if (event)
+        (void)nt_SetEvent(event);
+    nt_SetLastError(last_error);
+    return status;
+}
+
 nt_status NT_MS_ABI nt_NtReadFile(uintptr_t handle, uintptr_t event, void *apc,
     void *apc_context, struct nt_io_status_block *io, void *buffer, uint32_t length,
     const int64_t *offset, const uint32_t *key)
 {
-    return nt_guest_io(handle, event, apc, apc_context, io, buffer, length, offset, key, false);
+    return guest_io_with_event(handle, event, apc, apc_context, io,
+                               buffer, length, offset, key, false);
 }
 
 nt_status NT_MS_ABI nt_NtWriteFile(uintptr_t handle, uintptr_t event, void *apc,
@@ -2924,8 +3368,8 @@ nt_status NT_MS_ABI nt_NtWriteFile(uintptr_t handle, uintptr_t event, void *apc,
     const int64_t *offset, const uint32_t *key)
 {
     /* The shared POSIX implementation never writes to the caller's buffer. */
-    return nt_guest_io(handle, event, apc, apc_context, io, (void *)buffer,
-                       length, offset, key, true);
+    return guest_io_with_event(handle, event, apc, apc_context, io, (void *)buffer,
+                               length, offset, key, true);
 }
 
 nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_status_block *io,
@@ -3130,6 +3574,21 @@ static struct nt_file_attribute_data file_attributes(int fd, const struct stat *
         (uint32_t)(size >> 32), (uint32_t)size};
 }
 
+/* Report Linux symbolic links as non-traversable reparse points. This
+ * exposes directory metadata, never the target inode or contents. */
+static struct nt_file_attribute_data reparse_attributes(const struct stat *info)
+{
+    const uint64_t length = info->st_size < 0 ? 0 : (uint64_t)info->st_size;
+    return (struct nt_file_attribute_data){
+        .attributes = 0x400u,
+        .created = file_time(info->st_ctim),
+        .accessed = file_time(info->st_atim),
+        .written = file_time(info->st_mtim),
+        .size_high = (uint32_t)(length >> 32),
+        .size_low = (uint32_t)length
+    };
+}
+
 int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
                                          struct nt_file_attribute_data *info)
 {
@@ -3147,7 +3606,25 @@ int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
     const char *resolved = relative[0] != '\0' ? relative : ".";
     const int root = duplicate_root(&resolved);
     const int fd = root >= 0 ? confined_open(root, resolved, O_PATH, 0) : -1;
-    const int error = errno;
+    int error = errno;
+    if (fd < 0 && error == ELOOP && root >= 0) {
+        /* Parent components still use confined_open with NO_SYMLINKS.
+         * Only the final leaf is inspected with AT_SYMLINK_NOFOLLOW. */
+        char leaf[NAME_MAX + 1];
+        const int parent = open_parent(root, resolved, leaf);
+        if (parent >= 0) {
+            struct stat link;
+            if (fstatat(parent, leaf, &link, AT_SYMLINK_NOFOLLOW) == 0 &&
+                S_ISLNK(link.st_mode)) {
+                *info = reparse_attributes(&link);
+                close(parent);
+                close(root);
+                return 1;
+            }
+            error = errno;
+            close(parent);
+        }
+    }
     if (root >= 0)
         close(root);
     errno = error;
@@ -3215,8 +3692,18 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
         if (nt_MultiByteToWideChar(65001, 8, entry->d_name, -1, result.name, 260) == 0)
             continue;
         const int fd = confined_open(dirfd(search->directory), entry->d_name, O_PATH, 0);
-        if (fd < 0)
+        if (fd < 0) {
+            if (errno == ELOOP && !search->directories_only) {
+                struct stat link;
+                if (fstatat(dirfd(search->directory), entry->d_name, &link,
+                            AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(link.st_mode)) {
+                    result.info = reparse_attributes(&link);
+                    *data = result;
+                    return -1;
+                }
+            }
             continue;
+        }
         struct stat stat_info;
         const bool valid = fstat(fd, &stat_info) == 0 &&
                            (S_ISREG(stat_info.st_mode) || S_ISDIR(stat_info.st_mode));
@@ -3405,10 +3892,21 @@ uint32_t NT_MS_ABI nt_GetFinalPathNameByHandleW(uintptr_t handle, uint16_t *buff
         nt_SetLastError(NT_ERROR_INVALID_FLAGS);
         return 0;
     }
-    char path[PATH_MAX + 7] = "\\\\?\\";
-    if (!open_path_name(handle, path + 4))
+    char dos[PATH_MAX + 3], path[PATH_MAX + 12];
+    if (!open_path_name(handle, dos))
         return 0;
-    return path_result(path + ((flags & 4) != 0 ? 6 : 0), size, buffer);
+    if (dos[0] == '\\' && dos[1] == '\\') {
+        if (snprintf(path, sizeof(path), "\\\\?\\UNC\\%s", dos + 2) >= (int)sizeof(path)) {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        return path_result(path + ((flags & 4u) != 0 ? 8 : 0), size, buffer);
+    }
+    if (snprintf(path, sizeof(path), "\\\\?\\%s", dos) >= (int)sizeof(path)) {
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    return path_result(path + ((flags & 4u) != 0 ? 6 : 0), size, buffer);
 }
 
 struct basic_file_info { uint64_t created, accessed, written, changed; uint32_t attributes; };

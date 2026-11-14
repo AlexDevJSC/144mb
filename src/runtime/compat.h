@@ -18,6 +18,10 @@ enum {
     NT_ERROR_NO_MORE_FILES = 18,
     NT_ERROR_GEN_FAILURE = 31,
     NT_ERROR_SHARING_VIOLATION = 32,
+    NT_ERROR_LOCK_VIOLATION = 33,
+    NT_ERROR_HANDLE_EOF = 38,
+    NT_ERROR_IO_INCOMPLETE = 996,
+    NT_ERROR_IO_PENDING = 997,
     NT_ERROR_NOT_SUPPORTED = 50,
     NT_ERROR_FILE_EXISTS = 80,
     NT_ERROR_INVALID_PARAMETER = 87,
@@ -96,6 +100,7 @@ uint32_t NT_MS_ABI nt_GetACP(void);
 uint32_t NT_MS_ABI nt_GetOEMCP(void);
 int32_t NT_MS_ABI nt_IsValidCodePage(uint32_t page);
 int32_t NT_MS_ABI nt_IsDBCSLeadByte(uint8_t byte);
+int32_t NT_MS_ABI nt_IsDBCSLeadByteEx(uint32_t page, uint8_t byte);
 size_t nt_runtime_wide_length(const uint16_t *text, size_t limit);
 uint16_t *nt_runtime_utf8_to_wide(const char *text);
 
@@ -247,6 +252,8 @@ int32_t NT_MS_ABI nt_seh_filter_exe(uint32_t code, struct nt_exception_pointers 
 
 /* The launcher supplies the host directory for the guest C: drive. */
 bool nt_runtime_set_file_root(const char *directory);
+bool nt_runtime_set_drive_root(char letter, const char *directory);
+bool nt_runtime_set_unc_root(const char *server, const char *share, const char *directory);
 int nt_runtime_open_guest_directory(const char *path, char *dos_path, size_t capacity);
 bool nt_runtime_check_guest_file(const char *path, char *dos_path, size_t capacity, bool *exists);
 bool nt_runtime_guest_directory_entry(int fd, const char *name, bool *directory);
