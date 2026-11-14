@@ -248,6 +248,52 @@ Siguen pendientes IOCP, APC asíncronas NT, cancelación (`CancelIoEx`),
 paralelismo de múltiples trabajadores y las semánticas completas de
 desvinculación de handles/eventos.
 
+## Coordinación de borrados entre procesos NT (extensión incremental)
+
+La traducción de operaciones de ficheros sigue realizándose en espacio de
+usuario, pero Linux mantiene los **bloqueos sobre el propio inodo**.
+Cada apertura de archivo por la capa NT toma `flock(LOCK_SH|LOCK_NB)`
+sobre su descriptor. Si el HANDLE niega `FILE_SHARE_DELETE`, conserva
+ese bloqueo compartido hasta el último cierre de la descripción de archivo
+(duplicación, herencia y caída del proceso incluidas). Si permite borrar,
+libera el bloqueo de apertura inmediatamente.
+
+`DeleteFileA/W` y el `MoveFileExA/W` ordinario adquieren un bloqueo
+exclusivo **desde otro descriptor independiente**, verifican que el inodo no
+haya cambiado, y mantienen el bloqueo mientras Linux ejecuta
+`unlinkat` o `renameat2`. Un bloqueo denegado se comunica al PE
+como `ERROR_SHARING_VIOLATION`. Los test Linux crean dos procesos reales:
+uno conserva abierto el archivo con denegación de borrado mientras el otro
+intenta borrarlo y renombrarlo; otro escenario demuestra que
+`FILE_SHARE_DELETE` permite borrar la entrada y seguir leyendo por el
+handle abierto. Tras `unlinkat`, `NtQueryInformationFile`
+(`FileStandardInformation`) y `GetFileInformationByHandleEx`
+(`FileStandardInfo`) exponen `DeletePending=1` mientras el último
+enlace del inodo ya no existe y el handle sigue vivo. Se comprueba ese
+valor en el hijo PE simulado mediante proceso Linux real. Esta
+observación **no** equivale a disponer del estado de borrado pendiente
+previo al `unlinkat` que ofrece Windows. No se requiere root, un
+usuario NT privilegiado ni una modificación del kernel.
+
+**Límites que impiden declararlo completado:** esta barrera coordina
+`FILE_SHARE_DELETE`, **no** los conflictos de `FILE_SHARE_READ` y
+`FILE_SHARE_WRITE` entre procesos. Tampoco implementa un namespace
+`delete-pending` como Windows (rechazo de aperturas durante ese estado),
+operaciones de `MoveFileEx` por copia entre raíces con el mismo bloqueo
+retenido durante todo el traslado, ni atomicidad total con escritores
+Linux externos. `flock` es *advisory*: un programa Linux que no coopera
+puede renombrar o borrar el inodo. Un archivo sin ningún permiso Linux de
+lectura o escritura puede resultar no borrable por la capa porque
+`flock` necesita un FD real y no admite `O_PATH`; ese error es
+conservador, no una equivalencia completa de ACL NT. No se afirma
+simulación de NTFS ni que todos los programas PE funcionen.
+
+El próximo paso de la misma línea de trabajo es un namespace de permisos
+y borrados pendientes **por usuario y volumen autorizado**, respaldado
+por un broker de usuario sin privilegios o una estructura IPC segura;
+debe conservar el aislamiento de Bubblewrap, validar a sus clientes,
+recuperarse de caídas y no permitir que un invitado controle procesos host.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
