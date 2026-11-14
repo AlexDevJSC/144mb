@@ -644,6 +644,10 @@ static void usage(const char *command)
             "--drive and --unc are explicit per-launch Linux directory grants, never automatic mounts.\n"
             "Requires bubblewrap + Wayland. For headless smoke tests use SDL_VIDEODRIVER=offscreen.\n",
             command, command, command);
+    fputs("       --remember-drive D=/absolute/linux/path (one-time grant)\n"
+          "       --forget-drive D (revoke remembered drive)\n"
+          "Drive mappings D:-Z: persist in private drives.conf; --drive overrides them per launch.\n",
+          stderr);
 }
 
 int main(int argc, char **argv)
@@ -724,6 +728,29 @@ int main(int argc, char **argv)
         }
         fprintf(stderr, "%s native folder grant: %s\n", remember ? "Remembered" : "Removed",
                 folder);
+        return 0;
+    }
+
+    /* Drive grants are independent of known folders: they refer to an
+     * existing, explicitly approved Linux directory, not an auto-discovered
+     * partition or to the user's full HOME. */
+    if (argc >= 2 && (strcmp(argv[1], "--remember-drive") == 0 ||
+                      strcmp(argv[1], "--forget-drive") == 0)) {
+        const bool remember = strcmp(argv[1], "--remember-drive") == 0;
+        if (argc != 3 || strlen(argv[2]) < 1 ||
+            (remember && (argv[2][1] != '=' || argv[2][2] != '/')) ||
+            (!remember && argv[2][1] != '\0')) {
+            usage(argv[0]);
+            return 2;
+        }
+        const char letter = argv[2][0];
+        const char *directory = remember ? argv[2] + 2 : NULL;
+        if (nt_guest_drive_update(config_home, home, letter, directory) != 0) {
+            fprintf(stderr, "Cannot update DOS drive grant: %s\n", strerror(errno));
+            return 2;
+        }
+        fprintf(stderr, "%s DOS drive %c: grant\n",
+                remember ? "Remembered" : "Removed", letter);
         return 0;
     }
 
@@ -812,7 +839,19 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i)
         if (folders[i] == NULL)
             folders[i] = remembered[i];
+    char *remembered_drives[NT_GUEST_EXTRA_DRIVES] = {0};
+    if (nt_guest_drive_load(config_home, home, remembered_drives) != 0) {
+        fprintf(stderr, "Cannot load DOS drive grants: %s\n", strerror(errno));
+        nt_guest_share_free(remembered, NT_USER_FOLDER_COUNT);
+        return 2;
+    }
+    for (size_t i = 0; i < NT_GUEST_EXTRA_DRIVES; ++i) {
+        /* Explicit --drive for this launch takes precedence. */
+        if (requested_drives[i + ('D' - 'A')] == NULL)
+            requested_drives[i + ('D' - 'A')] = remembered_drives[i];
+    }
     const int result = run_isolated(argv[arg], folders, argc - arg - 1, argv + arg + 1);
     nt_guest_share_free(remembered, NT_USER_FOLDER_COUNT);
+    nt_guest_share_free(remembered_drives, NT_GUEST_EXTRA_DRIVES);
     return result;
 }

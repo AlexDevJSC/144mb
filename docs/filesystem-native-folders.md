@@ -68,6 +68,40 @@ pe-isolated-run --share "Documents=/ruta/alternativa" /ruta/a/aplicacion-windows
 pe-isolated-run --forget-share Documents
 ~~~
 
+### Unidades Windows adicionales sin repetir permisos por juego
+
+Las unidades D:–Z: siguen siendo **carpetas Linux reales** explícitamente
+autorizadas. Se puede preparar una carpeta propia (no un nuevo volumen ni
+un disco físico) y asociarla una sola vez:
+
+~~~sh
+mkdir -p "$HOME/Windows-drives/D:"
+pe-isolated-run --remember-drive "D=$HOME/Windows-drives/D:"
+pe-isolated-run /ruta/juego.exe
+# Para esta ejecución, usar otra carpeta sin alterar la asignación recordada:
+pe-isolated-run --drive "D=/ruta/alternativa" -- /ruta/juego.exe
+# Revocar la asociación:
+pe-isolated-run --forget-drive D
+~~~
+
+La ruta solicitada por Windows `D:\\Juegos\\datos.bin` se resuelve dentro
+del directorio Linux autorizado para `D:`, usando descriptores Linux y
+las comprobaciones `openat2`. No se copian archivos, no se crea una
+partición, no se concede acceso al disco entero y no se descubre ninguna
+unidad automáticamente. `C:` sigue en el perfil existente
+`$XDG_STATE_HOME/nt-native-linux/C:`, sin mover ni migrar sus datos.
+Las asignaciones de unidades están en el archivo privado separado
+`$XDG_CONFIG_HOME/nt-native-linux/drives.conf` (o en
+`$HOME/.config/nt-native-linux/drives.conf`), con los mismos límites de
+propiedad/permisos, rutas canónicas, escritura atómica y revocación que
+`shares.conf`. Así, los lanzadores anteriores que solo conocen
+`shares.conf` no dejan de leer las carpetas habituales.
+
+Solo acepta D:–Z: y cada carpeta debe existir antes de ser concedida.
+Los recursos UNC siguen necesitando `--unc` por ejecución. No añade
+SMB, unidades automáticas, directorios relativos por unidad ni semántica
+NTFS de reparse. Los accesos siguen sujetos a permisos Linux y SELinux.
+
 Si xdg-user-dir devuelve el propio $HOME (carpeta XDG deshabilitada), el programa rechaza la autorización: no se permite compartir todo el directorio personal por accidente. Las carpetas deben existir y las rutas del host deben ser absolutas.
 
 ## Formato y duración
@@ -224,7 +258,7 @@ pe-isolated-run --drive D=/ruta/linux/autorizada \
 
 Los directorios de origen se abren con FD y se montan bajo
 `/guest-drives/D` y `/guest-unc/lab/assets`, no como
-accesos globales al anfitrión. La persistencia de estas concesiones, la
+accesos globales al anfitrión. La persistencia de asignaciones UNC, la
 administración avanzada de unidades y los directorios de trabajo
 independientes por unidad siguen pendientes (por ahora `D:relativa`
 se rechaza).
