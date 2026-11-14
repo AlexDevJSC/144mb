@@ -3,6 +3,7 @@
 #define NT_RUNTIME_CHILD_PROCESS_H
 
 #include "nt_services.h"
+#include "winfile.h"
 
 #include <stdint.h>
 #include <sys/types.h>
@@ -22,6 +23,7 @@ struct nt_startup_info {
 
 typedef int (*nt_child_launcher)(int fd, const char *dos_path, const char *command,
                                 const char *directory, bool suspended, int environment_fd,
+                                const struct nt_child_file_transfer *files,
                                 pid_t *pid, int *status_fd, int *start_fd);
 void nt_runtime_set_child_launcher(nt_child_launcher launcher);
 /* Sealed, bounded UTF-8 guest environment payload; not host envp. */
