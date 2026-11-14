@@ -3745,7 +3745,7 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
                 .allocation_size = (int64_t)file.st_blocks * 512,
                 .end_of_file = file.st_size,
                 .number_of_links = file.st_nlink > UINT32_MAX ? UINT32_MAX : (uint32_t)file.st_nlink,
-                .delete_pending = 0,
+                .delete_pending = file.st_nlink == 0,
                 .directory = S_ISDIR(file.st_mode) != 0
             };
             memcpy(buffer, &info, sizeof(info));
