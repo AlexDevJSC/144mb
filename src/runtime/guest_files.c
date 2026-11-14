@@ -31,6 +31,90 @@
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 static int drive_root = -1;
 static char guest_cwd[PATH_MAX];
+static struct { int fd; bool active; } drive_roots[26];
+enum { UNC_LIMIT = 8, UNC_PART_MAX = 63 };
+static struct {
+    int fd;
+    char server[UNC_PART_MAX + 1], share[UNC_PART_MAX + 1];
+    bool active;
+} unc_roots[UNC_LIMIT];
+
+/* Each drive/share requires an explicit host root grant; no host drive,
+ * /mnt share or network resource is exposed by inference. */
+static bool unc_part(const char *text)
+{
+    const size_t n = strnlen(text, UNC_PART_MAX + 2);
+    if (!n || n > UNC_PART_MAX || strcmp(text, ".") == 0 || strcmp(text, "..") == 0)
+        return false;
+    for (size_t i = 0; i < n; ++i)
+        if (!((text[i] >= 'a' && text[i] <= 'z') ||
+              (text[i] >= 'A' && text[i] <= 'Z') ||
+              (text[i] >= '0' && text[i] <= '9') ||
+              text[i] == '-' || text[i] == '_' || text[i] == '.'))
+            return false;
+    return true;
+}
+
+bool nt_runtime_set_drive_root(char letter, const char *directory)
+{
+    if (letter >= 'a' && letter <= 'z')
+        letter = (char)(letter - 'a' + 'A');
+    if (letter <= 'C' || letter > 'Z') {
+        errno = EINVAL;
+        return false;
+    }
+    const int fd = directory ? open(directory, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (directory && fd < 0)
+        return false;
+    pthread_mutex_lock(&root_lock);
+    const size_t index = (size_t)(letter - 'A');
+    if (drive_roots[index].active)
+        close(drive_roots[index].fd);
+    drive_roots[index].fd = fd;
+    drive_roots[index].active = fd >= 0;
+    pthread_mutex_unlock(&root_lock);
+    return true;
+}
+
+bool nt_runtime_set_unc_root(const char *server, const char *share, const char *directory)
+{
+    if (!server || !share || !unc_part(server) || !unc_part(share)) {
+        errno = EINVAL;
+        return false;
+    }
+    const int fd = directory ? open(directory, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (directory && fd < 0)
+        return false;
+    pthread_mutex_lock(&root_lock);
+    size_t index = UNC_LIMIT;
+    size_t empty = UNC_LIMIT;
+    for (size_t i = 0; i < UNC_LIMIT; ++i) {
+        if (unc_roots[i].active && strcasecmp(unc_roots[i].server, server) == 0 &&
+            strcasecmp(unc_roots[i].share, share) == 0) {
+            index = i;
+            break;
+        }
+        if (!unc_roots[i].active && empty == UNC_LIMIT)
+            empty = i;
+    }
+    if (index == UNC_LIMIT)
+        index = empty;
+    if (index == UNC_LIMIT) {
+        pthread_mutex_unlock(&root_lock);
+        if (fd >= 0)
+            close(fd);
+        errno = ENOSPC;
+        return false;
+    }
+    if (unc_roots[index].active)
+        close(unc_roots[index].fd);
+    unc_roots[index].fd = fd;
+    unc_roots[index].active = fd >= 0;
+    snprintf(unc_roots[index].server, sizeof(unc_roots[index].server), "%s", server);
+    snprintf(unc_roots[index].share, sizeof(unc_roots[index].share), "%s", share);
+    pthread_mutex_unlock(&root_lock);
+    return true;
+}
 static struct { int fd; bool active; } folder_roots[NT_USER_FOLDER_COUNT];
 
 bool nt_runtime_set_file_root(const char *directory)
@@ -41,6 +125,16 @@ bool nt_runtime_set_file_root(const char *directory)
     pthread_mutex_lock(&root_lock);
     const int previous = drive_root;
     drive_root = next;
+    for (size_t i = 0; i < 26; ++i)
+        if (drive_roots[i].active) {
+            close(drive_roots[i].fd);
+            drive_roots[i].active = false;
+        }
+    for (size_t i = 0; i < UNC_LIMIT; ++i)
+        if (unc_roots[i].active) {
+            close(unc_roots[i].fd);
+            unc_roots[i].active = false;
+        }
     guest_cwd[0] = '\0';
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         if (folder_roots[i].active) {
@@ -87,6 +181,43 @@ unsigned int nt_runtime_shared_user_folders(void)
 /* The caller holds root_lock while resolving paths and duplicating the root. */
 static int path_root(const char **path)
 {
+    if ((*path)[0] >= 'D' && (*path)[0] <= 'Z' && (*path)[1] == ':' &&
+        ((*path)[2] == '/' || (*path)[2] == '\0')) {
+        const int drive = (*path)[0] - 'A';
+        if (!drive_roots[drive].active) {
+            errno = EACCES;
+            return -1;
+        }
+        *path = (*path)[2] == '/' ? *path + 3 : ".";
+        if (**path == '\0')
+            *path = ".";
+        return drive_roots[drive].fd;
+    }
+    if (strncmp(*path, "@UNC:/", 6) == 0) {
+        const char *name = *path + 6;
+        const char *slash = strchr(name, '/');
+        if (!slash) {
+            errno = EACCES;
+            return -1;
+        }
+        const char *end = strchr(slash + 1, '/');
+        if (!end)
+            end = slash + strlen(slash);
+        for (size_t i = 0; i < UNC_LIMIT; ++i) {
+            if (unc_roots[i].active &&
+                strlen(unc_roots[i].server) == (size_t)(slash - name) &&
+                strlen(unc_roots[i].share) == (size_t)(end - slash - 1) &&
+                strncasecmp(unc_roots[i].server, name, (size_t)(slash - name)) == 0 &&
+                strncasecmp(unc_roots[i].share, slash + 1, (size_t)(end - slash - 1)) == 0) {
+                *path = *end == '/' ? end + 1 : ".";
+                if (**path == '\0')
+                    *path = ".";
+                return unc_roots[i].fd;
+            }
+        }
+        errno = EACCES;
+        return -1;
+    }
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         if (!folder_roots[i].active)
             continue;
