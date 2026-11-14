@@ -8,6 +8,7 @@
 #define NT_INVALID_INFO_CLASS ((LONG)0xc0000003u)
 #define NT_INFO_LENGTH_MISMATCH ((LONG)0xc0000004u)
 #define NT_INVALID_PARAMETER ((LONG)0xc000000du)
+#define NT_NOT_SUPPORTED ((LONG)0xc00000bbu)
 #define NT_CONFLICTING_ADDRESSES ((LONG)0xc0000018u)
 
 typedef struct {
@@ -50,15 +51,31 @@ int import_fixture_entry(void)
     PROCESS_BASIC basic = {0};
     THREAD_BASIC thread_basic = {0};
     ULONG returned = 0;
+    uintptr_t process_affinity = 0, system_affinity = 0;
+    BOOL supported_affinity = GetProcessAffinityMask(process, &process_affinity,
+                                                    &system_affinity);
+    DWORD affinity_error = supported_affinity ? 0 : GetLastError();
     SetLastError(0x5678);
-
+    LONG process_result = NtQueryInformationProcess(process, 0, &basic,
+                                                     sizeof(basic), &returned);
     if (sizeof(basic) != 48 || sizeof(thread_basic) != 48 ||
-        NtQueryInformationProcess(process, 0, &basic, sizeof(basic), &returned) != NT_OK ||
-        returned != sizeof(basic) || basic.peb != (void *)gs_pointer(0x60) ||
-        basic.peb != RtlGetCurrentPeb() ||
-        basic.pid != GetCurrentProcessId() || basic.exit_status != 259 ||
-        GetLastError() != 0x5678)
+        returned != sizeof(basic) || GetLastError() != 0x5678)
         return 10;
+    if (supported_affinity) {
+        if (process_result != NT_OK || process_affinity == 0 ||
+            basic.affinity != process_affinity ||
+            basic.peb != (void *)gs_pointer(0x60) ||
+            basic.peb != RtlGetCurrentPeb() ||
+            basic.pid != GetCurrentProcessId() || basic.exit_status != 259)
+            return 10;
+    } else {
+        /* On Linux hosts with CPUs outside group zero, both public and
+         * native queries must refuse to invent a 64-bit Windows mask.
+         * We can still inspect the independent RtlGetCurrentPeb API. */
+        if (affinity_error != ERROR_NOT_SUPPORTED || process_result != NT_NOT_SUPPORTED)
+            return 10;
+        basic.peb = RtlGetCurrentPeb();
+    }
 
     /* Real Win64 programs discover their module by following PEB->Ldr
      * and the InLoadOrderModuleList from GS. Check that the primary

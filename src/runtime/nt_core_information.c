@@ -80,11 +80,21 @@ nt_status NT_MS_ABI nt_NtQueryInformationProcess(uintptr_t process, uint32_t inf
                                             sizeof(struct nt_process_basic_information), returned_length);
     if (status != NT_STATUS_SUCCESS)
         return status;
+    /* ProcessBasicInformation must never expose an invented CPU0 mask.
+     * Reuse the native Linux-backed group-0 affinity bridge, preserving
+     * LastError as required for Nt* calls. If CPUs >=64 are present,
+     * report unsupported instead of truncating the scheduler mask. */
+    uintptr_t affinity = 0, system_affinity = 0;
+    const uint32_t preserved_error = nt_GetLastError();
+    const bool supported = nt_GetProcessAffinityMask(process, &affinity, &system_affinity) != 0;
+    nt_SetLastError(preserved_error);
+    if (!supported)
+        return NT_STATUS_NOT_SUPPORTED;
     const struct nt_process_basic_information result = {
         .exit_status = 259, /* STILL_ACTIVE */
         .peb_base = peb,
-        .affinity_mask = 1,
-        .base_priority = 8,
+        .affinity_mask = affinity,
+        .base_priority = 8, /* No process priority-class setter exists yet. */
         .unique_process_id = (uintptr_t)getpid(),
         .inherited_from_unique_process_id = (uintptr_t)getppid()
     };

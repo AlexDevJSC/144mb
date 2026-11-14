@@ -71,6 +71,8 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **14-11-2026, fase 4 — CreateProcessA, entorno ANSI y SECURITY_ATTRIBUTES (PR #90, en revisión): 90 % → 91 % (+1 punto estimado, sujeto a CI).** La ruta `CreateProcessA` adapta rutas, comando, directorio y campos de `STARTUPINFOA` usando CP1252 Windows. `CreateProcessA/W` permite un entorno ANSI y lo transforma en UTF-16 antes de compartir el protocolo sellado de procesos hijo, sin usar la configuración regional Linux. Los atributos de seguridad sin descriptor pueden indicar la herencia de los HANDLE de proceso/hilo devueltos, con flags independientes. Tests Linux crean un hijo real con el backend de `CreateProcessA`, validan código de salida, bloques ANSI, errores y flags; fixtures PE AMD64 amplían cobertura sin eliminar la limitación Bubblewrap. La ejecución anidada en Bubblewrap permanece pendiente. **Esta entrega no resuelve suspensión asíncrona ni contextos AMD64 de otros hilos, así que la fase 4 no se cierra.**
 
+- **14-11-2026, fase 4 — afinidad nativa de ProcessBasicInformation (PR en revisión): 91 % → 92 % (+1 punto estimado, sujeto a CI).** `NtQueryInformationProcess` deja de devolver una máscara CPU0 ficticia y utiliza la afinidad real del kernel Linux para el proceso actual; rechaza cpusets fuera del grupo 0 y conserva Win32 `LastError`. Test PE Win64 compara `GetProcessAffinityMask` con la consulta nativa y cubre el rechazo explícito.
+
 ### Estado de la entrega acumulada del 14-11-2026
 
 - **Componente 4: 72 % → 90 % (+18 puntos porcentuales estimados)** mediante PR #85, #87 y #88, fusionadas en `main`.
