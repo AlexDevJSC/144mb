@@ -181,6 +181,83 @@ static void check_user_folders(void)
     puts("PASS Windows known folders and direct Linux file access with separate roots");
 }
 
+/* Explicit host-root mapping: extra drives and UNC never inherit host
+ * /mnt or network privileges. Symlinks are discoverable but not followed. */
+static void check_explicit_drive_and_unc(void)
+{
+    char croot[] = "/tmp/nt-extra-c.XXXXXX";
+    char droot[] = "/tmp/nt-extra-d.XXXXXX";
+    char shared[] = "/tmp/nt-unc-share.XXXXXX";
+    CHECK(mkdtemp(croot) && mkdtemp(droot) && mkdtemp(shared));
+    CHECK(nt_runtime_set_file_root(croot));
+    CHECK(nt_GetLogicalDrives() == (1u << 2));
+    CHECK(nt_CreateFileA("D:\\denied.txt", 0x40000000u, 0, NULL, 2, 0x80, 0) ==
+          UINTPTR_MAX && last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_runtime_set_drive_root('D', droot));
+    CHECK(nt_GetLogicalDrives() == ((1u << 2) | (1u << 3)) &&
+          nt_GetDriveTypeW(u"D:\\") == 3u);
+    CHECK(nt_CreateDirectoryA("D:\\Data", NULL));
+    void *file = nt_fopen("d:\\DATA\\hello.txt", "wb");
+    CHECK(file && nt_fwrite("extra", 1, 5, file) == 5 && nt_fclose(file) == 0);
+    char native_path[256];
+    CHECK(snprintf(native_path, sizeof(native_path), "%s/Data/hello.txt", droot) > 0);
+    FILE *host = fopen(native_path, "rb");
+    char bytes[8] = {0};
+    CHECK(host && fread(bytes, 1, 5, host) == 5 &&
+          memcmp(bytes, "extra", 5) == 0 && fclose(host) == 0);
+    CHECK(!nt_CreateDirectoryA("D:\\..\\escape", NULL) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(!nt_runtime_set_drive_root('B', droot) && errno == EINVAL);
+
+    const char unc_file[] = "\\\\server\\share\\report.txt";
+    CHECK(!nt_CreateFileA(unc_file, 0x40000000u, 0, NULL, 2, 0x80, 0) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_runtime_set_unc_root("server", "share", shared) &&
+          nt_GetDriveTypeW(u"\\\\SERVER\\SHARE\\") == 4u);
+    file = nt_fopen(unc_file, "wb");
+    CHECK(file && nt_fwrite("unc", 1, 3, file) == 3 && nt_fclose(file) == 0);
+    CHECK(snprintf(native_path, sizeof(native_path), "%s/report.txt", shared) > 0);
+    host = fopen(native_path, "rb");
+    CHECK(host && fread(bytes, 1, 3, host) == 3 &&
+          memcmp(bytes, "unc", 3) == 0 && fclose(host) == 0);
+    CHECK(!nt_CreateDirectoryA("\\\\server\\share\\..\\escape", NULL) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(!nt_CreateFileA("\\\\other\\share\\file.txt", 0x80000000u, 1, NULL,
+                          3, 0x80, 0) && last_error() == NT_ERROR_ACCESS_DENIED);
+    const uintptr_t opened = nt_CreateFileA(unc_file, 0x80000000u, 1, NULL, 3, 0x80, 0);
+    uint16_t resolved[256] = {0};
+    static const uint16_t expected[] = u"\\\\?\\UNC\\server\\share\\report.txt";
+    CHECK(opened != UINTPTR_MAX &&
+          nt_GetFinalPathNameByHandleW(opened, resolved, 256, 0) ==
+          sizeof(expected) / sizeof(*expected) - 1 &&
+          memcmp(resolved, expected, sizeof(expected)) == 0 &&
+          nt_CloseHandle(opened));
+
+    char symlink_path[256];
+    CHECK(snprintf(symlink_path, sizeof(symlink_path), "%s/escape-link", droot) > 0 &&
+          symlink("/etc/passwd", symlink_path) == 0);
+    CHECK((nt_GetFileAttributesW(u"D:\\escape-link") & 0x400u) != 0);
+    CHECK(nt_CreateFileA("D:\\escape-link", 0x80000000u, 1, NULL, 3, 0x80, 0) ==
+          UINTPTR_MAX);
+    struct nt_find_data_w link_data;
+    const uintptr_t search = nt_FindFirstFileW(u"D:\\escape-*", &link_data);
+    CHECK(search != UINTPTR_MAX && (link_data.info.attributes & 0x400u) != 0 &&
+          nt_FindClose(search));
+    CHECK(unlink(symlink_path) == 0);
+    CHECK(nt_runtime_set_unc_root("server", "share", NULL));
+    CHECK(!nt_CreateFileA(unc_file, 0x80000000u, 1, NULL, 3, 0x80, 0) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_runtime_set_file_root(NULL) && nt_GetLogicalDrives() == 0);
+    CHECK(snprintf(native_path, sizeof(native_path), "%s/Data/hello.txt", droot) > 0 &&
+          unlink(native_path) == 0);
+    CHECK(snprintf(native_path, sizeof(native_path), "%s/report.txt", shared) > 0 &&
+          unlink(native_path) == 0);
+    CHECK(snprintf(native_path, sizeof(native_path), "%s/Data", droot) > 0 &&
+          rmdir(native_path) == 0);
+    CHECK(rmdir(droot) == 0 && rmdir(shared) == 0 && rmdir(croot) == 0);
+    puts("PASS authorized D: and UNC roots, confinement, and symlink reparse metadata");
+}
+
 static void check_startup(void)
 {
     BOUND(KERNEL, "GetModuleFileNameA", nt_GetModuleFileNameA);
@@ -749,6 +826,7 @@ int main(void)
 {
     check_file_handles();
     check_user_folders();
+    check_explicit_drive_and_unc();
     check_startup();
     check_exit();
     check_quick_cleanup();
