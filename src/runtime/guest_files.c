@@ -238,7 +238,7 @@ static int duplicate_root(const char **path)
     int result = -1;
     if (root >= 0)
         result = fcntl(root, F_DUPFD_CLOEXEC, 0);
-    else
+    else if (errno == 0)
         errno = ENOENT;
     const int error = errno;
     pthread_mutex_unlock(&root_lock);
@@ -268,6 +268,22 @@ static bool device_name(const char *name, size_t size)
             (memcmp(stem, "COM", 3) == 0 || memcmp(stem, "LPT", 3) == 0));
 }
 
+/* Internal DOS root markers use names impossible to type as ordinary
+ * Windows path components, so a C: directory cannot impersonate a grant. */
+static size_t root_boundary(const char *path)
+{
+    if (path[0] >= 'D' && path[0] <= 'Z' && path[1] == ':')
+        return 2;
+    if (strncmp(path, "@UNC:/", 6) == 0) {
+        const char *share = strchr(path + 6, '/');
+        if (!share)
+            return 0;
+        const char *end = strchr(share + 1, '/');
+        return end ? (size_t)(end - path) : strlen(path);
+    }
+    return 0;
+}
+
 static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_root)
 {
     if (input == NULL || *input == '\0') {
@@ -282,32 +298,99 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         errno = EINVAL;
         return false;
     }
-    /* Windows ANSI extended DOS prefix; UNC and NT device namespaces
-     * remain deliberately unsupported rather than accessing host paths. */
-    bool extended = false;
+    /* Plain \\\\server\\share and extended \\\\?\\UNC\\server\\share
+     * resolve only through an explicit descriptor-backed UNC grant. */
+    bool extended = false, network = false;
     if (input[0] == '\\' && input[1] == '\\' &&
         input[2] == '?' && input[3] == '\\') {
         extended = true;
         input += 4;
+        if (strncasecmp(input, "UNC\\", 4) == 0) {
+            network = true;
+            input += 4;
+        }
+    } else if (separator(input[0]) && separator(input[1])) {
+        network = true;
+        input += 2;
     }
-    const bool has_drive = input[1] == ':';
-    const bool absolute = has_drive ? separator(input[2]) : separator(input[0]);
-    if (has_drive) {
-        if ((*input != 'C' && *input != 'c') ||
-            (extended && !separator(input[2]))) {
+    const bool has_drive = !network && input[1] == ':';
+    const bool absolute = network || (has_drive ? separator(input[2]) : separator(input[0]));
+    size_t used = 0;
+    if (network) {
+        const char *server = input;
+        while (*input && !separator(*input))
+            ++input;
+        const size_t server_len = (size_t)(input - server);
+        if (!separator(*input) || server_len == 0 || server_len > UNC_PART_MAX) {
+            errno = EACCES;
+            return false;
+        }
+        ++input;
+        const char *share = input;
+        while (*input && !separator(*input))
+            ++input;
+        const size_t share_len = (size_t)(input - share);
+        if (share_len == 0 || share_len > UNC_PART_MAX) {
+            errno = EACCES;
+            return false;
+        }
+        char host[UNC_PART_MAX + 1], volume[UNC_PART_MAX + 1];
+        memcpy(host, server, server_len);
+        host[server_len] = '\0';
+        memcpy(volume, share, share_len);
+        volume[share_len] = '\0';
+        if (!unc_part(host) || !unc_part(volume)) {
             errno = EINVAL;
             return false;
         }
-        /* C:relative follows the current C: directory. C:\relative and
-         * \relative are rooted at the physical guest C: directory. */
+        pthread_mutex_lock(&root_lock);
+        bool granted = false;
+        for (size_t i = 0; i < UNC_LIMIT; ++i)
+            if (unc_roots[i].active && strcasecmp(unc_roots[i].server, host) == 0 &&
+                strcasecmp(unc_roots[i].share, volume) == 0)
+                granted = true;
+        pthread_mutex_unlock(&root_lock);
+        if (!granted) {
+            errno = EACCES;
+            return false;
+        }
+        used = (size_t)snprintf(output, PATH_MAX, "@UNC:/%s/%s", host, volume);
+    } else if (has_drive) {
+        char drive = *input;
+        if (drive >= 'a' && drive <= 'z')
+            drive = (char)(drive - 'a' + 'A');
+        if (drive < 'C' || drive > 'Z' || (extended && !absolute)) {
+            errno = EINVAL;
+            return false;
+        }
+        if (drive != 'C') {
+            pthread_mutex_lock(&root_lock);
+            const bool granted = drive_roots[drive - 'A'].active;
+            pthread_mutex_unlock(&root_lock);
+            if (!granted) {
+                errno = EACCES;
+                return false;
+            }
+            if (!absolute) {
+                errno = EINVAL; /* No independent D: per-drive CWD yet. */
+                return false;
+            }
+            output[0] = drive;
+            output[1] = ':';
+            used = 2;
+        } else if (!absolute) {
+            pthread_mutex_lock(&root_lock);
+            if (guest_cwd[0] != '@' && !(guest_cwd[1] == ':' && guest_cwd[0] != 'C')) {
+                used = strlen(guest_cwd);
+                memcpy(output, guest_cwd, used);
+            }
+            pthread_mutex_unlock(&root_lock);
+        }
         input += 2;
-    } else if (extended || (separator(input[0]) && separator(input[1]))) {
+    } else if (extended) {
         errno = EACCES;
         return false;
-    }
-
-    size_t used = 0;
-    if (!absolute) {
+    } else if (!absolute) {
         pthread_mutex_lock(&root_lock);
         used = strlen(guest_cwd);
         memcpy(output, guest_cwd, used);
@@ -342,7 +425,7 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
                 }
             }
             pthread_mutex_unlock(&root_lock);
-            if (used == 0 || at_share_boundary) {
+            if (used <= root_boundary(output) || at_share_boundary) {
                 errno = EACCES;
                 return false;
             }
