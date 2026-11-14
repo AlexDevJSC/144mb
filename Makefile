@@ -192,7 +192,7 @@ $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnat
 
 $(BUILD_DIR)/compat-batch-test: tests/compat_batch_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    $(filter %.c %.o,$^) -Wl,--wrap=clock_gettime $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+	    $(filter %.c %.o,$^) -Wl,--wrap=clock_gettime -Wl,--wrap=pread $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/user_folders.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
