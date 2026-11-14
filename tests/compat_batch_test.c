@@ -41,6 +41,27 @@ static struct timespec realtime = {0, 123456789};
 static struct timespec boottime = {10, 123400000};
 static bool clock_fails;
 
+/* Freeze one real worker pread so queued cancellation can be tested without
+ * relying on the OS scheduler or on an artificial delay. */
+static pthread_mutex_t async_test_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t async_test_changed = PTHREAD_COND_INITIALIZER;
+static bool async_hold_enabled, async_hold_entered, async_hold_release;
+
+ssize_t __real_pread(int fd, void *buffer, size_t count, off_t offset);
+
+ssize_t __wrap_pread(int fd, void *buffer, size_t count, off_t offset)
+{
+    pthread_mutex_lock(&async_test_lock);
+    if (async_hold_enabled && offset == 4096) {
+        async_hold_entered = true;
+        pthread_cond_broadcast(&async_test_changed);
+        while (!async_hold_release)
+            pthread_cond_wait(&async_test_changed, &async_test_lock);
+    }
+    pthread_mutex_unlock(&async_test_lock);
+    return __real_pread(fd, buffer, count, offset);
+}
+
 int __wrap_clock_gettime(clockid_t clock, struct timespec *value)
 {
     if (clock_fails) {
@@ -335,6 +356,7 @@ static void check_files(void)
     BOUND(KERNEL, LockFileEx);
     BOUND(KERNEL, UnlockFileEx);
     BOUND(KERNEL, GetOverlappedResult);
+    BOUND(KERNEL, CancelIoEx);
     BOUND(KERNEL, GetTempPathA);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
     CRT_BOUND("stdio", "fopen", nt_fopen);
@@ -644,6 +666,50 @@ static void check_files(void)
           last_error() == NT_ERROR_IO_PENDING);
     CHECK(nt_GetOverlappedResult(background, &async_read, &async_completed, 1) != 0 &&
           async_completed == 5 && memcmp(background_data, "async", 5) == 0);
+
+    /* The first read is already running, while two later reads remain in
+     * the queue. Cancellation must target the originating Windows HANDLE,
+     * publish ERROR_OPERATION_ABORTED, signal its event, and leave the
+     * active request running until Linux completes it. */
+    pthread_mutex_lock(&async_test_lock);
+    async_hold_enabled = true;
+    async_hold_entered = false;
+    async_hold_release = false;
+    pthread_mutex_unlock(&async_test_lock);
+    const uintptr_t running_event = nt_CreateEventW(NULL, 1, 0, NULL);
+    const uintptr_t cancelled_event = nt_CreateEventW(NULL, 1, 0, NULL);
+    CHECK(running_event && cancelled_event);
+    struct nt_overlapped running = {.offset = 4096, .event = running_event};
+    struct nt_overlapped victim = {.offset = 0, .event = cancelled_event};
+    char pending_byte = 0, unused_byte = 0;
+    CHECK(!nt_ReadFile(background, &pending_byte, 1, NULL, &running) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    pthread_mutex_lock(&async_test_lock);
+    while (!async_hold_entered)
+        pthread_cond_wait(&async_test_changed, &async_test_lock);
+    pthread_mutex_unlock(&async_test_lock);
+    CHECK(!nt_ReadFile(background, &unused_byte, 1, NULL, &victim) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    const uintptr_t alternate = nt_CreateFileA("data/background.bin", UINT32_C(0x80000000),
+        7u, NULL, 3u, 0x40000080u, 0);
+    CHECK(alternate != UINTPTR_MAX);
+    CHECK(!nt_CancelIoEx(alternate, &victim) && last_error() == NT_ERROR_NOT_FOUND);
+    CHECK(nt_CancelIoEx(background, &victim));
+    CHECK(!nt_GetOverlappedResult(background, &victim, &async_completed, 1) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED);
+    CHECK(nt_WaitForSingleObject(cancelled_event, 1000) == 0);
+    CHECK(!nt_CancelIoEx(background, &running) && last_error() == NT_ERROR_NOT_FOUND);
+    pthread_mutex_lock(&async_test_lock);
+    async_hold_release = true;
+    async_hold_enabled = false;
+    pthread_cond_broadcast(&async_test_changed);
+    pthread_mutex_unlock(&async_test_lock);
+    CHECK(nt_GetOverlappedResult(background, &running, &async_completed, 1) &&
+          async_completed == 0);
+    CHECK(nt_WaitForSingleObject(running_event, 1000) == 0);
+    CHECK(nt_CloseHandle(alternate) && nt_CloseHandle(running_event) &&
+          nt_CloseHandle(cancelled_event));
+
     CHECK(nt_CloseHandle(background) && nt_CloseHandle(background_event) &&
           nt_DeleteFileA("data/background.bin"));
 
