@@ -152,6 +152,14 @@ El movimiento dentro de la misma raíz sigue usando `renameat2`. No se
 aceptan enlaces simbólicos como origen ni destino. Los movimientos por
 copia no son atómicos y, si el borrado del origen falla, se informa del error.
 
+La apertura reconoce el permiso explícito `FILE_SHARE_DELETE`: si **todos**
+los handles de Windows abiertos sobre ese archivo lo concedieron, se puede
+renombrar o eliminar la entrada de directorio manteniendo el inodo Linux
+vivo hasta cerrar esos descriptores. Si alguno no lo concede, se devuelve
+un error de compartición. `DeleteFileA/W` también respeta el atributo de
+solo lectura. Esto aún no implementa por completo la semántica NT de
+`delete-pending` entre procesos o sobre archivos reabiertos por nombre.
+
 Siguen pendientes junctions/reparse points, rutas UNC, todos los modos de
 compartición y borrado NT, I/O asíncrono y otras funciones de ficheros. No
 se modifica el kernel NT, el cargador PE ni la red.
