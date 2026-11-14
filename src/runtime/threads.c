@@ -408,17 +408,30 @@ static void release_waitable(struct waitable *object)
     }
 }
 
-bool nt_runtime_close_waitable(uintptr_t handle)
+/* HANDLE_FLAG_PROTECT_FROM_CLOSE is metadata on the HANDLE, never on
+ * the shared kernel-object state. It must survive DuplicateHandle aliasing
+ * without preventing another independent alias from being released. */
+nt_status nt_runtime_close_waitable_status(uintptr_t handle)
 {
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = find_waitable(handle);
-    if (object != NULL) {
+    nt_status status = NT_STATUS_SUCCESS;
+    if (object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object->handle_flags & 2u)
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
         object->handle = 0;
         release_waitable(object);
         pthread_cond_broadcast(&wait_changed);
     }
     pthread_mutex_unlock(&wait_lock);
-    return object != NULL;
+    return status;
+}
+
+bool nt_runtime_close_waitable(uintptr_t handle)
+{
+    return nt_runtime_close_waitable_status(handle) == NT_STATUS_SUCCESS;
 }
 
 bool nt_runtime_get_waitable_flags(uintptr_t handle, uint32_t *flags)
@@ -429,6 +442,27 @@ bool nt_runtime_get_waitable_flags(uintptr_t handle, uint32_t *flags)
         *flags = object->handle_flags;
     pthread_mutex_unlock(&wait_lock);
     return object != NULL;
+}
+
+bool nt_runtime_set_waitable_flags(uintptr_t handle, uint32_t mask, uint32_t flags)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    if (object != NULL)
+        object->handle_flags = (object->handle_flags & ~mask) | (flags & mask);
+    pthread_mutex_unlock(&wait_lock);
+    return object != NULL;
+}
+
+uint32_t nt_runtime_count_waitable_handles(void)
+{
+    pthread_mutex_lock(&wait_lock);
+    uint32_t count = 0;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i)
+        if (waitables[i].handle != 0 && waitables[i].refs != 0)
+            ++count;
+    pthread_mutex_unlock(&wait_lock);
+    return count;
 }
 
 _Static_assert(sizeof(struct nt_object_attributes) == 48 &&
