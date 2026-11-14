@@ -199,6 +199,26 @@ static void check_unicode_and_rects(void)
     CHECK(nt_MultiByteToWideChar(65001, 1, utf8, -1, wide, 4) == 0 &&
           last_error() == NT_ERROR_INVALID_FLAGS);
 
+    /* ICU-backed page conversion remains deterministic without the Linux
+     * locale. Verify SBCS Cyrillic and two Windows DBCS families. */
+    uint16_t international[16] = {0};
+    const char russian_cp1251[] = "\xcf\xf0\xe8\xe2\xe5\xf2";
+    CHECK(nt_IsValidCodePage(1251) && nt_IsValidCodePage(932) &&
+          nt_IsValidCodePage(936) && nt_IsValidCodePage(850));
+    CHECK(nt_MultiByteToWideChar(1251, 8, russian_cp1251, 6, international, 16) == 6 &&
+          memcmp(international, u"Привет", 6 * sizeof(uint16_t)) == 0);
+    char reverse_cp1251[32] = {0};
+    CHECK(nt_WideCharToMultiByte(1251, 0, u"Привет", 6, reverse_cp1251,
+                                 sizeof(reverse_cp1251), NULL, NULL) == 6 &&
+          memcmp(reverse_cp1251, russian_cp1251, 6) == 0);
+    CHECK(nt_MultiByteToWideChar(936, 8, "\xd6\xd0\xce\xc4", 4,
+                                 international, 16) == 2 &&
+          international[0] == 0x4e2d && international[1] == 0x6587);
+    CHECK(nt_MultiByteToWideChar(932, 8, "\x82\xa0", 2,
+                                 international, 16) == 1 && international[0] == 0x3042);
+    CHECK(nt_MultiByteToWideChar(932, 8, "\x82", 1, international, 16) == 0 &&
+          last_error() == NT_ERROR_NO_UNICODE_TRANSLATION);
+
     struct nt_rect first, second, result;
     CHECK(nt_SetRect(&first, -2, 1, 8, 9) && nt_SetRect(&second, 4, 2, 10, 7));
     CHECK(nt_IntersectRect(&first, &first, &second) && first.left == 4 && first.right == 8 &&
@@ -304,6 +324,13 @@ static void check_files(void)
     BOUND(KERNEL, GetFileSize);
     BOUND(KERNEL, GetFileTime);
     BOUND(KERNEL, SetFileTime);
+    BOUND(KERNEL, GetLogicalDrives);
+    BOUND(KERNEL, GetDriveTypeW);
+    BOUND(KERNEL, LockFile);
+    BOUND(KERNEL, UnlockFile);
+    BOUND(KERNEL, LockFileEx);
+    BOUND(KERNEL, UnlockFileEx);
+    BOUND(KERNEL, GetOverlappedResult);
     BOUND(KERNEL, GetTempPathA);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
     CRT_BOUND("stdio", "fopen", nt_fopen);
