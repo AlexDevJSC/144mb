@@ -264,6 +264,7 @@ uint32_t NT_MS_ABI nt_GetCurrentDirectoryA(uint32_t size, char *buffer);
 int32_t NT_MS_ABI nt_SetCurrentDirectoryA(const char *path);
 uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size, char *buffer, char **leaf);
 uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path);
+int32_t NT_MS_ABI nt_SetFileAttributesA(const char *path, uint32_t attributes);
 struct nt_file_attribute_data;
 int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
                                          struct nt_file_attribute_data *info);

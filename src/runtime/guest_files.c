@@ -148,14 +148,26 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         errno = EINVAL;
         return false;
     }
-    const bool absolute = input[1] == ':' || separator(input[0]);
-    if (input[1] == ':') {
-        if ((*input != 'C' && *input != 'c') || !separator(input[2])) {
+    /* Windows ANSI extended DOS prefix; UNC and NT device namespaces
+     * remain deliberately unsupported rather than accessing host paths. */
+    bool extended = false;
+    if (input[0] == '\\' && input[1] == '\\' &&
+        input[2] == '?' && input[3] == '\\') {
+        extended = true;
+        input += 4;
+    }
+    const bool has_drive = input[1] == ':';
+    const bool absolute = has_drive ? separator(input[2]) : separator(input[0]);
+    if (has_drive) {
+        if ((*input != 'C' && *input != 'c') ||
+            (extended && !separator(input[2]))) {
             errno = EINVAL;
             return false;
         }
+        /* C:relative follows the current C: directory. C:\relative and
+         * \relative are rooted at the physical guest C: directory. */
         input += 2;
-    } else if (separator(input[0]) && separator(input[1])) {
+    } else if (extended || (separator(input[0]) && separator(input[1]))) {
         errno = EACCES;
         return false;
     }
@@ -588,7 +600,7 @@ static uint32_t path_error(int error, bool parent)
 }
 
 enum {
-    FILE_READ = 1, FILE_WRITE = 2, FILE_TABLE_SIZE = 256,
+    FILE_READ = 1, FILE_WRITE = 2, FILE_DELETE = 4, FILE_TABLE_SIZE = 256,
     HANDLE_FLAG_INHERIT = 1,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
     TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80
@@ -619,10 +631,14 @@ static bool same_file(const struct guest_file *file, const struct stat *info)
            file->inode == info->st_ino;
 }
 
-static bool file_in_use(const struct stat *info)
+/* Windows permits rename/unlink of an open file only when every existing
+ * handle explicitly grants FILE_SHARE_DELETE. Native Linux keeps its inode
+ * alive until the final descriptor is closed. A full NT delete-pending
+ * namespace broker is still outside this subsystem's current scope. */
+static bool file_blocks_delete(const struct stat *info)
 {
     for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
-        if (same_file(&files[i], info))
+        if (same_file(&files[i], info) && (files[i].share & FILE_DELETE) == 0)
             return true;
     }
     return false;
@@ -693,7 +709,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     }
     if ((desired & ~(generic_read | generic_write)) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
-        (share & ~(FILE_READ | FILE_WRITE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
+        (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
         template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return UINTPTR_MAX;
@@ -931,8 +947,17 @@ static int32_t change_path(const char *input, enum path_operation operation)
     } else {
         struct stat info;
         status = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW);
-        if (status == 0 && (S_ISLNK(info.st_mode) || file_in_use(&info))) {
-            errno = S_ISLNK(info.st_mode) ? EACCES : EBUSY;
+        if (status == 0 && S_ISLNK(info.st_mode)) {
+            errno = EACCES;
+            status = -1;
+        } else if (status == 0 && operation == REMOVE_FILE &&
+                   S_ISREG(info.st_mode) && (info.st_mode & 0222) == 0) {
+            /* Linux allows unlinking readonly files through the parent
+             * directory. Windows DeleteFile must respect READONLY. */
+            errno = EACCES;
+            status = -1;
+        } else if (status == 0 && file_blocks_delete(&info)) {
+            errno = EBUSY;
             status = -1;
         }
         if (status == 0)
@@ -973,8 +998,10 @@ int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags)
 {
     char source[PATH_MAX], destination[PATH_MAX];
-    if (flags > 1) {
-        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+    /* MOVEFILE_REPLACE_EXISTING and MOVEFILE_COPY_ALLOWED are the
+     * supported flags. Explicitly reject delayed and hard-link moves. */
+    if ((flags & ~3u) != 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
     if (!guest_path(from, source) || !guest_path(to, destination)) {
@@ -990,6 +1017,23 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     const int root_error = errno;
     pthread_mutex_unlock(&root_lock);
     if (root < 0) {
+        if (source_root >= 0 && destination_root >= 0 && source_root != destination_root &&
+            (flags & 2u) != 0) {
+            /* Different authorized roots must never be joined using a
+             * host path. A regular file is copied via guest handles, then
+             * deleted only after the copy is complete. */
+            if (!nt_CopyFileA(from, to, (flags & 1u) == 0))
+                return 0;
+            if (nt_DeleteFileA(from))
+                return 1;
+            const uint32_t saved = nt_GetLastError();
+            /* Without replacement, the newly copied file is ours to
+             * remove if the source could not be deleted. */
+            if ((flags & 1u) == 0)
+                (void)nt_DeleteFileA(to);
+            nt_SetLastError(saved);
+            return 0;
+        }
         nt_SetLastError(source_root < 0 || destination_root < 0 ? NT_ERROR_PATH_NOT_FOUND :
                         source_root != destination_root ? NT_ERROR_NOT_SAME_DEVICE : path_error(root_error, true));
         return 0;
@@ -1024,15 +1068,29 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     struct stat info;
     int status = fstatat(source_parent, source_leaf, &info, AT_SYMLINK_NOFOLLOW);
     if (status == 0) {
-        if (file_in_use(&info) || (flags != 0 &&
-            fstatat(destination_parent, destination_leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
-            file_in_use(&info))) {
+        if (S_ISLNK(info.st_mode)) {
+            errno = EACCES;
+            status = -1;
+        } else if (file_blocks_delete(&info)) {
             errno = EBUSY;
             status = -1;
         } else {
-            status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
-                                  destination_parent, rename_leaf,
-                                  flags == 0 ? RENAME_NOREPLACE : 0);
+            struct stat target;
+            const int exists = fstatat(destination_parent, destination_leaf, &target,
+                                       AT_SYMLINK_NOFOLLOW);
+            if (exists == 0 && S_ISLNK(target.st_mode)) {
+                errno = EACCES;
+                status = -1;
+            } else if (exists == 0 && (flags & 1u) != 0 && file_blocks_delete(&target)) {
+                errno = EBUSY;
+                status = -1;
+            } else if (exists < 0 && errno != ENOENT) {
+                status = -1;
+            } else {
+                status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
+                                      destination_parent, rename_leaf,
+                                      (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+            }
         }
     }
     const int error = errno;
@@ -1560,7 +1618,7 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
     const uint32_t supported_access = UINT32_C(0xc0100003);
     if (!disposition || attributes->root || attributes->security || attributes->qos ||
         (attributes->attributes & ~0x42u) || (allocation && *allocation) || ea || ea_length ||
-        (access & ~supported_access) || (options & ~0x60u) || (share & ~3u) ||
+        (access & ~supported_access) || (options & ~0x60u) || (share & ~7u) ||
         (file_attributes & ~FILE_ATTRIBUTE_NORMAL))
         return NT_STATUS_NOT_SUPPORTED;
     if ((options & 0x20u) && !(access & 0x100000u))
@@ -1787,6 +1845,58 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
            nt_GetFileAttributesExW(wide, level, info);
 }
 
+/* Only the meaningful native equivalents of NORMAL and READONLY can be
+ * changed here. DIRECTORY, SYSTEM, HIDDEN and NTFS attributes are not
+ * Linux chmod flags and must never be silently claimed as supported. */
+int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
+{
+    if (attributes != FILE_ATTRIBUTE_NORMAL && attributes != 1u) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    char path[PATH_MAX];
+    if (!guest_path(input, path)) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const int fd = confined_open(root, relative, O_RDONLY, 0);
+    const int open_error = errno;
+    close(root);
+    if (fd < 0) {
+        nt_SetLastError(path_error(open_error, false));
+        return 0;
+    }
+    struct stat info;
+    int result = fstat(fd, &info);
+    if (result == 0 && !S_ISREG(info.st_mode)) {
+        errno = EACCES;
+        result = -1;
+    }
+    if (result == 0) {
+        const mode_t original = info.st_mode & 07777;
+        const mode_t changed = attributes == 1u ? original & ~(mode_t)0222 :
+                                                         original | S_IWUSR;
+        result = fchmod(fd, changed);
+    }
+    const int error = errno;
+    close(fd);
+    if (result < 0)
+        nt_SetLastError(path_error(error, false));
+    return result == 0;
+}
+
+int32_t NT_MS_ABI nt_SetFileAttributesW(const uint16_t *input, uint32_t attributes)
+{
+    char narrow[PATH_MAX];
+    return wide_path(input, narrow) && nt_SetFileAttributesA(narrow, attributes);
+}
+
 uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer)
 {
     uint16_t wide[PATH_MAX];
@@ -1898,6 +2008,19 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
                                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
     if (from == UINTPTR_MAX)
         return 0;
+    /* Capture source metadata before reading: a copy must not lose the
+     * original modification time or its native read-only mode. */
+    struct stat source_info;
+    const int source_fd = duplicate_handle(from, FILE_READ);
+    const int stat_result = source_fd >= 0 ? fstat(source_fd, &source_info) : -1;
+    const int stat_error = errno;
+    if (source_fd >= 0)
+        close(source_fd);
+    if (stat_result != 0) {
+        nt_CloseHandle(from);
+        nt_SetLastError(path_error(stat_error, false));
+        return 0;
+    }
 
     const uintptr_t to = nt_CreateFileA(destination, generic_write, 0, NULL,
                                        fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
@@ -1958,10 +2081,28 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
             if (error != NT_ERROR_SUCCESS)
                 break;
         }
-        if (finished && nt_FlushFileBuffers(to))
-            success = 1;
-        else if (finished)
-            error = nt_GetLastError();
+        if (finished) {
+            const int output_fd = duplicate_handle(to, FILE_WRITE);
+            if (output_fd < 0) {
+                error = path_error(errno, false);
+            } else {
+                const struct timespec times[2] = {source_info.st_atim, source_info.st_mtim};
+                /* Do not copy setuid/setgid bits: those are Linux process
+                 * credentials, not Windows file attributes. */
+                const int metadata_ok = fchmod(output_fd, source_info.st_mode & 0777) == 0 &&
+                                        futimens(output_fd, times) == 0;
+                const int metadata_error = errno;
+                close(output_fd);
+                if (!metadata_ok)
+                    error = path_error(metadata_error, false);
+            }
+            if (error == NT_ERROR_SUCCESS) {
+                if (nt_FlushFileBuffers(to))
+                    success = 1;
+                else
+                    error = nt_GetLastError();
+            }
+        }
     }
     free(buffer);
     if (!nt_CloseHandle(to) && success) {

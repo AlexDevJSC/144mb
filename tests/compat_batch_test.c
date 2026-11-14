@@ -4,6 +4,8 @@
 #include "winfile.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -283,6 +285,8 @@ static void check_files(void)
     BOUND(KERNEL, MoveFileW);
     BOUND(KERNEL, CopyFileA);
     BOUND(KERNEL, CopyFileW);
+    BOUND(KERNEL, SetFileAttributesA);
+    BOUND(KERNEL, SetFileAttributesW);
     BOUND(KERNEL, GetCurrentDirectoryA);
     BOUND(KERNEL, SetCurrentDirectoryA);
     BOUND(KERNEL, GetFullPathNameA);
@@ -312,6 +316,20 @@ static void check_files(void)
                               absolute_path, &base_name) == strlen("C:\\data\\scores.txt") &&
           strcmp(absolute_path, "C:\\data\\scores.txt") == 0 &&
           base_name != NULL && strcmp(base_name, "scores.txt") == 0);
+    CHECK(nt_GetFullPathNameA("C:drive-relative.txt", sizeof(absolute_path),
+                              absolute_path, NULL) ==
+          strlen("C:\\DATA\\drive-relative.txt") &&
+          strcmp(absolute_path, "C:\\DATA\\drive-relative.txt") == 0);
+    CHECK(nt_CreateDirectoryA("C:relative-child", NULL) != 0);
+    CHECK(nt_RemoveDirectoryA("C:\\DATA\\RELATIVE-CHILD") != 0);
+    CHECK(nt_GetFullPathNameA("\\\\?\\C:\\DATA\\hello.txt",
+                              sizeof(absolute_path), absolute_path, &base_name) ==
+          strlen("C:\\DATA\\hello.txt") &&
+          strcmp(absolute_path, "C:\\DATA\\hello.txt") == 0 &&
+          base_name != NULL && strcmp(base_name, "hello.txt") == 0);
+    CHECK(nt_GetFullPathNameA("\\\\remote\\share", sizeof(absolute_path),
+                              absolute_path, NULL) == 0 &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
     CHECK(nt_SetCurrentDirectoryA("C:\\") != 0);
     CHECK((nt_GetFileAttributesA("C:\\DATA") & 0x10u) != 0);
     struct nt_file_attribute_data folder_attributes;
@@ -362,6 +380,8 @@ static void check_files(void)
     CHECK(symlink("data", link) == 0);
     CHECK(nt_fopen("link\\outside", "wb") == NULL && errno == ELOOP);
     CHECK(nt_fopen("LINK\\outside", "wb") == NULL && errno == ELOOP);
+    CHECK(nt_MoveFileExA("link", "link-renamed", 0) == 0 &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
     CHECK(unlink(link) == 0);
 
     /* Exact spelling wins; two non-exact ASCII-folded host names are
@@ -399,11 +419,63 @@ static void check_files(void)
     CHECK(raw != NULL && nt_fclose(raw) == 0);
     /* Native copy does not invoke cp(1), create an alternate drive, or
      * duplicate files merely because the Windows caller changes case. */
+    /* An open handle without delete sharing blocks the operation; an
+     * explicitly shared-delete handle keeps the original Linux inode alive. */
+    void *delete_stream = nt_fopen("data/delete-me.bin", "wb");
+    CHECK(delete_stream != NULL && nt_fwrite("X", 1, 1, delete_stream) == 1 &&
+          nt_fclose(delete_stream) == 0);
+    uintptr_t delete_handle = nt_CreateFileA("DATA/DELETE-ME.BIN",
+        UINT32_C(0x80000000), 1u, NULL, 3u, 0x80u, 0);
+    CHECK(delete_handle != UINTPTR_MAX);
+    CHECK(nt_DeleteFileA("data/delete-me.bin") == 0 &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_CloseHandle(delete_handle) != 0);
+    CHECK(nt_SetFileAttributesA("data/delete-me.bin", 1u) != 0);
+    CHECK(nt_DeleteFileA("DATA/DELETE-ME.BIN") == 0 &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_SetFileAttributesA("data/delete-me.bin", 0x80u) != 0);
+    delete_handle = nt_CreateFileA("data/delete-me.bin",
+        UINT32_C(0x80000000), 1u | 4u, NULL, 3u, 0x80u, 0);
+    CHECK(delete_handle != UINTPTR_MAX);
+    CHECK(nt_DeleteFileA("DATA/DELETE-ME.BIN") != 0);
+    char still_open = 0;
+    uint32_t got_delete = 0;
+    CHECK(nt_ReadFile(delete_handle, &still_open, 1, &got_delete, NULL) != 0 &&
+          got_delete == 1 && still_open == 'X');
+    CHECK(nt_CloseHandle(delete_handle) != 0);
+    CHECK(nt_GetFileAttributesA("data/delete-me.bin") == UINT32_MAX);
+
     CHECK(nt_CopyFileA("C:\\DATA\\SCORES.TXT", "C:\\data\\Backup.TXT", 1) != 0);
     CHECK(nt_CopyFileA("data/scores.txt", "DATA/backup.txt", 1) == 0 &&
           last_error() == NT_ERROR_FILE_EXISTS);
     CHECK(nt_CopyFileA("data/SCORES.TXT", "DATA/BACKUP.txt", 0) != 0);
     CHECK(nt_CopyFileA("data/scores.txt", "DATA/SCORES.TXT", 0) == 0);
+    /* Preserve the Linux inode's basic Windows-visible metadata when
+     * copying: readonly mode and modification time. */
+    char source_native[512], readonly_native[512];
+    CHECK(snprintf(source_native, sizeof(source_native), "%s/data/scores.txt", root) > 0);
+    CHECK(snprintf(readonly_native, sizeof(readonly_native), "%s/data/ReadonlyCopy.bin", root) > 0);
+    const struct timespec fixed_times[2] = {{1700000000, 0}, {1700000042, 123456789}};
+    CHECK(utimensat(AT_FDCWD, source_native, fixed_times, 0) == 0);
+    CHECK(nt_SetFileAttributesA("DATA/SCORES.TXT", 1u) != 0);
+    CHECK(nt_CopyFileA("data/SCORES.txt", "data/ReadonlyCopy.bin", 1) != 0);
+    struct stat source_stat, copy_stat;
+    CHECK(stat(source_native, &source_stat) == 0 &&
+          stat(readonly_native, &copy_stat) == 0 &&
+          (source_stat.st_mode & 0777) == (copy_stat.st_mode & 0777) &&
+          copy_stat.st_mtim.tv_sec == source_stat.st_mtim.tv_sec &&
+          copy_stat.st_mtim.tv_nsec == source_stat.st_mtim.tv_nsec &&
+          (nt_GetFileAttributesA("data/READONLYCOPY.bin") & 1u) != 0);
+    static const uint16_t wide_readonly[] = {
+        'C', ':', '\\', 'd', 'a', 't', 'a', '\\',
+        'R', 'e', 'a', 'd', 'o', 'n', 'l', 'y', 'C', 'o', 'p', 'y', '.', 'b', 'i', 'n', 0
+    };
+    CHECK(nt_SetFileAttributesW(wide_readonly, 0x80u) != 0);
+    CHECK((nt_GetFileAttributesA("data/readonlycopy.bin") & 1u) == 0);
+    CHECK(nt_DeleteFileA("data/READONLYCOPY.BIN") != 0);
+    CHECK(nt_SetFileAttributesA("data/scores.txt", 0x80u) != 0);
+    CHECK(nt_SetFileAttributesA("data/scores.txt", 0x2u) == 0 &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
     CHECK(nt_MoveFileA("DATA/backup.txt", "data/Copied.TXT") != 0);
     folded = nt_fopen("data/cOPIED.txt", "rb");
     char copied[6] = {0};

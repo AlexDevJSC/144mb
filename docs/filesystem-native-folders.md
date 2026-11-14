@@ -86,7 +86,7 @@ Documents=/home/usuario/Documentos
 Downloads=/home/usuario/Descargas
 ~~~
 
-Las opciones --remember-share y --forget-share cambian la política guardada; --share solo modifica el lanzamiento actual. Una configuración inválida o un directorio que ha desaparecido provoca un error explícito y no una apertura de otra ubicación.
+Las opciones --remember-share y --forget-share cambian la política guardada; --share solo modifica el lanzamiento actual. Una configuración inválida o un directorio que ha desaparecido provoca un error explícito y no una apertura de otra ubicación. Al guardar un permiso, el runtime ahora almacena la **ruta canónica** del directorio Linux y comprueba el inodo autorizado: sustituir después un enlace simbólico usado como alias de autorización no redirige el permiso persistente. Las seis categorías autorizables se comprueban por separado en la batería automatizada.
 
 **Persistencia no significa duplicación:** las modificaciones que haga el programa sobre un archivo compartido son modificaciones del mismo archivo del host. Se aplican los permisos Linux y las políticas SELinux del usuario. Los datos exclusivos del invitado permanecen en el perfil privado.
 
@@ -110,8 +110,13 @@ de handles Win32 y las mismas comprobaciones de compartición, sin invocar
 mismo archivo no trunque el original. Un fallo de escritura elimina una
 copia creada incompleta; la sustitución de una copia preexistente **no
 es transaccional** y puede dejar contenido parcial si falla el disco.
-No se garantiza todavía la reproducción de todos los metadatos NT,
-flujos alternativos o atributos extendidos al copiar.
+Se conservan al copiar los permisos Linux básicos (sin bits setuid/setgid)
+y las fechas de acceso y modificación; también existen
+`SetFileAttributesA/W` para NORMAL y READONLY. La creación de destino
+no es transaccional frente a programas externos, ni se reproducen todos
+los metadatos NT, el tiempo de creación, flujos alternativos o atributos
+extendidos. El borrado y la sustitución siguen sujetos al modelo limitado
+de compartición del runtime.
 
 Además, se han añadido las variantes `GetCurrentDirectoryA`,
 `SetCurrentDirectoryA`, `GetFullPathNameA`, `GetFileAttributesA`,
@@ -120,7 +125,10 @@ disponibles. El modo «ANSI» de esta primera implementación **acepta UTF-8**
 (y lo convierte a UTF-16 para las funciones `W`); falta implementar
 correctamente la página de códigos ANSI configurada por Windows.
 Las rutas relativas admiten `..` **solo cuando permanecen dentro de la
-raíz concedida**; si intentan subir por encima, fallan.
+raíz concedida**; si intentan subir por encima, fallan. Se distinguen
+`C:\\ruta` (absoluta), `C:ruta` (relativa al directorio de trabajo de C:)
+y `\\\\?\\C:\\ruta` (prefijo DOS extendido). UNC y otros volúmenes no
+se traducen por accidente al sistema Linux.
 
 En directorios Linux que ya contienen `Foo` y `foo`, la coincidencia exacta
 tiene prioridad. Una petición `FOO` sin coincidencia exacta se rechaza por
@@ -136,9 +144,36 @@ por mayúsculas todavía puede sufrir una carrera entre procesos o programas
 Linux que escriban simultáneamente en el directorio; la protección de
 `openat2` garantiza confinamiento, no atomicidad case-insensitive de nombres.
 
+Las operaciones `MoveFileExA/W` soportan ahora
+`MOVEFILE_COPY_ALLOWED` (0x2): cuando un archivo regular se mueve entre
+dos raíces Linux diferentes explícitamente autorizadas, se copia usando
+handles del invitado y, solo si la copia termina, se elimina el origen.
+El movimiento dentro de la misma raíz sigue usando `renameat2`. No se
+aceptan enlaces simbólicos como origen ni destino. Los movimientos por
+copia no son atómicos y, si el borrado del origen falla, se informa del error.
+
+La apertura reconoce el permiso explícito `FILE_SHARE_DELETE`: si **todos**
+los handles de Windows abiertos sobre ese archivo lo concedieron, se puede
+renombrar o eliminar la entrada de directorio manteniendo el inodo Linux
+vivo hasta cerrar esos descriptores. Si alguno no lo concede, se devuelve
+un error de compartición. `DeleteFileA/W` también respeta el atributo de
+solo lectura. Esto aún no implementa por completo la semántica NT de
+`delete-pending` entre procesos o sobre archivos reabiertos por nombre.
+
 Siguen pendientes junctions/reparse points, rutas UNC, todos los modos de
 compartición y borrado NT, I/O asíncrono y otras funciones de ficheros. No
 se modifica el kernel NT, el cargador PE ni la red.
+
+## Criterio de cierre
+
+En el informe de cada vuelta, **100 % significa código implementado,
+publicado y preparado para la aprobación del usuario final en Fedora**;
+no significa que esa aprobación ya se haya producido. Para asignar ese
+100 % a un bloque no deben quedar funcionalidades conocidas pendientes
+**dentro de su alcance declarado**, y deben haber terminado las comprobaciones
+automáticas aplicables. La compatibilidad completa NTFS/Windows no debe
+confundirse con la conclusión de los bloques específicos de directorios
+persistentes y concesión explícita de carpetas.
 
 ## Verificación
 
