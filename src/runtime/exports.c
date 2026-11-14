@@ -342,6 +342,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetLastError),
     WIN_EXPORT(GetCurrentDirectoryA),
     WIN_EXPORT(GetFileAttributesA),
+    WIN_EXPORT(SetFileAttributesA),
     WIN_EXPORT(GetFileAttributesExA),
     WIN_EXPORT(GetFullPathNameA),
     WIN_EXPORT(GetLocalTime),
