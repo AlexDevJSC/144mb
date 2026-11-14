@@ -947,8 +947,17 @@ static int32_t change_path(const char *input, enum path_operation operation)
     } else {
         struct stat info;
         status = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW);
-        if (status == 0 && (S_ISLNK(info.st_mode) || file_blocks_delete(&info))) {
-            errno = S_ISLNK(info.st_mode) ? EACCES : EBUSY;
+        if (status == 0 && S_ISLNK(info.st_mode)) {
+            errno = EACCES;
+            status = -1;
+        } else if (status == 0 && operation == REMOVE_FILE &&
+                   S_ISREG(info.st_mode) && (info.st_mode & 0222) == 0) {
+            /* Linux allows unlinking readonly files through the parent
+             * directory. Windows DeleteFile must respect READONLY. */
+            errno = EACCES;
+            status = -1;
+        } else if (status == 0 && file_blocks_delete(&info)) {
+            errno = EBUSY;
             status = -1;
         }
         if (status == 0)
