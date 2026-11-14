@@ -8,6 +8,8 @@
 #include "sync.h"
 #include "winbase.h"
 #include <stdint.h>
+#include <string.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -29,6 +31,40 @@ static void check(int condition, const char *message)
 
 int main(void)
 {
+    /* An immutable UTF-16 snapshot must round-trip Unicode without
+     * touching the host environment (including dangerous LD_* names). */
+    static const uint16_t custom[] = u"NT_CI_TEST=niño\0LD_PRELOAD=inert\0";
+    int environment_fd = -1;
+    check(nt_runtime_build_child_environment(custom, &environment_fd) ==
+          NT_ERROR_SUCCESS && environment_fd >= 0, "build sealed guest environment");
+    char **entries = NULL;
+    char *storage = NULL;
+    check(nt_runtime_read_child_environment(environment_fd, &entries, &storage) &&
+          entries != NULL && storage != NULL && entries[0] != NULL &&
+          strcmp(entries[0], "NT_CI_TEST=niño") == 0 &&
+          entries[1] != NULL && strcmp(entries[1], "LD_PRELOAD=inert") == 0 &&
+          entries[2] == NULL, "read sealed Unicode environment");
+    free(entries);
+    free(storage);
+    close(environment_fd);
+    static const uint16_t bad[] = u"MISSING_EQUALS\0";
+    check(nt_runtime_build_child_environment(bad, &environment_fd) ==
+          NT_ERROR_INVALID_PARAMETER, "reject invalid environment record");
+    const uint16_t empty[] = {0, 0};
+    check(nt_runtime_build_child_environment(empty, &environment_fd) ==
+          NT_ERROR_SUCCESS && environment_fd >= 0 &&
+          nt_runtime_read_child_environment(environment_fd, &entries, &storage) &&
+          entries[0] == NULL, "round-trip empty environment block");
+    free(entries);
+    free(storage);
+    close(environment_fd);
+    int unsealed[2];
+    check(pipe(unsealed) == 0, "unsealed test pipe");
+    check(!nt_runtime_read_child_environment(unsealed[0], &entries, &storage),
+          "reject non-sealed environment descriptor");
+    close(unsealed[0]);
+    close(unsealed[1]);
+
     int channel[2];
     check(pipe(channel) == 0, "pipe");
     pid_t child = fork();
