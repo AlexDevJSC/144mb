@@ -38,6 +38,7 @@ static const char *active_dos_path, *active_command, *active_directory;
 /* The sealed guest environment is loaded before any child PE instructions
  * execute. It is never installed as the Linux process's environ. */
 static char **active_child_environment;
+static int active_child_manifest = -1;
 
 static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *context)
 {
@@ -57,6 +58,15 @@ static int NT_MS_ABI guest_entry(void)
                                                               active_child_environment : environ));
     if (!nt_runtime_set_file_root("/game"))
         return 118;
+    if (active_child_manifest >= 0) {
+        const bool restored = nt_runtime_restore_inherited_files(active_child_manifest);
+        close(active_child_manifest);
+        active_child_manifest = -1;
+        if (!restored) {
+            fputs("Refusing invalid inherited HANDLE manifest\n", stderr);
+            return 118;
+        }
+    }
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         char directory[sizeof(NT_GUEST_FOLDER_MOUNTS) + 32];
         snprintf(directory, sizeof(directory), "%s/%s", NT_GUEST_FOLDER_MOUNTS, nt_user_folders[i].name);
@@ -142,7 +152,23 @@ static bool worker_ready(bool child, bool suspended)
     /* Drop setup descriptors before loading guest code. A host directory fd
      * would otherwise retain access beyond the sandbox's filesystem root.
      */
-    if (close_range(child ? 7u : 3u, UINT_MAX, 0) != 0) {
+    /* The child must retain only authenticated protocol descriptors and
+     * the bounded sequence of file HANDLE FDs explicitly listed by its
+     * sealed manifest. Everything else is closed before loading guest PE. */
+    size_t inherited_files = 0;
+    if (child && !nt_runtime_inherited_file_count(7, &inherited_files))
+        return false;
+    if (child) {
+        for (size_t i = 0; i < inherited_files; ++i) {
+            struct stat inherited;
+            if (fstat(NT_CHILD_FILE_FD_BASE + (int)i, &inherited) != 0)
+                return false;
+        }
+    }
+    if ((child ? (close_range(8u, NT_CHILD_FILE_FD_BASE - 1u, 0) != 0 ||
+                  close_range(NT_CHILD_FILE_FD_BASE + (unsigned int)inherited_files,
+                              UINT_MAX, 0) != 0) :
+                 close_range(3u, UINT_MAX, 0) != 0)) {
         perror("Cannot close sandbox setup descriptors");
         return false;
     }
@@ -235,7 +261,8 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
 }
 
 static int launch_child(int fd, const char *dos_path, const char *command,
-                        const char *directory, bool suspended, int environment_fd, pid_t *pid,
+                        const char *directory, bool suspended, int environment_fd,
+                        const struct nt_child_file_transfer *files, pid_t *pid,
                         int *status_fd, int *start_fd)
 {
     int pipe_fds[2];
@@ -259,6 +286,9 @@ static int launch_child(int fd, const char *dos_path, const char *command,
     int environment_reader = error ? -1 : fcntl(environment_fd, F_DUPFD_CLOEXEC, 7);
     if (!error && environment_reader < 0)
         error = errno;
+    int manifest_reader = error ? -1 : fcntl(files->manifest_fd, F_DUPFD_CLOEXEC, 128);
+    if (!error && manifest_reader < 0)
+        error = errno;
     if (!error) {
         posix_spawn_file_actions_t actions;
         error = posix_spawn_file_actions_init(&actions);
@@ -270,6 +300,11 @@ static int launch_child(int fd, const char *dos_path, const char *command,
                 error = posix_spawn_file_actions_adddup2(&actions, start_reader, 5);
             if (!error)
                 error = posix_spawn_file_actions_adddup2(&actions, environment_reader, 6);
+            if (!error)
+                error = posix_spawn_file_actions_adddup2(&actions, manifest_reader, 7);
+            for (size_t i = 0; !error && i < files->count; ++i)
+                error = posix_spawn_file_actions_adddup2(&actions, files->source_fds[i],
+                                                         NT_CHILD_FILE_FD_BASE + (int)i);
             if (!error) {
                 char *const args[] = {"/runner", suspended ? "--child-suspended" : "--child",
                                       (char *)dos_path, (char *)command, (char *)directory, NULL};
@@ -286,6 +321,8 @@ static int launch_child(int fd, const char *dos_path, const char *command,
         close(start_reader);
     if (environment_reader >= 0)
         close(environment_reader);
+    if (manifest_reader >= 0)
+        close(manifest_reader);
     if (gate[0] >= 0)
         close(gate[0]);
     close(pipe_fds[1]);
@@ -537,7 +574,11 @@ int main(int argc, char **argv)
             return 125;
         }
         active_child_environment = entries;
+        active_child_manifest = 7;
         const int result = execute_pe(3, argv[2], argv[3], argv[4], 4);
+        if (active_child_manifest >= 0)
+            close(active_child_manifest);
+        active_child_manifest = -1;
         active_child_environment = NULL;
         free(entries);
         free(storage);
