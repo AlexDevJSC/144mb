@@ -454,6 +454,20 @@ bool nt_runtime_set_waitable_flags(uintptr_t handle, uint32_t mask, uint32_t fla
     return object != NULL;
 }
 
+bool nt_runtime_has_inheritable_waitables(void)
+{
+    pthread_mutex_lock(&wait_lock);
+    bool exists = false;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i)
+        if (waitables[i].handle != 0 && waitables[i].refs != 0 &&
+            (waitables[i].handle_flags & 1u) != 0) {
+            exists = true;
+            break;
+        }
+    pthread_mutex_unlock(&wait_lock);
+    return exists;
+}
+
 uint32_t nt_runtime_count_waitable_handles(void)
 {
     pthread_mutex_lock(&wait_lock);
