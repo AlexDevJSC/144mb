@@ -78,7 +78,7 @@ static bool open_secondary_grants(void)
         if (server->d_name[0] == '.' || !valid_share_label(server->d_name))
             continue;
         char server_directory[192];
-        snprintf(server_directory, sizeof(server_directory), "/guest-unc/%s", server->d_name);
+        snprintf(server_directory, sizeof(server_directory), "/guest-unc/%.63s", server->d_name);
         DIR *shares = opendir(server_directory);
         if (!shares) {
             success = false;
@@ -89,7 +89,7 @@ static bool open_secondary_grants(void)
             if (share->d_name[0] == '.' || !valid_share_label(share->d_name))
                 continue;
             char path[320];
-            snprintf(path, sizeof(path), "%s/%s", server_directory, share->d_name);
+            snprintf(path, sizeof(path), "%s/%.63s", server_directory, share->d_name);
             success = nt_runtime_set_unc_root(server->d_name, share->d_name, path);
         }
         closedir(shares);
@@ -615,7 +615,7 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
             return 2;
         }
         snprintf(unc_sources[i], sizeof(unc_sources[i]), "/proc/self/fd/%d", fd);
-        snprintf(unc_targets[i], sizeof(unc_targets[i]), "/guest-unc/%s/%s",
+        snprintf(unc_targets[i], sizeof(unc_targets[i]), "/guest-unc/%.63s/%.63s",
                  requested_unc[i].server, requested_unc[i].share);
         ADD("--bind"); ADD(unc_sources[i]); ADD(unc_targets[i]);
     }
