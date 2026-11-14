@@ -23,6 +23,78 @@ enum { COMMAND_LIMIT = 32768, ERROR_BAD_EXE_FORMAT = 193 };
 _Static_assert(sizeof(struct nt_startup_info) == 104, "STARTUPINFOW ABI");
 _Static_assert(sizeof(struct nt_process_information) == 24, "PROCESS_INFORMATION ABI");
 
+/* Convert a Windows ANSI (CP_ACP = CP1252 in this guest) multi-SZ block
+ * without treating bytes as Linux UTF-8. The result may be passed to
+ * CreateProcessW with CREATE_UNICODE_ENVIRONMENT. No host environ changes. */
+uint16_t *nt_runtime_ansi_child_environment(const char *source)
+{
+    if (source == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    enum { MAX_ANSI_ENV_BYTES = 32767, MAX_ANSI_ENV_ENTRIES = 1024 };
+    uint16_t *wide = calloc(MAX_ANSI_ENV_BYTES + 1u, sizeof(*wide));
+    if (wide == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+    size_t at = 0, units = 0, entries = 0;
+    while (at < MAX_ANSI_ENV_BYTES) {
+        const size_t count = strnlen(source + at, MAX_ANSI_ENV_BYTES - at);
+        if (count == MAX_ANSI_ENV_BYTES - at)
+            break;
+        if (count == 0) {
+            if (at == 0) {
+                /* Even an empty multi-SZ requires two terminators. */
+                if (source[1] != '\0')
+                    break;
+                wide[units++] = 0;
+            }
+            wide[units] = 0;
+            return wide;
+        }
+        if (++entries > MAX_ANSI_ENV_ENTRIES || count > INT32_MAX)
+            break;
+        const int32_t required = nt_MultiByteToWideChar(0, 0, source + at,
+                                                       (int32_t)count, NULL, 0);
+        if (required <= 0 || units + (size_t)required + 2 > MAX_ANSI_ENV_BYTES)
+            break;
+        if (nt_MultiByteToWideChar(0, 0, source + at, (int32_t)count,
+                                   wide + units, required) != required)
+            break;
+        units += (size_t)required;
+        wide[units++] = 0;
+        at += count + 1;
+    }
+    free(wide);
+    nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+    return NULL;
+}
+
+static uint16_t *ansi_child_string(const char *text, size_t limit)
+{
+    if (text == NULL)
+        return NULL;
+    size_t length = strnlen(text, limit);
+    if (length == limit) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    const int32_t size = nt_MultiByteToWideChar(0, 0, text, -1, NULL, 0);
+    if (size <= 0)
+        return NULL;
+    uint16_t *result = malloc((size_t)size * sizeof(*result));
+    if (result == NULL) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+    if (nt_MultiByteToWideChar(0, 0, text, -1, result, size) != size) {
+        free(result);
+        return NULL;
+    }
+    return result;
+}
+
 /* This is a guest-only environment snapshot. The child runner inherits
  * its original sanitized Linux environment; guest values never enter
  * posix_spawn's envp (in particular no LD_PRELOAD/PATH injection). */
@@ -294,12 +366,6 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
-    if (environment != NULL && (flags & 0x400u) == 0) {
-        /* ANSI environment blocks need the guest's codepage converter;
-         * reinterpretation as UTF-16 would be incorrect. */
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
-    }
     char path[PATH_MAX], workdir[PATH_MAX], default_command[PATH_MAX + 3];
     if (!current_directory(directory, workdir)) {
         nt_SetLastError(NT_ERROR_PATH_NOT_FOUND);
@@ -318,11 +384,21 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         return 0;
     }
     snprintf(default_command, sizeof(default_command), "\"%s\"", path);
+    uint16_t *converted_environment =
+        environment != NULL && (flags & 0x400u) == 0 ?
+        nt_runtime_ansi_child_environment(environment) : NULL;
+    if (environment != NULL && (flags & 0x400u) == 0 && converted_environment == NULL) {
+        free(converted);
+        close(fd);
+        return 0; /* converter set LastError */
+    }
     uint16_t *inherited = environment == NULL ? nt_GetEnvironmentStringsW() : NULL;
-    const uint16_t *source = environment == NULL ? inherited : environment;
+    const uint16_t *source = environment == NULL ? inherited :
+                             (converted_environment != NULL ? converted_environment : environment);
     int environment_fd = -1;
     uint32_t env_error = source == NULL ? NT_ERROR_NOT_ENOUGH_MEMORY :
                          nt_runtime_build_child_environment(source, &environment_fd);
+    free(converted_environment);
     if (inherited != NULL)
         (void)nt_FreeEnvironmentStringsW(inherited);
     if (env_error != NT_ERROR_SUCCESS) {
@@ -368,4 +444,79 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         return 0;
     }
     return 1;
+}
+
+/* The ANSI API uses the runtime's Windows ACP (CP1252), never the Linux
+ * locale. Translate paths, command and optional environment to the exact
+ * CreateProcessW backend: sandbox, handle permissions and pidfd remain shared.
+ * STARTUPINFOA/STARTUPINFOW have the same AMD64 layout apart from strings. */
+int32_t NT_MS_ABI nt_CreateProcessA(const char *application, char *command,
+        const void *process_security, const void *thread_security, int32_t inherit_handles,
+        uint32_t flags, const void *environment, const char *directory,
+        const struct nt_startup_info *startup, struct nt_process_information *info)
+{
+    if (info != NULL)
+        *info = (struct nt_process_information){0};
+    if (startup == NULL || startup->size != sizeof(*startup) || info == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    uint16_t *app = ansi_child_string(application, PATH_MAX);
+    if (application != NULL && app == NULL)
+        return 0;
+    uint16_t *cmd = ansi_child_string(command, COMMAND_LIMIT);
+    if (command != NULL && cmd == NULL) {
+        free(app);
+        return 0;
+    }
+    uint16_t *dir = ansi_child_string(directory, PATH_MAX);
+    if (directory != NULL && dir == NULL) {
+        free(app);
+        free(cmd);
+        return 0;
+    }
+    uint16_t *desktop = ansi_child_string((const char *)startup->desktop, PATH_MAX);
+    if (startup->desktop != NULL && desktop == NULL) {
+        free(app);
+        free(cmd);
+        free(dir);
+        return 0;
+    }
+    uint16_t *title = ansi_child_string((const char *)startup->title, PATH_MAX);
+    if (startup->title != NULL && title == NULL) {
+        free(app);
+        free(cmd);
+        free(dir);
+        free(desktop);
+        return 0;
+    }
+    uint16_t *converted_environment =
+        environment != NULL && (flags & 0x400u) == 0 ?
+        nt_runtime_ansi_child_environment(environment) : NULL;
+    if (environment != NULL && (flags & 0x400u) == 0 && converted_environment == NULL) {
+        free(app);
+        free(cmd);
+        free(dir);
+        free(desktop);
+        free(title);
+        return 0;
+    }
+    struct nt_startup_info converted_startup = *startup;
+    converted_startup.desktop = desktop;
+    converted_startup.title = title;
+    const void *child_environment =
+        converted_environment != NULL ? converted_environment : environment;
+    const uint32_t child_flags = converted_environment != NULL ?
+                                 flags | 0x400u : flags;
+    const int32_t result = nt_CreateProcessW(app, cmd, process_security, thread_security,
+                                             inherit_handles, child_flags, child_environment,
+                                             dir, &converted_startup, info);
+    free(converted_environment);
+    free(app);
+    free(cmd);
+    free(dir);
+    free(desktop);
+    free(title);
+    return result;
 }
