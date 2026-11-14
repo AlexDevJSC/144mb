@@ -673,6 +673,12 @@ static int write_guest_xattr(int fd, const char *name, const void *value, size_t
 
 static int clear_guest_xattr(int fd, const char *name)
 {
+    unsigned char previous[sizeof(uint64_t)];
+    if (read_guest_xattr(fd, name, previous, sizeof(previous)) < 0) {
+        if (errno == ENODATA || errno == ENOTSUP)
+            return 0;
+        return -1;
+    }
     int result = fremovexattr(fd, name);
     if (result < 0 && errno == EBADF) {
         char path[64];
@@ -2209,13 +2215,18 @@ int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
         const mode_t changed = (attributes & WIN_READONLY) ? original & ~(mode_t)0222 :
                                                                  original | S_IWUSR;
         const uint32_t extended = attributes & WIN_EXTENDED;
-        /* First verify host filesystem support for the requested flags.
-         * Failure is explicit rather than claiming a Hidden/System bit. */
-        result = extended ? write_guest_xattr(fd, WIN_ATTR_XATTR, &extended,
-                                               sizeof(extended)) :
-                            clear_guest_xattr(fd, WIN_ATTR_XATTR);
-        if (result == 0)
-            result = fchmod(fd, changed);
+        /* Linux may deny xattr removal on a readonly inode. Restore the
+         * owner's write permission before clearing Windows metadata; when
+         * setting READONLY, write metadata before dropping that permission. */
+        if ((attributes & WIN_READONLY) == 0 && (result = fchmod(fd, changed)) != 0) {
+            /* errno is preserved for the Win32 error mapping below. */
+        } else {
+            result = extended ? write_guest_xattr(fd, WIN_ATTR_XATTR, &extended,
+                                                   sizeof(extended)) :
+                                clear_guest_xattr(fd, WIN_ATTR_XATTR);
+            if (result == 0 && (attributes & WIN_READONLY) != 0)
+                result = fchmod(fd, changed);
+        }
     }
     const int error = errno;
     close(fd);
