@@ -586,6 +586,8 @@ static uint32_t path_error(int error, bool parent)
         return NT_ERROR_DIR_NOT_EMPTY;
     case EINVAL: case ENAMETOOLONG:
         return NT_ERROR_INVALID_PARAMETER;
+    case ENOTSUP:
+        return NT_ERROR_NOT_SUPPORTED;
     case EBADF:
         return NT_ERROR_INVALID_HANDLE;
     case EPIPE:
