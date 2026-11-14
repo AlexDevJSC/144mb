@@ -282,9 +282,10 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         extended = true;
         input += 4;
     }
-    if (extended && strncasecmp(input, "UNC\\", 4) == 0)
+    const bool extended_unc = extended && strncasecmp(input, "UNC\\", 4) == 0;
+    if (extended_unc)
         input += 4;
-    const bool unc = separator(input[0]) && separator(input[1]);
+    const bool unc = extended_unc || (separator(input[0]) && separator(input[1]));
     const bool has_drive = !unc && input[1] == ':';
     const bool absolute = has_drive ? separator(input[2]) : separator(input[0]);
     char letter = 0;
@@ -304,7 +305,8 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
     size_t used = 0;
     size_t boundary = 0;
     if (unc) {
-        input += 2;
+        if (!extended_unc)
+            input += 2;
         const char *server = input;
         while (*input && !separator(*input))
             ++input;
@@ -346,7 +348,11 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
     } else if (!absolute) {
         pthread_mutex_lock(&root_lock);
         used = strlen(guest_cwd);
-        memcpy(output, guest_cwd, used);
+        /* C:relative is always C:relative, never relative to a D: cwd. */
+        if (!(letter == 'C' && guest_cwd[1] == ':'))
+            memcpy(output, guest_cwd, used);
+        else
+            used = 0;
         pthread_mutex_unlock(&root_lock);
         if (used >= 2 && output[1] == ':')
             boundary = 2;
