@@ -226,6 +226,19 @@ como UTF-8 sigue teniendo prioridad el tratamiento UTF-8 del puente
 actual. **Aún no es un modelo ACP estricto y uniforme** para todas las
 API ni para las secuencias ambiguas.
 
+**Política de apertura de un nombre existente.** Para `CreateFileA` con
+`OPEN_EXISTING`, el runtime prefiere un nombre válido en UTF-8. Si el
+archivo correspondiente no existe y esos mismos bytes también tienen otra
+interpretación CP1252, comprueba el segundo nombre sobre el directorio
+Linux concedido. Si ambos existen, gana UTF-8. No se hace una segunda
+apertura si el nombre original existe pero falla por permisos Linux. Las
+llamadas `CreateFileW` parten de UTF-16 y **nunca** se reinterpretan como
+CP1252: evitar que un nombre Unicode inexistente abra por error otro
+archivo es más importante que la heurística. No se hace esta suposición
+para `CREATE_NEW` ni otras disposiciones de creación/escritura.
+La política todavía no es universal para todas las API `A` ni sustituye
+las conversiones explícitas de `MultiByteToWideChar`.
+
 **Bloqueos NT.** Las operaciones Win32 `LockFile`, `UnlockFile`,
 `LockFileEx` y `UnlockFileEx` utilizan bloqueos de intervalo OFD del
 kernel Linux (`F_OFD_SETLK` y `F_OFD_SETLKW`) con offset y longitud de
@@ -278,9 +291,20 @@ se señaliza el evento opcional de Windows. Para los handles antiguos
 sin ese flag se mantiene la finalización inmediata que ya utilizaban
 los fixtures. `NtReadFile/NtWriteFile` todavía admiten solo finalización
 inmediata, aunque pueden señalar un evento.
-Siguen pendientes IOCP, APC asíncronas NT, cancelación (`CancelIoEx`),
-paralelismo de múltiples trabajadores y las semánticas completas de
-desvinculación de handles/eventos.
+Se añade `CancelIoEx` sobre las operaciones de `FILE_FLAG_OVERLAPPED`
+**que todavía están en cola**, con identidad del HANDLE y del proceso
+emisor. Admite cancelar una solicitud concreta por dirección de
+`OVERLAPPED`, o todas las encoladas de ese handle al pasar NULL.
+Notifica `ERROR_OPERATION_ABORTED` y señaliza el evento; un handle
+distinto del mismo archivo no puede cancelar la operación ajena. Una
+solicitud que el trabajador ya empezó no se cancela mediante `pthread_cancel`
+ni se reporta falsamente como cancelada: devuelve `ERROR_NOT_FOUND`
+cuando no hay solicitudes en cola para ese criterio.
+
+Siguen pendientes IOCP, APC asíncronas NT, cancelación real de operaciones
+ya despachadas, varios trabajadores y las semánticas completas de
+cierre, señalización y desvinculación de handles/eventos. La cancelación
+de cola no implica que este bloque esté completo.
 
 ## Coordinación de borrados entre procesos NT (extensión incremental)
 
