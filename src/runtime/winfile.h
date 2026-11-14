@@ -5,6 +5,8 @@
 #include "compat.h"
 
 int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags);
+int32_t NT_MS_ABI nt_SetHandleInformation(uintptr_t handle, uint32_t mask, uint32_t flags);
+int32_t NT_MS_ABI nt_GetProcessHandleCount(uintptr_t process, uint32_t *count);
 int32_t NT_MS_ABI nt_DuplicateHandle(uintptr_t source_process, uintptr_t source,
                                      uintptr_t target_process, uintptr_t *target,
                                      uint32_t access, int32_t inherit, uint32_t options);

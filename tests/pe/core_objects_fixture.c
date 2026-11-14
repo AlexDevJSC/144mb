@@ -136,6 +136,9 @@ static int test_semaphores(void)
 
 static int test_thread_handles(void)
 {
+    DWORD baseline = 0;
+    if (!GetProcessHandleCount(GetCurrentProcess(), &baseline))
+        return 50;
     volatile DWORD ran = 0;
     DWORD created_id = 0;
     HANDLE original = CreateThread(NULL, 0, stopped_thread, (void *)&ran,
@@ -151,6 +154,62 @@ static int test_thread_handles(void)
     if (alias == NULL || alias == original || GetThreadId(alias) != created_id ||
         GetProcessIdOfThread(alias) != GetCurrentProcessId())
         return 31;
+    DWORD count = 0, flags = 0;
+    if (!GetProcessHandleCount(GetCurrentProcess(), &count) ||
+        count != baseline + 2 ||
+        !GetHandleInformation(original, &flags) || flags != 0 ||
+        !SetHandleInformation(original, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) ||
+        !GetHandleInformation(original, &flags) || flags != HANDLE_FLAG_INHERIT ||
+        !GetHandleInformation(alias, &flags) || flags != 0)
+        return 51;
+
+    /* Inherit/protect flags belong to each HANDLE, not to the shared
+     * thread object. A protected alias cannot be closed accidentally. */
+    if (!SetHandleInformation(alias, HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                              HANDLE_FLAG_PROTECT_FROM_CLOSE) ||
+        !GetHandleInformation(alias, &flags) ||
+        flags != HANDLE_FLAG_PROTECT_FROM_CLOSE)
+        return 52;
+    SetLastError(0x770u);
+    if (CloseHandle(alias) || GetLastError() != ERROR_ACCESS_DENIED ||
+        !GetHandleInformation(alias, &flags) ||
+        flags != HANDLE_FLAG_PROTECT_FROM_CLOSE)
+        return 53;
+    if (!SetHandleInformation(alias, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0) ||
+        !GetHandleInformation(alias, &flags) || flags != 0)
+        return 54;
+
+    HANDLE self_dup = OpenProcess(PROCESS_DUP_HANDLE, FALSE, GetCurrentProcessId());
+    HANDLE query_dup = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                  GetCurrentProcessId());
+    HANDLE duplicated = NULL;
+    if (self_dup == NULL || query_dup == NULL ||
+        !DuplicateHandle(self_dup, original, self_dup, &duplicated, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS) ||
+        duplicated == NULL || duplicated == original ||
+        !GetHandleInformation(duplicated, &flags) || flags != 0)
+        return 55;
+    SetLastError(0);
+    HANDLE denied = NULL;
+    if (DuplicateHandle(query_dup, original, self_dup, &denied, 0, FALSE,
+                        DUPLICATE_SAME_ACCESS) ||
+        GetLastError() != ERROR_ACCESS_DENIED || denied != NULL)
+        return 56;
+    if (!SetHandleInformation(duplicated, HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                              HANDLE_FLAG_PROTECT_FROM_CLOSE))
+        return 57;
+    SetLastError(0);
+    if (DuplicateHandle(self_dup, duplicated, self_dup, &denied, 0, FALSE,
+                        DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE) ||
+        GetLastError() != ERROR_ACCESS_DENIED || denied != NULL ||
+        !GetHandleInformation(duplicated, &flags) ||
+        flags != HANDLE_FLAG_PROTECT_FROM_CLOSE)
+        return 58;
+    if (!SetHandleInformation(duplicated, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0) ||
+        !CloseHandle(duplicated) ||
+        !CloseHandle(self_dup) || !CloseHandle(query_dup))
+        return 59;
+
     const struct win_client_id ids = {GetCurrentProcessId(), created_id};
     const struct win_object_attributes attributes = {sizeof(attributes), 0, NULL, 0, NULL, NULL};
     HANDLE native = NULL;
@@ -240,11 +299,71 @@ static int test_thread_handles(void)
     if (GetThreadId((HANDLE)(uintptr_t)15) != 0 ||
         GetLastError() != ERROR_INVALID_HANDLE)
         return 38;
+    if (!GetProcessHandleCount(GetCurrentProcess(), &count) || count != baseline)
+        return 60;
+    SetLastError(0);
+    if (SetHandleInformation((HANDLE)(uintptr_t)15, HANDLE_FLAG_INHERIT, 0) ||
+        GetLastError() != ERROR_INVALID_HANDLE)
+        return 61;
+    SetLastError(0);
+    if (SetHandleInformation(original, 0x40u, 0x40u) ||
+        GetLastError() != ERROR_INVALID_PARAMETER)
+        return 62;
+    SetLastError(0);
+    if (GetProcessHandleCount(GetCurrentProcess(), NULL) ||
+        GetLastError() != ERROR_INVALID_PARAMETER)
+        return 63;
+    return 0;
+}
+
+static int test_file_handle_flags(void)
+{
+    DWORD baseline = 0, count = 0, flags = 0;
+    if (!GetProcessHandleCount(GetCurrentProcess(), &baseline))
+        return 64;
+    static const WCHAR filename[] = L"C:\\nt-stage4-handle-flags.bin";
+    HANDLE file = CreateFileW(filename, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE ||
+        !GetProcessHandleCount(GetCurrentProcess(), &count) ||
+        count != baseline + 1)
+        return 65;
+    if (!SetHandleInformation(file, HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                              HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE) ||
+        !GetHandleInformation(file, &flags) ||
+        flags != (HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE))
+        return 66;
+    HANDLE duplicate = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), file, GetCurrentProcess(), &duplicate,
+                         0, FALSE, DUPLICATE_SAME_ACCESS | 4u) ||
+        duplicate == NULL || duplicate == file ||
+        !GetHandleInformation(duplicate, &flags) ||
+        flags != (HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE))
+        return 67;
+    SetLastError(0);
+    if (CloseHandle(file) || GetLastError() != ERROR_ACCESS_DENIED ||
+        !GetProcessHandleCount(GetCurrentProcess(), &count) ||
+        count != baseline + 2)
+        return 68;
+    if (!SetHandleInformation(file, HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE, 0) ||
+        !CloseHandle(file))
+        return 69;
+    SetLastError(0);
+    if (CloseHandle(duplicate) || GetLastError() != ERROR_ACCESS_DENIED ||
+        !SetHandleInformation(duplicate, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0) ||
+        !CloseHandle(duplicate))
+        return 70;
+    if (!DeleteFileW(filename) ||
+        !GetProcessHandleCount(GetCurrentProcess(), &count) ||
+        count != baseline)
+        return 71;
     return 0;
 }
 
 int import_fixture_entry(void)
 {
     int result = test_semaphores();
-    return result ? result : test_thread_handles();
+    if (result == 0)
+        result = test_thread_handles();
+    return result ? result : test_file_handle_flags();
 }

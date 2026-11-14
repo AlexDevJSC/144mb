@@ -37,6 +37,9 @@ uint32_t NT_MS_ABI nt_WaitForMultipleObjects(uint32_t count, const uintptr_t *ha
 uint32_t NT_MS_ABI nt_WaitForMultipleObjectsEx(uint32_t count, const uintptr_t *handles,
                                             int32_t all, uint32_t milliseconds, int32_t alertable);
 bool nt_runtime_close_waitable(uintptr_t handle);
+nt_status nt_runtime_close_waitable_status(uintptr_t handle);
+bool nt_runtime_set_waitable_flags(uintptr_t handle, uint32_t mask, uint32_t flags);
+uint32_t nt_runtime_count_waitable_handles(void);
 bool nt_runtime_get_waitable_flags(uintptr_t handle, uint32_t *flags);
 nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
                                          uint32_t attributes, uint32_t options,
