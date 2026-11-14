@@ -3621,6 +3621,35 @@ static struct nt_file_attribute_data file_attributes(int fd, const struct stat *
         (uint32_t)(size >> 32), (uint32_t)size};
 }
 
+/* Reparse-point metadata is exposed without following the Linux symlink.
+ * This does not authorize opening the link target or creating junctions. */
+static bool symlink_attributes(int root, const char *path, struct nt_file_attribute_data *result)
+{
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, path, leaf);
+    if (parent < 0)
+        return false;
+    struct stat info;
+    const int status = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW);
+    const int error = errno;
+    close(parent);
+    if (status < 0) {
+        errno = error;
+        return false;
+    }
+    if (!S_ISLNK(info.st_mode)) {
+        errno = EINVAL;
+        return false;
+    }
+    *result = (struct nt_file_attribute_data) {
+        .attributes = 0x400u, /* FILE_ATTRIBUTE_REPARSE_POINT */
+        .created = file_time(info.st_ctim),
+        .accessed = file_time(info.st_atim),
+        .written = file_time(info.st_mtim)
+    };
+    return true;
+}
+
 int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
                                          struct nt_file_attribute_data *info)
 {
@@ -3639,6 +3668,15 @@ int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
     const int root = duplicate_root(&resolved);
     const int fd = root >= 0 ? confined_open(root, resolved, O_PATH, 0) : -1;
     const int error = errno;
+    if (root >= 0 && fd < 0 && error == ELOOP) {
+        const bool link = symlink_attributes(root, resolved, info);
+        const int metadata_error = errno;
+        close(root);
+        if (link)
+            return 1;
+        nt_SetLastError(path_error(metadata_error, false));
+        return 0;
+    }
     if (root >= 0)
         close(root);
     errno = error;
@@ -3706,8 +3744,14 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
         if (nt_MultiByteToWideChar(65001, 8, entry->d_name, -1, result.name, 260) == 0)
             continue;
         const int fd = confined_open(dirfd(search->directory), entry->d_name, O_PATH, 0);
-        if (fd < 0)
+        if (fd < 0) {
+            if (errno == ELOOP && !search->directories_only &&
+                symlink_attributes(dirfd(search->directory), entry->d_name, &result.info)) {
+                *data = result;
+                return -1;
+            }
             continue;
+        }
         struct stat stat_info;
         const bool valid = fstat(fd, &stat_info) == 0 &&
                            (S_ISREG(stat_info.st_mode) || S_ISDIR(stat_info.st_mode));
