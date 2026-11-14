@@ -282,7 +282,9 @@ int import_fixture_entry(void)
     char output[8] = {0};
     DWORD output_size = 0;
     if (!ReadFile(read_pipe, output, 7, &output_size, NULL) || output_size != 7 ||
-        __builtin_memcmp(output, "PIPE_OK", 7) != 0)
+        output[0] != 'P' || output[1] != 'I' || output[2] != 'P' ||
+        output[3] != 'E' || output[4] != '_' || output[5] != 'O' ||
+        output[6] != 'K')
         return 123;
     SetLastError(0);
     if (CreateProcessW(NULL, pipe_command, NULL, NULL, FALSE, 0, NULL,
