@@ -108,7 +108,7 @@ int main(int argc, char **argv)
           "write baseline in parent");
     check(nt_SetFilePointerEx(file, 0, NULL, 0), "reset shared offset");
     struct nt_child_file_transfer files;
-    check(nt_runtime_snapshot_inherited_files(true, &files) == NT_ERROR_SUCCESS &&
+    check(nt_runtime_snapshot_inherited_files(true, &files, NULL) == NT_ERROR_SUCCESS &&
           files.count == 1 && files.source_fds[0] >= 128,
           "capture exact inheritable file handle with duplicated host FD");
     spawn_child(argv[0], true, file, &files);
@@ -116,7 +116,7 @@ int main(int argc, char **argv)
     int64_t current = -1;
     check(nt_SetFilePointerEx(file, 0, &current, 1) && current == 5,
           "child advanced parent's shared open-file description");
-    check(nt_runtime_snapshot_inherited_files(false, &files) == NT_ERROR_SUCCESS &&
+    check(nt_runtime_snapshot_inherited_files(false, &files, NULL) == NT_ERROR_SUCCESS &&
           files.count == 0,
           "bInheritHandles=FALSE excludes even explicitly inheritable file handles");
     spawn_child(argv[0], false, file, &files);
@@ -133,7 +133,7 @@ int main(int argc, char **argv)
     uintptr_t event = nt_CreateEventW(NULL, 1, 0, NULL);
     check(event != 0 && nt_runtime_set_waitable_flags(event, 1u, 1u),
           "mark event inheritable");
-    check(nt_runtime_snapshot_inherited_files(true, &files) ==
+    check(nt_runtime_snapshot_inherited_files(true, &files, NULL) ==
           NT_ERROR_NOT_SUPPORTED, "reject unsupported cross-process event inheritance");
     check(nt_runtime_close_waitable(event), "close event");
     check(nt_CloseHandle(file), "close original inherited file HANDLE");
