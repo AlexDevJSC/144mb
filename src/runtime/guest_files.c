@@ -228,6 +228,8 @@ static int path_root(const char **path)
             return folder_roots[i].fd;
         }
     }
+    if (drive_root < 0)
+        errno = ENOENT;
     return drive_root;
 }
 
