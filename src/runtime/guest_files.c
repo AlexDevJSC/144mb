@@ -1820,6 +1820,58 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
            nt_GetFileAttributesExW(wide, level, info);
 }
 
+/* Only the meaningful native equivalents of NORMAL and READONLY can be
+ * changed here. DIRECTORY, SYSTEM, HIDDEN and NTFS attributes are not
+ * Linux chmod flags and must never be silently claimed as supported. */
+int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
+{
+    if (attributes != FILE_ATTRIBUTE_NORMAL && attributes != 1u) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    char path[PATH_MAX];
+    if (!guest_path(input, path)) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const int fd = confined_open(root, relative, O_RDONLY, 0);
+    const int open_error = errno;
+    close(root);
+    if (fd < 0) {
+        nt_SetLastError(path_error(open_error, false));
+        return 0;
+    }
+    struct stat info;
+    int result = fstat(fd, &info);
+    if (result == 0 && !S_ISREG(info.st_mode)) {
+        errno = EACCES;
+        result = -1;
+    }
+    if (result == 0) {
+        const mode_t original = info.st_mode & 07777;
+        const mode_t changed = attributes == 1u ? original & ~(mode_t)0222 :
+                                                         original | S_IWUSR;
+        result = fchmod(fd, changed);
+    }
+    const int error = errno;
+    close(fd);
+    if (result < 0)
+        nt_SetLastError(path_error(error, false));
+    return result == 0;
+}
+
+int32_t NT_MS_ABI nt_SetFileAttributesW(const uint16_t *input, uint32_t attributes)
+{
+    char narrow[PATH_MAX];
+    return wide_path(input, narrow) && nt_SetFileAttributesA(narrow, attributes);
+}
+
 uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer)
 {
     uint16_t wide[PATH_MAX];
