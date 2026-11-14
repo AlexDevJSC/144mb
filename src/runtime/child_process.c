@@ -290,7 +290,7 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
     }
     if (!launch_child || process_security || thread_security ||
         (flags & ~(4u | 0x400u)) || startup->reserved || startup->reserved_bytes || startup->reserved_data ||
-        (startup->flags & ~1u)) {
+        (startup->flags & ~(1u | 0x100u))) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
@@ -331,9 +331,13 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         nt_SetLastError(env_error);
         return 0;
     }
+    /* STARTF_USESTDHANDLES is meaningful only with bInheritHandles=TRUE
+     * and three guest HANDLEs that the child can actually open. */
+    uintptr_t stdio[3] = {startup->input, startup->output, startup->error};
+    const uintptr_t *std_handles = (startup->flags & 0x100u) != 0 ? stdio : NULL;
     struct nt_child_file_transfer files;
     const uint32_t inherited_error =
-        nt_runtime_snapshot_inherited_files(inherit_handles != 0, &files);
+        nt_runtime_snapshot_inherited_files(inherit_handles != 0, &files, std_handles);
     if (inherited_error != NT_ERROR_SUCCESS) {
         close(environment_fd);
         free(converted);

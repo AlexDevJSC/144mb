@@ -43,6 +43,17 @@ int import_fixture_entry(void)
         Sleep(30000);
         return 0x766u;
     }
+    if (contains_command_marker(command, L"/nt-std-pipe")) {
+        HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD flags = 0, sent = 0;
+        if (output == NULL || output == INVALID_HANDLE_VALUE ||
+            !GetHandleInformation(output, &flags) ||
+            (flags & HANDLE_FLAG_INHERIT) == 0 ||
+            GetFileType(output) != FILE_TYPE_PIPE ||
+            !WriteFile(output, "PIPE_OK", 7, &sent, NULL) || sent != 7)
+            return 118;
+        return 0x12345678u;
+    }
     /* The HANDLE is the guest's numeric token, not a host FD or PID.
      * The child inherits its real Linux open-file description. */
     static const WCHAR prefix[] = L"/nt-file-handle=";
@@ -247,6 +258,41 @@ int import_fixture_entry(void)
                        directory, &startup, &process) ||
         GetLastError() != ERROR_NOT_SUPPORTED || !CloseHandle(unshareable))
         return 117;
+    /* STARTF_USESTDHANDLES must point to truly inherited Win32 pipe
+     * handles, not to invented Linux stdout/stderr pseudo values. */
+    HANDLE read_pipe = NULL, write_pipe = NULL;
+    if (!CreatePipe(&read_pipe, &write_pipe, &security, 0) ||
+        GetFileType(read_pipe) != FILE_TYPE_PIPE)
+        return 119;
+    STARTUPINFOW redirected = startup;
+    redirected.dwFlags = STARTF_USESTDHANDLES;
+    redirected.hStdInput = read_pipe;
+    redirected.hStdOutput = write_pipe;
+    redirected.hStdError = write_pipe;
+    WCHAR pipe_command[] = L"\"C:\\Test child.exe\" /nt-std-pipe ä";
+    if (!CreateProcessW(NULL, pipe_command, NULL, NULL, TRUE, 0, NULL,
+                        directory, &redirected, &process))
+        return 120;
+    if (WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 121;
+    if (!CloseHandle(write_pipe))
+        return 122;
+    char output[8] = {0};
+    DWORD output_size = 0;
+    if (!ReadFile(read_pipe, output, 7, &output_size, NULL) || output_size != 7 ||
+        output[0] != 'P' || output[1] != 'I' || output[2] != 'P' ||
+        output[3] != 'E' || output[4] != '_' || output[5] != 'O' ||
+        output[6] != 'K')
+        return 123;
+    SetLastError(0);
+    if (CreateProcessW(NULL, pipe_command, NULL, NULL, FALSE, 0, NULL,
+                       directory, &redirected, &process) ||
+        GetLastError() != ERROR_NOT_SUPPORTED)
+        return 124;
+    if (!CloseHandle(read_pipe))
+        return 125;
     if (!SetEnvironmentVariableW(L"NT_CHILD_INHERITED", NULL))
         return 102;
     return 0;

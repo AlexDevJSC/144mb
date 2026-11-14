@@ -901,6 +901,7 @@ struct child_file_record {
 };
 struct child_file_manifest {
     uint32_t magic, count;
+    uintptr_t standard_handles[3]; /* 0 means no STARTF_USESTDHANDLES */
     struct child_file_record files[NT_CHILD_FILE_LIMIT];
 };
 
@@ -919,7 +920,8 @@ void nt_runtime_release_inherited_files(struct nt_child_file_transfer *transfer)
         transfer->source_fds[i] = -1;
 }
 
-uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer)
+uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer,
+                                             const uintptr_t standard_handles[3])
 {
     if (transfer == NULL)
         return NT_ERROR_INVALID_PARAMETER;
@@ -968,6 +970,27 @@ uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_
                 memcpy(out->path, entry->path, len + 1);
             }
             ++transfer->count;
+        }
+    }
+    if (error == NT_ERROR_SUCCESS && standard_handles != NULL) {
+        if (!enabled) {
+            error = NT_ERROR_NOT_SUPPORTED;
+        } else {
+            for (size_t stream = 0; stream < 3; ++stream) {
+                bool found = false;
+                const uint32_t required = stream == 0 ? FILE_READ : FILE_WRITE;
+                for (size_t i = 0; i < transfer->count; ++i)
+                    if (manifest->files[i].handle == standard_handles[stream] &&
+                        (manifest->files[i].access & required)) {
+                        found = true;
+                        break;
+                    }
+                if (!found) {
+                    error = NT_ERROR_ACCESS_DENIED;
+                    break;
+                }
+                manifest->standard_handles[stream] = standard_handles[stream];
+            }
         }
     }
     pthread_mutex_unlock(&file_lock);
@@ -1068,6 +1091,18 @@ bool nt_runtime_inherited_file_count(int manifest_fd, size_t *count)
     return true;
 }
 
+bool nt_runtime_inherited_standard_handles(int manifest_fd, uintptr_t handles[3])
+{
+    if (handles == NULL)
+        return false;
+    struct child_file_manifest *manifest = read_inherited_file_manifest(manifest_fd);
+    if (manifest == NULL)
+        return false;
+    memcpy(handles, manifest->standard_handles, sizeof(manifest->standard_handles));
+    free(manifest);
+    return true;
+}
+
 bool nt_runtime_restore_inherited_files(int manifest_fd)
 {
     struct child_file_manifest *manifest = read_inherited_file_manifest(manifest_fd);
@@ -1151,6 +1186,82 @@ int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
     if (!file)
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
     return file != NULL;
+}
+
+/* Windows anonymous pipes are real Linux pipe objects, not fake buffered
+ * handles. Both ends are entered into the same Win32 HANDLE table as files,
+ * and a marked inheritable end may cross the existing sealed file protocol. */
+int32_t NT_MS_ABI nt_CreatePipe(uintptr_t *reader, uintptr_t *writer,
+                               const void *security, uint32_t size_hint)
+{
+    if (reader == NULL || writer == NULL || reader == writer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *reader = *writer = 0;
+    const struct security_attributes *attributes = security;
+    if (attributes != NULL && attributes->size != sizeof(*attributes)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (attributes != NULL && attributes->descriptor != NULL) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0) {
+        nt_SetLastError(errno == EMFILE || errno == ENFILE ?
+                        NT_ERROR_NOT_ENOUGH_MEMORY : NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    /* Windows treats nSize as a sizing hint. F_SETPIPE_SZ can be denied
+     * under a cgroup; a functional pipe with default capacity is valid. */
+    if (size_hint != 0 && size_hint <= UINT32_C(1048576))
+        (void)fcntl(fds[0], F_SETPIPE_SZ, (int)size_hint);
+    struct stat info[2];
+    if (fstat(fds[0], &info[0]) != 0 || fstat(fds[1], &info[1]) != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    bool success = false;
+    pthread_mutex_lock(&file_lock);
+    if (next_handle <= UINTPTR_MAX - 32u) {
+        struct guest_file *read_end = new_file();
+        if (read_end != NULL) {
+            /* Reserve this slot while locating the second free entry. */
+            read_end->owner = WIN_HANDLE;
+            struct guest_file *write_end = new_file();
+            if (write_end != NULL) {
+                const uint32_t flags = attributes && attributes->inherit ?
+                                       HANDLE_FLAG_INHERIT : 0u;
+                *reader = next_handle;
+                *writer = next_handle + 16u;
+                next_handle += 32u;
+                *read_end = (struct guest_file){
+                    .owner = WIN_HANDLE, .handle = *reader, .fd = fds[0],
+                    .access = FILE_READ, .share = FILE_READ | FILE_WRITE,
+                    .handle_flags = flags, .device = info[0].st_dev, .inode = info[0].st_ino
+                };
+                *write_end = (struct guest_file){
+                    .owner = WIN_HANDLE, .handle = *writer, .fd = fds[1],
+                    .access = FILE_WRITE, .share = FILE_READ | FILE_WRITE,
+                    .handle_flags = flags, .device = info[1].st_dev, .inode = info[1].st_ino
+                };
+                success = true;
+            } else {
+                read_end->owner = FREE_FILE;
+            }
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    if (!success) {
+        close(fds[0]);
+        close(fds[1]);
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+    }
+    return success;
 }
 
 int32_t NT_MS_ABI nt_SetHandleInformation(uintptr_t handle, uint32_t mask, uint32_t flags)
