@@ -288,7 +288,7 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    if (!launch_child || process_security || thread_security || inherit_handles ||
+    if (!launch_child || process_security || thread_security ||
         (flags & ~(4u | 0x400u)) || startup->reserved || startup->reserved_bytes || startup->reserved_data ||
         (startup->flags & ~1u)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
@@ -331,10 +331,22 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         nt_SetLastError(env_error);
         return 0;
     }
+    struct nt_child_file_transfer files;
+    const uint32_t inherited_error =
+        nt_runtime_snapshot_inherited_files(inherit_handles != 0, &files);
+    if (inherited_error != NT_ERROR_SUCCESS) {
+        close(environment_fd);
+        free(converted);
+        close(fd);
+        nt_SetLastError(inherited_error);
+        return 0;
+    }
     pid_t pid = 0;
     int status_fd = -1, start_fd = -1;
     int error = launch_child(fd, path, converted ? converted : default_command, workdir,
-                             (flags & 4u) != 0, environment_fd, &pid, &status_fd, &start_fd);
+                             (flags & 4u) != 0, environment_fd, &files,
+                             &pid, &status_fd, &start_fd);
+    nt_runtime_release_inherited_files(&files);
     close(environment_fd);
     free(converted);
     close(fd);
