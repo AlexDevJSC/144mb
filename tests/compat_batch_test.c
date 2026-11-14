@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "compat.h"
 #include "winfile.h"
+#include "sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
