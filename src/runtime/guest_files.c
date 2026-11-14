@@ -23,6 +23,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/xattr.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -632,6 +633,67 @@ bool nt_runtime_check_guest_file(const char *path, char *output, size_t capacity
         return false;
     *exists = found;
     return true;
+}
+
+/* Persist Windows-only metadata on the actual Linux inode, never in
+ * a parallel Windows filesystem. An O_PATH metadata query uses its pinned
+ * /proc/self/fd reference when fgetxattr rejects O_PATH (EBADF). */
+#define WIN_ATTR_XATTR "user.ntnative.winattrs"
+#define WIN_BIRTH_XATTR "user.ntnative.birthtime"
+enum { WIN_READONLY = 1, WIN_HIDDEN = 2, WIN_SYSTEM = 4,
+       WIN_DIRECTORY = 16, WIN_ARCHIVE = 32, WIN_NORMAL = 128,
+       WIN_EXTENDED = WIN_HIDDEN | WIN_SYSTEM | WIN_ARCHIVE };
+
+static void descriptor_path(int fd, char path[64])
+{
+    snprintf(path, 64, "/proc/self/fd/%d", fd);
+}
+
+static ssize_t read_guest_xattr(int fd, const char *name, void *value, size_t size)
+{
+    ssize_t result = fgetxattr(fd, name, value, size);
+    if (result < 0 && errno == EBADF) {
+        char path[64];
+        descriptor_path(fd, path);
+        result = getxattr(path, name, value, size);
+    }
+    return result;
+}
+
+static int write_guest_xattr(int fd, const char *name, const void *value, size_t size)
+{
+    int result = fsetxattr(fd, name, value, size, 0);
+    if (result < 0 && errno == EBADF) {
+        char path[64];
+        descriptor_path(fd, path);
+        result = setxattr(path, name, value, size, 0);
+    }
+    return result;
+}
+
+static int clear_guest_xattr(int fd, const char *name)
+{
+    int result = fremovexattr(fd, name);
+    if (result < 0 && errno == EBADF) {
+        char path[64];
+        descriptor_path(fd, path);
+        result = removexattr(path, name);
+    }
+    return result == 0 || errno == ENODATA ? 0 : -1;
+}
+
+static bool copy_guest_xattr(int source, int destination, const char *name,
+                             size_t expected)
+{
+    unsigned char bytes[sizeof(uint64_t)];
+    const ssize_t count = read_guest_xattr(source, name, bytes, expected);
+    if (count == (ssize_t)expected)
+        return write_guest_xattr(destination, name, bytes, expected) == 0;
+    if (count < 0 && (errno == ENODATA || errno == ENOTSUP))
+        return clear_guest_xattr(destination, name) == 0;
+    if (count >= 0)
+        errno = EINVAL;
+    return false;
 }
 
 static uint32_t path_error(int error, bool parent)
@@ -2113,7 +2175,8 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
  * Linux chmod flags and must never be silently claimed as supported. */
 int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
 {
-    if (attributes != FILE_ATTRIBUTE_NORMAL && attributes != 1u) {
+    if (attributes == 0 || (attributes & ~(WIN_READONLY | WIN_EXTENDED | WIN_NORMAL)) ||
+        ((attributes & WIN_NORMAL) && attributes != WIN_NORMAL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
@@ -2143,9 +2206,16 @@ int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
     }
     if (result == 0) {
         const mode_t original = info.st_mode & 07777;
-        const mode_t changed = attributes == 1u ? original & ~(mode_t)0222 :
-                                                         original | S_IWUSR;
-        result = fchmod(fd, changed);
+        const mode_t changed = (attributes & WIN_READONLY) ? original & ~(mode_t)0222 :
+                                                                 original | S_IWUSR;
+        const uint32_t extended = attributes & WIN_EXTENDED;
+        /* First verify host filesystem support for the requested flags.
+         * Failure is explicit rather than claiming a Hidden/System bit. */
+        result = extended ? write_guest_xattr(fd, WIN_ATTR_XATTR, &extended,
+                                               sizeof(extended)) :
+                            clear_guest_xattr(fd, WIN_ATTR_XATTR);
+        if (result == 0)
+            result = fchmod(fd, changed);
     }
     const int error = errno;
     close(fd);
@@ -2352,8 +2422,14 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
                 const struct timespec times[2] = {source_info.st_atim, source_info.st_mtim};
                 /* Do not copy setuid/setgid bits: those are Linux process
                  * credentials, not Windows file attributes. */
-                const int metadata_ok = fchmod(output_fd, source_info.st_mode & 0777) == 0 &&
-                                        futimens(output_fd, times) == 0;
+                const int source_attrs_fd = duplicate_handle(from, FILE_READ);
+                const int metadata_ok = source_attrs_fd >= 0 &&
+                    copy_guest_xattr(source_attrs_fd, output_fd, WIN_ATTR_XATTR, sizeof(uint32_t)) &&
+                    copy_guest_xattr(source_attrs_fd, output_fd, WIN_BIRTH_XATTR, sizeof(uint64_t)) &&
+                    fchmod(output_fd, source_info.st_mode & 0777) == 0 &&
+                    futimens(output_fd, times) == 0;
+                if (source_attrs_fd >= 0)
+                    close(source_attrs_fd);
                 const int metadata_error = errno;
                 close(output_fd);
                 if (!metadata_ok)
@@ -2660,9 +2736,21 @@ static struct nt_file_attribute_data file_attributes(int fd, const struct stat *
     if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_BTIME, &extended) == 0 &&
         (extended.stx_mask & STATX_BTIME) != 0)
         created = (struct timespec){extended.stx_btime.tv_sec, extended.stx_btime.tv_nsec};
-    uint32_t attributes = S_ISDIR(stat_info->st_mode) ? 0x10u : 0;
+    uint64_t saved_birth = 0;
+    if (read_guest_xattr(fd, WIN_BIRTH_XATTR, &saved_birth, sizeof(saved_birth)) ==
+        (ssize_t)sizeof(saved_birth))
+        created = (struct timespec){
+            (int64_t)(saved_birth / UINT64_C(10000000)) - INT64_C(11644473600),
+            (long)(saved_birth % UINT64_C(10000000)) * 100
+        };
+    uint32_t stored = 0;
+    if (read_guest_xattr(fd, WIN_ATTR_XATTR, &stored, sizeof(stored)) !=
+        (ssize_t)sizeof(stored))
+        stored = 0;
+    uint32_t attributes = (S_ISDIR(stat_info->st_mode) ? WIN_DIRECTORY : 0) |
+                          (stored & WIN_EXTENDED);
     if ((stat_info->st_mode & 0222) == 0)
-        attributes |= 1;
+        attributes |= WIN_READONLY;
     const uint64_t size = S_ISDIR(stat_info->st_mode) ? 0 : (uint64_t)stat_info->st_size;
     return (struct nt_file_attribute_data){attributes != 0 ? attributes : FILE_ATTRIBUTE_NORMAL,
         file_time(created), file_time(stat_info->st_atim), file_time(stat_info->st_mtim),
@@ -3082,20 +3170,24 @@ int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *cr
                                 const struct nt_file_time *accessed,
                                 const struct nt_file_time *written)
 {
-    if (created) {
-        /* Host Linux birth time is not settable through futimens. Never
-         * report a successful Windows creation-time update if it was lost. */
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
-    }
-    if (!accessed && !written)
+    if (!created && !accessed && !written)
         return 1;
-    const struct timespec dates[2] = {
-        accessed ? to_timespec(ticks(*accessed)) : (struct timespec){0, UTIME_OMIT},
-        written ? to_timespec(ticks(*written)) : (struct timespec){0, UTIME_OMIT}
-    };
     const int fd = duplicate_handle(handle, FILE_WRITE);
-    return file_result(fd, fd >= 0 && futimens(fd, dates) == 0);
+    if (fd < 0)
+        return file_result(fd, false);
+    bool valid = true;
+    if (created) {
+        const uint64_t value = ticks(*created);
+        valid = write_guest_xattr(fd, WIN_BIRTH_XATTR, &value, sizeof(value)) == 0;
+    }
+    if (valid && (accessed || written)) {
+        const struct timespec dates[2] = {
+            accessed ? to_timespec(ticks(*accessed)) : (struct timespec){0, UTIME_OMIT},
+            written ? to_timespec(ticks(*written)) : (struct timespec){0, UTIME_OMIT}
+        };
+        valid = futimens(fd, dates) == 0;
+    }
+    return file_result(fd, valid);
 }
 
 int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, const void *info, uint32_t size)
