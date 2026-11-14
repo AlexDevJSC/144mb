@@ -54,7 +54,22 @@ static int run_child(bool should_inherit, uintptr_t value)
     return 0;
 }
 
-static void spawn_child(const char *executable, bool inherit,
+static int run_pipe_child(uintptr_t value)
+{
+    size_t count = 0;
+    if (!nt_runtime_inherited_file_count(7, &count) || count != 1u ||
+        !nt_runtime_restore_inherited_files(7))
+        return 36;
+    close(7);
+    uint32_t written = 0;
+    if (nt_GetFileType(value) != 3 ||
+        !nt_WriteFile(value, "PIPE_OK", 7, &written, NULL) || written != 7 ||
+        !nt_CloseHandle(value))
+        return 37;
+    return 0;
+}
+
+static void spawn_child(const char *executable, const char *mode,
                         uintptr_t handle, const struct nt_child_file_transfer *transfer)
 {
     posix_spawn_file_actions_t actions;
@@ -69,8 +84,7 @@ static void spawn_child(const char *executable, bool inherit,
               "inherit only selected host file descriptors");
     char token[48];
     snprintf(token, sizeof(token), "%llu", (unsigned long long)handle);
-    char *const arguments[] = {(char *)executable,
-                               inherit ? "--inherited" : "--not-inherited", token, NULL};
+    char *const arguments[] = {(char *)executable, (char *)mode, token, NULL};
     pid_t pid = -1;
     check(posix_spawn(&pid, executable, &actions, NULL, arguments, environ) == 0,
           "start subprocess with sealed metadata and selected fd");
@@ -92,6 +106,8 @@ int main(int argc, char **argv)
             return run_child(true, (uintptr_t)parsed);
         if (strcmp(argv[1], "--not-inherited") == 0)
             return run_child(false, (uintptr_t)parsed);
+        if (strcmp(argv[1], "--pipe-child") == 0)
+            return run_pipe_child((uintptr_t)parsed);
         return 29;
     }
     check(argc == 1, "test arguments");
@@ -111,7 +127,7 @@ int main(int argc, char **argv)
     check(nt_runtime_snapshot_inherited_files(true, &files, NULL) == NT_ERROR_SUCCESS &&
           files.count == 1 && files.source_fds[0] >= 128,
           "capture exact inheritable file handle with duplicated host FD");
-    spawn_child(argv[0], true, file, &files);
+    spawn_child(argv[0], "--inherited", file, &files);
     nt_runtime_release_inherited_files(&files);
     int64_t current = -1;
     check(nt_SetFilePointerEx(file, 0, &current, 1) && current == 5,
@@ -119,7 +135,7 @@ int main(int argc, char **argv)
     check(nt_runtime_snapshot_inherited_files(false, &files, NULL) == NT_ERROR_SUCCESS &&
           files.count == 0,
           "bInheritHandles=FALSE excludes even explicitly inheritable file handles");
-    spawn_child(argv[0], false, file, &files);
+    spawn_child(argv[0], "--not-inherited", file, &files);
     nt_runtime_release_inherited_files(&files);
     int pipe_fds[2];
     check(pipe(pipe_fds) == 0, "make unsealed descriptor");
@@ -136,6 +152,28 @@ int main(int argc, char **argv)
     check(nt_runtime_snapshot_inherited_files(true, &files, NULL) ==
           NT_ERROR_NOT_SUPPORTED, "reject unsupported cross-process event inheritance");
     check(nt_runtime_close_waitable(event), "close event");
+    /* Anonymous pipes use real kernel pipes and the same inherited file
+     * protocol. The child's WriteFile reaches the parent's ReadFile. */
+    uintptr_t read_end = 0, write_end = 0;
+    check(nt_CreatePipe(&read_end, &write_end, &security, 0) &&
+          read_end != 0 && write_end != 0 &&
+          nt_GetFileType(read_end) == 3 && nt_GetFileType(write_end) == 3,
+          "create real anonymous Win32 pipe");
+    check(nt_SetHandleInformation(read_end, 1u, 0) &&
+          nt_SetHandleInformation(file, 1u, 0),
+          "only the write pipe end is inheritable");
+    check(nt_runtime_snapshot_inherited_files(true, &files, NULL) ==
+          NT_ERROR_SUCCESS && files.count == 1,
+          "snapshot only inheritable pipe writer");
+    spawn_child(argv[0], "--pipe-child", write_end, &files);
+    nt_runtime_release_inherited_files(&files);
+    char pipe_data[8] = {0};
+    uint32_t got = 0;
+    check(nt_ReadFile(read_end, pipe_data, 7, &got, NULL) &&
+          got == 7 && strcmp(pipe_data, "PIPE_OK") == 0,
+          "read message from child's inherited pipe writer");
+    check(nt_CloseHandle(read_end) && nt_CloseHandle(write_end),
+          "close both ends of anonymous pipe");
     check(nt_CloseHandle(file), "close original inherited file HANDLE");
     check(nt_runtime_set_file_root(NULL), "release guest volume");
     char pathname[256];
