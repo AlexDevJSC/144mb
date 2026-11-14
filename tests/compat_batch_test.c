@@ -727,6 +727,20 @@ static void check_files(void)
     CHECK(!nt_GetOverlappedResult(background, &victim, &async_completed, 1) &&
           last_error() == NT_ERROR_OPERATION_ABORTED);
     CHECK(nt_WaitForSingleObject(cancelled_event, 1000) == 0);
+    /* NULL cancels all queued requests associated with the HANDLE, but
+     * leaves the already-running read to complete normally. */
+    struct nt_overlapped all_one = {.offset = 1};
+    struct nt_overlapped all_two = {.offset = 2};
+    char all_one_byte = 0, all_two_byte = 0;
+    CHECK(!nt_ReadFile(background, &all_one_byte, 1, NULL, &all_one) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(!nt_ReadFile(background, &all_two_byte, 1, NULL, &all_two) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_CancelIoEx(background, NULL));
+    CHECK(!nt_GetOverlappedResult(background, &all_one, &async_completed, 1) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED);
+    CHECK(!nt_GetOverlappedResult(background, &all_two, &async_completed, 1) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED);
     CHECK(!nt_CancelIoEx(background, &running) && last_error() == NT_ERROR_NOT_FOUND);
     pthread_mutex_lock(&async_test_lock);
     async_hold_release = true;
