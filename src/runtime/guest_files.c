@@ -30,6 +30,10 @@
 
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 static int drive_root = -1;
+static int extra_drives[26];
+enum { UNC_GRANTS_MAX = 8 };
+struct unc_grant { int fd; char server[64], share[64]; };
+static struct unc_grant unc_grants[UNC_GRANTS_MAX];
 static char guest_cwd[PATH_MAX];
 static struct { int fd; bool active; } folder_roots[NT_USER_FOLDER_COUNT];
 
@@ -47,6 +51,16 @@ bool nt_runtime_set_file_root(const char *directory)
             close(folder_roots[i].fd);
             folder_roots[i].active = false;
         }
+    }
+    for (size_t i = 0; i < 26; ++i) {
+        if (extra_drives[i] > 0)
+            close(extra_drives[i] - 1);
+        extra_drives[i] = 0;
+    }
+    for (size_t i = 0; i < UNC_GRANTS_MAX; ++i) {
+        if (unc_grants[i].fd > 0)
+            close(unc_grants[i].fd - 1);
+        memset(&unc_grants[i], 0, sizeof(unc_grants[i]));
     }
     pthread_mutex_unlock(&root_lock);
     if (previous >= 0)
@@ -72,6 +86,87 @@ bool nt_runtime_set_user_folder_root(size_t folder, const char *directory)
     return true;
 }
 
+/* All secondary roots are explicit grants to physical Linux directories.
+ * Never infer /mnt/drive, a home directory, or a network mount from a DOS
+ * letter or a UNC hostname. Directories are opened once and pinned by FD. */
+bool nt_runtime_set_drive_root(char letter, const char *directory)
+{
+    if (letter >= 'a' && letter <= 'z')
+        letter -= 'a' - 'A';
+    if (letter < 'A' || letter > 'Z') {
+        errno = EINVAL;
+        return false;
+    }
+    if (letter == 'C')
+        return nt_runtime_set_file_root(directory);
+    const int opened = directory ?
+        open(directory, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (directory && opened < 0)
+        return false;
+    pthread_mutex_lock(&root_lock);
+    int *slot = &extra_drives[letter - 'A'];
+    const int former = *slot;
+    *slot = opened < 0 ? 0 : opened + 1;
+    pthread_mutex_unlock(&root_lock);
+    if (former > 0)
+        close(former - 1);
+    return true;
+}
+
+static bool unc_part(const char *part)
+{
+    if (!part || !*part || strlen(part) >= 64)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)part; *p; ++p)
+        if (!( (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+               (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' || *p == '.'))
+            return false;
+    return true;
+}
+
+bool nt_runtime_set_unc_root(const char *server, const char *share, const char *directory)
+{
+    if (!unc_part(server) || !unc_part(share)) {
+        errno = EINVAL;
+        return false;
+    }
+    const int opened = directory ?
+        open(directory, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (directory && opened < 0)
+        return false;
+    pthread_mutex_lock(&root_lock);
+    int index = -1;
+    for (int i = 0; i < UNC_GRANTS_MAX; ++i) {
+        if (unc_grants[i].fd > 0 &&
+            strcasecmp(unc_grants[i].server, server) == 0 &&
+            strcasecmp(unc_grants[i].share, share) == 0) {
+            index = i;
+            break;
+        }
+        if (index < 0 && unc_grants[i].fd == 0)
+            index = i;
+    }
+    if (index < 0) {
+        pthread_mutex_unlock(&root_lock);
+        if (opened >= 0)
+            close(opened);
+        errno = ENOSPC;
+        return false;
+    }
+    struct unc_grant *slot = &unc_grants[index];
+    const int previous = slot->fd;
+    memset(slot, 0, sizeof(*slot));
+    if (opened >= 0) {
+        slot->fd = opened + 1;
+        strcpy(slot->server, server);
+        strcpy(slot->share, share);
+    }
+    pthread_mutex_unlock(&root_lock);
+    if (previous > 0)
+        close(previous - 1);
+    return true;
+}
+
 unsigned int nt_runtime_shared_user_folders(void)
 {
     unsigned int folders = 0;
@@ -87,6 +182,34 @@ unsigned int nt_runtime_shared_user_folders(void)
 /* The caller holds root_lock while resolving paths and duplicating the root. */
 static int path_root(const char **path)
 {
+    if ((*path)[0] == '/' && (*path)[1] == '/') {
+        const char *server = *path + 2;
+        const char *slash = strchr(server, '/');
+        const char *share = slash ? slash + 1 : NULL;
+        const char *end = share ? strchr(share, '/') : NULL;
+        if (!slash || !share || !*share)
+            return -1;
+        const size_t server_length = (size_t)(slash - server);
+        const size_t share_length = end ? (size_t)(end - share) : strlen(share);
+        for (size_t i = 0; i < UNC_GRANTS_MAX; ++i) {
+            const struct unc_grant *grant = &unc_grants[i];
+            if (grant->fd > 0 && strlen(grant->server) == server_length &&
+                strlen(grant->share) == share_length &&
+                strncasecmp(server, grant->server, server_length) == 0 &&
+                strncasecmp(share, grant->share, share_length) == 0) {
+                *path = end && end[1] ? end + 1 : ".";
+                return grant->fd - 1;
+            }
+        }
+        return -1;
+    }
+    if ((*path)[0] >= 'A' && (*path)[0] <= 'Z' && (*path)[1] == ':') {
+        const int index = (*path)[0] - 'A';
+        *path = (*path)[2] == '/' ? *path + 3 : *path + 2;
+        if (!**path)
+            *path = ".";
+        return extra_drives[index] > 0 ? extra_drives[index] - 1 : -1;
+    }
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         if (!folder_roots[i].active)
             continue;
@@ -151,35 +274,88 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         errno = EINVAL;
         return false;
     }
-    /* Windows ANSI extended DOS prefix; UNC and NT device namespaces
-     * remain deliberately unsupported rather than accessing host paths. */
+    /* Explicit DOS drive and authorized UNC roots; all roots stay pinned
+     * to separate FDs and may never be selected by a Linux host pathname. */
     bool extended = false;
     if (input[0] == '\\' && input[1] == '\\' &&
         input[2] == '?' && input[3] == '\\') {
         extended = true;
         input += 4;
     }
-    const bool has_drive = input[1] == ':';
+    if (extended && strncasecmp(input, "UNC\\", 4) == 0)
+        input += 4;
+    const bool unc = separator(input[0]) && separator(input[1]);
+    const bool has_drive = !unc && input[1] == ':';
     const bool absolute = has_drive ? separator(input[2]) : separator(input[0]);
+    char letter = 0;
     if (has_drive) {
-        if ((*input != 'C' && *input != 'c') ||
-            (extended && !separator(input[2]))) {
+        letter = input[0] >= 'a' && input[0] <= 'z' ? input[0] - ('a' - 'A') : input[0];
+        if (letter < 'A' || letter > 'Z' ||
+            (extended && !separator(input[2])) ||
+            (letter != 'C' && !separator(input[2]))) {
             errno = EINVAL;
             return false;
         }
-        /* C:relative follows the current C: directory. C:\relative and
-         * \relative are rooted at the physical guest C: directory. */
         input += 2;
-    } else if (extended || (separator(input[0]) && separator(input[1]))) {
+    } else if (extended && !unc) {
         errno = EACCES;
         return false;
     }
-
     size_t used = 0;
-    if (!absolute) {
+    size_t boundary = 0;
+    if (unc) {
+        input += 2;
+        const char *server = input;
+        while (*input && !separator(*input))
+            ++input;
+        const size_t server_length = (size_t)(input - server);
+        if (!separator(*input)) {
+            errno = EINVAL;
+            return false;
+        }
+        ++input;
+        const char *share = input;
+        while (*input && !separator(*input))
+            ++input;
+        const size_t share_length = (size_t)(input - share);
+        char server_part[64], share_part[64];
+        if (!server_length || !share_length || server_length >= sizeof(server_part) ||
+            share_length >= sizeof(share_part)) {
+            errno = EINVAL;
+            return false;
+        }
+        memcpy(server_part, server, server_length);
+        server_part[server_length] = '\0';
+        memcpy(share_part, share, share_length);
+        share_part[share_length] = '\0';
+        if (!unc_part(server_part) || !unc_part(share_part)) {
+            errno = EINVAL;
+            return false;
+        }
+        output[used++] = '/'; output[used++] = '/';
+        memcpy(output + used, server_part, server_length);
+        used += server_length;
+        output[used++] = '/';
+        memcpy(output + used, share_part, share_length);
+        used += share_length;
+        boundary = used;
+    } else if (letter != 0 && letter != 'C') {
+        output[0] = letter;
+        output[1] = ':';
+        used = boundary = 2;
+    } else if (!absolute) {
         pthread_mutex_lock(&root_lock);
         used = strlen(guest_cwd);
         memcpy(output, guest_cwd, used);
+        pthread_mutex_unlock(&root_lock);
+        if (used >= 2 && output[1] == ':')
+            boundary = 2;
+    } else if (!has_drive) {
+        pthread_mutex_lock(&root_lock);
+        if (guest_cwd[1] == ':') {
+            memcpy(output, guest_cwd, 2);
+            used = boundary = 2;
+        }
         pthread_mutex_unlock(&root_lock);
     }
     while (*input != '\0') {
@@ -211,7 +387,7 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
                 }
             }
             pthread_mutex_unlock(&root_lock);
-            if (used == 0 || at_share_boundary) {
+            if (used <= boundary || at_share_boundary) {
                 errno = EACCES;
                 return false;
             }
@@ -556,12 +732,29 @@ int nt_runtime_read_guest_file(const char *path, size_t limit, void **data, size
 
 static bool copy_dos_path(const char *relative, char *output, size_t capacity)
 {
+    if (relative[0] == '/' && relative[1] == '/') {
+        const size_t length = strlen(relative);
+        if (length + 1 > capacity) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        for (size_t i = 0; i <= length; ++i)
+            output[i] = relative[i] == '/' ? '\\' : relative[i];
+        return true;
+    }
+    const bool other_drive = relative[0] >= 'A' && relative[0] <= 'Z' &&
+                             relative[1] == ':';
+    const char drive = other_drive ? relative[0] : 'C';
+    if (other_drive)
+        relative += 2 + (relative[2] == '/');
     const size_t length = strlen(relative);
     if (capacity < 4 || length > capacity - 4) {
         errno = ENAMETOOLONG;
         return false;
     }
-    memcpy(output, "C:\\", 3);
+    output[0] = drive;
+    output[1] = ':';
+    output[2] = '\\';
     for (size_t i = 0; i <= length; ++i)
         output[3 + i] = relative[i] == '/' ? '\\' : relative[i];
     return true;
