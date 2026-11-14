@@ -644,6 +644,57 @@ static bool file_blocks_delete(const struct stat *info)
     return false;
 }
 
+/* Existing file handles continue to reference their Linux inode after a
+ * rename. Their reported Windows pathname must also follow the move,
+ * including files inside a directory being renamed. Prepare every string
+ * before the syscall so allocation failure cannot leave stale paths. */
+static bool guest_path_prefix(const char *path, const char *prefix)
+{
+    size_t i = 0;
+    for (; prefix[i] != '\0'; ++i) {
+        if (path[i] == '\0' ||
+            lower_ascii((unsigned char)path[i]) != lower_ascii((unsigned char)prefix[i]))
+            return false;
+    }
+    return path[i] == '\0' || path[i] == '/';
+}
+
+static bool prepare_renamed_paths(const char *from, const char *to,
+                                  char *updated[FILE_TABLE_SIZE])
+{
+    const size_t from_length = strlen(from), to_length = strlen(to);
+    for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
+        const char *old = files[i].path;
+        if (files[i].owner == FREE_FILE || !old || !guest_path_prefix(old, from))
+            continue;
+        const size_t suffix = strlen(old + from_length);
+        if (to_length + suffix >= PATH_MAX) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        updated[i] = malloc(to_length + suffix + 1);
+        if (!updated[i])
+            return false;
+        memcpy(updated[i], to, to_length);
+        memcpy(updated[i] + to_length, old + from_length, suffix + 1);
+    }
+    return true;
+}
+
+static void finish_renamed_paths(char *updated[FILE_TABLE_SIZE], bool committed)
+{
+    for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
+        if (!updated[i])
+            continue;
+        if (committed) {
+            free(files[i].path);
+            files[i].path = updated[i];
+        } else {
+            free(updated[i]);
+        }
+    }
+}
+
 static struct guest_file *new_file(void)
 {
     for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
@@ -1087,9 +1138,17 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
             } else if (exists < 0 && errno != ENOENT) {
                 status = -1;
             } else {
-                status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
-                                      destination_parent, rename_leaf,
-                                      (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+                char *updated[FILE_TABLE_SIZE] = {0};
+                if (!prepare_renamed_paths(source, destination, updated)) {
+                    status = -1;
+                } else {
+                    status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
+                                          destination_parent, rename_leaf,
+                                          (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+                }
+                const int rename_error = errno;
+                finish_renamed_paths(updated, status == 0);
+                errno = rename_error;
             }
         }
     }
