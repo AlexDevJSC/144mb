@@ -160,6 +160,20 @@ int main(void)
     CHECK(paths[1] != NULL && strcmp(paths[1], other) == 0);
     nt_guest_share_free(paths, 6);
 
+    /* A remembered grant must survive a symlink alias being redirected
+     * after it was authorized. Store the canonical target, not the alias. */
+    char alias[512], alternate[512];
+    CHECK(snprintf(alias, sizeof(alias), "%s/host-folder-alias", root) > 0);
+    CHECK(snprintf(alternate, sizeof(alternate), "%s/alternate", root) > 0);
+    CHECK(mkdir(alternate, 0700) == 0);
+    CHECK(symlink(other, alias) == 0);
+    CHECK(nt_guest_share_update(NULL, root, names, 6, "Documents", alias) == 0);
+    CHECK(unlink(alias) == 0 && symlink(alternate, alias) == 0);
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) == 0 &&
+          paths[1] != NULL && strcmp(paths[1], other) == 0);
+    nt_guest_share_free(paths, 6);
+    CHECK(unlink(alias) == 0);
+
     /* The granted native directory contains the actual file, not a copy. */
     shared = nt_open_shared_folder(other, root);
     CHECK(shared >= 0);
@@ -198,6 +212,21 @@ int main(void)
           errno == EINVAL);
     CHECK(nt_guest_share_update(NULL, root, names, 6, "InvalidFolder", other) < 0 &&
           errno == EINVAL);
+
+    /* Each of the six public known folders can be remembered, recovered
+     * and revoked independently, with no accidental HOME fallback. */
+    for (size_t i = 0; i < 6; ++i)
+        CHECK(nt_guest_share_update(NULL, root, names, 6, names[i], other) == 0);
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) == 0);
+    for (size_t i = 0; i < 6; ++i)
+        CHECK(paths[i] != NULL && strcmp(paths[i], other) == 0);
+    nt_guest_share_free(paths, 6);
+    for (size_t i = 0; i < 6; ++i)
+        CHECK(nt_guest_share_update(NULL, root, names, 6, names[i], NULL) == 0);
+    CHECK(nt_guest_share_load(NULL, root, names, 6, paths) == 0);
+    for (size_t i = 0; i < 6; ++i)
+        CHECK(paths[i] == NULL);
+    nt_guest_share_free(paths, 6);
 
     char config_path[512];
     CHECK(snprintf(config_path, sizeof(config_path),
