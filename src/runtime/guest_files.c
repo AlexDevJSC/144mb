@@ -973,8 +973,10 @@ int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags)
 {
     char source[PATH_MAX], destination[PATH_MAX];
-    if (flags > 1) {
-        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+    /* MOVEFILE_REPLACE_EXISTING and MOVEFILE_COPY_ALLOWED are the
+     * supported flags. Explicitly reject delayed and hard-link moves. */
+    if ((flags & ~3u) != 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
     if (!guest_path(from, source) || !guest_path(to, destination)) {
@@ -990,6 +992,23 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     const int root_error = errno;
     pthread_mutex_unlock(&root_lock);
     if (root < 0) {
+        if (source_root >= 0 && destination_root >= 0 && source_root != destination_root &&
+            (flags & 2u) != 0) {
+            /* Different authorized roots must never be joined using a
+             * host path. A regular file is copied via guest handles, then
+             * deleted only after the copy is complete. */
+            if (!nt_CopyFileA(from, to, (flags & 1u) == 0))
+                return 0;
+            if (nt_DeleteFileA(from))
+                return 1;
+            const uint32_t saved = nt_GetLastError();
+            /* Without replacement, the newly copied file is ours to
+             * remove if the source could not be deleted. */
+            if ((flags & 1u) == 0)
+                (void)nt_DeleteFileA(to);
+            nt_SetLastError(saved);
+            return 0;
+        }
         nt_SetLastError(source_root < 0 || destination_root < 0 ? NT_ERROR_PATH_NOT_FOUND :
                         source_root != destination_root ? NT_ERROR_NOT_SAME_DEVICE : path_error(root_error, true));
         return 0;
@@ -1024,15 +1043,29 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     struct stat info;
     int status = fstatat(source_parent, source_leaf, &info, AT_SYMLINK_NOFOLLOW);
     if (status == 0) {
-        if (file_in_use(&info) || (flags != 0 &&
-            fstatat(destination_parent, destination_leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
-            file_in_use(&info))) {
+        if (S_ISLNK(info.st_mode)) {
+            errno = EACCES;
+            status = -1;
+        } else if (file_in_use(&info)) {
             errno = EBUSY;
             status = -1;
         } else {
-            status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
-                                  destination_parent, rename_leaf,
-                                  flags == 0 ? RENAME_NOREPLACE : 0);
+            struct stat target;
+            const int exists = fstatat(destination_parent, destination_leaf, &target,
+                                       AT_SYMLINK_NOFOLLOW);
+            if (exists == 0 && S_ISLNK(target.st_mode)) {
+                errno = EACCES;
+                status = -1;
+            } else if (exists == 0 && (flags & 1u) != 0 && file_in_use(&target)) {
+                errno = EBUSY;
+                status = -1;
+            } else if (exists < 0 && errno != ENOENT) {
+                status = -1;
+            } else {
+                status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
+                                      destination_parent, rename_leaf,
+                                      (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+            }
         }
     }
     const int error = errno;
