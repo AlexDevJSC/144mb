@@ -2653,51 +2653,199 @@ static int32_t file_result(int fd, bool success)
     return success;
 }
 
-int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size, uint32_t *done, void *overlap)
+_Static_assert(sizeof(struct nt_overlapped) == 32, "Win64 OVERLAPPED layout");
+_Static_assert(offsetof(struct nt_overlapped, event) == 24, "Win64 OVERLAPPED.hEvent offset");
+
+/* Offset-based OVERLAPPED operations can complete synchronously, exactly
+ * as Windows permits. A true pending work queue/IOCP is not implemented.
+ * The explicit offset never changes the shared file pointer. */
+static int32_t file_io(uintptr_t handle, void *buffer, uint32_t size,
+                      uint32_t *done, struct nt_overlapped *overlap, bool writing)
 {
-    if (done != NULL)
+    if (done)
         *done = 0;
-    if (done == NULL || (size != 0 && buffer == NULL) || overlap != NULL) {
-        nt_SetLastError(overlap != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+    if ((done == NULL && overlap == NULL) || (size && buffer == NULL)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    const int fd = duplicate_handle(handle, FILE_READ);
-    if (fd < 0)
-        return file_result(fd, false);
-    ssize_t received;
+    if (overlap) {
+        overlap->internal = NT_ERROR_IO_PENDING;
+        overlap->internal_high = 0;
+        if (overlap->event != 0 && !nt_ResetEvent(overlap->event)) {
+            overlap->internal = nt_GetLastError();
+            return 0;
+        }
+    }
+    const int fd = duplicate_handle(handle, writing ? FILE_WRITE : FILE_READ);
+    if (fd < 0) {
+        const uint32_t err = path_error(errno, false);
+        if (overlap)
+            overlap->internal = err;
+        nt_SetLastError(err);
+        return 0;
+    }
+    uint64_t offset = 0;
+    if (overlap) {
+        offset = (uint64_t)overlap->offset_high << 32 | overlap->offset;
+        if (offset > INT64_MAX) {
+            close(fd);
+            overlap->internal = NT_ERROR_INVALID_PARAMETER;
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    }
+    ssize_t count;
     do {
-        received = read(fd, buffer, size);
-    } while (received < 0 && errno == EINTR);
-    if (received == 0 && size != 0) {
+        count = writing ? (overlap ? pwrite(fd, buffer, size, (off_t)offset) :
+                                     write(fd, buffer, size)) :
+                          (overlap ? pread(fd, buffer, size, (off_t)offset) :
+                                     read(fd, buffer, size));
+    } while (count < 0 && errno == EINTR);
+    if (count == 0 && size && !writing) {
         struct stat info;
         if (fstat(fd, &info) == 0 && S_ISFIFO(info.st_mode)) {
             errno = EPIPE;
-            received = -1;
+            count = -1;
         }
     }
-    if (received >= 0)
-        *done = (uint32_t)received;
-    return file_result(fd, received >= 0);
-}
-
-int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t size, uint32_t *done, void *overlap)
-{
-    if (done != NULL)
-        *done = 0;
-    if (done == NULL || (size != 0 && buffer == NULL) || overlap != NULL) {
-        nt_SetLastError(overlap != NULL ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+    const int saved_error = errno;
+    close(fd);
+    if (count < 0) {
+        const uint32_t err = path_error(saved_error, false);
+        if (overlap) {
+            overlap->internal = err;
+            if (overlap->event)
+                (void)nt_SetEvent(overlap->event);
+        }
+        nt_SetLastError(err);
         return 0;
     }
-    const int fd = duplicate_handle(handle, FILE_WRITE);
+    if (done)
+        *done = (uint32_t)count;
+    if (overlap) {
+        overlap->internal = NT_ERROR_SUCCESS;
+        overlap->internal_high = (uintptr_t)count;
+        if (overlap->event)
+            (void)nt_SetEvent(overlap->event);
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size,
+                              uint32_t *done, void *overlap)
+{
+    return file_io(handle, buffer, size, done, overlap, false);
+}
+
+int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t size,
+                               uint32_t *done, void *overlap)
+{
+    return file_io(handle, (void *)buffer, size, done, overlap, true);
+}
+
+int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,
+                                         uint32_t *done, int32_t wait)
+{
+    if (!overlap || !done) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
     if (fd < 0)
         return file_result(fd, false);
-    ssize_t written;
+    close(fd);
+    if (overlap->internal == NT_ERROR_IO_PENDING) {
+        if (!wait || !overlap->event) {
+            nt_SetLastError(NT_ERROR_IO_INCOMPLETE);
+            return 0;
+        }
+        if (nt_WaitForSingleObject(overlap->event, UINT32_MAX) != 0) {
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+    }
+    if (overlap->internal != NT_ERROR_SUCCESS) {
+        nt_SetLastError((uint32_t)overlap->internal);
+        return 0;
+    }
+    *done = (uint32_t)overlap->internal_high;
+    return 1;
+}
+
+static int32_t range_lock(uintptr_t handle, uint64_t offset, uint64_t length,
+                          bool unlock, bool shared, bool wait)
+{
+    if (!length || offset > INT64_MAX || length > INT64_MAX ||
+        offset > INT64_MAX - length) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, unlock ? 0 : shared ? FILE_READ : FILE_WRITE);
+    if (fd < 0)
+        return file_result(fd, false);
+    struct flock request = {
+        .l_type = unlock ? F_UNLCK : shared ? F_RDLCK : F_WRLCK,
+        .l_whence = SEEK_SET, .l_start = (off_t)offset, .l_len = (off_t)length
+    };
+    int status;
     do {
-        written = write(fd, buffer, size);
-    } while (written < 0 && errno == EINTR);
-    if (written >= 0)
-        *done = (uint32_t)written;
-    return file_result(fd, written >= 0);
+        status = fcntl(fd, wait ? F_OFD_SETLKW : F_OFD_SETLK, &request);
+    } while (status < 0 && errno == EINTR && wait);
+    const int error = errno;
+    close(fd);
+    if (status < 0) {
+        nt_SetLastError(error == EAGAIN || error == EACCES ? NT_ERROR_LOCK_VIOLATION :
+                        error == ENOLCK ? NT_ERROR_LOCK_FAILED : path_error(error, false));
+        return 0;
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_LockFile(uintptr_t handle, uint32_t low, uint32_t high,
+                              uint32_t length_low, uint32_t length_high)
+{
+    return range_lock(handle, (uint64_t)high << 32 | low,
+                      (uint64_t)length_high << 32 | length_low, false, false, false);
+}
+
+int32_t NT_MS_ABI nt_UnlockFile(uintptr_t handle, uint32_t low, uint32_t high,
+                                uint32_t length_low, uint32_t length_high)
+{
+    return range_lock(handle, (uint64_t)high << 32 | low,
+                      (uint64_t)length_high << 32 | length_low, true, false, false);
+}
+
+int32_t NT_MS_ABI nt_LockFileEx(uintptr_t handle, uint32_t flags, uint32_t reserved,
+                                uint32_t low, uint32_t high, struct nt_overlapped *overlap)
+{
+    if (reserved || (flags & ~3u) || !overlap) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int32_t ok = range_lock(handle, (uint64_t)overlap->offset_high << 32 | overlap->offset,
+                                   (uint64_t)high << 32 | low, false,
+                                   (flags & 2u) == 0, (flags & 1u) == 0);
+    overlap->internal = ok ? NT_ERROR_SUCCESS : nt_GetLastError();
+    overlap->internal_high = 0;
+    if (overlap->event)
+        (void)nt_SetEvent(overlap->event);
+    return ok;
+}
+
+int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved,
+                                  uint32_t low, uint32_t high, struct nt_overlapped *overlap)
+{
+    if (reserved || !overlap) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int32_t ok = range_lock(handle, (uint64_t)overlap->offset_high << 32 | overlap->offset,
+                                   (uint64_t)high << 32 | low, true, false, false);
+    overlap->internal = ok ? NT_ERROR_SUCCESS : nt_GetLastError();
+    overlap->internal_high = 0;
+    if (overlap->event)
+        (void)nt_SetEvent(overlap->event);
+    return ok;
 }
 
 /* CopyFile is built on the same guest HANDLE table and path confinement
