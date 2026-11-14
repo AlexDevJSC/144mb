@@ -927,6 +927,8 @@ static uint32_t path_error(int error, bool parent)
         return NT_ERROR_NOT_ENOUGH_MEMORY;
     case EBUSY:
         return NT_ERROR_SHARING_VIOLATION;
+    case EAGAIN:
+        return NT_ERROR_LOCK_VIOLATION;
     default:
         return NT_ERROR_GEN_FAILURE;
     }
@@ -2852,6 +2854,111 @@ static int32_t file_result(int fd, bool success)
     return success;
 }
 
+/* OFD byte-range locks survive fd duplication and conflict with other
+ * Windows opens, including opens from a second Linux process. Linux locks
+ * are advisory: guest ReadFile/WriteFile must additionally check conflicts. */
+static bool byte_range_valid(uint64_t offset, uint64_t length)
+{
+    return length != 0 && offset <= INT64_MAX && length <= (uint64_t)INT64_MAX - offset;
+}
+
+static bool range_unlocked(int fd, uint64_t offset, uint64_t length, bool write_access)
+{
+    if (length == 0)
+        return true;
+    if (!byte_range_valid(offset, length)) {
+        errno = EINVAL;
+        return false;
+    }
+    struct flock query = {
+        .l_type = write_access ? F_WRLCK : F_RDLCK, .l_whence = SEEK_SET,
+        .l_start = (off_t)offset, .l_len = (off_t)length
+    };
+    if (fcntl(fd, F_OFD_GETLK, &query) < 0)
+        return false;
+    if (query.l_type != F_UNLCK) {
+        errno = EAGAIN;
+        return false;
+    }
+    return true;
+}
+
+static bool check_current_lock(int fd, uint32_t length, bool write_access)
+{
+    if (length == 0)
+        return true;
+    struct stat info;
+    if (fstat(fd, &info) != 0)
+        return false;
+    if (!S_ISREG(info.st_mode))
+        return true;
+    const off_t current = lseek(fd, 0, SEEK_CUR);
+    if (current < 0)
+        return false;
+    return range_unlocked(fd, (uint64_t)current, length, write_access);
+}
+
+static int32_t file_lock_range(uintptr_t handle, uint64_t offset, uint64_t length,
+                               short type, bool wait)
+{
+    if (!byte_range_valid(offset, length)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, type == F_WRLCK ? FILE_WRITE :
+                                             type == F_RDLCK ? FILE_READ : 0);
+    if (fd < 0)
+        return file_result(fd, false);
+    struct flock region = {
+        .l_type = type, .l_whence = SEEK_SET,
+        .l_start = (off_t)offset, .l_len = (off_t)length
+    };
+    int result;
+    do {
+        result = fcntl(fd, wait ? F_OFD_SETLKW : F_OFD_SETLK, &region);
+    } while (result < 0 && errno == EINTR);
+    return file_result(fd, result == 0);
+}
+
+int32_t NT_MS_ABI nt_LockFile(uintptr_t handle, uint32_t low, uint32_t high,
+                              uint32_t length_low, uint32_t length_high)
+{
+    return file_lock_range(handle, (uint64_t)high << 32 | low,
+                           (uint64_t)length_high << 32 | length_low, F_WRLCK, false);
+}
+
+int32_t NT_MS_ABI nt_UnlockFile(uintptr_t handle, uint32_t low, uint32_t high,
+                                uint32_t length_low, uint32_t length_high)
+{
+    return file_lock_range(handle, (uint64_t)high << 32 | low,
+                           (uint64_t)length_high << 32 | length_low, F_UNLCK, false);
+}
+
+int32_t NT_MS_ABI nt_LockFileEx(uintptr_t handle, uint32_t flags, uint32_t reserved,
+                                uint32_t length_low, uint32_t length_high,
+                                struct nt_overlapped *overlapped)
+{
+    if (reserved != 0 || (flags & ~3u) || !overlapped) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return file_lock_range(handle, (uint64_t)overlapped->offset_high << 32 | overlapped->offset,
+                           (uint64_t)length_high << 32 | length_low,
+                           (flags & 2u) ? F_WRLCK : F_RDLCK, (flags & 1u) == 0);
+}
+
+int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved,
+                                  uint32_t length_low, uint32_t length_high,
+                                  struct nt_overlapped *overlapped)
+{
+    if (reserved || !overlapped) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return file_lock_range(handle, (uint64_t)overlapped->offset_high << 32 | overlapped->offset,
+                           (uint64_t)length_high << 32 | length_low, F_UNLCK, false);
+}
+
 int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size, uint32_t *done, void *overlap)
 {
     if (done != NULL)
@@ -2862,6 +2969,8 @@ int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size, uin
     }
     const int fd = duplicate_handle(handle, FILE_READ);
     if (fd < 0)
+        return file_result(fd, false);
+    if (!check_current_lock(fd, size, false))
         return file_result(fd, false);
     ssize_t received;
     do {
@@ -2889,6 +2998,8 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
     }
     const int fd = duplicate_handle(handle, FILE_WRITE);
     if (fd < 0)
+        return file_result(fd, false);
+    if (!check_current_lock(fd, size, true))
         return file_result(fd, false);
     ssize_t written;
     do {
@@ -3089,6 +3200,13 @@ static nt_status nt_guest_io(uintptr_t handle, uintptr_t event, void *apc, void 
     if (fd < 0)
         return nt_file_complete(io, nt_file_errno_status(errno), 0);
 
+    const bool can_read = offset ? range_unlocked(fd, (uint64_t)*offset, length, write_operation) :
+                                   check_current_lock(fd, length, write_operation);
+    if (!can_read) {
+        const int lock_error = errno;
+        close(fd);
+        return nt_file_complete(io, nt_file_errno_status(lock_error), 0);
+    }
     ssize_t transferred;
     do {
         if (offset != NULL) {
