@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <linux/fs.h>
 #include <linux/openat2.h>
+#include <sys/mman.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -885,6 +886,253 @@ static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
     }
     pthread_mutex_unlock(&file_lock);
     return status;
+}
+
+/* A bounded child-process file-handle snapshot. The manifest is sealed
+ * against mutation while posix_spawn duplicates the corresponding host FDs.
+ * Each inherited guest HANDLE retains its numerical identity, open-file
+ * description, rights and per-HANDLE flags. NT objects still require a
+ * separate broker; inheritable waitables are explicitly rejected. */
+enum { INHERITED_FILE_MAGIC = 0x3434464eu }; /* "NF44" */
+struct child_file_record {
+    uintptr_t handle;
+    uint32_t access, share, flags;
+    char path[PATH_MAX];
+};
+struct child_file_manifest {
+    uint32_t magic, count;
+    struct child_file_record files[NT_CHILD_FILE_LIMIT];
+};
+
+void nt_runtime_release_inherited_files(struct nt_child_file_transfer *transfer)
+{
+    if (transfer == NULL)
+        return;
+    if (transfer->manifest_fd >= 0)
+        close(transfer->manifest_fd);
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+        if (transfer->source_fds[i] >= 0)
+            close(transfer->source_fds[i]);
+    transfer->manifest_fd = -1;
+    transfer->count = 0;
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+        transfer->source_fds[i] = -1;
+}
+
+uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer)
+{
+    if (transfer == NULL)
+        return NT_ERROR_INVALID_PARAMETER;
+    transfer->manifest_fd = -1;
+    transfer->count = 0;
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+        transfer->source_fds[i] = -1;
+    /* Events/semaphores/threads cannot be serialized as Linux file FDs:
+     * fail the process creation, don't silently lose an inherited HANDLE. */
+    if (enabled && nt_runtime_has_inheritable_waitables())
+        return NT_ERROR_NOT_SUPPORTED;
+    struct child_file_manifest *manifest = calloc(1, sizeof(*manifest));
+    if (manifest == NULL)
+        return NT_ERROR_NOT_ENOUGH_MEMORY;
+    manifest->magic = INHERITED_FILE_MAGIC;
+    uint32_t error = NT_ERROR_SUCCESS;
+    pthread_mutex_lock(&file_lock);
+    if (enabled) {
+        for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
+            const struct guest_file *entry = &files[i];
+            if (entry->owner != WIN_HANDLE || (entry->handle_flags & HANDLE_FLAG_INHERIT) == 0)
+                continue;
+            if (transfer->count == NT_CHILD_FILE_LIMIT) {
+                error = NT_ERROR_NOT_SUPPORTED;
+                break;
+            }
+            const size_t index = transfer->count;
+            const int copy = fcntl(entry->fd, F_DUPFD_CLOEXEC, 128);
+            if (copy < 0) {
+                error = errno == EMFILE || errno == ENFILE ? NT_ERROR_NOT_ENOUGH_MEMORY :
+                        NT_ERROR_GEN_FAILURE;
+                break;
+            }
+            transfer->source_fds[index] = copy;
+            struct child_file_record *out = &manifest->files[index];
+            out->handle = entry->handle;
+            out->access = entry->access;
+            out->share = entry->share;
+            out->flags = entry->handle_flags;
+            if (entry->path != NULL) {
+                const size_t len = strnlen(entry->path, PATH_MAX);
+                if (len == PATH_MAX) {
+                    error = NT_ERROR_INVALID_PARAMETER;
+                    break;
+                }
+                memcpy(out->path, entry->path, len + 1);
+            }
+            ++transfer->count;
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    if (error != NT_ERROR_SUCCESS)
+        goto fail;
+    manifest->count = (uint32_t)transfer->count;
+    int fd = memfd_create("nt-inherited-files", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) {
+        error = errno == ENOSYS ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_GEN_FAILURE;
+        goto fail;
+    }
+    size_t done = 0;
+    const size_t size = sizeof(*manifest);
+    const char *bytes = (const char *)manifest;
+    while (done < size) {
+        ssize_t written = write(fd, bytes + done, size - done);
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written <= 0) {
+            error = NT_ERROR_GEN_FAILURE;
+            close(fd);
+            goto fail;
+        }
+        done += (size_t)written;
+    }
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW |
+                                F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+        error = NT_ERROR_GEN_FAILURE;
+        close(fd);
+        goto fail;
+    }
+    free(manifest);
+    transfer->manifest_fd = fd;
+    return NT_ERROR_SUCCESS;
+fail:
+    free(manifest);
+    nt_runtime_release_inherited_files(transfer);
+    return error;
+}
+
+static struct child_file_manifest *read_inherited_file_manifest(int fd)
+{
+    struct stat info;
+    const int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    const int seals = fd >= 0 ? fcntl(fd, F_GET_SEALS) : -1;
+    if (seals < 0 || (seals & required) != required ||
+        fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_size != (off_t)sizeof(struct child_file_manifest))
+        return NULL;
+    struct child_file_manifest *manifest = malloc(sizeof(*manifest));
+    if (manifest == NULL)
+        return NULL;
+    size_t done = 0;
+    const size_t size = sizeof(*manifest);
+    while (done < size) {
+        ssize_t n = pread(fd, (char *)manifest + done, size - done, (off_t)done);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            free(manifest);
+            return NULL;
+        }
+        done += (size_t)n;
+    }
+    if (manifest->magic != INHERITED_FILE_MAGIC ||
+        manifest->count > NT_CHILD_FILE_LIMIT) {
+        free(manifest);
+        return NULL;
+    }
+    for (size_t i = 0; i < manifest->count; ++i) {
+        const struct child_file_record *entry = &manifest->files[i];
+        if (entry->handle == 0 || entry->handle == UINTPTR_MAX ||
+            memchr(entry->path, '\0', sizeof(entry->path)) == NULL ||
+            (entry->flags & ~(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE)) != 0 ||
+            (entry->access & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
+            (entry->share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0) {
+            free(manifest);
+            return NULL;
+        }
+        for (size_t earlier = 0; earlier < i; ++earlier)
+            if (entry->handle == manifest->files[earlier].handle) {
+                free(manifest);
+                return NULL;
+            }
+    }
+    return manifest;
+}
+
+bool nt_runtime_inherited_file_count(int manifest_fd, size_t *count)
+{
+    if (count == NULL)
+        return false;
+    struct child_file_manifest *manifest = read_inherited_file_manifest(manifest_fd);
+    if (manifest == NULL)
+        return false;
+    *count = manifest->count;
+    free(manifest);
+    return true;
+}
+
+bool nt_runtime_restore_inherited_files(int manifest_fd)
+{
+    struct child_file_manifest *manifest = read_inherited_file_manifest(manifest_fd);
+    if (manifest == NULL)
+        return false;
+    int copies[NT_CHILD_FILE_LIMIT];
+    char *names[NT_CHILD_FILE_LIMIT] = {0};
+    struct stat stats[NT_CHILD_FILE_LIMIT];
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+        copies[i] = -1;
+    bool valid = true;
+    for (size_t i = 0; i < manifest->count; ++i) {
+        const int source = NT_CHILD_FILE_FD_BASE + (int)i;
+        if (fstat(source, &stats[i]) != 0 ||
+            (copies[i] = fcntl(source, F_DUPFD_CLOEXEC, 0)) < 0) {
+            valid = false;
+            break;
+        }
+        const char *path = manifest->files[i].path;
+        if (*path != '\0' && (names[i] = strdup(path)) == NULL) {
+            valid = false;
+            break;
+        }
+    }
+    if (valid) {
+        pthread_mutex_lock(&file_lock);
+        size_t free_slots = 0;
+        for (size_t i = 0; i < FILE_TABLE_SIZE; ++i)
+            free_slots += files[i].owner == FREE_FILE;
+        if (free_slots < manifest->count)
+            valid = false;
+        for (size_t i = 0; valid && i < manifest->count; ++i)
+            if (find_handle(manifest->files[i].handle) != NULL ||
+                manifest->files[i].handle > UINTPTR_MAX - 16)
+                valid = false;
+        if (valid) {
+            /* Allocation, fstat, path copy and collisions were validated
+             * first, so commit cannot partially import on failure. */
+            for (size_t i = 0; i < manifest->count; ++i) {
+                const struct child_file_record *entry = &manifest->files[i];
+                struct guest_file *slot = new_file();
+                *slot = (struct guest_file){
+                    .owner = WIN_HANDLE, .handle = entry->handle, .fd = copies[i],
+                    .access = entry->access, .share = entry->share,
+                    .handle_flags = entry->flags, .device = stats[i].st_dev,
+                    .inode = stats[i].st_ino, .path = names[i]
+                };
+                copies[i] = -1;
+                names[i] = NULL;
+                if (entry->handle >= next_handle)
+                    next_handle = entry->handle + 16;
+            }
+        }
+        pthread_mutex_unlock(&file_lock);
+    }
+    for (size_t i = 0; i < manifest->count; ++i) {
+        if (copies[i] >= 0)
+            close(copies[i]);
+        free(names[i]);
+        /* The original descriptor is a protocol resource, not a public
+         * host FD available to the guest after the table is constructed. */
+        close(NT_CHILD_FILE_FD_BASE + (int)i);
+    }
+    free(manifest);
+    return valid;
 }
 
 int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
