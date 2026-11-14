@@ -1931,6 +1931,19 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
                                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
     if (from == UINTPTR_MAX)
         return 0;
+    /* Capture source metadata before reading: a copy must not lose the
+     * original modification time or its native read-only mode. */
+    struct stat source_info;
+    const int source_fd = duplicate_handle(from, FILE_READ);
+    const int stat_result = source_fd >= 0 ? fstat(source_fd, &source_info) : -1;
+    const int stat_error = errno;
+    if (source_fd >= 0)
+        close(source_fd);
+    if (stat_result != 0) {
+        nt_CloseHandle(from);
+        nt_SetLastError(path_error(stat_error, false));
+        return 0;
+    }
 
     const uintptr_t to = nt_CreateFileA(destination, generic_write, 0, NULL,
                                        fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
@@ -1991,10 +2004,28 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
             if (error != NT_ERROR_SUCCESS)
                 break;
         }
-        if (finished && nt_FlushFileBuffers(to))
-            success = 1;
-        else if (finished)
-            error = nt_GetLastError();
+        if (finished) {
+            const int output_fd = duplicate_handle(to, FILE_WRITE);
+            if (output_fd < 0) {
+                error = path_error(errno, false);
+            } else {
+                const struct timespec times[2] = {source_info.st_atim, source_info.st_mtim};
+                /* Do not copy setuid/setgid bits: those are Linux process
+                 * credentials, not Windows file attributes. */
+                const int metadata_ok = fchmod(output_fd, source_info.st_mode & 0777) == 0 &&
+                                        futimens(output_fd, times) == 0;
+                const int metadata_error = errno;
+                close(output_fd);
+                if (!metadata_ok)
+                    error = path_error(metadata_error, false);
+            }
+            if (error == NT_ERROR_SUCCESS) {
+                if (nt_FlushFileBuffers(to))
+                    success = 1;
+                else
+                    error = nt_GetLastError();
+            }
+        }
     }
     free(buffer);
     if (!nt_CloseHandle(to) && success) {
