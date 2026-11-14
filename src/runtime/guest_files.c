@@ -2206,25 +2206,27 @@ int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
     }
     struct stat info;
     int result = fstat(fd, &info);
-    if (result == 0 && !S_ISREG(info.st_mode)) {
+    if (result == 0 && !S_ISREG(info.st_mode) && !S_ISDIR(info.st_mode)) {
         errno = EACCES;
         result = -1;
     }
     if (result == 0) {
+        const bool directory = S_ISDIR(info.st_mode);
         const mode_t original = info.st_mode & 07777;
         const mode_t changed = (attributes & WIN_READONLY) ? original & ~(mode_t)0222 :
                                                                  original | S_IWUSR;
-        const uint32_t extended = attributes & WIN_EXTENDED;
-        /* Linux may deny xattr removal on a readonly inode. Restore the
-         * owner's write permission before clearing Windows metadata; when
-         * setting READONLY, write metadata before dropping that permission. */
-        if ((attributes & WIN_READONLY) == 0 && (result = fchmod(fd, changed)) != 0) {
-            /* errno is preserved for the Win32 error mapping below. */
+        /* Directory READONLY is Windows metadata, not a POSIX permission
+         * change that would prevent creating/removing child files. */
+        const uint32_t stored = (attributes & WIN_EXTENDED) |
+                                (directory ? attributes & WIN_READONLY : 0u);
+        if (!directory && (attributes & WIN_READONLY) == 0 &&
+            (result = fchmod(fd, changed)) != 0) {
+            /* Preserve errno for the Win32 mapper. */
         } else {
-            result = extended ? write_guest_xattr(fd, WIN_ATTR_XATTR, &extended,
-                                                   sizeof(extended)) :
-                                clear_guest_xattr(fd, WIN_ATTR_XATTR);
-            if (result == 0 && (attributes & WIN_READONLY) != 0)
+            result = stored ? write_guest_xattr(fd, WIN_ATTR_XATTR, &stored,
+                                                sizeof(stored)) :
+                              clear_guest_xattr(fd, WIN_ATTR_XATTR);
+            if (result == 0 && !directory && (attributes & WIN_READONLY) != 0)
                 result = fchmod(fd, changed);
         }
     }
@@ -2760,7 +2762,8 @@ static struct nt_file_attribute_data file_attributes(int fd, const struct stat *
         stored = 0;
     uint32_t attributes = (S_ISDIR(stat_info->st_mode) ? WIN_DIRECTORY : 0) |
                           (stored & WIN_EXTENDED);
-    if ((stat_info->st_mode & 0222) == 0)
+    if (((stat_info->st_mode & 0222) == 0) ||
+        (S_ISDIR(stat_info->st_mode) && (stored & WIN_READONLY) != 0))
         attributes |= WIN_READONLY;
     const uint64_t size = S_ISDIR(stat_info->st_mode) ? 0 : (uint64_t)stat_info->st_size;
     return (struct nt_file_attribute_data){attributes != 0 ? attributes : FILE_ATTRIBUTE_NORMAL,
