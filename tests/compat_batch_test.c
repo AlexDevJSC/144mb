@@ -293,6 +293,17 @@ static void check_files(void)
     BOUND(KERNEL, GetFullPathNameA);
     BOUND(KERNEL, GetFileAttributesA);
     BOUND(KERNEL, GetFileAttributesExA);
+    BOUND(KERNEL, FindFirstFileExA);
+    BOUND(KERNEL, FindFirstFileExW);
+    BOUND(KERNEL, FindFirstFileA);
+    BOUND(KERNEL, FindFirstFileW);
+    BOUND(KERNEL, FindNextFileA);
+    BOUND(KERNEL, FindNextFileW);
+    BOUND(KERNEL, FindClose);
+    BOUND(KERNEL, GetFileInformationByHandle);
+    BOUND(KERNEL, GetFileSize);
+    BOUND(KERNEL, GetFileTime);
+    BOUND(KERNEL, SetFileTime);
     BOUND(KERNEL, GetTempPathA);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
     CRT_BOUND("stdio", "fopen", nt_fopen);
@@ -408,6 +419,71 @@ static void check_files(void)
     CHECK(folded != NULL && nt_fclose(folded) == 0);
     CHECK(unlink(upper_name) == 0 && unlink(lower_name) == 0);
 
+    /* Unicode case folding is locale-independent, including every parent
+     * component and Windows wildcard matching on Unicode characters. */
+    CHECK(nt_CreateDirectoryA("C:\\Étage", NULL) != 0);
+    CHECK(nt_CreateDirectoryA("c:\\étage", NULL) == 0 &&
+          last_error() == NT_ERROR_ALREADY_EXISTS);
+    CHECK(nt_SetFileAttributesA("C:\\éTAGE", 1u | 2u) != 0 &&
+          (nt_GetFileAttributesW(u"C:\\Étage") & (1u | 2u | 0x10u)) ==
+          (1u | 2u | 0x10u));
+    void *international = nt_fopen("C:\\Étage\\Résumé.TXT", "wb");
+    CHECK(international != NULL && nt_fwrite("ok", 1, 2, international) == 2 &&
+          nt_fclose(international) == 0);
+    international = nt_fopen("c:\\étage\\résumé.txt", "rb");
+    char international_bytes[2];
+    CHECK(international != NULL &&
+          nt_fread(international_bytes, 1, 2, international) == 2 &&
+          memcmp(international_bytes, "ok", 2) == 0 &&
+          nt_fclose(international) == 0);
+    struct nt_find_data_w found_w;
+    uintptr_t search = nt_FindFirstFileW(u"C:\\étage\\RÉSU?É.t?t", &found_w);
+    CHECK(search != UINTPTR_MAX &&
+          memcmp(found_w.name, u"Résumé.TXT", sizeof(u"Résumé.TXT")) == 0);
+    CHECK(!nt_FindNextFileW(search, &found_w) && last_error() == NT_ERROR_NO_MORE_FILES);
+    CHECK(nt_FindClose(search) != 0);
+
+    struct nt_find_data_a found_a;
+    search = nt_FindFirstFileA("C:\\\xE9tage\\*.txt", &found_a);
+    static const unsigned char expected_ansi[] = {
+        'R', 0xe9, 's', 'u', 'm', 0xe9, '.', 'T', 'X', 'T', 0
+    };
+    CHECK(search != UINTPTR_MAX &&
+          memcmp(found_a.name, expected_ansi, sizeof(expected_ansi)) == 0 &&
+          nt_FindClose(search) != 0);
+    search = nt_FindFirstFileExW(u"C:\\*", 0, &found_w, 1, NULL, 0);
+    CHECK(search != UINTPTR_MAX && (found_w.info.attributes & 0x10u) != 0 &&
+          nt_FindClose(search) != 0);
+
+    /* HIDDEN, SYSTEM, ARCHIVE and a mutable Windows creation timestamp
+     * are persisted as Linux user xattrs on the original file. */
+    CHECK(nt_SetFileAttributesA("c:\\étage\\RÉSUMÉ.TXT", 2u | 4u | 32u) != 0);
+    CHECK((nt_GetFileAttributesW(u"C:\\ÉTAGE\\résumé.txt") & (2u | 4u | 32u)) ==
+          (2u | 4u | 32u));
+    uintptr_t info_handle = nt_CreateFileW(u"C:\\étage\\résumé.txt",
+        UINT32_C(0xc0000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(info_handle != UINTPTR_MAX);
+    uint32_t high = 123u;
+    CHECK(nt_GetFileSize(info_handle, &high) == 2 && high == 0);
+    struct nt_handle_file_info handle_info;
+    CHECK(nt_GetFileInformationByHandle(info_handle, &handle_info) != 0 &&
+          handle_info.size_low == 2 && handle_info.size_high == 0 &&
+          (handle_info.attributes & 2u) != 0);
+    const struct nt_file_time birth = {0x12345678u, 0x01dbeeeeu};
+    const struct nt_file_time modified = {0x87654321u, 0x01dbeeedu};
+    CHECK(nt_SetFileTime(info_handle, &birth, NULL, &modified) != 0);
+    struct nt_file_time actual_birth = {0}, actual_modified = {0};
+    CHECK(nt_GetFileTime(info_handle, &actual_birth, NULL, &actual_modified) != 0 &&
+          memcmp(&actual_birth, &birth, sizeof(birth)) == 0 &&
+          memcmp(&actual_modified, &modified, sizeof(modified)) == 0);
+    CHECK(nt_CloseHandle(info_handle) != 0);
+    CHECK(nt_CopyFileA("C:\\étage\\RÉSUMÉ.TXT", "C:\\Étage\\Clone.bin", 1) != 0);
+    CHECK((nt_GetFileAttributesA("C:\\étage\\clone.bin") & (2u | 4u | 32u)) ==
+          (2u | 4u | 32u));
+    CHECK(nt_DeleteFileA("c:\\étage\\CLONE.BIN") != 0 &&
+          nt_DeleteFileA("c:\\étage\\RÉSUMÉ.TXT") != 0 &&
+          nt_RemoveDirectoryA("C:\\ÉTAGE") != 0);
+
     void *text = nt_fopen("C:\\data\\scores.txt", "w");
     CHECK(text != NULL && nt_fwrite("a\nb\n", 2, 2, text) == 2);
     nt_cexit();
@@ -484,7 +560,7 @@ static void check_files(void)
     CHECK((nt_GetFileAttributesA("data/readonlycopy.bin") & 1u) == 0);
     CHECK(nt_DeleteFileA("data/READONLYCOPY.BIN") != 0);
     CHECK(nt_SetFileAttributesA("data/scores.txt", 0x80u) != 0);
-    CHECK(nt_SetFileAttributesA("data/scores.txt", 0x2u) == 0 &&
+    CHECK(nt_SetFileAttributesA("data/scores.txt", 0x1000u) == 0 &&
           last_error() == NT_ERROR_NOT_SUPPORTED);
     CHECK(nt_MoveFileA("DATA/backup.txt", "data/Copied.TXT") != 0);
     folded = nt_fopen("data/cOPIED.txt", "rb");

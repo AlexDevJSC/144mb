@@ -9,7 +9,8 @@
 
 #include <dirent.h>
 #include <errno.h>
-#include <fnmatch.h>
+#include <unicode/uchar.h>
+#include <unicode/utf8.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/fs.h>
@@ -23,6 +24,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/xattr.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -246,20 +248,82 @@ static bool guest_path(const char *input, char output[PATH_MAX])
     return normalize_path(input, output, false);
 }
 
-/* Windows ASCII case folding on ordinary Linux files, resolved by FD.
- * Keep non-ASCII UTF-8 bytes exact until Unicode folding is implemented. */
-static unsigned char lower_ascii(unsigned char byte)
+/* Unicode simple case fold, one code point at a time, independent of
+ * the host's locale. NT filenames are ordinal UTF-16 comparisons: do not
+ * apply NFC/NFD normalization or multi-codepoint folds implicitly.
+ * Invalid UTF-8 host names are accessible only through exact byte matches. */
+static int32_t next_folded(const char **cursor, const char *end)
 {
-    return byte >= 'A' && byte <= 'Z' ? (unsigned char)(byte + 'a' - 'A') : byte;
+    if (*cursor >= end)
+        return -1;
+    int32_t offset = 0;
+    UChar32 codepoint;
+    U8_NEXT(*cursor, offset, (int32_t)(end - *cursor), codepoint);
+    if (codepoint < 0)
+        return -1;
+    *cursor += offset;
+    return u_foldCase(codepoint, U_FOLD_CASE_DEFAULT);
 }
 
-static bool same_ascii_name(const char *left, const char *right)
+static bool case_prefix(const char *path, const char *prefix, size_t *consumed)
 {
-    while (*left && *right) {
-        if (lower_ascii((unsigned char)*left++) != lower_ascii((unsigned char)*right++))
+    const char *start = path, *p_end = path + strlen(path);
+    const char *q_end = prefix + strlen(prefix);
+    while (prefix < q_end) {
+        if (path >= p_end)
+            return false;
+        const int32_t p = next_folded(&path, p_end);
+        const int32_t q = next_folded(&prefix, q_end);
+        if (p < 0 || q < 0 || p != q)
             return false;
     }
-    return *left == '\0' && *right == '\0';
+    if (consumed)
+        *consumed = (size_t)(path - start);
+    return path == p_end || *path == '/';
+}
+
+static bool same_unicode_name(const char *left, const char *right)
+{
+    size_t consumed = 0;
+    return case_prefix(left, right, &consumed) &&
+           left[consumed] == '\0';
+}
+
+/* '*' and '?' operate on Unicode scalars, not UTF-8 bytes. DOS '*.*'
+ * is handled by the caller; all comparisons share the path fold table.
+ * An iterative backtracker bounds stack use with untrusted names. */
+static bool unicode_wildcard(const char *pattern, const char *name)
+{
+    const char *p_end = pattern + strlen(pattern), *n_end = name + strlen(name);
+    const char *retry_pattern = NULL, *retry_name = NULL;
+    while (name < n_end) {
+        if (pattern < p_end && *pattern == '*') {
+            do { ++pattern; } while (pattern < p_end && *pattern == '*');
+            retry_pattern = pattern;
+            retry_name = name;
+            continue;
+        }
+        const char *before_p = pattern, *before_n = name;
+        const bool any = pattern < p_end && *pattern == '?';
+        if (any)
+            ++pattern;
+        const int32_t needle = any ? 0 : next_folded(&pattern, p_end);
+        const int32_t scalar = next_folded(&name, n_end);
+        if (scalar >= 0 && (any || (needle >= 0 && scalar == needle)))
+            continue;
+        if (retry_pattern == NULL || retry_name >= n_end)
+            return false;
+        pattern = retry_pattern;
+        name = retry_name;
+        if (next_folded(&name, n_end) < 0)
+            return false;
+        retry_name = name;
+        (void)before_p;
+        (void)before_n;
+    }
+    while (pattern < p_end && *pattern == '*')
+        ++pattern;
+    return pattern == p_end;
 }
 
 static int confined_open_raw(int root, const char *path, int flags, unsigned int mode)
@@ -306,7 +370,7 @@ static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1]
             error = errno;
             break;
         }
-        if (same_ascii_name(asked, entry->d_name)) {
+        if (same_unicode_name(asked, entry->d_name)) {
             if (++matches > 1) {
                 error = EEXIST;
                 break;
@@ -572,6 +636,73 @@ bool nt_runtime_check_guest_file(const char *path, char *output, size_t capacity
     return true;
 }
 
+/* Persist Windows-only metadata on the actual Linux inode, never in
+ * a parallel Windows filesystem. An O_PATH metadata query uses its pinned
+ * /proc/self/fd reference when fgetxattr rejects O_PATH (EBADF). */
+#define WIN_ATTR_XATTR "user.ntnative.winattrs"
+#define WIN_BIRTH_XATTR "user.ntnative.birthtime"
+enum { WIN_READONLY = 1, WIN_HIDDEN = 2, WIN_SYSTEM = 4,
+       WIN_DIRECTORY = 16, WIN_ARCHIVE = 32, WIN_NORMAL = 128,
+       WIN_EXTENDED = WIN_HIDDEN | WIN_SYSTEM | WIN_ARCHIVE };
+
+static void descriptor_path(int fd, char path[64])
+{
+    snprintf(path, 64, "/proc/self/fd/%d", fd);
+}
+
+static ssize_t read_guest_xattr(int fd, const char *name, void *value, size_t size)
+{
+    ssize_t result = fgetxattr(fd, name, value, size);
+    if (result < 0 && errno == EBADF) {
+        char path[64];
+        descriptor_path(fd, path);
+        result = getxattr(path, name, value, size);
+    }
+    return result;
+}
+
+static int write_guest_xattr(int fd, const char *name, const void *value, size_t size)
+{
+    int result = fsetxattr(fd, name, value, size, 0);
+    if (result < 0 && errno == EBADF) {
+        char path[64];
+        descriptor_path(fd, path);
+        result = setxattr(path, name, value, size, 0);
+    }
+    return result;
+}
+
+static int clear_guest_xattr(int fd, const char *name)
+{
+    unsigned char previous[sizeof(uint64_t)];
+    if (read_guest_xattr(fd, name, previous, sizeof(previous)) < 0) {
+        if (errno == ENODATA || errno == ENOTSUP)
+            return 0;
+        return -1;
+    }
+    int result = fremovexattr(fd, name);
+    if (result < 0 && errno == EBADF) {
+        char path[64];
+        descriptor_path(fd, path);
+        result = removexattr(path, name);
+    }
+    return result == 0 || errno == ENODATA ? 0 : -1;
+}
+
+static bool copy_guest_xattr(int source, int destination, const char *name,
+                             size_t expected)
+{
+    unsigned char bytes[sizeof(uint64_t)];
+    const ssize_t count = read_guest_xattr(source, name, bytes, expected);
+    if (count == (ssize_t)expected)
+        return write_guest_xattr(destination, name, bytes, expected) == 0;
+    if (count < 0 && (errno == ENODATA || errno == ENOTSUP))
+        return clear_guest_xattr(destination, name) == 0;
+    if (count >= 0)
+        errno = EINVAL;
+    return false;
+}
+
 static uint32_t path_error(int error, bool parent)
 {
     switch (error) {
@@ -653,24 +784,19 @@ static bool file_blocks_delete(const struct stat *info)
  * before the syscall so allocation failure cannot leave stale paths. */
 static bool guest_path_prefix(const char *path, const char *prefix)
 {
-    size_t i = 0;
-    for (; prefix[i] != '\0'; ++i) {
-        if (path[i] == '\0' ||
-            lower_ascii((unsigned char)path[i]) != lower_ascii((unsigned char)prefix[i]))
-            return false;
-    }
-    return path[i] == '\0' || path[i] == '/';
+    return case_prefix(path, prefix, NULL);
 }
 
 static bool prepare_renamed_paths(const char *from, const char *to,
                                   char *updated[FILE_TABLE_SIZE])
 {
-    const size_t from_length = strlen(from), to_length = strlen(to);
+    const size_t to_length = strlen(to);
     for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
         const char *old = files[i].path;
-        if (files[i].owner == FREE_FILE || !old || !guest_path_prefix(old, from))
+        size_t matched = 0;
+        if (files[i].owner == FREE_FILE || !old || !case_prefix(old, from, &matched))
             continue;
-        const size_t suffix = strlen(old + from_length);
+        const size_t suffix = strlen(old + matched);
         if (to_length + suffix >= PATH_MAX) {
             errno = ENAMETOOLONG;
             return false;
@@ -679,7 +805,7 @@ static bool prepare_renamed_paths(const char *from, const char *to,
         if (!updated[i])
             return false;
         memcpy(updated[i], to, to_length);
-        memcpy(updated[i] + to_length, old + from_length, suffix + 1);
+        memcpy(updated[i] + to_length, old + matched, suffix + 1);
     }
     return true;
 }
@@ -1615,7 +1741,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     const char *wanted = strrchr(resolved_destination, '/');
     wanted = wanted ? wanted + 1 : resolved_destination;
     struct stat src_dir, dst_dir;
-    if (strcmp(source_leaf, wanted) != 0 && same_ascii_name(source_leaf, wanted) &&
+    if (strcmp(source_leaf, wanted) != 0 && same_unicode_name(source_leaf, wanted) &&
         fstat(source_parent, &src_dir) == 0 && fstat(destination_parent, &dst_dir) == 0 &&
         src_dir.st_dev == dst_dir.st_dev && src_dir.st_ino == dst_dir.st_ino)
         rename_leaf = wanted;
@@ -2414,7 +2540,8 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
  * Linux chmod flags and must never be silently claimed as supported. */
 int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
 {
-    if (attributes != FILE_ATTRIBUTE_NORMAL && attributes != 1u) {
+    if (attributes == 0 || (attributes & ~(WIN_READONLY | WIN_EXTENDED | WIN_NORMAL)) ||
+        ((attributes & WIN_NORMAL) && attributes != WIN_NORMAL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
@@ -2438,15 +2565,29 @@ int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
     }
     struct stat info;
     int result = fstat(fd, &info);
-    if (result == 0 && !S_ISREG(info.st_mode)) {
+    if (result == 0 && !S_ISREG(info.st_mode) && !S_ISDIR(info.st_mode)) {
         errno = EACCES;
         result = -1;
     }
     if (result == 0) {
+        const bool directory = S_ISDIR(info.st_mode);
         const mode_t original = info.st_mode & 07777;
-        const mode_t changed = attributes == 1u ? original & ~(mode_t)0222 :
-                                                         original | S_IWUSR;
-        result = fchmod(fd, changed);
+        const mode_t changed = (attributes & WIN_READONLY) ? original & ~(mode_t)0222 :
+                                                                 original | S_IWUSR;
+        /* Directory READONLY is Windows metadata, not a POSIX permission
+         * change that would prevent creating/removing child files. */
+        const uint32_t stored = (attributes & WIN_EXTENDED) |
+                                (directory ? attributes & WIN_READONLY : 0u);
+        if (!directory && (attributes & WIN_READONLY) == 0 &&
+            (result = fchmod(fd, changed)) != 0) {
+            /* Preserve errno for the Win32 mapper. */
+        } else {
+            result = stored ? write_guest_xattr(fd, WIN_ATTR_XATTR, &stored,
+                                                sizeof(stored)) :
+                              clear_guest_xattr(fd, WIN_ATTR_XATTR);
+            if (result == 0 && !directory && (attributes & WIN_READONLY) != 0)
+                result = fchmod(fd, changed);
+        }
     }
     const int error = errno;
     close(fd);
@@ -2653,8 +2794,14 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
                 const struct timespec times[2] = {source_info.st_atim, source_info.st_mtim};
                 /* Do not copy setuid/setgid bits: those are Linux process
                  * credentials, not Windows file attributes. */
-                const int metadata_ok = fchmod(output_fd, source_info.st_mode & 0777) == 0 &&
-                                        futimens(output_fd, times) == 0;
+                const int source_attrs_fd = duplicate_handle(from, FILE_READ);
+                const int metadata_ok = source_attrs_fd >= 0 &&
+                    copy_guest_xattr(source_attrs_fd, output_fd, WIN_ATTR_XATTR, sizeof(uint32_t)) &&
+                    copy_guest_xattr(source_attrs_fd, output_fd, WIN_BIRTH_XATTR, sizeof(uint64_t)) &&
+                    fchmod(output_fd, source_info.st_mode & 0777) == 0 &&
+                    futimens(output_fd, times) == 0;
+                if (source_attrs_fd >= 0)
+                    close(source_attrs_fd);
                 const int metadata_error = errno;
                 close(output_fd);
                 if (!metadata_ok)
@@ -2961,9 +3108,22 @@ static struct nt_file_attribute_data file_attributes(int fd, const struct stat *
     if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_BTIME, &extended) == 0 &&
         (extended.stx_mask & STATX_BTIME) != 0)
         created = (struct timespec){extended.stx_btime.tv_sec, extended.stx_btime.tv_nsec};
-    uint32_t attributes = S_ISDIR(stat_info->st_mode) ? 0x10u : 0;
-    if ((stat_info->st_mode & 0222) == 0)
-        attributes |= 1;
+    uint64_t saved_birth = 0;
+    if (read_guest_xattr(fd, WIN_BIRTH_XATTR, &saved_birth, sizeof(saved_birth)) ==
+        (ssize_t)sizeof(saved_birth))
+        created = (struct timespec){
+            (int64_t)(saved_birth / UINT64_C(10000000)) - INT64_C(11644473600),
+            (long)(saved_birth % UINT64_C(10000000)) * 100
+        };
+    uint32_t stored = 0;
+    if (read_guest_xattr(fd, WIN_ATTR_XATTR, &stored, sizeof(stored)) !=
+        (ssize_t)sizeof(stored))
+        stored = 0;
+    uint32_t attributes = (S_ISDIR(stat_info->st_mode) ? WIN_DIRECTORY : 0) |
+                          (stored & WIN_EXTENDED);
+    if (((stat_info->st_mode & 0222) == 0) ||
+        (S_ISDIR(stat_info->st_mode) && (stored & WIN_READONLY) != 0))
+        attributes |= WIN_READONLY;
     const uint64_t size = S_ISDIR(stat_info->st_mode) ? 0 : (uint64_t)stat_info->st_size;
     return (struct nt_file_attribute_data){attributes != 0 ? attributes : FILE_ATTRIBUTE_NORMAL,
         file_time(created), file_time(stat_info->st_atim), file_time(stat_info->st_mtim),
@@ -3019,6 +3179,7 @@ struct directory_search {
     uintptr_t handle;
     DIR *directory;
     char pattern[PATH_MAX];
+    bool directories_only;
 };
 static struct directory_search searches[FIND_LIMIT];
 static uintptr_t next_search = 0x75000001;
@@ -3043,7 +3204,7 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
             return errno;
         char normalized[PATH_MAX];
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
-            fnmatch(pattern, entry->d_name, FNM_CASEFOLD) != 0)
+            !unicode_wildcard(pattern, entry->d_name))
             continue;
         /* Add a rooted prefix to validate the entry independently of CWD. */
         char rooted[PATH_MAX];
@@ -3059,6 +3220,10 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
         struct stat stat_info;
         const bool valid = fstat(fd, &stat_info) == 0 &&
                            (S_ISREG(stat_info.st_mode) || S_ISDIR(stat_info.st_mode));
+        if (valid && search->directories_only && !S_ISDIR(stat_info.st_mode)) {
+            close(fd);
+            continue;
+        }
         if (valid)
             result.info = file_attributes(fd, &stat_info);
         close(fd);
@@ -3072,7 +3237,7 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
 uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, struct nt_find_data_w *data,
                                        int32_t operation, void *filter, uint32_t flags)
 {
-    if (data == NULL || (level != 0 && level != 1) || operation != 0 ||
+    if (data == NULL || (level != 0 && level != 1) || (operation != 0 && operation != 1) ||
         filter != NULL || (flags & ~2u) != 0) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return UINTPTR_MAX;
@@ -3085,11 +3250,11 @@ uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, str
         if (separator(*cursor))
             pattern = cursor + 1;
     }
-    if (*pattern == '\0' || strchr(pattern, ':') != NULL || strchr(pattern, '[') != NULL) {
+    if (*pattern == '\0' || strchr(pattern, ':') != NULL) {
         nt_SetLastError(NT_ERROR_INVALID_NAME);
         return UINTPTR_MAX;
     }
-    struct directory_search search = {0};
+    struct directory_search search = {.directories_only = operation == 1};
     strcpy(search.pattern, pattern);
     if (pattern != narrow)
         *pattern = '\0';
@@ -3146,6 +3311,65 @@ int32_t NT_MS_ABI nt_FindNextFileW(uintptr_t handle, struct nt_find_data_w *data
     if (result != -1)
         nt_SetLastError(result == 0 ? NT_ERROR_NO_MORE_FILES : path_error(result, false));
     return result == -1;
+}
+
+/* ANSI enumeration uses the process ACP (currently Windows-1252);
+ * filename scanning itself remains Unicode via the W implementation. */
+static bool narrow_find_data(const struct nt_find_data_w *wide,
+                             struct nt_find_data_a *ansi)
+{
+    struct nt_find_data_a result = {0};
+    result.info = wide->info;
+    memcpy(result.reserved, wide->reserved, sizeof(result.reserved));
+    if (!nt_WideCharToMultiByte(nt_GetACP(), 0, wide->name, -1,
+                                result.name, sizeof(result.name), NULL, NULL))
+        return false;
+    if (wide->alternate[0] &&
+        !nt_WideCharToMultiByte(nt_GetACP(), 0, wide->alternate, -1,
+                               result.alternate, sizeof(result.alternate), NULL, NULL))
+        return false;
+    *ansi = result;
+    return true;
+}
+
+uintptr_t NT_MS_ABI nt_FindFirstFileExA(const char *path, int32_t level,
+                                       struct nt_find_data_a *data, int32_t operation,
+                                       void *filter, uint32_t flags)
+{
+    if (!path || !data) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return UINTPTR_MAX;
+    }
+    uint16_t wide_path_buf[PATH_MAX];
+    if (!nt_MultiByteToWideChar(nt_GetACP(), 0, path, -1, wide_path_buf, PATH_MAX))
+        return UINTPTR_MAX;
+    struct nt_find_data_w found;
+    const uintptr_t handle = nt_FindFirstFileExW(wide_path_buf, level, &found,
+                                                 operation, filter, flags);
+    if (handle == UINTPTR_MAX)
+        return handle;
+    if (!narrow_find_data(&found, data)) {
+        const uint32_t error = nt_GetLastError();
+        nt_FindClose(handle);
+        nt_SetLastError(error);
+        return UINTPTR_MAX;
+    }
+    return handle;
+}
+
+uintptr_t NT_MS_ABI nt_FindFirstFileA(const char *path, struct nt_find_data_a *data)
+{
+    return nt_FindFirstFileExA(path, 0, data, 0, NULL, 0);
+}
+
+int32_t NT_MS_ABI nt_FindNextFileA(uintptr_t handle, struct nt_find_data_a *data)
+{
+    if (!data) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_find_data_w next;
+    return nt_FindNextFileW(handle, &next) && narrow_find_data(&next, data);
 }
 
 int32_t NT_MS_ABI nt_FindClose(uintptr_t handle)
@@ -3246,12 +3470,97 @@ int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind
     return file_result(fd, true);
 }
 
+_Static_assert(sizeof(struct nt_find_data_a) == 320, "WIN32_FIND_DATAA layout");
+_Static_assert(sizeof(struct nt_handle_file_info) == 52, "BY_HANDLE_FILE_INFORMATION layout");
+
+uint32_t NT_MS_ABI nt_GetFileSize(uintptr_t handle, uint32_t *high)
+{
+    int64_t length = 0;
+    if (!nt_GetFileSizeEx(handle, &length))
+        return UINT32_MAX;
+    if (high)
+        *high = (uint32_t)((uint64_t)length >> 32);
+    nt_SetLastError(NT_ERROR_SUCCESS);
+    return (uint32_t)length;
+}
+
+int32_t NT_MS_ABI nt_GetFileInformationByHandle(uintptr_t handle,
+                                               struct nt_handle_file_info *info)
+{
+    if (!info) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
+    if (fd < 0)
+        return file_result(fd, false);
+    struct stat stat_info;
+    if (fstat(fd, &stat_info) != 0)
+        return file_result(fd, false);
+    if (!S_ISREG(stat_info.st_mode) && !S_ISDIR(stat_info.st_mode)) {
+        errno = EACCES;
+        return file_result(fd, false);
+    }
+    const struct nt_file_attribute_data attrs = file_attributes(fd, &stat_info);
+    *info = (struct nt_handle_file_info) {
+        attrs.attributes, attrs.created, attrs.accessed, attrs.written,
+        (uint32_t)stat_info.st_dev, attrs.size_high, attrs.size_low,
+        (uint32_t)stat_info.st_nlink,
+        (uint32_t)((uint64_t)stat_info.st_ino >> 32),
+        (uint32_t)stat_info.st_ino
+    };
+    return file_result(fd, true);
+}
+
+int32_t NT_MS_ABI nt_GetFileTime(uintptr_t handle, struct nt_file_time *created,
+                                struct nt_file_time *accessed, struct nt_file_time *written)
+{
+    const int fd = duplicate_handle(handle, 0);
+    if (fd < 0)
+        return file_result(fd, false);
+    struct stat stat_info;
+    if (fstat(fd, &stat_info) != 0)
+        return file_result(fd, false);
+    const struct nt_file_attribute_data attrs = file_attributes(fd, &stat_info);
+    if (created)
+        *created = attrs.created;
+    if (accessed)
+        *accessed = attrs.accessed;
+    if (written)
+        *written = attrs.written;
+    return file_result(fd, true);
+}
+
 static struct timespec to_timespec(uint64_t ticks_value)
 {
     if (ticks_value == 0)
         return (struct timespec){0, UTIME_OMIT};
     return (struct timespec){(int64_t)(ticks_value / UINT64_C(10000000)) - INT64_C(11644473600),
                              (long)(ticks_value % UINT64_C(10000000)) * 100};
+}
+
+int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *created,
+                                const struct nt_file_time *accessed,
+                                const struct nt_file_time *written)
+{
+    if (!created && !accessed && !written)
+        return 1;
+    const int fd = duplicate_handle(handle, FILE_WRITE);
+    if (fd < 0)
+        return file_result(fd, false);
+    bool valid = true;
+    if (created) {
+        const uint64_t value = ticks(*created);
+        valid = write_guest_xattr(fd, WIN_BIRTH_XATTR, &value, sizeof(value)) == 0;
+    }
+    if (valid && (accessed || written)) {
+        const struct timespec dates[2] = {
+            accessed ? to_timespec(ticks(*accessed)) : (struct timespec){0, UTIME_OMIT},
+            written ? to_timespec(ticks(*written)) : (struct timespec){0, UTIME_OMIT}
+        };
+        valid = futimens(fd, dates) == 0;
+    }
+    return file_result(fd, valid);
 }
 
 int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, const void *info, uint32_t size)

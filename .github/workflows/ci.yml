@@ -25,7 +25,7 @@ jobs:
       - name: Install Linux build and desktop test dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libsdl2-image-dev libcairo2-dev libffi-dev libssl-dev libfluidsynth3 libvkd3d-dev libvulkan-dev mesa-vulkan-drivers bubblewrap weston fonts-dejavu-core
+          sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libsdl2-image-dev libcairo2-dev libffi-dev libssl-dev libicu-dev libfluidsynth3 libvkd3d-dev libvulkan-dev mesa-vulkan-drivers bubblewrap weston fonts-dejavu-core
           x86_64-w64-mingw32-gcc --version
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 all check check-pe check-pe-import check-pe-image
@@ -70,7 +70,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install Fedora build tools in the CI container
-        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip /usr/bin/curl /usr/bin/sha256sum 'pkgconfig(sdl2)' 'pkgconfig(SDL2_image)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' 'pkgconfig(libcrypto)' 'pkgconfig(libvkd3d)' 'pkgconfig(libvkd3d-utils)' 'pkgconfig(vulkan)' fluidsynth-libs libstdc++ mesa-vulkan-drivers dejavu-sans-fonts pkgconf-pkg-config bubblewrap shadow-utils util-linux-core mingw64-gcc mingw64-binutils
+        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip /usr/bin/curl /usr/bin/sha256sum 'pkgconfig(sdl2)' 'pkgconfig(SDL2_image)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' 'pkgconfig(libcrypto)' 'pkgconfig(icu-uc)' 'pkgconfig(libvkd3d)' 'pkgconfig(libvkd3d-utils)' 'pkgconfig(vulkan)' fluidsynth-libs libstdc++ mesa-vulkan-drivers dejavu-sans-fonts pkgconf-pkg-config bubblewrap shadow-utils util-linux-core mingw64-gcc mingw64-binutils
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
