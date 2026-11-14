@@ -148,14 +148,26 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         errno = EINVAL;
         return false;
     }
-    const bool absolute = input[1] == ':' || separator(input[0]);
-    if (input[1] == ':') {
-        if ((*input != 'C' && *input != 'c') || !separator(input[2])) {
+    /* Windows ANSI extended DOS prefix; UNC and NT device namespaces
+     * remain deliberately unsupported rather than accessing host paths. */
+    bool extended = false;
+    if (input[0] == '\\' && input[1] == '\\' &&
+        input[2] == '?' && input[3] == '\\') {
+        extended = true;
+        input += 4;
+    }
+    const bool has_drive = input[1] == ':';
+    const bool absolute = has_drive ? separator(input[2]) : separator(input[0]);
+    if (has_drive) {
+        if ((*input != 'C' && *input != 'c') ||
+            (extended && !separator(input[2]))) {
             errno = EINVAL;
             return false;
         }
+        /* C:relative follows the current C: directory. C:\relative and
+         * \relative are rooted at the physical guest C: directory. */
         input += 2;
-    } else if (separator(input[0]) && separator(input[1])) {
+    } else if (extended || (separator(input[0]) && separator(input[1]))) {
         errno = EACCES;
         return false;
     }
