@@ -26,6 +26,16 @@ struct nt_find_data_w {
     uint32_t reserved[2];
     uint16_t name[260], alternate[14];
 };
+struct nt_find_data_a {
+    struct nt_file_attribute_data info;
+    uint32_t reserved[2];
+    char name[260], alternate[14];
+};
+struct nt_handle_file_info {
+    uint32_t attributes;
+    struct nt_file_time created, accessed, written;
+    uint32_t volume_serial, size_high, size_low, links, index_high, index_low;
+};
 
 uintptr_t NT_MS_ABI nt_CreateFileW(const uint16_t *path, uint32_t access, uint32_t share,
                                   const void *security, uint32_t disposition, uint32_t flags,
@@ -51,6 +61,10 @@ uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, str
                                        int32_t operation, void *filter, uint32_t flags);
 uintptr_t NT_MS_ABI nt_FindFirstFileW(const uint16_t *path, struct nt_find_data_w *data);
 int32_t NT_MS_ABI nt_FindNextFileW(uintptr_t handle, struct nt_find_data_w *data);
+uintptr_t NT_MS_ABI nt_FindFirstFileExA(const char *path, int32_t level, struct nt_find_data_a *data,
+                                       int32_t operation, void *filter, uint32_t flags);
+uintptr_t NT_MS_ABI nt_FindFirstFileA(const char *path, struct nt_find_data_a *data);
+int32_t NT_MS_ABI nt_FindNextFileA(uintptr_t handle, struct nt_find_data_a *data);
 int32_t NT_MS_ABI nt_FindClose(uintptr_t handle);
 int32_t NT_MS_ABI nt_ReadFile(uintptr_t handle, void *buffer, uint32_t size, uint32_t *done, void *overlap);
 int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t size, uint32_t *done, void *overlap);
@@ -59,6 +73,12 @@ int32_t NT_MS_ABI nt_GetFileSizeEx(uintptr_t handle, int64_t *size);
 int32_t NT_MS_ABI nt_SetFilePointerEx(uintptr_t handle, int64_t offset, int64_t *position, uint32_t method);
 int32_t NT_MS_ABI nt_SetEndOfFile(uintptr_t handle);
 uint32_t NT_MS_ABI nt_GetFileType(uintptr_t handle);
+int32_t NT_MS_ABI nt_GetFileInformationByHandle(uintptr_t handle, struct nt_handle_file_info *info);
+uint32_t NT_MS_ABI nt_GetFileSize(uintptr_t handle, uint32_t *high);
+int32_t NT_MS_ABI nt_GetFileTime(uintptr_t handle, struct nt_file_time *created,
+                                struct nt_file_time *accessed, struct nt_file_time *written);
+int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *created,
+                                const struct nt_file_time *accessed, const struct nt_file_time *written);
 int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind, void *info, uint32_t size);
 int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, const void *info, uint32_t size);
 uint32_t NT_MS_ABI nt_GetFinalPathNameByHandleW(uintptr_t handle, uint16_t *buffer, uint32_t size, uint32_t flags);
