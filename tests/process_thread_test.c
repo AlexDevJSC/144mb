@@ -104,7 +104,7 @@ int main(int argc, char **argv)
     close(environment_fd);
     /* Windows ANSI means guest ACP=1252, not the host Linux locale.
      * The final double NUL and each entry's name/value must survive. */
-    static const char cp1252_env[] = "NT_CP1252=Espa\xf1a\0NT_ACCENT=caf\xe9\0";
+    static const char cp1252_env[] = "NT_CP1252=Espa\xf1" "a\0NT_ACCENT=caf\xe9\0";
     uint16_t *converted_cp = nt_runtime_ansi_child_environment(cp1252_env);
     check(converted_cp != NULL &&
           memcmp(converted_cp, u"NT_CP1252=España", sizeof(u"NT_CP1252=España")) == 0 &&
