@@ -247,6 +247,8 @@ int32_t NT_MS_ABI nt_seh_filter_exe(uint32_t code, struct nt_exception_pointers 
 
 /* The launcher supplies the host directory for the guest C: drive. */
 bool nt_runtime_set_file_root(const char *directory);
+bool nt_runtime_set_drive_root(char letter, const char *directory);
+bool nt_runtime_set_unc_root(const char *server, const char *share, const char *directory);
 int nt_runtime_open_guest_directory(const char *path, char *dos_path, size_t capacity);
 bool nt_runtime_check_guest_file(const char *path, char *dos_path, size_t capacity, bool *exists);
 bool nt_runtime_guest_directory_entry(int fd, const char *name, bool *directory);
