@@ -1793,6 +1793,11 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
     return !error;
 }
 
+/* Directory removal must obey the same DOS-name stability policy as rename.
+ * A current directory or a granted known-folder root must not disappear
+ * while its guest path is still in use. */
+static bool path_breaks_guest_root(const char *source);
+
 enum path_operation { MAKE_DIRECTORY, REMOVE_FILE, REMOVE_DIRECTORY };
 
 static int32_t change_path(const char *input, enum path_operation operation)
@@ -1800,6 +1805,10 @@ static int32_t change_path(const char *input, enum path_operation operation)
     char path[PATH_MAX];
     if (!guest_path(input, path)) {
         nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    if (operation == REMOVE_DIRECTORY && path_breaks_guest_root(path)) {
+        nt_SetLastError(NT_ERROR_SHARING_VIOLATION);
         return 0;
     }
     const char *resolved = path;
@@ -1909,9 +1918,11 @@ static bool move_source_can_be_deleted(const char *path)
 }
 
 /* The current working directory and externally granted known folders
- * have stable DOS names. Renaming an ancestor would invalidate the Win32
- * path-to-root mapping and could make a grant appear under a stale name. */
-static bool move_breaks_guest_root(const char *source)
+ * have stable DOS names. Renaming or deleting an ancestor would invalidate
+ * the Win32 path-to-root mapping and could make a grant appear under a
+ * stale name. This check shares the existing root-lock policy but does
+ * not make Linux directory operations atomic against external writers. */
+static bool path_breaks_guest_root(const char *source)
 {
     pthread_mutex_lock(&root_lock);
     bool blocked = guest_cwd[0] != '\0' && guest_path_prefix(guest_cwd, source);
@@ -1941,7 +1952,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         nt_SetLastError(path_error(errno, true));
         return 0;
     }
-    if (move_breaks_guest_root(source)) {
+    if (path_breaks_guest_root(source)) {
         nt_SetLastError(NT_ERROR_SHARING_VIOLATION);
         return 0;
     }
