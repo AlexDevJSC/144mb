@@ -8,6 +8,19 @@ __declspec(dllimport) LONG NTAPI NtSuspendThread(HANDLE, ULONG *);
 #endif
 
 #ifdef NT_CHILD_FIXTURE
+static BOOL contains_command_marker(const WCHAR *command, const WCHAR *marker)
+{
+    for (const WCHAR *p = command; *p != 0; ++p) {
+        const WCHAR *a = p, *b = marker;
+        while (*a && *b && *a == *b) {
+            ++a;
+            ++b;
+        }
+        if (*b == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
 static BOOL has_hold_argument(const WCHAR *command)
 {
     static const WCHAR marker[] = L"/nt-hold";
@@ -30,6 +43,18 @@ int import_fixture_entry(void)
         Sleep(30000);
         return 0x766u;
     }
+    WCHAR env[80];
+    if (contains_command_marker(command, L"/nt-env-custom")) {
+        if (GetEnvironmentVariableW(L"NT_CHILD_CUSTOM", env, 80) != 5 ||
+            lstrcmpW(env, L"árbol") != 0 ||
+            GetEnvironmentVariableW(L"NT_CHILD_INHERITED", env, 80) != 0 ||
+            GetLastError() != ERROR_ENVVAR_NOT_FOUND)
+            return 96;
+    } else {
+        if (GetEnvironmentVariableW(L"NT_CHILD_INHERITED", env, 80) != 5 ||
+            lstrcmpW(env, L"Grüße") != 0)
+            return 97;
+    }
     BOOL found = FALSE;
     for (const WCHAR *p = command; *p; ++p)
         if (*p == 0xe4)
@@ -47,6 +72,8 @@ int import_fixture_entry(void)
     const WCHAR directory[] = L"C:\\ChildDir";
     STARTUPINFOW startup = {.cb = sizeof(startup)};
     PROCESS_INFORMATION process = {0};
+    if (!SetEnvironmentVariableW(L"NT_CHILD_INHERITED", L"Grüße"))
+        return 98;
     if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, directory, &startup, &process))
         return 20;
     DWORD code = 0;
@@ -106,6 +133,27 @@ int import_fixture_entry(void)
         return 28;
     if (!CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
         return 29;
+
+    /* The custom environment replaces, rather than extends, the inherited
+     * guest snapshot. The Linux runner's host envp remains untouched. */
+    WCHAR custom_command[] = L"\"C:\\Test child.exe\" /nt-env-custom ä";
+    static const WCHAR environment[] =
+        L"NT_CHILD_CUSTOM=árbol\0NT_CHILD_OTHER=ok\0";
+    if (!CreateProcessW(NULL, custom_command, NULL, NULL, FALSE,
+                        CREATE_UNICODE_ENVIRONMENT, (void *)environment,
+                        directory, &startup, &process))
+        return 99;
+    if (WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 100;
+    SetLastError(0);
+    if (CreateProcessW(NULL, custom_command, NULL, NULL, FALSE, 0,
+                       (void *)environment, directory, &startup, &process) ||
+        GetLastError() != ERROR_NOT_SUPPORTED)
+        return 101;
+    if (!SetEnvironmentVariableW(L"NT_CHILD_INHERITED", NULL))
+        return 102;
     return 0;
 }
 #endif
