@@ -345,6 +345,12 @@ static void check_files(void)
     CHECK(nt_CreateDirectoryA("data", NULL) == 0 && last_error() == NT_ERROR_PATH_NOT_FOUND);
     char root[] = "/tmp/nt-mines-drive.XXXXXX";
     CHECK(mkdtemp(root) != NULL && nt_runtime_set_file_root(root));
+    /* Win32 A codepage compatibility for raw CP1252 bytes, in addition to
+     * the UTF-8 strings used by the host runtime. */
+    const char cp1252_directory[] = {'C', ':', '\\', 'c', 'a', 'f', (char)0xe9, 0};
+    CHECK(nt_CreateDirectoryA(cp1252_directory, NULL) != 0 &&
+          (nt_GetFileAttributesA(cp1252_directory) & 0x10u) != 0 &&
+          nt_RemoveDirectoryA(cp1252_directory) != 0);
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
     CHECK(nt_CreateDirectoryA("data", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
     CHECK(nt_CreateDirectoryA("DATA", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
@@ -573,6 +579,12 @@ static void check_files(void)
     CHECK(nt_LockFile(first_lock, 0, 0, 8, 0) != 0);
     CHECK(nt_LockFile(second_lock, 0, 0, 8, 0) == 0 &&
           last_error() == NT_ERROR_LOCK_VIOLATION);
+    int64_t start_locked = -1;
+    CHECK(nt_SetFilePointerEx(second_lock, 0, &start_locked, 0) && start_locked == 0);
+    char check_locked[4];
+    uint32_t checked_bytes = 0;
+    CHECK(!nt_ReadFile(second_lock, check_locked, 4, &checked_bytes, NULL) &&
+          last_error() == NT_ERROR_LOCK_VIOLATION);
     CHECK(nt_UnlockFile(first_lock, 0, 0, 8, 0) != 0 &&
           nt_LockFile(second_lock, 0, 0, 8, 0) != 0 &&
           nt_UnlockFile(second_lock, 0, 0, 8, 0) != 0);
@@ -603,6 +615,29 @@ static void check_files(void)
           written_bytes == 3 && memcmp(positional, "aZc", 3) == 0);
     CHECK(nt_CloseHandle(completed) != 0 && nt_CloseHandle(second_lock) != 0 &&
           nt_CloseHandle(first_lock) != 0 && nt_DeleteFileA("data/LOCKED.bin") != 0);
+
+    /* FILE_FLAG_OVERLAPPED takes the real worker path, rather than the
+     * immediate pread/pwrite completion preserved for legacy handles. */
+    const uintptr_t background = nt_CreateFileA("data/background.bin",
+        UINT32_C(0xc0000000), 7u, NULL, 2u, 0x40000080u, 0);
+    CHECK(background != UINTPTR_MAX);
+    const uintptr_t background_event = nt_CreateEventW(NULL, 1, 0, NULL);
+    CHECK(background_event != 0 && background_event != UINTPTR_MAX);
+    struct nt_overlapped async_write = {.offset = 5, .event = background_event};
+    CHECK(!nt_WriteFile(background, "async", 5, NULL, &async_write) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    uint32_t async_completed = 0;
+    CHECK(nt_GetOverlappedResult(background, &async_write, &async_completed, 1) != 0 &&
+          async_completed == 5);
+    CHECK(nt_WaitForSingleObject(background_event, 1000) == 0);
+    struct nt_overlapped async_read = {.offset = 5, .event = background_event};
+    char background_data[6] = {0};
+    CHECK(!nt_ReadFile(background, background_data, 5, NULL, &async_read) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_GetOverlappedResult(background, &async_read, &async_completed, 1) != 0 &&
+          async_completed == 5 && memcmp(background_data, "async", 5) == 0);
+    CHECK(nt_CloseHandle(background) && nt_CloseHandle(background_event) &&
+          nt_DeleteFileA("data/background.bin"));
 
     CHECK(nt_CopyFileA("C:\\DATA\\SCORES.TXT", "C:\\data\\Backup.TXT", 1) != 0);
     CHECK(nt_CopyFileA("data/scores.txt", "DATA/backup.txt", 1) == 0 &&
