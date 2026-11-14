@@ -275,6 +275,30 @@ static void check_crt(void)
     puts("PASS C locale, numeric overflow, isolated environment and callback order");
 }
 
+static void check_extended_codepages(void)
+{
+    CHECK(nt_IsValidCodePage(1251) && nt_IsValidCodePage(932));
+    CHECK(!nt_IsValidCodePage(77777));
+    uint16_t wide[8] = {0};
+    const char cyrillic[] = {(char)0xcf, (char)0xf0, 0};
+    CHECK(nt_MultiByteToWideChar(1251, 8, cyrillic, -1, wide, 8) == 3 &&
+          wide[0] == 0x041f && wide[1] == 0x0440 && wide[2] == 0);
+    char roundtrip[8] = {0};
+    int32_t substituted = -1;
+    CHECK(nt_WideCharToMultiByte(1251, 0, wide, -1, roundtrip, 8, NULL,
+                                &substituted) == 3 &&
+          memcmp(roundtrip, cyrillic, 3) == 0 && substituted == 0);
+    const char japanese[] = {(char)0x82, (char)0xa0, 0};
+    CHECK(nt_MultiByteToWideChar(932, 8, japanese, -1, wide, 8) == 2 &&
+          wide[0] == 0x3042 && wide[1] == 0);
+    CHECK(nt_WideCharToMultiByte(932, 0, wide, -1, roundtrip, 8,
+                                NULL, NULL) == 3 &&
+          memcmp(roundtrip, japanese, 3) == 0);
+    CHECK(nt_MultiByteToWideChar(932, 8, "\x82", 1, wide, 8) == 0 &&
+          last_error() == NT_ERROR_NO_UNICODE_TRANSLATION);
+    puts("PASS Unicode legacy pages CP1251/CP932, strict decoding and roundtrips");
+}
+
 static void check_files(void)
 {
     BOUND(KERNEL, CreateDirectoryA);
@@ -314,6 +338,41 @@ static void check_files(void)
     CHECK(nt_CreateDirectoryA("data", NULL) == 0 && last_error() == NT_ERROR_PATH_NOT_FOUND);
     char root[] = "/tmp/nt-mines-drive.XXXXXX";
     CHECK(mkdtemp(root) != NULL && nt_runtime_set_file_root(root));
+    /* Every secondary drive or UNC share is an explicit host grant.
+     * No Linux directory is ever reachable by an invented DOS root. */
+    char second[] = "/tmp/nt-second-drive.XXXXXX";
+    char share[] = "/tmp/nt-host-share.XXXXXX";
+    CHECK(mkdtemp(second) != NULL && mkdtemp(share) != NULL);
+    CHECK(nt_runtime_set_drive_root('D', second));
+    CHECK(nt_runtime_set_unc_root("lab", "assets", share));
+    CHECK(nt_CreateDirectoryA("d:\\Folder", NULL) != 0);
+    void *mounted = nt_fopen("D:\\FOLDER\\example.txt", "wb");
+    CHECK(mounted != NULL && nt_fwrite("drive", 1, 5, mounted) == 5 &&
+          nt_fclose(mounted) == 0);
+    char host_drive[512], host_share[512];
+    CHECK(snprintf(host_drive, sizeof(host_drive), "%s/Folder/example.txt", second) > 0);
+    FILE *host_check = fopen(host_drive, "rb");
+    char host_bytes[8] = {0};
+    CHECK(host_check != NULL && fread(host_bytes, 1, 5, host_check) == 5 &&
+          memcmp(host_bytes, "drive", 5) == 0 && fclose(host_check) == 0);
+    CHECK(nt_MoveFileExA("D:\\Folder\\example.txt", "\\\\LAB\\ASSETS\\example.txt",
+                         0) == 0 && last_error() == NT_ERROR_NOT_SAME_DEVICE);
+    CHECK(nt_MoveFileExA("D:\\Folder\\example.txt", "\\\\LAB\\ASSETS\\example.txt",
+                         2u) != 0);
+    CHECK(snprintf(host_share, sizeof(host_share), "%s/example.txt", share) > 0);
+    CHECK(access(host_drive, F_OK) != 0 && access(host_share, F_OK) == 0);
+    mounted = nt_fopen("\\\\lab\\assets\\EXAMPLE.TXT", "rb");
+    CHECK(mounted != NULL && nt_fread(host_bytes, 1, 5, mounted) == 5 &&
+          memcmp(host_bytes, "drive", 5) == 0 && nt_fclose(mounted) == 0);
+    CHECK(nt_fopen("\\\\other\\assets\\example.txt", "rb") == NULL);
+    CHECK(nt_fopen("E:\\example.txt", "rb") == NULL);
+    CHECK(nt_fopen("D:\\..\\escape.txt", "wb") == NULL && errno == EACCES);
+    CHECK(nt_fopen("\\\\lab\\assets\\..\\escape.txt", "wb") == NULL && errno == EACCES);
+    CHECK(nt_DeleteFileA("\\\\lab\\assets\\example.txt") != 0);
+    CHECK(nt_RemoveDirectoryA("D:\\FOLDER") != 0);
+    CHECK(nt_runtime_set_unc_root("lab", "assets", NULL));
+    CHECK(nt_runtime_set_drive_root('D', NULL));
+    CHECK(rmdir(share) == 0 && rmdir(second) == 0);
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
     CHECK(nt_CreateDirectoryA("data", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
     CHECK(nt_CreateDirectoryA("DATA", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
@@ -826,6 +885,7 @@ int main(void)
     check_memory();
     check_unicode_and_rects();
     check_crt();
+    check_extended_codepages();
     check_files();
     check_gdi();
     check_menus();
