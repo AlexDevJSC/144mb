@@ -3102,6 +3102,10 @@ static bool check_current_lock(int fd, uint32_t length, bool write_access)
 enum { ASYNC_LIMIT = 32, ASYNC_PENDING = NT_ERROR_IO_PENDING };
 struct async_request {
     bool occupied, queued;
+    /* Per-process ownership: different Win32 HANDLE aliases are distinct
+     * cancellation targets even if they refer to the same Linux inode. */
+    uintptr_t owner_handle;
+    pid_t owner_pid;
     int fd;
     void *buffer;
     uint32_t size;
@@ -3177,10 +3181,11 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     }
     pthread_mutex_lock(&file_lock);
     const struct guest_file *entry = find_handle(handle);
-    const bool enabled = entry && entry->overlapped_io;
+    const bool exists = entry != NULL;
+    const bool enabled = exists && entry->overlapped_io;
     pthread_mutex_unlock(&file_lock);
     if (!enabled) {
-        nt_SetLastError(entry == NULL ? NT_ERROR_INVALID_HANDLE : NT_ERROR_NOT_SUPPORTED);
+        nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
         return 0;
     }
     const int fd = duplicate_handle(handle, write_access ? FILE_WRITE : FILE_READ);
@@ -3212,7 +3217,9 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     }
     if (slot >= 0) {
         async_tasks[slot] = (struct async_request) {
-            .occupied = true, .queued = true, .fd = fd, .buffer = buffer,
+            .occupied = true, .queued = true,
+            .owner_handle = handle, .owner_pid = getpid(),
+            .fd = fd, .buffer = buffer,
             .size = size, .offset = (off_t)offset, .write_access = write_access,
             .completion = completion, .event = completion->event
         };
@@ -3230,9 +3237,9 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     return 0;
 }
 
-/* Offset-based OVERLAPPED operations can complete synchronously, exactly
- * as Windows permits. A true pending work queue/IOCP is not implemented.
- * The explicit offset never changes the shared file pointer. */
+/* Regular handles preserve immediate offset completion. FILE_FLAG_OVERLAPPED
+ * handles instead use the bounded worker queue; cancellation only handles
+ * requests which have not started. IOCP/APC completion is not supported. */
 static int32_t file_io(uintptr_t handle, void *buffer, uint32_t size,
                       uint32_t *done, struct nt_overlapped *overlap, bool writing)
 {
@@ -3338,6 +3345,58 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
                                uint32_t *done, void *overlap)
 {
     return file_io(handle, (void *)buffer, size, done, overlap, true);
+}
+
+/* CancelIoEx is deliberately limited to work not yet handed to the Linux
+ * worker: no pthread cancellation, interruption of pwrite, or invented
+ * completion. A running request is left alone; ERROR_NOT_FOUND tells the
+ * guest that no queued request was cancelled by this call.
+ *
+ * The file HANDLE (not the inode or guest PID) owns each request. An
+ * OVERLAPPED pointer restricts the selection; NULL selects all queued
+ * requests issued through this HANDLE, including other guest threads. */
+int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *completion)
+{
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *entry = find_handle(handle);
+    const bool exists = entry != NULL;
+    const bool enabled = exists && entry->overlapped_io;
+    pthread_mutex_unlock(&file_lock);
+    if (!enabled) {
+        nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    struct async_request cancelled[ASYNC_LIMIT];
+    size_t count = 0;
+    pthread_mutex_lock(&async_lock);
+    for (size_t i = 0; i < ASYNC_LIMIT; ++i) {
+        struct async_request *task = &async_tasks[i];
+        if (!task->occupied || !task->queued || task->owner_handle != handle ||
+            task->owner_pid != getpid() ||
+            (completion != NULL && task->completion != completion))
+            continue;
+        cancelled[count++] = *task;
+        task->queued = false;
+        task->occupied = false;
+        __atomic_store_n(&task->completion->internal_high, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&task->completion->internal, NT_ERROR_OPERATION_ABORTED,
+                         __ATOMIC_RELEASE);
+    }
+    if (count)
+        pthread_cond_broadcast(&async_condition);
+    pthread_mutex_unlock(&async_lock);
+
+    for (size_t i = 0; i < count; ++i) {
+        close(cancelled[i].fd);
+        if (cancelled[i].event)
+            (void)nt_SetEvent(cancelled[i].event);
+    }
+    if (count == 0) {
+        nt_SetLastError(NT_ERROR_NOT_FOUND);
+        return 0;
+    }
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,
