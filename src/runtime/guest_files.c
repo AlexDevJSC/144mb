@@ -1084,6 +1084,21 @@ static bool move_source_can_be_deleted(const char *path)
     return error == 0;
 }
 
+/* The current working directory and externally granted known folders
+ * have stable DOS names. Renaming an ancestor would invalidate the Win32
+ * path-to-root mapping and could make a grant appear under a stale name. */
+static bool move_breaks_guest_root(const char *source)
+{
+    pthread_mutex_lock(&root_lock);
+    bool blocked = guest_cwd[0] != '\0' && guest_path_prefix(guest_cwd, source);
+    for (size_t i = 0; !blocked && i < NT_USER_FOLDER_COUNT; ++i)
+        if (folder_roots[i].active &&
+            guest_path_prefix(nt_user_folders[i].relative, source))
+            blocked = true;
+    pthread_mutex_unlock(&root_lock);
+    return blocked;
+}
+
 int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
 {
     return nt_MoveFileExA(from, to, 0);
@@ -1100,6 +1115,10 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     }
     if (!guest_path(from, source) || !guest_path(to, destination)) {
         nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    if (move_breaks_guest_root(source)) {
+        nt_SetLastError(NT_ERROR_SHARING_VIOLATION);
         return 0;
     }
     const char *resolved_source = source, *resolved_destination = destination;
