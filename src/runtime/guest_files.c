@@ -3333,11 +3333,28 @@ static nt_status nt_guest_io(uintptr_t handle, uintptr_t event, void *apc, void 
     return nt_file_complete(io, NT_STATUS_SUCCESS, (uintptr_t)transferred);
 }
 
+/* NT may complete an offset I/O synchronously while still honoring
+ * the supplied event. APC dispatch and genuinely pending I/O remain outside
+ * this immediate-completion subset. */
+static nt_status guest_io_with_event(uintptr_t handle, uintptr_t event, void *apc,
+    void *apc_context, struct nt_io_status_block *io, void *buffer,
+    uint32_t length, const int64_t *offset, const uint32_t *key, bool write_operation)
+{
+    if (event && !nt_ResetEvent(event))
+        return nt_file_complete(io, NT_STATUS_NOT_SUPPORTED, 0);
+    const nt_status status = nt_guest_io(handle, 0, apc, apc_context, io,
+                                        buffer, length, offset, key, write_operation);
+    if (event)
+        (void)nt_SetEvent(event);
+    return status;
+}
+
 nt_status NT_MS_ABI nt_NtReadFile(uintptr_t handle, uintptr_t event, void *apc,
     void *apc_context, struct nt_io_status_block *io, void *buffer, uint32_t length,
     const int64_t *offset, const uint32_t *key)
 {
-    return nt_guest_io(handle, event, apc, apc_context, io, buffer, length, offset, key, false);
+    return guest_io_with_event(handle, event, apc, apc_context, io,
+                               buffer, length, offset, key, false);
 }
 
 nt_status NT_MS_ABI nt_NtWriteFile(uintptr_t handle, uintptr_t event, void *apc,
@@ -3345,8 +3362,8 @@ nt_status NT_MS_ABI nt_NtWriteFile(uintptr_t handle, uintptr_t event, void *apc,
     const int64_t *offset, const uint32_t *key)
 {
     /* The shared POSIX implementation never writes to the caller's buffer. */
-    return nt_guest_io(handle, event, apc, apc_context, io, (void *)buffer,
-                       length, offset, key, true);
+    return guest_io_with_event(handle, event, apc, apc_context, io, (void *)buffer,
+                               length, offset, key, true);
 }
 
 nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_status_block *io,
