@@ -728,26 +728,72 @@ int main(int argc, char **argv)
 
     const char *folders[NT_USER_FOLDER_COUNT] = {0};
     int arg = 1;
-    while (arg + 1 < argc && strcmp(argv[arg], "--share") == 0) {
-        const char *mapping = argv[arg + 1];
+    while (arg + 1 < argc) {
+        const char *option = argv[arg], *mapping = argv[arg + 1];
         const char *equals = strchr(mapping, '=');
-        size_t folder = 0;
-        if (equals != NULL && equals[1] == '/') {
-            const size_t length = (size_t)(equals - mapping);
-            for (; folder < NT_USER_FOLDER_COUNT; ++folder) {
-                const char *name = nt_user_folders[folder].name;
-                if (strlen(name) == length && memcmp(mapping, name, length) == 0)
-                    break;
+        if (strcmp(option, "--share") == 0) {
+            size_t folder = 0;
+            if (equals != NULL && equals[1] == '/') {
+                const size_t length = (size_t)(equals - mapping);
+                for (; folder < NT_USER_FOLDER_COUNT; ++folder) {
+                    const char *name = nt_user_folders[folder].name;
+                    if (strlen(name) == length && memcmp(mapping, name, length) == 0)
+                        break;
+                }
+            } else {
+                folder = NT_USER_FOLDER_COUNT;
             }
+            if (folder == NT_USER_FOLDER_COUNT || folders[folder] != NULL) {
+                fprintf(stderr, "Invalid or duplicate folder mapping: %s\n", mapping);
+                usage(argv[0]);
+                return 2;
+            }
+            folders[folder] = equals + 1;
+        } else if (strcmp(option, "--drive") == 0) {
+            char letter = mapping[0];
+            if (letter >= 'a' && letter <= 'z')
+                letter -= 'a' - 'A';
+            if (!equals || equals != mapping + 1 || equals[1] != '/' ||
+                letter < 'A' || letter > 'Z' || letter == 'C' ||
+                requested_drives[letter - 'A'] != NULL) {
+                fprintf(stderr, "Invalid or duplicate drive grant: %s\n", mapping);
+                return 2;
+            }
+            requested_drives[letter - 'A'] = equals + 1;
+        } else if (strcmp(option, "--unc") == 0) {
+            const char *slash = strchr(mapping, '/');
+            char server[64], share[64];
+            const size_t server_length = slash ? (size_t)(slash - mapping) : 0;
+            const size_t share_length = equals && slash && equals > slash ?
+                                        (size_t)(equals - slash - 1) : 0;
+            if (!equals || equals[1] != '/' || server_length == 0 ||
+                server_length >= sizeof(server) || share_length == 0 ||
+                share_length >= sizeof(share) || requested_unc_count == EXTRA_UNC_LIMIT ||
+                memchr(slash + 1, '/', share_length) != NULL) {
+                fprintf(stderr, "Invalid UNC grant: %s\n", mapping);
+                return 2;
+            }
+            memcpy(server, mapping, server_length);
+            server[server_length] = '\0';
+            memcpy(share, slash + 1, share_length);
+            share[share_length] = '\0';
+            if (!valid_share_label(server) || !valid_share_label(share) ||
+                server[0] == '.' || share[0] == '.') {
+                fprintf(stderr, "Invalid UNC server/share: %s\n", mapping);
+                return 2;
+            }
+            for (size_t i = 0; i < requested_unc_count; ++i)
+                if (strcasecmp(requested_unc[i].server, server) == 0 &&
+                    strcasecmp(requested_unc[i].share, share) == 0) {
+                    fprintf(stderr, "Duplicate UNC grant: %s\n", mapping);
+                    return 2;
+                }
+            strcpy(requested_unc[requested_unc_count].server, server);
+            strcpy(requested_unc[requested_unc_count].share, share);
+            requested_unc[requested_unc_count++].directory = equals + 1;
         } else {
-            folder = NT_USER_FOLDER_COUNT;
+            break;
         }
-        if (folder == NT_USER_FOLDER_COUNT || folders[folder] != NULL) {
-            fprintf(stderr, "Invalid or duplicate folder mapping: %s\n", mapping);
-            usage(argv[0]);
-            return 2;
-        }
-        folders[folder] = equals + 1;
         arg += 2;
     }
     const bool end_options = arg < argc && strcmp(argv[arg], "--") == 0;
