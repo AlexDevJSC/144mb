@@ -23,6 +23,16 @@ enum { COMMAND_LIMIT = 32768, ERROR_BAD_EXE_FORMAT = 193 };
 _Static_assert(sizeof(struct nt_startup_info) == 104, "STARTUPINFOW ABI");
 _Static_assert(sizeof(struct nt_process_information) == 24, "PROCESS_INFORMATION ABI");
 
+/* SECURITY_ATTRIBUTES is identical for A/W on AMD64. A null security
+ * descriptor needs no token/ACL emulation; only bInheritHandle is retained.
+ * Arbitrary security descriptors still require an NT security subsystem. */
+struct nt_security_attributes {
+    uint32_t size;
+    const void *descriptor;
+    int32_t inherit;
+};
+_Static_assert(sizeof(struct nt_security_attributes) == 24, "SECURITY_ATTRIBUTES AMD64 ABI");
+
 /* Convert a Windows ANSI (CP_ACP = CP1252 in this guest) multi-SZ block
  * without treating bytes as Linux UTF-8. The result may be passed to
  * CreateProcessW with CREATE_UNICODE_ENVIRONMENT. No host environ changes. */
@@ -360,7 +370,16 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    if (!launch_child || process_security || thread_security ||
+    const struct nt_security_attributes *process_attributes = process_security;
+    const struct nt_security_attributes *thread_attributes = thread_security;
+    if ((process_attributes != NULL && process_attributes->size != sizeof(*process_attributes)) ||
+        (thread_attributes != NULL && thread_attributes->size != sizeof(*thread_attributes))) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (!launch_child ||
+        (process_attributes != NULL && process_attributes->descriptor != NULL) ||
+        (thread_attributes != NULL && thread_attributes->descriptor != NULL) ||
         (flags & ~(4u | 0x400u)) || startup->reserved || startup->reserved_bytes || startup->reserved_data ||
         (startup->flags & ~(1u | 0x100u))) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
@@ -443,6 +462,12 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
+    /* Flags belong to independent returned HANDLE entries. They never
+     * grant the child extra access or fabricate a cross-process broker. */
+    if (process_attributes != NULL && process_attributes->inherit)
+        (void)nt_runtime_set_waitable_flags(info->process, 1u, 1u);
+    if (thread_attributes != NULL && thread_attributes->inherit)
+        (void)nt_runtime_set_waitable_flags(info->thread, 1u, 1u);
     return 1;
 }
 
