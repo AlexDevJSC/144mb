@@ -5,6 +5,7 @@
 #include "child_process.h"
 #include "winbase.h"
 #include "winfile.h"
+#include "sync.h"
 #include "../pe/pe_bytes.h"
 
 #include <errno.h>
