@@ -175,6 +175,32 @@ automáticas aplicables. La compatibilidad completa NTFS/Windows no debe
 confundirse con la conclusión de los bloques específicos de directorios
 persistentes y concesión explícita de carpetas.
 
+## Matriz de aceptación de esta vuelta
+
+Se miden **bloques funcionales concretos**, no la compatibilidad total
+con NTFS ni con todas las variantes de la API Windows:
+
+| Bloque | Contrato que se entrega a revisión del usuario |
+|---|---|
+| Crear y abrir | Operaciones de archivo `CreateFileA/W` con las cinco disposiciones soportadas, variantes básicas CRT, creación de carpetas y conflictos de compartición gestionados por el runtime |
+| Copiar | `CopyFileA/W` sobre los archivos reales: destino nuevo o existente, opción `failIfExists`, preservación del contenido, permisos básicos y atime/mtime; prevención de copia sobre el mismo inodo |
+| Mover | `MoveFileA/W` y `MoveFileExA/W` con flags REPLACE_EXISTING/COPY_ALLOWED; cambio de escritura real en Linux, actualización de la ruta de handles abiertos y bloqueo de movimientos que rompan el cwd o las carpetas concedidas |
+| Borrar | `DeleteFileA/W` y `RemoveDirectoryA/W`: comprobación de READONLY, enlaces simbólicos, directorios no vacíos y `FILE_SHARE_DELETE` en handles del proceso |
+| Rutas y seguridad | `C:\\...`, `C:relativa`, `\\\\?\\C:\\...`, `..` acotado, directorios bajo FDs, búsqueda ASCII segura, prohibición de escapes a raíces compartidas, enlaces simbólicos y cruces de montajes mediante `openat2` |
+
+Las regresiones de `compat-batch-test`, `mines-services-test` y
+`guest-profile-test` cubren los escenarios anteriores. Las carpetas
+concedidas son las seis *known folders* de la lista de permisos; ninguna
+autoriza implícitamente el HOME completo.
+
+Los siguientes apartados **siguen fuera del contrato de cierre de estos
+bloques** y tienen porcentajes propios: opciones avanzadas de `MoveFileEx`
+(como operaciones diferidas tras reinicio), copia transaccional,
+`CopyFileEx` con callbacks, ACL completas, bloqueo interproceso,
+`delete-pending` NT, flujos alternativos, casefold Unicode, UNC y reparse
+points. Por ello, un bloque básico listo para aprobación del usuario puede
+estar al 100 % sin que la compatibilidad global Windows esté al 100 %.
+
 ## Verificación
 
 ~~~sh

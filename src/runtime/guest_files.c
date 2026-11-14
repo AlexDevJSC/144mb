@@ -586,6 +586,8 @@ static uint32_t path_error(int error, bool parent)
         return NT_ERROR_DIR_NOT_EMPTY;
     case EINVAL: case ENAMETOOLONG:
         return NT_ERROR_INVALID_PARAMETER;
+    case ENOTSUP:
+        return NT_ERROR_NOT_SUPPORTED;
     case EBADF:
         return NT_ERROR_INVALID_HANDLE;
     case EPIPE:
@@ -642,6 +644,57 @@ static bool file_blocks_delete(const struct stat *info)
             return true;
     }
     return false;
+}
+
+/* Existing file handles continue to reference their Linux inode after a
+ * rename. Their reported Windows pathname must also follow the move,
+ * including files inside a directory being renamed. Prepare every string
+ * before the syscall so allocation failure cannot leave stale paths. */
+static bool guest_path_prefix(const char *path, const char *prefix)
+{
+    size_t i = 0;
+    for (; prefix[i] != '\0'; ++i) {
+        if (path[i] == '\0' ||
+            lower_ascii((unsigned char)path[i]) != lower_ascii((unsigned char)prefix[i]))
+            return false;
+    }
+    return path[i] == '\0' || path[i] == '/';
+}
+
+static bool prepare_renamed_paths(const char *from, const char *to,
+                                  char *updated[FILE_TABLE_SIZE])
+{
+    const size_t from_length = strlen(from), to_length = strlen(to);
+    for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
+        const char *old = files[i].path;
+        if (files[i].owner == FREE_FILE || !old || !guest_path_prefix(old, from))
+            continue;
+        const size_t suffix = strlen(old + from_length);
+        if (to_length + suffix >= PATH_MAX) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        updated[i] = malloc(to_length + suffix + 1);
+        if (!updated[i])
+            return false;
+        memcpy(updated[i], to, to_length);
+        memcpy(updated[i] + to_length, old + from_length, suffix + 1);
+    }
+    return true;
+}
+
+static void finish_renamed_paths(char *updated[FILE_TABLE_SIZE], bool committed)
+{
+    for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
+        if (!updated[i])
+            continue;
+        if (committed) {
+            free(files[i].path);
+            files[i].path = updated[i];
+        } else {
+            free(updated[i]);
+        }
+    }
 }
 
 static struct guest_file *new_file(void)
@@ -1070,6 +1123,62 @@ int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path)
     return change_path(path, REMOVE_DIRECTORY);
 }
 
+/* Check that cross-root copy+delete will be permitted before a new
+ * destination is created. Otherwise a readonly or non-delete-shared
+ * source can leave a completed but unwanted copy behind on failure. */
+static bool move_source_can_be_deleted(const char *path)
+{
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0)
+        return false;
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, relative, leaf);
+    const int open_error = errno;
+    close(root);
+    if (parent < 0) {
+        errno = open_error;
+        return false;
+    }
+    struct stat info;
+    int error = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW) != 0 ? errno : 0;
+    if (error == 0) {
+        if (S_ISLNK(info.st_mode))
+            error = EACCES;
+        else if (!S_ISREG(info.st_mode))
+            error = ENOTSUP;
+        else if ((info.st_mode & 0222) == 0)
+            error = EACCES;
+    }
+    if (error == 0 && faccessat(parent, ".", W_OK | X_OK, AT_EACCESS) != 0)
+        error = errno;
+    if (error == 0) {
+        pthread_mutex_lock(&file_lock);
+        const bool blocked = file_blocks_delete(&info);
+        pthread_mutex_unlock(&file_lock);
+        if (blocked)
+            error = EBUSY;
+    }
+    close(parent);
+    errno = error;
+    return error == 0;
+}
+
+/* The current working directory and externally granted known folders
+ * have stable DOS names. Renaming an ancestor would invalidate the Win32
+ * path-to-root mapping and could make a grant appear under a stale name. */
+static bool move_breaks_guest_root(const char *source)
+{
+    pthread_mutex_lock(&root_lock);
+    bool blocked = guest_cwd[0] != '\0' && guest_path_prefix(guest_cwd, source);
+    for (size_t i = 0; !blocked && i < NT_USER_FOLDER_COUNT; ++i)
+        if (folder_roots[i].active &&
+            guest_path_prefix(nt_user_folders[i].relative, source))
+            blocked = true;
+    pthread_mutex_unlock(&root_lock);
+    return blocked;
+}
+
 int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
 {
     return nt_MoveFileExA(from, to, 0);
@@ -1088,6 +1197,10 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         nt_SetLastError(path_error(errno, true));
         return 0;
     }
+    if (move_breaks_guest_root(source)) {
+        nt_SetLastError(NT_ERROR_SHARING_VIOLATION);
+        return 0;
+    }
     const char *resolved_source = source, *resolved_destination = destination;
     pthread_mutex_lock(&root_lock);
     const int source_root = path_root(&resolved_source);
@@ -1102,6 +1215,10 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
             /* Different authorized roots must never be joined using a
              * host path. A regular file is copied via guest handles, then
              * deleted only after the copy is complete. */
+            if (!move_source_can_be_deleted(source)) {
+                nt_SetLastError(path_error(errno, false));
+                return 0;
+            }
             if (!nt_CopyFileA(from, to, (flags & 1u) == 0))
                 return 0;
             if (nt_DeleteFileA(from))
@@ -1167,9 +1284,17 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
             } else if (exists < 0 && errno != ENOENT) {
                 status = -1;
             } else {
-                status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
-                                      destination_parent, rename_leaf,
-                                      (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+                char *updated[FILE_TABLE_SIZE] = {0};
+                if (!prepare_renamed_paths(source, destination, updated)) {
+                    status = -1;
+                } else {
+                    status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
+                                          destination_parent, rename_leaf,
+                                          (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+                }
+                const int rename_error = errno;
+                finish_renamed_paths(updated, status == 0);
+                errno = rename_error;
             }
         }
     }
