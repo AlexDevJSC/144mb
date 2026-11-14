@@ -312,6 +312,11 @@ static void check_files(void)
     BOUND(KERNEL, SetFileAttributesA);
     BOUND(KERNEL, SetFileAttributesW);
     BOUND(KERNEL, GetFinalPathNameByHandleW);
+    BOUND(KERNEL, LockFile);
+    BOUND(KERNEL, LockFileEx);
+    BOUND(KERNEL, UnlockFile);
+    BOUND(KERNEL, UnlockFileEx);
+    BOUND(KERNEL, GetOverlappedResult);
     BOUND(KERNEL, GetCurrentDirectoryA);
     BOUND(KERNEL, SetCurrentDirectoryA);
     BOUND(KERNEL, GetFullPathNameA);
@@ -462,6 +467,11 @@ static void check_files(void)
     CHECK(nt_fopen("LINK\\outside", "wb") == NULL && errno == ELOOP);
     CHECK(nt_MoveFileExA("link", "link-renamed", 0) == 0 &&
           last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK((nt_GetFileAttributesA("LINK") & 0x400u) != 0);
+    struct nt_find_data_w reparse_found = {0};
+    uintptr_t reparse_search = nt_FindFirstFileW(u"C:\\LiNk", &reparse_found);
+    CHECK(reparse_search != UINTPTR_MAX && (reparse_found.info.attributes & 0x400u) != 0 &&
+          nt_FindClose(reparse_search));
     CHECK(unlink(link) == 0);
 
     /* Exact spelling wins; two non-exact ASCII-folded host names are
@@ -683,6 +693,58 @@ static void check_files(void)
     CHECK(folded != NULL && nt_fclose(folded) == 0);
     CHECK(nt_RemoveDirectoryA("data") == 0 && last_error() == NT_ERROR_DIR_NOT_EMPTY);
     CHECK(nt_DeleteFileA("DATA/TARGET.TXT") != 0 && nt_RemoveDirectoryA("DATA") != 0);
+    /* Linux OFD locks are shared by duplicated HANDLEs and conflict with
+     * independent Win32 opens of the same real inode. */
+    uintptr_t lock_owner = nt_CreateFileA("data\\locks.bin", UINT32_C(0xc0000000),
+                                          7, NULL, 2, 0x80, 0);
+    CHECK(lock_owner != UINTPTR_MAX);
+    uint32_t wrote_lock = 0;
+    CHECK(nt_WriteFile(lock_owner, "0123456789", 10, &wrote_lock, NULL) &&
+          wrote_lock == 10);
+    uintptr_t lock_other = nt_CreateFileA("data\\locks.bin", UINT32_C(0xc0000000),
+                                          7, NULL, 3, 0x80, 0);
+    CHECK(lock_other != UINTPTR_MAX);
+    CHECK(nt_LockFile(lock_owner, 0, 0, 4, 0) != 0);
+    CHECK(nt_LockFile(lock_other, 0, 0, 4, 0) == 0 &&
+          last_error() == NT_ERROR_LOCK_VIOLATION);
+    int64_t seek_zero = 0;
+    CHECK(nt_SetFilePointerEx(lock_other, 0, &seek_zero, 0));
+    char locked_data[5] = {0};
+    uint32_t locked_read = 0;
+    CHECK(nt_ReadFile(lock_other, locked_data, 4, &locked_read, NULL) == 0 &&
+          last_error() == NT_ERROR_LOCK_VIOLATION);
+    CHECK(nt_UnlockFile(lock_owner, 0, 0, 4, 0));
+    CHECK(nt_ReadFile(lock_other, locked_data, 4, &locked_read, NULL) &&
+          locked_read == 4 && memcmp(locked_data, "0123", 4) == 0);
+    struct nt_overlapped lock_region = {.offset = 6};
+    CHECK(nt_LockFileEx(lock_owner, 3, 0, 2, 0, &lock_region));
+    CHECK(!nt_LockFileEx(lock_other, 3, 0, 2, 0, &lock_region) &&
+          last_error() == NT_ERROR_LOCK_VIOLATION);
+    CHECK(nt_UnlockFileEx(lock_owner, 0, 2, 0, &lock_region));
+    CHECK(nt_CloseHandle(lock_other) && nt_CloseHandle(lock_owner));
+
+    /* The overlapped worker performs real pread/pwrite from a bounded
+     * queue. Both the event and GetOverlappedResult report completion. */
+    uintptr_t async_file = nt_CreateFileA("data\\async.bin", UINT32_C(0xc0000000),
+                                           7u, NULL, 2u, 0x40000080u, 0);
+    CHECK(async_file != UINTPTR_MAX);
+    uintptr_t async_event = nt_CreateEventW(NULL, 1, 0, NULL);
+    CHECK(async_event != 0 && async_event != UINTPTR_MAX);
+    struct nt_overlapped writing = {.offset = 8, .event = async_event};
+    CHECK(!nt_WriteFile(async_file, "HELLO", 5, NULL, &writing) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    uint32_t completed = 0;
+    CHECK(nt_GetOverlappedResult(async_file, &writing, &completed, 1) &&
+          completed == 5);
+    CHECK(nt_WaitForSingleObject(async_event, 1000) == 0);
+    struct nt_overlapped reading = {.offset = 8, .event = async_event};
+    char async_bytes[6] = {0};
+    CHECK(!nt_ReadFile(async_file, async_bytes, 5, NULL, &reading) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_GetOverlappedResult(async_file, &reading, &completed, 1) &&
+          completed == 5 && memcmp(async_bytes, "HELLO", 5) == 0);
+    CHECK(nt_CloseHandle(async_file) && nt_CloseHandle(async_event));
+    CHECK(nt_DeleteFileA("data\\locks.bin") && nt_DeleteFileA("data\\async.bin"));
     CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS scoped files, text and binary I/O, and denied paths");
 }
