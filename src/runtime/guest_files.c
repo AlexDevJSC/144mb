@@ -334,6 +334,21 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
             errno = EINVAL;
             return false;
         }
+        bool granted = false;
+        pthread_mutex_lock(&root_lock);
+        for (size_t i = 0; i < UNC_GRANTS_MAX; ++i) {
+            if (unc_grants[i].fd > 0 &&
+                strcasecmp(unc_grants[i].server, server_part) == 0 &&
+                strcasecmp(unc_grants[i].share, share_part) == 0) {
+                granted = true;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&root_lock);
+        if (!granted) {
+            errno = EACCES;
+            return false;
+        }
         output[used++] = '/'; output[used++] = '/';
         memcpy(output + used, server_part, server_length);
         used += server_length;
