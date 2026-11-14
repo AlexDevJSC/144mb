@@ -7,15 +7,15 @@ Este archivo fija el orden de prioridad para **los siete componentes críticos d
 
 | Fase | Identificador de componente | Componente | Prioridad |
 | --- | --- | --- | --- |
-| 1 | **4** | **Procesos e hilos** | **Actual: máximo desarrollo alcanzable antes de cambiar la prioridad** |
-| 2 | **5** | Memoria virtual | Después de fase 1 |
-| 3 | **2** | PEB/TEB | Después de fase 2 |
-| 4 | **3** | Objetos NT | Después de fase 3 |
-| 5 | **1** | Cargador PE y DLL | Después de fase 4 |
-| 6 | **6** | Excepciones SEH/VEH | Después de fase 5 |
-| 7 | **7** | API NTDLL/Win32 | Después de fase 6 |
+| 1 | **4** | **Procesos e hilos** | **Actual; no cerrar sin cumplir los criterios de salida** |
+| 2 | **1** | Cargador PE y DLL | Después del cierre verificable del componente 4 |
+| 3 | **5** | Memoria virtual | Tras el cargador |
+| 4 | **2** | PEB/TEB | Después de memoria virtual |
+| 5 | **3** | Objetos NT | Después de PEB/TEB |
+| 6 | **6** | Excepciones SEH/VEH | Después de objetos NT |
+| 7 | **7** | API NTDLL/Win32 | Última fase |
 
-**Orden obligatorio: 4 → 5 → 2 → 3 → 1 → 6 → 7.**
+**Orden vigente por instrucción expresa del 14-11-2026: 4 → 1 → 5 → 2 → 3 → 6 → 7.** El orden anterior era **4 → 5 → 2 → 3 → 1 → 6 → 7**; se documenta el cambio, no se presenta como si hubiese sido el original. **El paso de 4 a 1 sigue condicionado al cierre real de la fase 4.**
 
 La expresión «por completo» es una meta de desarrollo, no una declaración de que pueda alcanzarse una paridad universal con Windows en un único cambio. Antes de cambiar de prioridad, desarrollar el componente activo hasta el máximo viable y medible. Si un requisito de un componente anterior depende de otro componente todavía no priorizado, implementar **únicamente la interfaz mínima transversal necesaria**, sin trasladar silenciosamente la prioridad principal. Documentar los bloqueos irresolubles, los riesgos de seguridad y los casos sin prueba antes de avanzar. Nunca declarar un componente «100 %» por contar importaciones, superar CI o pasar un fixture controlado.
 
@@ -37,11 +37,11 @@ Estimación registrada tras la integración de la PR #68, **13 de noviembre de 2
 
 | Componente | Línea base estimada | Estado |
 | --- | ---: | --- |
-| 1. Cargador PE y DLL | 55 % | En espera de su fase |
+| 1. Cargador PE y DLL | 55 % | Siguiente fase, tras cerrar el componente 4 |
 | 2. PEB/TEB | 40 % | En espera de su fase |
 | 3. Objetos NT | 30 % | En espera de su fase |
 | **4. Procesos e hilos** | **35 %** | **Línea base histórica; fase actual activa** |
-| 5. Memoria virtual | 35 % | Siguiente fase |
+| 5. Memoria virtual | 35 % | Tras el cargador PE/DLL por nueva instrucción |
 | 6. SEH/VEH | 25 % | En espera de su fase |
 | 7. API NTDLL/Win32 | 20 % | En espera de su fase |
 
@@ -68,6 +68,8 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 - **14-11-2026, PR #87 integrada — herencia real de HANDLE de archivo: 78 % → 84 % (+6 puntos porcentuales estimados).** `CreateProcessW(bInheritHandles=TRUE)` captura y transmite hasta 32 handles de archivos con flags `INHERIT`, número de HANDLE, permisos y descripción abierta compartida. La transferencia se limita a descriptores del sandbox mediante manifiesto sellado y FDs controlados. Se añade prueba Linux `posix_spawn`/`exec` + UBSan y fixture PE. Se rechaza explícitamente la herencia de objetos NT no transferibles. [CI Linux/UBSan/Fedora correcta (run 43599531683)](https://github.com/AlexDevJSC/144mb/actions/runs/43599531683). Siguen pendientes su broker, la seguridad NT completa y el control asíncrono de hilos.
 
 - **14-11-2026, PR #88 integrada — tuberías e I/O estándar de procesos hijo: 84 % → 90 % (+6 puntos porcentuales estimados).** `CreatePipe` usa un `pipe2` real, con handles de lectura/escritura y permisos propios. Los extremos heredables viajan por el protocolo sellado de la PR #87; `CreateProcessW(STARTF_USESTDHANDLES)` valida y selecciona handles de entrada/salida/error en el hijo. [CI Linux/UBSan/Fedora superada (run 43600342005)](https://github.com/AlexDevJSC/144mb/actions/runs/43600342005), incluida prueba real `posix_spawn`+`exec` de tuberías y bloqueo de herencia. Los fixtures Win64 se compilaron, pero su ejecución PE anidada no se verificó en CI por `SKIP` de Bubblewrap. **No demuestra que solo quede probar Fedora**: suspensión/terminación asíncrona, contextos completos, broker NT y seguridad siguen pendientes, y la estimación del 90 % está limitada al subconjunto alcanzado. Debe revisarse si las pruebas reales de Windows/Fedora o los contratos pendientes revelan una diferencia importante.
+
+- **14-11-2026, fase 4 — CreateProcessA y bloques de entorno ANSI (PR en revisión): 90 % → 91 % (+1 punto estimado, sujeto a CI).** La ruta `CreateProcessA` adapta rutas, comando, directorio y campos de `STARTUPINFOA` usando CP1252 Windows. `CreateProcessA/W` permite un entorno ANSI y lo transforma en UTF-16 antes de compartir el protocolo sellado de procesos hijo, sin usar la configuración regional Linux. Tests nativos de conversión, entradas incorrectas, y fixtures PE AMD64 de creación de hijos con ANSI. La ejecución anidada en Bubblewrap permanece pendiente. **Esta entrega no resuelve suspensión asíncrona ni contextos AMD64 de otros hilos, así que la fase 4 no se cierra.**
 
 ### Estado de la entrega acumulada del 14-11-2026
 
@@ -106,4 +108,4 @@ Backlog específico de la fase, sin asumir que todos los puntos sean realizables
 
 **Regla de seguridad:** no intentar suspender un pthread arbitrario mediante señales de Linux ni presentar un mecanismo cooperativo como suspensión asíncrona general de Windows. Fallar explícitamente cuando no se pueda mantener el contrato.
 
-En cada PR del componente activo actualizar este archivo o [nt-core-readiness.md](nt-core-readiness.md) con nuevos logros, pruebas y límites. Al cerrar la fase 4, priorizar **memoria virtual (5)** sin volver a reorganizar la secuencia salvo nueva instrucción del responsable del proyecto.
+En cada PR del componente activo actualizar este archivo o [nt-core-readiness.md](nt-core-readiness.md) con nuevos logros, pruebas y límites. Al cerrar la fase 4, priorizar **cargador PE/DLL (1)**, según la instrucción expresa más reciente del responsable. La revisión del orden se ha documentado arriba; no trasladar la prioridad antes del cierre verificable del componente 4.
