@@ -216,6 +216,8 @@ int nt_open_shared_folder(const char *directory, const char *home)
  */
 #define NT_SHARE_FILE "shares.conf"
 #define NT_SHARE_LOCK ".shares.lock"
+#define NT_DRIVE_FILE "drives.conf"
+#define NT_DRIVE_LOCK ".drives.lock"
 #define NT_SHARE_MAX_BYTES 32768
 
 static int share_config_directory(const char *config_home, const char *home, bool create)
@@ -291,9 +293,9 @@ static int share_folder_index(const char *name, const char *const *names, size_t
 }
 
 /* Read one complete configuration snapshot, or no mappings when absent. */
-static int load_share_config(int dir, const char *const *names, size_t count, char **paths)
+static int load_share_config(int dir, const char *file, const char *const *names, size_t count, char **paths)
 {
-    const int fd = openat(dir, NT_SHARE_FILE, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    const int fd = openat(dir, file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0)
         return errno == ENOENT ? 0 : -1;
     struct stat info;
@@ -380,8 +382,9 @@ invalid:
     }
 }
 
-int nt_guest_share_load(const char *config_home, const char *home,
-                        const char *const *names, size_t count, char **paths)
+static int grant_load(const char *config_home, const char *home,
+                      const char *const *names, size_t count, char **paths,
+                      const char *filename)
 {
     if (names == NULL || paths == NULL || count == 0 || count > 64) {
         errno = EINVAL;
@@ -392,7 +395,7 @@ int nt_guest_share_load(const char *config_home, const char *home,
     const int dir = share_config_directory(config_home, home, false);
     if (dir < 0)
         return errno == ENOENT ? 0 : -1;
-    const int result = load_share_config(dir, names, count, paths);
+    const int result = load_share_config(dir, filename, names, count, paths);
     const int error = errno;
     close(dir);
     errno = error;
@@ -417,9 +420,11 @@ static bool share_write_all(int fd, const char *data, size_t length)
 }
 
 /* Atomic replace, serialized against other writers via the private lock. */
-int nt_guest_share_update(const char *config_home, const char *home,
-                          const char *const *names, size_t count,
-                          const char *folder, const char *directory)
+static int grant_update(const char *config_home, const char *home,
+                        const char *const *names, size_t count,
+                        const char *folder, const char *directory,
+                        const char *filename, const char *lockname,
+                        const char *temp_prefix)
 {
     if (names == NULL || folder == NULL || count == 0 || count > 64) {
         errno = EINVAL;
@@ -468,7 +473,7 @@ int nt_guest_share_update(const char *config_home, const char *home,
     const int dir = share_config_directory(config_home, home, true);
     if (dir < 0)
         return -1;
-    const int lock = openat(dir, NT_SHARE_LOCK, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    const int lock = openat(dir, lockname, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     struct stat info;
     if (lock < 0 || fstat(lock, &info) != 0 || !S_ISREG(info.st_mode) ||
         info.st_uid != geteuid() || (info.st_mode & 0077) != 0 ||
@@ -481,7 +486,7 @@ int nt_guest_share_update(const char *config_home, const char *home,
         return -1;
     }
     char *paths[64] = {0};
-    int result = load_share_config(dir, names, count, paths);
+    int result = load_share_config(dir, filename, names, count, paths);
     if (result == 0) {
         free(paths[index]);
         paths[index] = directory != NULL ? strdup(directory) : NULL;
@@ -492,7 +497,7 @@ int nt_guest_share_update(const char *config_home, const char *home,
     int fd = -1;
     if (result == 0) {
         for (unsigned int attempt = 0; attempt < 64; ++attempt) {
-            snprintf(temp, sizeof(temp), ".shares.tmp.%ld.%u", (long)getpid(), attempt);
+            snprintf(temp, sizeof(temp), "%s%ld.%u", temp_prefix, (long)getpid(), attempt);
             fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
             if (fd >= 0 || errno != EEXIST)
                 break;
@@ -518,7 +523,7 @@ int nt_guest_share_update(const char *config_home, const char *home,
             result = -1;
         if (close(fd) != 0 && result == 0)
             result = -1;
-        if (result == 0 && renameat(dir, temp, dir, NT_SHARE_FILE) != 0)
+        if (result == 0 && renameat(dir, temp, dir, filename) != 0)
             result = -1;
         if (result == 0 && fsync(dir) != 0)
             result = -1;
@@ -532,4 +537,58 @@ int nt_guest_share_update(const char *config_home, const char *home,
     close(dir);
     errno = error;
     return result;
+}
+
+/* Keep user-folder grants separate from optional DOS-drive mappings.
+ * A previously installed launcher can continue reading shares.conf. */
+int nt_guest_share_load(const char *config_home, const char *home,
+                        const char *const *names, size_t count, char **paths)
+{
+    return grant_load(config_home, home, names, count, paths, NT_SHARE_FILE);
+}
+
+int nt_guest_share_update(const char *config_home, const char *home,
+                          const char *const *names, size_t count,
+                          const char *folder, const char *directory)
+{
+    return grant_update(config_home, home, names, count, folder, directory,
+                        NT_SHARE_FILE, NT_SHARE_LOCK, ".shares.tmp.");
+}
+
+static void extra_drive_names(char labels[NT_GUEST_EXTRA_DRIVES][3],
+                              const char *names[NT_GUEST_EXTRA_DRIVES])
+{
+    for (size_t i = 0; i < NT_GUEST_EXTRA_DRIVES; ++i) {
+        labels[i][0] = (char)('D' + i);
+        labels[i][1] = ':';
+        labels[i][2] = '\0';
+        names[i] = labels[i];
+    }
+}
+
+int nt_guest_drive_load(const char *config_home, const char *home,
+                        char **paths)
+{
+    char labels[NT_GUEST_EXTRA_DRIVES][3];
+    const char *names[NT_GUEST_EXTRA_DRIVES];
+    extra_drive_names(labels, names);
+    return grant_load(config_home, home, names, NT_GUEST_EXTRA_DRIVES,
+                      paths, NT_DRIVE_FILE);
+}
+
+int nt_guest_drive_update(const char *config_home, const char *home,
+                          char letter, const char *directory)
+{
+    if (letter >= 'a' && letter <= 'z')
+        letter = (char)(letter - 'a' + 'A');
+    if (letter < 'D' || letter > 'Z') {
+        errno = EINVAL;
+        return -1;
+    }
+    char labels[NT_GUEST_EXTRA_DRIVES][3];
+    const char *names[NT_GUEST_EXTRA_DRIVES];
+    extra_drive_names(labels, names);
+    return grant_update(config_home, home, names, NT_GUEST_EXTRA_DRIVES,
+                        names[letter - 'D'], directory,
+                        NT_DRIVE_FILE, NT_DRIVE_LOCK, ".drives.tmp.");
 }
