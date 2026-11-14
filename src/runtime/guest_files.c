@@ -270,9 +270,25 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         errno = ENAMETOOLONG;
         return false;
     }
+    /* Native internal paths and the W APIs are UTF-8. Legacy Windows A
+     * callers may instead pass raw CP1252; only fall back when the byte
+     * string is invalid UTF-8, preserving already-working UTF-8 bridges. */
+    char ansi_fallback[PATH_MAX];
     if (nt_MultiByteToWideChar(65001, 8, input, -1, NULL, 0) == 0) {
-        errno = EINVAL;
-        return false;
+        char *converted = nt_runtime_ansi_to_utf8(input, strlen(input));
+        if (!converted) {
+            errno = ENOMEM;
+            return false;
+        }
+        const size_t length = strlen(converted);
+        if (length >= sizeof(ansi_fallback)) {
+            free(converted);
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        memcpy(ansi_fallback, converted, length + 1);
+        free(converted);
+        input = ansi_fallback;
     }
     /* Explicit DOS drive and authorized UNC roots; all roots stay pinned
      * to separate FDs and may never be selected by a Linux host pathname. */
@@ -2685,7 +2701,10 @@ static bool utf8_guest_to_wide(const char *path, uint16_t result[PATH_MAX])
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return false;
     }
-    return nt_MultiByteToWideChar(65001, 8, path, -1, result, PATH_MAX) != 0;
+    if (nt_MultiByteToWideChar(65001, 8, path, -1, result, PATH_MAX) != 0)
+        return true;
+    /* CP1252 filenames from unmodified Win32 A applications. */
+    return nt_MultiByteToWideChar(nt_GetACP(), 0, path, -1, result, PATH_MAX) != 0;
 }
 
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryA(uint32_t size, char *buffer)
