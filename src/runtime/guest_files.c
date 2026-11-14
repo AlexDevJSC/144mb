@@ -2645,6 +2645,37 @@ int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destinati
            nt_CopyFileA(from, to, fail_if_exists);
 }
 
+uint32_t NT_MS_ABI nt_GetLogicalDrives(void)
+{
+    pthread_mutex_lock(&root_lock);
+    uint32_t bits = drive_root >= 0 ? UINT32_C(1) << 2 : 0;
+    for (unsigned int letter = 3; letter < 26; ++letter)
+        if (drive_roots[letter].active)
+            bits |= UINT32_C(1) << letter;
+    pthread_mutex_unlock(&root_lock);
+    return bits;
+}
+
+uint32_t NT_MS_ABI nt_GetDriveTypeW(const uint16_t *input)
+{
+    if (!input) {
+        pthread_mutex_lock(&root_lock);
+        const uint32_t result = guest_cwd[0] == '@' ? 4u :
+                                guest_cwd[1] == ':' ? 3u : drive_root >= 0 ? 3u : 1u;
+        pthread_mutex_unlock(&root_lock);
+        return result;
+    }
+    char path[PATH_MAX], relative[PATH_MAX];
+    if (!wide_path(input, path) || !normalize_path(path, relative, true))
+        return 1; /* DRIVE_NO_ROOT_DIR, never infer a host mount. */
+    const char *part = relative[0] ? relative : ".";
+    const int root = duplicate_root(&part);
+    if (root < 0)
+        return 1;
+    close(root);
+    return strncmp(relative, "@UNC:/", 6) == 0 ? 4u : 3u; /* REMOTE / FIXED */
+}
+
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer)
 {
     char path[PATH_MAX + 3];
@@ -3793,10 +3824,21 @@ uint32_t NT_MS_ABI nt_GetFinalPathNameByHandleW(uintptr_t handle, uint16_t *buff
         nt_SetLastError(NT_ERROR_INVALID_FLAGS);
         return 0;
     }
-    char path[PATH_MAX + 7] = "\\\\?\\";
-    if (!open_path_name(handle, path + 4))
+    char dos[PATH_MAX + 3], path[PATH_MAX + 12];
+    if (!open_path_name(handle, dos))
         return 0;
-    return path_result(path + ((flags & 4) != 0 ? 6 : 0), size, buffer);
+    if (dos[0] == '\\' && dos[1] == '\\') {
+        if (snprintf(path, sizeof(path), "\\\\?\\UNC\\%s", dos + 2) >= (int)sizeof(path)) {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        return path_result(path + ((flags & 4u) != 0 ? 8 : 0), size, buffer);
+    }
+    if (snprintf(path, sizeof(path), "\\\\?\\%s", dos) >= (int)sizeof(path)) {
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    return path_result(path + ((flags & 4u) != 0 ? 6 : 0), size, buffer);
 }
 
 struct basic_file_info { uint64_t created, accessed, written, changed; uint32_t attributes; };
