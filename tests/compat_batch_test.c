@@ -696,6 +696,7 @@ static void check_files(void)
     CHECK(nt_DeleteFileA("DATA/TARGET.TXT") != 0 && nt_RemoveDirectoryA("DATA") != 0);
     /* Linux OFD locks are shared by duplicated HANDLEs and conflict with
      * independent Win32 opens of the same real inode. */
+    CHECK(nt_CreateDirectoryA("data", NULL));
     uintptr_t lock_owner = nt_CreateFileA("data\\locks.bin", UINT32_C(0xc0000000),
                                           7, NULL, 2, 0x80, 0);
     CHECK(lock_owner != UINTPTR_MAX);
@@ -746,6 +747,7 @@ static void check_files(void)
           completed == 5 && memcmp(async_bytes, "HELLO", 5) == 0);
     CHECK(nt_CloseHandle(async_file) && nt_CloseHandle(async_event));
     CHECK(nt_DeleteFileA("data\\locks.bin") && nt_DeleteFileA("data\\async.bin"));
+    CHECK(nt_RemoveDirectoryA("data"));
     CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS scoped files, text and binary I/O, and denied paths");
 }
