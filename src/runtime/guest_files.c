@@ -9,7 +9,8 @@
 
 #include <dirent.h>
 #include <errno.h>
-#include <fnmatch.h>
+#include <unicode/uchar.h>
+#include <unicode/utf8.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/fs.h>
@@ -245,20 +246,82 @@ static bool guest_path(const char *input, char output[PATH_MAX])
     return normalize_path(input, output, false);
 }
 
-/* Windows ASCII case folding on ordinary Linux files, resolved by FD.
- * Keep non-ASCII UTF-8 bytes exact until Unicode folding is implemented. */
-static unsigned char lower_ascii(unsigned char byte)
+/* Unicode simple case fold, one code point at a time, independent of
+ * the host's locale. NT filenames are ordinal UTF-16 comparisons: do not
+ * apply NFC/NFD normalization or multi-codepoint folds implicitly.
+ * Invalid UTF-8 host names are accessible only through exact byte matches. */
+static int32_t next_folded(const char **cursor, const char *end)
 {
-    return byte >= 'A' && byte <= 'Z' ? (unsigned char)(byte + 'a' - 'A') : byte;
+    if (*cursor >= end)
+        return -1;
+    int32_t offset = 0;
+    UChar32 codepoint;
+    U8_NEXT(*cursor, offset, (int32_t)(end - *cursor), codepoint);
+    if (codepoint < 0)
+        return -1;
+    *cursor += offset;
+    return u_foldCase(codepoint, U_FOLD_CASE_DEFAULT);
 }
 
-static bool same_ascii_name(const char *left, const char *right)
+static bool case_prefix(const char *path, const char *prefix, size_t *consumed)
 {
-    while (*left && *right) {
-        if (lower_ascii((unsigned char)*left++) != lower_ascii((unsigned char)*right++))
+    const char *start = path, *p_end = path + strlen(path);
+    const char *q_end = prefix + strlen(prefix);
+    while (prefix < q_end) {
+        if (path >= p_end)
+            return false;
+        const int32_t p = next_folded(&path, p_end);
+        const int32_t q = next_folded(&prefix, q_end);
+        if (p < 0 || q < 0 || p != q)
             return false;
     }
-    return *left == '\0' && *right == '\0';
+    if (consumed)
+        *consumed = (size_t)(path - start);
+    return path == p_end || *path == '/';
+}
+
+static bool same_unicode_name(const char *left, const char *right)
+{
+    size_t consumed = 0;
+    return case_prefix(left, right, &consumed) &&
+           left[consumed] == '\0';
+}
+
+/* '*' and '?' operate on Unicode scalars, not UTF-8 bytes. DOS '*.*'
+ * is handled by the caller; all comparisons share the path fold table.
+ * An iterative backtracker bounds stack use with untrusted names. */
+static bool unicode_wildcard(const char *pattern, const char *name)
+{
+    const char *p_end = pattern + strlen(pattern), *n_end = name + strlen(name);
+    const char *retry_pattern = NULL, *retry_name = NULL;
+    while (name < n_end) {
+        if (pattern < p_end && *pattern == '*') {
+            do { ++pattern; } while (pattern < p_end && *pattern == '*');
+            retry_pattern = pattern;
+            retry_name = name;
+            continue;
+        }
+        const char *before_p = pattern, *before_n = name;
+        const bool any = pattern < p_end && *pattern == '?';
+        if (any)
+            ++pattern;
+        const int32_t needle = any ? 0 : next_folded(&pattern, p_end);
+        const int32_t scalar = next_folded(&name, n_end);
+        if (scalar >= 0 && (any || (needle >= 0 && scalar == needle)))
+            continue;
+        if (retry_pattern == NULL || retry_name >= n_end)
+            return false;
+        pattern = retry_pattern;
+        name = retry_name;
+        if (next_folded(&name, n_end) < 0)
+            return false;
+        retry_name = name;
+        (void)before_p;
+        (void)before_n;
+    }
+    while (pattern < p_end && *pattern == '*')
+        ++pattern;
+    return pattern == p_end;
 }
 
 static int confined_open_raw(int root, const char *path, int flags, unsigned int mode)
@@ -305,7 +368,7 @@ static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1]
             error = errno;
             break;
         }
-        if (same_ascii_name(asked, entry->d_name)) {
+        if (same_unicode_name(asked, entry->d_name)) {
             if (++matches > 1) {
                 error = EEXIST;
                 break;
@@ -652,24 +715,19 @@ static bool file_blocks_delete(const struct stat *info)
  * before the syscall so allocation failure cannot leave stale paths. */
 static bool guest_path_prefix(const char *path, const char *prefix)
 {
-    size_t i = 0;
-    for (; prefix[i] != '\0'; ++i) {
-        if (path[i] == '\0' ||
-            lower_ascii((unsigned char)path[i]) != lower_ascii((unsigned char)prefix[i]))
-            return false;
-    }
-    return path[i] == '\0' || path[i] == '/';
+    return case_prefix(path, prefix, NULL);
 }
 
 static bool prepare_renamed_paths(const char *from, const char *to,
                                   char *updated[FILE_TABLE_SIZE])
 {
-    const size_t from_length = strlen(from), to_length = strlen(to);
+    const size_t to_length = strlen(to);
     for (size_t i = 0; i < FILE_TABLE_SIZE; ++i) {
         const char *old = files[i].path;
-        if (files[i].owner == FREE_FILE || !old || !guest_path_prefix(old, from))
+        size_t matched = 0;
+        if (files[i].owner == FREE_FILE || !old || !case_prefix(old, from, &matched))
             continue;
-        const size_t suffix = strlen(old + from_length);
+        const size_t suffix = strlen(old + matched);
         if (to_length + suffix >= PATH_MAX) {
             errno = ENAMETOOLONG;
             return false;
@@ -678,7 +736,7 @@ static bool prepare_renamed_paths(const char *from, const char *to,
         if (!updated[i])
             return false;
         memcpy(updated[i], to, to_length);
-        memcpy(updated[i] + to_length, old + from_length, suffix + 1);
+        memcpy(updated[i] + to_length, old + matched, suffix + 1);
     }
     return true;
 }
@@ -1256,7 +1314,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     const char *wanted = strrchr(resolved_destination, '/');
     wanted = wanted ? wanted + 1 : resolved_destination;
     struct stat src_dir, dst_dir;
-    if (strcmp(source_leaf, wanted) != 0 && same_ascii_name(source_leaf, wanted) &&
+    if (strcmp(source_leaf, wanted) != 0 && same_unicode_name(source_leaf, wanted) &&
         fstat(source_parent, &src_dir) == 0 && fstat(destination_parent, &dst_dir) == 0 &&
         src_dir.st_dev == dst_dir.st_dev && src_dir.st_ino == dst_dir.st_ino)
         rename_leaf = wanted;
@@ -2684,7 +2742,7 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
             return errno;
         char normalized[PATH_MAX];
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
-            fnmatch(pattern, entry->d_name, FNM_CASEFOLD) != 0)
+            !unicode_wildcard(pattern, entry->d_name))
             continue;
         /* Add a rooted prefix to validate the entry independently of CWD. */
         char rooted[PATH_MAX];
