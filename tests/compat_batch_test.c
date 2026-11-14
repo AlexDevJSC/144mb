@@ -399,6 +399,14 @@ static void check_files(void)
     CHECK(nt_SetCurrentDirectoryA("C:\\DATA\\CURRENT") != 0);
     CHECK(nt_MoveFileExA("C:\\DATA\\current", "C:\\data\\relocated", 0) == 0 &&
           last_error() == NT_ERROR_SHARING_VIOLATION);
+    /* An empty active CWD must not be unlinked and leave all relative
+     * guest paths dangling. Its case-insensitive DOS spelling is protected. */
+    nt_SetLastError(0);
+    CHECK(nt_RemoveDirectoryA("c:\\data\\CuRrEnT") == 0 &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_GetCurrentDirectoryA(sizeof(win_cwd), win_cwd) ==
+          strlen("C:\\DATA\\CURRENT") &&
+          strcmp(win_cwd, "C:\\DATA\\CURRENT") == 0);
     CHECK(nt_SetCurrentDirectoryA("C:\\") != 0);
     CHECK(nt_MoveFileExA("DATA\\CURRENT", "data\\relocated", 0) != 0);
     CHECK(nt_RemoveDirectoryA("data\\RELOCATED") != 0);

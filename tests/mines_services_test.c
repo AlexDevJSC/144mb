@@ -176,6 +176,12 @@ static void check_user_folders(void)
     CHECK(access(input, F_OK) < 0 && errno == ENOENT);
     CHECK(nt_DeleteFileA("C:/Users/guest/Documents/sub/output.txt") &&
           nt_RemoveDirectoryA("C:/Users/guest/Documents/sub"));
+    /* While Documents is granted, its C:/Users ancestors must not be
+     * removed. Revoking the explicit grant permits normal cleanup. */
+    nt_SetLastError(0);
+    CHECK(!nt_RemoveDirectoryA("C:/Users/guest") &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_runtime_set_user_folder_root(folder, NULL));
     CHECK(nt_RemoveDirectoryA("C:/Users/guest") && nt_RemoveDirectoryA("C:/Users"));
     CHECK(nt_runtime_set_file_root(NULL) && nt_runtime_shared_user_folders() == 0);
     CHECK(unlink(link) == 0 && rmdir(native) == 0 && rmdir(drive) == 0);
