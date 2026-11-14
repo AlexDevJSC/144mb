@@ -345,6 +345,15 @@ static void check_files(void)
     CHECK(nt_CreateDirectoryA("data\\nested\\..\\subfolder", NULL) != 0);
     CHECK(nt_RemoveDirectoryA("DATA\\SUBFOLDER") != 0);
     CHECK(nt_RemoveDirectoryA("DATA\\NESTED") != 0);
+    /* A Windows process keeps its current directory reserved. Renaming
+     * that directory would leave every relative C: path pointing nowhere. */
+    CHECK(nt_CreateDirectoryA("data\\current", NULL) != 0);
+    CHECK(nt_SetCurrentDirectoryA("C:\\DATA\\CURRENT") != 0);
+    CHECK(nt_MoveFileExA("DATA\\current", "data\\relocated", 0) == 0 &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_SetCurrentDirectoryA("C:\\") != 0);
+    CHECK(nt_MoveFileExA("DATA\\CURRENT", "data\\relocated", 0) != 0);
+    CHECK(nt_RemoveDirectoryA("data\\RELOCATED") != 0);
     /* The guest sees a DOS path, while Linux receives a normal directory
      * entry. The path is not a separately emulated disk or a copied file. */
     CHECK(nt_CreateDirectoryA("C:\\Program Files", NULL) != 0);
