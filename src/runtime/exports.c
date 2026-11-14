@@ -478,6 +478,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetFileInformationByHandleEx),
     WIN_EXPORT(GetFileSize),
     WIN_EXPORT(GetFileSizeEx),
+    WIN_EXPORT(GetOverlappedResult),
     WIN_EXPORT(GetHandleInformation),
     WIN_EXPORT(SetHandleInformation),
     WIN_EXPORT(GetProcessHandleCount),
