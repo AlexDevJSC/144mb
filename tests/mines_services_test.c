@@ -8,6 +8,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <setjmp.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,74 @@ int __wrap_fdatasync(int fd)
 {
     ++commits;
     return __real_fdatasync(fd);
+}
+
+/* Two independent guest processes open the same real Linux inode.
+ * The child holds a Windows HANDLE; the parent attempts a delete/rename.
+ * Pipes order the operations, and the kernel releases flock leases when
+ * the last open-file description is closed. No supervisor or root needed. */
+static void check_crossprocess_delete_sharing(void)
+{
+    const uint32_t read_access = UINT32_C(0x80000000);
+    const uint32_t write_access = UINT32_C(0x40000000);
+    for (unsigned int permit_delete = 0; permit_delete < 2; ++permit_delete) {
+        uintptr_t created = nt_CreateFileA("C:\\two-processes.bin",
+            write_access, 1u | 2u | 4u, NULL, 2u, 0x80u, 0);
+        uint32_t written = 0;
+        CHECK(created != UINTPTR_MAX &&
+              nt_WriteFile(created, "D", 1, &written, NULL) && written == 1 &&
+              nt_CloseHandle(created));
+
+        int ready[2], gate[2];
+        CHECK(pipe(ready) == 0 && pipe(gate) == 0);
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (child == 0) {
+            close(ready[0]);
+            close(gate[1]);
+            const uintptr_t handle = nt_CreateFileA("c:\\TWO-PROCESSES.BIN",
+                read_access, permit_delete ? 1u | 4u : 1u, NULL, 3u, 0x80u, 0);
+            if (handle == UINTPTR_MAX)
+                _exit(61);
+            const char ready_token = 'R';
+            if (write(ready[1], &ready_token, 1) != 1)
+                _exit(62);
+            char signal_token = 0;
+            if (read(gate[0], &signal_token, 1) != 1)
+                _exit(63);
+            char byte = 0;
+            uint32_t count = 0;
+            if (!nt_ReadFile(handle, &byte, 1, &count, NULL) ||
+                count != 1 || byte != 'D' || !nt_CloseHandle(handle))
+                _exit(64);
+            _exit(0);
+        }
+        close(ready[1]);
+        close(gate[0]);
+        char ready_token = 0;
+        CHECK(read(ready[0], &ready_token, 1) == 1 && ready_token == 'R');
+        close(ready[0]);
+
+        nt_SetLastError(0);
+        if (permit_delete) {
+            CHECK(nt_DeleteFileA("C:\\two-processes.bin"));
+        } else {
+            CHECK(!nt_DeleteFileA("C:\\two-processes.bin") &&
+                  last_error() == NT_ERROR_SHARING_VIOLATION);
+            CHECK(!nt_MoveFileExA("C:\\two-processes.bin",
+                                  "C:\\renamed-process.bin", 0) &&
+                  last_error() == NT_ERROR_SHARING_VIOLATION);
+        }
+
+        const char resume_token = 'G';
+        CHECK(write(gate[1], &resume_token, 1) == 1);
+        close(gate[1]);
+        int status = 0;
+        CHECK(waitpid(child, &status, 0) == child &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        if (!permit_delete)
+            CHECK(nt_DeleteFileA("C:\\two-processes.bin"));
+    }
 }
 
 static void check_file_handles(void)
@@ -86,8 +155,11 @@ static void check_file_handles(void)
     CHECK(nt_close(nt_open_osfhandle((intptr_t)truncated, 0)) == 0);
     stream = nt_fopen("scores", "rb");
     CHECK(stream != NULL && nt_fread(bytes, 1, 1, stream) == 0 && nt_fclose(stream) == 0);
-    CHECK(nt_DeleteFileA("scores") && nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
+    CHECK(nt_DeleteFileA("scores"));
+    check_crossprocess_delete_sharing();
+    CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS shared Win32 files and ownership from HANDLE to CRT fd to FILE");
+    puts("PASS cross-process FILE_SHARE_DELETE using Linux flock leases");
 }
 
 static void check_user_folders(void)
