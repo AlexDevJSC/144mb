@@ -557,7 +557,7 @@ static void check_files(void)
     CHECK((nt_GetFileAttributesA("data/readonlycopy.bin") & 1u) == 0);
     CHECK(nt_DeleteFileA("data/READONLYCOPY.BIN") != 0);
     CHECK(nt_SetFileAttributesA("data/scores.txt", 0x80u) != 0);
-    CHECK(nt_SetFileAttributesA("data/scores.txt", 0x2u) == 0 &&
+    CHECK(nt_SetFileAttributesA("data/scores.txt", 0x1000u) == 0 &&
           last_error() == NT_ERROR_NOT_SUPPORTED);
     CHECK(nt_MoveFileA("DATA/backup.txt", "data/Copied.TXT") != 0);
     folded = nt_fopen("data/cOPIED.txt", "rb");
