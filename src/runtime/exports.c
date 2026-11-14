@@ -391,6 +391,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetTimeZoneInformation),
     WIN_EXPORT(GetUserDefaultLCID),
     WIN_EXPORT(IsValidLocale),
+    WIN_EXPORT(IsDBCSLeadByteEx),
     WIN_EXPORT(LCMapStringEx),
     WIN_EXPORT(LCMapStringW),
     WIN_EXPORT(VirtualAlloc),
