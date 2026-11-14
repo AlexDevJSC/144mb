@@ -210,7 +210,7 @@ static void check_explicit_drive_and_unc(void)
     CHECK(!nt_runtime_set_drive_root('B', droot) && errno == EINVAL);
 
     const char unc_file[] = "\\\\server\\share\\report.txt";
-    CHECK(!nt_CreateFileA(unc_file, 0x40000000u, 0, NULL, 2, 0x80, 0) &&
+    CHECK(nt_CreateFileA(unc_file, 0x40000000u, 0, NULL, 2, 0x80, 0) == UINTPTR_MAX &&
           last_error() == NT_ERROR_ACCESS_DENIED);
     CHECK(nt_runtime_set_unc_root("server", "share", shared) &&
           nt_GetDriveTypeW(u"\\\\SERVER\\SHARE\\") == 4u);
@@ -222,8 +222,8 @@ static void check_explicit_drive_and_unc(void)
           memcmp(bytes, "unc", 3) == 0 && fclose(host) == 0);
     CHECK(!nt_CreateDirectoryA("\\\\server\\share\\..\\escape", NULL) &&
           last_error() == NT_ERROR_ACCESS_DENIED);
-    CHECK(!nt_CreateFileA("\\\\other\\share\\file.txt", 0x80000000u, 1, NULL,
-                          3, 0x80, 0) && last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_CreateFileA("\\\\other\\share\\file.txt", 0x80000000u, 1, NULL,
+                          3, 0x80, 0) == UINTPTR_MAX && last_error() == NT_ERROR_ACCESS_DENIED);
     const uintptr_t opened = nt_CreateFileA(unc_file, 0x80000000u, 1, NULL, 3, 0x80, 0);
     uint16_t resolved[256] = {0};
     static const uint16_t expected[] = u"\\\\?\\UNC\\server\\share\\report.txt";
@@ -245,7 +245,7 @@ static void check_explicit_drive_and_unc(void)
           nt_FindClose(search));
     CHECK(unlink(symlink_path) == 0);
     CHECK(nt_runtime_set_unc_root("server", "share", NULL));
-    CHECK(!nt_CreateFileA(unc_file, 0x80000000u, 1, NULL, 3, 0x80, 0) &&
+    CHECK(nt_CreateFileA(unc_file, 0x80000000u, 1, NULL, 3, 0x80, 0) == UINTPTR_MAX &&
           last_error() == NT_ERROR_ACCESS_DENIED);
     CHECK(nt_runtime_set_file_root(NULL) && nt_GetLogicalDrives() == 0);
     CHECK(snprintf(native_path, sizeof(native_path), "%s/Data/hello.txt", droot) > 0 &&
