@@ -275,8 +275,14 @@ los handles de Windows abiertos sobre ese archivo lo concedieron, se puede
 renombrar o eliminar la entrada de directorio manteniendo el inodo Linux
 vivo hasta cerrar esos descriptores. Si alguno no lo concede, se devuelve
 un error de compartición. `DeleteFileA/W` también respeta el atributo de
-solo lectura. Esto aún no implementa por completo la semántica NT de
-`delete-pending` entre procesos o sobre archivos reabiertos por nombre.
+solo lectura. La eliminación de un directorio de trabajo activo o de una carpeta compartida
+concedida (o sus ancestros) se rechaza con un error de compartición,
+igual que su cambio de nombre, para no dejar una ruta DOS inválida;
+existe una regresión que comprueba el directorio de trabajo vacío.
+La comprobación del nombre y el borrado siguen sin ser atómicos frente
+a modificaciones concurrentes de otro proceso Linux. Esto aún no implementa
+por completo la semántica NT de `delete-pending` entre procesos o sobre
+archivos reabiertos por nombre.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
 points, UNC de red y concesiones persistentes de unidades, compartición
