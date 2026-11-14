@@ -102,6 +102,39 @@ int main(int argc, char **argv)
     free(entries);
     free(storage);
     close(environment_fd);
+    /* Windows ANSI means guest ACP=1252, not the host Linux locale.
+     * The final double NUL and each entry's name/value must survive. */
+    static const char cp1252_env[] = "NT_CP1252=Espa\xf1a\0NT_ACCENT=caf\xe9\0";
+    uint16_t *converted_cp = nt_runtime_ansi_child_environment(cp1252_env);
+    check(converted_cp != NULL &&
+          memcmp(converted_cp, u"NT_CP1252=España", sizeof(u"NT_CP1252=España")) == 0 &&
+          memcmp(converted_cp + sizeof(u"NT_CP1252=España") / sizeof(uint16_t),
+                 u"NT_ACCENT=café", sizeof(u"NT_ACCENT=café")) == 0,
+          "convert CP1252 ANSI multi-SZ to exact UTF16 entries");
+    check(nt_runtime_build_child_environment(converted_cp, &environment_fd) ==
+          NT_ERROR_SUCCESS &&
+          nt_runtime_read_child_environment(environment_fd, &entries, &storage) &&
+          strcmp(entries[0], "NT_CP1252=España") == 0 &&
+          strcmp(entries[1], "NT_ACCENT=café") == 0 &&
+          entries[2] == NULL,
+          "sealed child environment represents CP1252 input as UTF8");
+    free(converted_cp);
+    free(entries);
+    free(storage);
+    close(environment_fd);
+    const char empty_ansi[] = {0, 0};
+    converted_cp = nt_runtime_ansi_child_environment(empty_ansi);
+    check(converted_cp != NULL && converted_cp[0] == 0 && converted_cp[1] == 0,
+          "empty ANSI multi-SZ is double-terminated");
+    free(converted_cp);
+    static const char broken_ansi[] = "BROKEN_RECORD\0";
+    converted_cp = nt_runtime_ansi_child_environment(broken_ansi);
+    check(converted_cp != NULL &&
+          nt_runtime_build_child_environment(converted_cp, &environment_fd) ==
+          NT_ERROR_INVALID_PARAMETER,
+          "reject malformed converted environment entry without equals sign");
+    free(converted_cp);
+
     int unsealed[2];
     check(pipe(unsealed) == 0, "unsealed test pipe");
     check(!nt_runtime_read_child_environment(unsealed[0], &entries, &storage),
