@@ -39,6 +39,7 @@ static const char *active_dos_path, *active_command, *active_directory;
  * execute. It is never installed as the Linux process's environ. */
 static char **active_child_environment;
 static int active_child_manifest = -1;
+static uintptr_t active_child_standard_handles[3];
 
 static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *context)
 {
@@ -59,7 +60,10 @@ static int NT_MS_ABI guest_entry(void)
     if (!nt_runtime_set_file_root("/game"))
         return 118;
     if (active_child_manifest >= 0) {
-        const bool restored = nt_runtime_restore_inherited_files(active_child_manifest);
+        const bool restored =
+            nt_runtime_inherited_standard_handles(active_child_manifest,
+                                                  active_child_standard_handles) &&
+            nt_runtime_restore_inherited_files(active_child_manifest);
         close(active_child_manifest);
         active_child_manifest = -1;
         if (!restored) {
@@ -90,6 +94,12 @@ static int NT_MS_ABI guest_entry(void)
     nt_runtime_set_guest_tls(&initial, active.base + active.tls.callbacks_rva, active.tls.callback_count);
     if (!nt_runtime_set_standard_streams(STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO))
         return 121;
+    const uint32_t selectors[3] = {(uint32_t)-10, (uint32_t)-11, (uint32_t)-12};
+    for (size_t i = 0; i < 3; ++i) {
+        if (active_child_standard_handles[i] != 0 &&
+            !nt_SetStdHandle(selectors[i], active_child_standard_handles[i]))
+            return 121;
+    }
     if (!nt_runtime_open_desktop())
         return 122;
     if (active.resource_size &&
