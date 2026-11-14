@@ -70,7 +70,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install Fedora build tools in the CI container
-        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip /usr/bin/curl /usr/bin/sha256sum 'pkgconfig(sdl2)' 'pkgconfig(SDL2_image)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' 'pkgconfig(libcrypto)' 'pkgconfig(libvkd3d)' 'pkgconfig(libvkd3d-utils)' 'pkgconfig(vulkan)' fluidsynth-libs libstdc++ mesa-vulkan-drivers dejavu-sans-fonts pkgconf-pkg-config bubblewrap shadow-utils util-linux-core mingw64-gcc mingw64-binutils
+        run: dnf -y install git gcc binutils make redhat-rpm-config rpm-build tar gzip /usr/bin/curl /usr/bin/sha256sum 'pkgconfig(sdl2)' 'pkgconfig(SDL2_image)' 'pkgconfig(cairo)' 'pkgconfig(libffi)' 'pkgconfig(libcrypto)' 'pkgconfig(icu-uc)' 'pkgconfig(libvkd3d)' 'pkgconfig(libvkd3d-utils)' 'pkgconfig(vulkan)' fluidsynth-libs libstdc++ mesa-vulkan-drivers dejavu-sans-fonts pkgconf-pkg-config bubblewrap shadow-utils util-linux-core mingw64-gcc mingw64-binutils
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
