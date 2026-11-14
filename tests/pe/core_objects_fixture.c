@@ -316,8 +316,54 @@ static int test_thread_handles(void)
     return 0;
 }
 
+static int test_file_handle_flags(void)
+{
+    DWORD baseline = 0, count = 0, flags = 0;
+    if (!GetProcessHandleCount(GetCurrentProcess(), &baseline))
+        return 64;
+    static const WCHAR filename[] = L"C:\\nt-stage4-handle-flags.bin";
+    HANDLE file = CreateFileW(filename, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE ||
+        !GetProcessHandleCount(GetCurrentProcess(), &count) ||
+        count != baseline + 1)
+        return 65;
+    if (!SetHandleInformation(file, HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                              HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE) ||
+        !GetHandleInformation(file, &flags) ||
+        flags != (HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE))
+        return 66;
+    HANDLE duplicate = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), file, GetCurrentProcess(), &duplicate,
+                         0, FALSE, DUPLICATE_SAME_ACCESS | 4u) ||
+        duplicate == NULL || duplicate == file ||
+        !GetHandleInformation(duplicate, &flags) ||
+        flags != (HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE))
+        return 67;
+    SetLastError(0);
+    if (CloseHandle(file) || GetLastError() != ERROR_ACCESS_DENIED ||
+        !GetProcessHandleCount(GetCurrentProcess(), &count) ||
+        count != baseline + 2)
+        return 68;
+    if (!SetHandleInformation(file, HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE, 0) ||
+        !CloseHandle(file))
+        return 69;
+    SetLastError(0);
+    if (CloseHandle(duplicate) || GetLastError() != ERROR_ACCESS_DENIED ||
+        !SetHandleInformation(duplicate, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0) ||
+        !CloseHandle(duplicate))
+        return 70;
+    if (!DeleteFileW(filename) ||
+        !GetProcessHandleCount(GetCurrentProcess(), &count) ||
+        count != baseline)
+        return 71;
+    return 0;
+}
+
 int import_fixture_entry(void)
 {
     int result = test_semaphores();
-    return result ? result : test_thread_handles();
+    if (result == 0)
+        result = test_thread_handles();
+    return result ? result : test_file_handle_flags();
 }
