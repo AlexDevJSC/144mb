@@ -296,9 +296,24 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         errno = ENAMETOOLONG;
         return false;
     }
+    /* Preserve internal UTF-8 paths, while raw CP1252 Win32 A strings
+     * that are not valid UTF-8 can still address native Linux files. */
+    char ansi_fallback[PATH_MAX];
     if (nt_MultiByteToWideChar(65001, 8, input, -1, NULL, 0) == 0) {
-        errno = EINVAL;
-        return false;
+        char *converted = nt_runtime_ansi_to_utf8(input, strlen(input));
+        if (!converted) {
+            errno = ENOMEM;
+            return false;
+        }
+        const size_t length = strlen(converted);
+        if (length >= sizeof(ansi_fallback)) {
+            free(converted);
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        memcpy(ansi_fallback, converted, length + 1);
+        free(converted);
+        input = ansi_fallback;
     }
     /* Plain \\\\server\\share and extended \\\\?\\UNC\\server\\share
      * resolve only through an explicit descriptor-backed UNC grant. */
@@ -977,7 +992,8 @@ enum {
     FILE_READ = 1, FILE_WRITE = 2, FILE_DELETE = 4, FILE_TABLE_SIZE = 256,
     HANDLE_FLAG_INHERIT = 1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 2,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
-    TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80
+    TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80,
+    FILE_FLAG_OVERLAPPED = 0x40000000
 };
 
 enum file_owner { FREE_FILE, WIN_HANDLE, CRT_DESCRIPTOR, CRT_STREAM };
@@ -991,6 +1007,7 @@ struct guest_file {
     dev_t device;
     ino_t inode;
     bool text;
+    bool overlapped_io;
     char *path;
 };
 
@@ -1129,7 +1146,8 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     }
     if ((desired & ~(generic_read | generic_write)) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
-        (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 || (flags & ~FILE_ATTRIBUTE_NORMAL) != 0 ||
+        (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
+        (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED)) != 0 ||
         template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return UINTPTR_MAX;
@@ -1189,6 +1207,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
                 slot->owner = WIN_HANDLE;
                 slot->handle = result;
                 slot->handle_flags = attributes && attributes->inherit ? HANDLE_FLAG_INHERIT : 0;
+                slot->overlapped_io = (flags & FILE_FLAG_OVERLAPPED) != 0;
                 slot->path = saved_path;
                 saved_path = NULL;
             }
@@ -2737,7 +2756,9 @@ static bool utf8_guest_to_wide(const char *path, uint16_t result[PATH_MAX])
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return false;
     }
-    return nt_MultiByteToWideChar(65001, 8, path, -1, result, PATH_MAX) != 0;
+    if (nt_MultiByteToWideChar(65001, 8, path, -1, result, PATH_MAX) != 0)
+        return true;
+    return nt_MultiByteToWideChar(nt_GetACP(), 0, path, -1, result, PATH_MAX) != 0;
 }
 
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryA(uint32_t size, char *buffer)
