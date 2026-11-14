@@ -10,6 +10,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <fcntl.h>
+#include <spawn.h>
+#include <errno.h>
+extern char **environ;
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -29,8 +32,31 @@ static void check(int condition, const char *message)
     }
 }
 
-int main(void)
+static int environment_child(void)
 {
+    char **entries = NULL;
+    char *storage = NULL;
+    if (!nt_runtime_read_child_environment(6, &entries, &storage))
+        return 11;
+    close(6);
+    if (getenv("NT_CI_TEST") != NULL)
+        return 12; /* Host envp must not have been polluted. */
+    nt_runtime_set_guest_environment((const char *const *)entries);
+    uint16_t received[32] = {0};
+    if (nt_GetEnvironmentVariableW(u"NT_CI_TEST", received, 32) != 4 ||
+        memcmp(received, u"niño", sizeof(u"niño")) != 0 ||
+        nt_GetEnvironmentVariableW(u"LD_PRELOAD", received, 32) != 5 ||
+        memcmp(received, u"inert", sizeof(u"inert")) != 0)
+        return 13;
+    free(entries);
+    free(storage);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "--env-child") == 0)
+        return environment_child();
     /* An immutable UTF-16 snapshot must round-trip Unicode without
      * touching the host environment (including dangerous LD_* names). */
     static const uint16_t custom[] = u"NT_CI_TEST=niño\0LD_PRELOAD=inert\0";
@@ -46,6 +72,24 @@ int main(void)
           entries[2] == NULL, "read sealed Unicode environment");
     free(entries);
     free(storage);
+    /* Cross a real exec boundary with the sealed descriptor, preserving
+     * the sanitized host envp while mounting the guest-only variables. */
+    int send_fd = fcntl(environment_fd, F_DUPFD_CLOEXEC, 16);
+    check(send_fd >= 16, "duplicate sealed environment outside reserved fd6");
+    posix_spawn_file_actions_t actions;
+    check(posix_spawn_file_actions_init(&actions) == 0 &&
+          posix_spawn_file_actions_adddup2(&actions, send_fd, 6) == 0,
+          "install sealed descriptor into child fd6");
+    char *const args[] = {argv[0], "--env-child", NULL};
+    pid_t env_child = -1;
+    check(posix_spawn(&env_child, argv[0], &actions, NULL, args, environ) == 0,
+          "exec child with sealed guest-only environment");
+    posix_spawn_file_actions_destroy(&actions);
+    close(send_fd);
+    int env_status = 0;
+    check(waitpid(env_child, &env_status, 0) == env_child &&
+          WIFEXITED(env_status) && WEXITSTATUS(env_status) == 0,
+          "child reconstructed Unicode environment without altering host envp");
     close(environment_fd);
     static const uint16_t bad[] = u"MISSING_EQUALS\0";
     check(nt_runtime_build_child_environment(bad, &environment_fd) ==
