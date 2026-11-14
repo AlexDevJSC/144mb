@@ -3009,12 +3009,93 @@ int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind
     return file_result(fd, true);
 }
 
+_Static_assert(sizeof(struct nt_find_data_a) == 320, "WIN32_FIND_DATAA layout");
+_Static_assert(sizeof(struct nt_handle_file_info) == 52, "BY_HANDLE_FILE_INFORMATION layout");
+
+uint32_t NT_MS_ABI nt_GetFileSize(uintptr_t handle, uint32_t *high)
+{
+    int64_t length = 0;
+    if (!nt_GetFileSizeEx(handle, &length))
+        return UINT32_MAX;
+    if (high)
+        *high = (uint32_t)((uint64_t)length >> 32);
+    nt_SetLastError(NT_ERROR_SUCCESS);
+    return (uint32_t)length;
+}
+
+int32_t NT_MS_ABI nt_GetFileInformationByHandle(uintptr_t handle,
+                                               struct nt_handle_file_info *info)
+{
+    if (!info) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const int fd = duplicate_handle(handle, 0);
+    if (fd < 0)
+        return file_result(fd, false);
+    struct stat stat_info;
+    if (fstat(fd, &stat_info) != 0)
+        return file_result(fd, false);
+    if (!S_ISREG(stat_info.st_mode) && !S_ISDIR(stat_info.st_mode)) {
+        errno = EACCES;
+        return file_result(fd, false);
+    }
+    const struct nt_file_attribute_data attrs = file_attributes(fd, &stat_info);
+    *info = (struct nt_handle_file_info) {
+        attrs.attributes, attrs.created, attrs.accessed, attrs.written,
+        (uint32_t)stat_info.st_dev, attrs.size_high, attrs.size_low,
+        (uint32_t)stat_info.st_nlink,
+        (uint32_t)((uint64_t)stat_info.st_ino >> 32),
+        (uint32_t)stat_info.st_ino
+    };
+    return file_result(fd, true);
+}
+
+int32_t NT_MS_ABI nt_GetFileTime(uintptr_t handle, struct nt_file_time *created,
+                                struct nt_file_time *accessed, struct nt_file_time *written)
+{
+    const int fd = duplicate_handle(handle, 0);
+    if (fd < 0)
+        return file_result(fd, false);
+    struct stat stat_info;
+    if (fstat(fd, &stat_info) != 0)
+        return file_result(fd, false);
+    const struct nt_file_attribute_data attrs = file_attributes(fd, &stat_info);
+    if (created)
+        *created = attrs.created;
+    if (accessed)
+        *accessed = attrs.accessed;
+    if (written)
+        *written = attrs.written;
+    return file_result(fd, true);
+}
+
 static struct timespec to_timespec(uint64_t ticks_value)
 {
     if (ticks_value == 0)
         return (struct timespec){0, UTIME_OMIT};
     return (struct timespec){(int64_t)(ticks_value / UINT64_C(10000000)) - INT64_C(11644473600),
                              (long)(ticks_value % UINT64_C(10000000)) * 100};
+}
+
+int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *created,
+                                const struct nt_file_time *accessed,
+                                const struct nt_file_time *written)
+{
+    if (created) {
+        /* Host Linux birth time is not settable through futimens. Never
+         * report a successful Windows creation-time update if it was lost. */
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (!accessed && !written)
+        return 1;
+    const struct timespec dates[2] = {
+        accessed ? to_timespec(ticks(*accessed)) : (struct timespec){0, UTIME_OMIT},
+        written ? to_timespec(ticks(*written)) : (struct timespec){0, UTIME_OMIT}
+    };
+    const int fd = duplicate_handle(handle, FILE_WRITE);
+    return file_result(fd, fd >= 0 && futimens(fd, dates) == 0);
 }
 
 int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, const void *info, uint32_t size)
