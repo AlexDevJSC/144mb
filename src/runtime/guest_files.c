@@ -3340,12 +3340,18 @@ static nt_status guest_io_with_event(uintptr_t handle, uintptr_t event, void *ap
     void *apc_context, struct nt_io_status_block *io, void *buffer,
     uint32_t length, const int64_t *offset, const uint32_t *key, bool write_operation)
 {
-    if (event && !nt_ResetEvent(event))
+    /* NTDLL calls return NTSTATUS without modifying the Win32 thread's
+     * GetLastError, even when the event belongs to the Win32 broker. */
+    const uint32_t last_error = nt_GetLastError();
+    if (event && !nt_ResetEvent(event)) {
+        nt_SetLastError(last_error);
         return nt_file_complete(io, NT_STATUS_NOT_SUPPORTED, 0);
+    }
     const nt_status status = nt_guest_io(handle, 0, apc, apc_context, io,
                                         buffer, length, offset, key, write_operation);
     if (event)
         (void)nt_SetEvent(event);
+    nt_SetLastError(last_error);
     return status;
 }
 
