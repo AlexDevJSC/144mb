@@ -4,6 +4,8 @@
 
 #include <stddef.h>
 
+#define NT_GUEST_EXTRA_DRIVES 23 /* D: through Z:; C: is the private profile */
+
 /* Open the ordinary Linux directory named "C:" beneath the user's state
  * directory. On first use, migrate an existing private "drive-c" directory
  * by rename (preserving original files, not copying them). Existing C: and
@@ -29,5 +31,14 @@ int nt_guest_share_update(const char *config_home, const char *home,
                           const char *const *names, size_t count,
                           const char *folder, const char *directory);
 void nt_guest_share_free(char **paths, size_t count);
+
+/* Explicit persistent D:-Z: grants live in private drives.conf, separate
+ * from remembered known-folder shares. No host drive is auto-discovered.
+ * paths is an NT_GUEST_EXTRA_DRIVES array indexed by letter - 'D'.
+ * Free the values with nt_guest_share_free(paths, NT_GUEST_EXTRA_DRIVES).
+ */
+int nt_guest_drive_load(const char *config_home, const char *home, char **paths);
+int nt_guest_drive_update(const char *config_home, const char *home,
+                          char letter, const char *directory);
 
 #endif
