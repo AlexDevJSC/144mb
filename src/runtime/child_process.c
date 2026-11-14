@@ -9,6 +9,8 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +22,165 @@
 enum { COMMAND_LIMIT = 32768, ERROR_BAD_EXE_FORMAT = 193 };
 _Static_assert(sizeof(struct nt_startup_info) == 104, "STARTUPINFOW ABI");
 _Static_assert(sizeof(struct nt_process_information) == 24, "PROCESS_INFORMATION ABI");
+
+/* This is a guest-only environment snapshot. The child runner inherits
+ * its original sanitized Linux environment; guest values never enter
+ * posix_spawn's envp (in particular no LD_PRELOAD/PATH injection). */
+enum { CHILD_ENV_UNITS = 32767, CHILD_ENV_MAX_BYTES = 131072, CHILD_ENV_MAX_ENTRIES = 1024 };
+
+uint32_t nt_runtime_build_child_environment(const uint16_t *block, int *output)
+{
+    if (block == NULL || output == NULL)
+        return NT_ERROR_INVALID_PARAMETER;
+    *output = -1;
+    char *buffer = malloc(CHILD_ENV_MAX_BYTES);
+    if (buffer == NULL)
+        return NT_ERROR_NOT_ENOUGH_MEMORY;
+    size_t source_at = 0, bytes = 0, entries = 0;
+    uint32_t error = NT_ERROR_INVALID_PARAMETER;
+    bool terminated = false;
+    while (source_at < CHILD_ENV_UNITS) {
+        const size_t len = nt_runtime_wide_length(block + source_at,
+                                                  CHILD_ENV_UNITS - source_at);
+        if (len == CHILD_ENV_UNITS - source_at)
+            goto fail;
+        if (len == 0) {
+            /* After the last entry NUL, the block has one extra NUL.
+             * An empty block consists of exactly two NULs. */
+            if (bytes == 0) {
+                if (block[1] != 0)
+                    goto fail;
+                buffer[bytes++] = '\0';
+            }
+            buffer[bytes++] = '\0';
+            terminated = true;
+            break;
+        }
+        if (++entries > CHILD_ENV_MAX_ENTRIES)
+            goto fail;
+        bool equals = false;
+        for (size_t i = 1; i < len; ++i)
+            if (block[source_at + i] == '=') {
+                equals = true;
+                break;
+            }
+        if (block[source_at] == '=') {
+            /* Drive current-directory pseudo variables need their own
+             * NT state model; do not discard them silently. */
+            error = NT_ERROR_NOT_SUPPORTED;
+            goto fail;
+        }
+        if (!equals)
+            goto fail;
+        char *entry = nt_runtime_utf16_to_utf8(block + source_at, len);
+        if (entry == NULL)
+            goto fail;
+        const size_t n = strlen(entry) + 1;
+        if (n > CHILD_ENV_MAX_BYTES - bytes) {
+            free(entry);
+            goto fail;
+        }
+        memcpy(buffer + bytes, entry, n);
+        free(entry);
+        bytes += n;
+        source_at += len + 1;
+    }
+    if (!terminated || bytes < 2)
+        goto fail;
+    int fd = memfd_create("nt-child-environment", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) {
+        error = errno == ENOSYS ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_GEN_FAILURE;
+        goto fail;
+    }
+    size_t copied = 0;
+    while (copied < bytes) {
+        ssize_t wrote = write(fd, buffer + copied, bytes - copied);
+        if (wrote < 0 && errno == EINTR)
+            continue;
+        if (wrote <= 0) {
+            close(fd);
+            error = NT_ERROR_GEN_FAILURE;
+            goto fail;
+        }
+        copied += (size_t)wrote;
+    }
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW |
+                                F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+        close(fd);
+        error = NT_ERROR_GEN_FAILURE;
+        goto fail;
+    }
+    free(buffer);
+    *output = fd;
+    return NT_ERROR_SUCCESS;
+fail:
+    free(buffer);
+    return error;
+}
+
+bool nt_runtime_read_child_environment(int fd, char ***entries, char **storage)
+{
+    if (entries == NULL || storage == NULL || fd < 0)
+        return false;
+    *entries = NULL;
+    *storage = NULL;
+    struct stat info;
+    const int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    const int seals = fcntl(fd, F_GET_SEALS);
+    if (seals < 0 || (seals & required) != required ||
+        fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_size < 2 || info.st_size > CHILD_ENV_MAX_BYTES)
+        return false;
+    const size_t length = (size_t)info.st_size;
+    char *data = malloc(length);
+    if (data == NULL)
+        return false;
+    size_t done = 0;
+    while (done < length) {
+        ssize_t got = pread(fd, data + done, length - done, (off_t)done);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0) {
+            free(data);
+            return false;
+        }
+        done += (size_t)got;
+    }
+    if (data[length - 1] != '\0' || data[length - 2] != '\0') {
+        free(data);
+        return false;
+    }
+    char **list = calloc(CHILD_ENV_MAX_ENTRIES + 1u, sizeof(*list));
+    if (list == NULL) {
+        free(data);
+        return false;
+    }
+    size_t at = 0, count = 0;
+    while (at < length && data[at] != '\0') {
+        if (count == CHILD_ENV_MAX_ENTRIES) {
+            free(list);
+            free(data);
+            return false;
+        }
+        const size_t n = strnlen(data + at, length - at);
+        if (n == length - at || n == 0 ||
+            memchr(data + at + 1, '=', n - 1) == NULL) {
+            free(list);
+            free(data);
+            return false;
+        }
+        list[count++] = data + at;
+        at += n + 1;
+    }
+    if (at + 1 != length && !(at == 0 && length == 2)) {
+        free(list);
+        free(data);
+        return false;
+    }
+    *entries = list;
+    *storage = data;
+    return true;
+}
 
 static nt_child_launcher launch_child;
 
@@ -127,9 +288,15 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    if (!launch_child || process_security || thread_security || inherit_handles || environment ||
-        (flags & ~4u) || startup->reserved || startup->reserved_bytes || startup->reserved_data ||
+    if (!launch_child || process_security || thread_security || inherit_handles ||
+        (flags & ~(4u | 0x400u)) || startup->reserved || startup->reserved_bytes || startup->reserved_data ||
         (startup->flags & ~1u)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (environment != NULL && (flags & 0x400u) == 0) {
+        /* ANSI environment blocks need the guest's codepage converter;
+         * reinterpretation as UTF-16 would be incorrect. */
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
@@ -151,10 +318,24 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         return 0;
     }
     snprintf(default_command, sizeof(default_command), "\"%s\"", path);
+    uint16_t *inherited = environment == NULL ? nt_GetEnvironmentStringsW() : NULL;
+    const uint16_t *source = environment == NULL ? inherited : environment;
+    int environment_fd = -1;
+    uint32_t env_error = source == NULL ? NT_ERROR_NOT_ENOUGH_MEMORY :
+                         nt_runtime_build_child_environment(source, &environment_fd);
+    if (inherited != NULL)
+        (void)nt_FreeEnvironmentStringsW(inherited);
+    if (env_error != NT_ERROR_SUCCESS) {
+        free(converted);
+        close(fd);
+        nt_SetLastError(env_error);
+        return 0;
+    }
     pid_t pid = 0;
     int status_fd = -1, start_fd = -1;
     int error = launch_child(fd, path, converted ? converted : default_command, workdir,
-                             (flags & 4u) != 0, &pid, &status_fd, &start_fd);
+                             (flags & 4u) != 0, environment_fd, &pid, &status_fd, &start_fd);
+    close(environment_fd);
     free(converted);
     close(fd);
     if (error) {

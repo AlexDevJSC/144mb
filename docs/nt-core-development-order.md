@@ -63,6 +63,8 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **14-11-2026, PR #82 integrada — flags y vida útil de handles: 70 % → 72 % (+2 puntos porcentuales estimados).** `SetHandleInformation`, `GetProcessHandleCount` y cierre protegido por `HANDLE_FLAG_PROTECT_FROM_CLOSE` para handles de archivos/objetos NT; duplicación con handles reales del proceso propio bajo `PROCESS_DUP_HANDLE`. Tests PE verifican protección, independencia entre alias, errores y cierre. [CI Linux/UBSan/Fedora correcta (run 43550562358)](https://github.com/AlexDevJSC/144mb/actions/runs/43550562358). La herencia de handles entre procesos y el broker NT siguen pendientes.
 
+- **14-11-2026, fase 4 — entornos de procesos hijo (PR en revisión): 72 % → 78 % (+6 puntos estimados, sujetos a CI).** `CreateProcessW` admite snapshot de entorno Unicode o bloque explícito `CREATE_UNICODE_ENVIRONMENT`; memfd sellado/validado sin exportar variables al `envp` del host; tests de herencia, sustitución, Unicode, rechazo de buffers erróneos. La validación de PE hijo aislado requiere un Fedora con namespace/bwrap operativo; los `SKIP` no cuentan. Siguen pendientes contextos asíncronos de hilos y herencia general de HANDLE.
+
 ### Formato de cierre para cambios futuros
 
 > **Componente 4 — Procesos e hilos:** 35 % → XX % (**+N puntos porcentuales**, estimación).\

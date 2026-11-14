@@ -35,6 +35,9 @@ extern char **environ;
 static struct pe_image active;
 static struct pe_dll_graph *active_dll_graph;
 static const char *active_dos_path, *active_command, *active_directory;
+/* The sealed guest environment is loaded before any child PE instructions
+ * execute. It is never installed as the Linux process's environ. */
+static char **active_child_environment;
 
 static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *context)
 {
@@ -50,7 +53,8 @@ static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal,
 
 static int NT_MS_ABI guest_entry(void)
 {
-    nt_runtime_set_guest_environment((const char *const *)environ);
+    nt_runtime_set_guest_environment((const char *const *)(active_child_environment ?
+                                                              active_child_environment : environ));
     if (!nt_runtime_set_file_root("/game"))
         return 118;
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
@@ -138,14 +142,15 @@ static bool worker_ready(bool child, bool suspended)
     /* Drop setup descriptors before loading guest code. A host directory fd
      * would otherwise retain access beyond the sandbox's filesystem root.
      */
-    if (close_range(child ? (suspended ? 6u : 5u) : 3u, UINT_MAX, 0) != 0) {
+    if (close_range(child ? 7u : 3u, UINT_MAX, 0) != 0) {
         perror("Cannot close sandbox setup descriptors");
         return false;
     }
     if (child) {
         struct stat pipe;
         if (fstat(4, &pipe) != 0 || !S_ISFIFO(pipe.st_mode) ||
-            (suspended && (fstat(5, &pipe) != 0 || !S_ISFIFO(pipe.st_mode))))
+            (suspended && (fstat(5, &pipe) != 0 || !S_ISFIFO(pipe.st_mode))) ||
+            fstat(6, &pipe) != 0 || !S_ISREG(pipe.st_mode))
             return false;
     }
     return true;
@@ -230,7 +235,7 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
 }
 
 static int launch_child(int fd, const char *dos_path, const char *command,
-                        const char *directory, bool suspended, pid_t *pid,
+                        const char *directory, bool suspended, int environment_fd, pid_t *pid,
                         int *status_fd, int *start_fd)
 {
     int pipe_fds[2];
@@ -243,13 +248,16 @@ static int launch_child(int fd, const char *dos_path, const char *command,
         close(pipe_fds[1]);
         return error;
     }
-    int image = fcntl(fd, F_DUPFD_CLOEXEC, 6);
+    int image = fcntl(fd, F_DUPFD_CLOEXEC, 7);
     int error = image < 0 ? errno : 0;
-    int status = error ? -1 : fcntl(pipe_fds[1], F_DUPFD_CLOEXEC, 6);
+    int status = error ? -1 : fcntl(pipe_fds[1], F_DUPFD_CLOEXEC, 7);
     if (!error && status < 0)
         error = errno;
-    int start_reader = error || !suspended ? -1 : fcntl(gate[0], F_DUPFD_CLOEXEC, 6);
+    int start_reader = error || !suspended ? -1 : fcntl(gate[0], F_DUPFD_CLOEXEC, 7);
     if (!error && suspended && start_reader < 0)
+        error = errno;
+    int environment_reader = error ? -1 : fcntl(environment_fd, F_DUPFD_CLOEXEC, 7);
+    if (!error && environment_reader < 0)
         error = errno;
     if (!error) {
         posix_spawn_file_actions_t actions;
@@ -260,6 +268,8 @@ static int launch_child(int fd, const char *dos_path, const char *command,
                 error = posix_spawn_file_actions_adddup2(&actions, status, 4);
             if (!error && suspended)
                 error = posix_spawn_file_actions_adddup2(&actions, start_reader, 5);
+            if (!error)
+                error = posix_spawn_file_actions_adddup2(&actions, environment_reader, 6);
             if (!error) {
                 char *const args[] = {"/runner", suspended ? "--child-suspended" : "--child",
                                       (char *)dos_path, (char *)command, (char *)directory, NULL};
@@ -274,6 +284,8 @@ static int launch_child(int fd, const char *dos_path, const char *command,
         close(status);
     if (start_reader >= 0)
         close(start_reader);
+    if (environment_reader >= 0)
+        close(environment_reader);
     if (gate[0] >= 0)
         close(gate[0]);
     close(pipe_fds[1]);
@@ -516,7 +528,20 @@ int main(int argc, char **argv)
             if (count != 1 || token != 'G')
                 return 125;
         }
-        return execute_pe(3, argv[2], argv[3], argv[4], 4);
+        char **entries = NULL;
+        char *storage = NULL;
+        const bool valid = nt_runtime_read_child_environment(6, &entries, &storage);
+        close(6);
+        if (!valid) {
+            fputs("Refusing unsealed or invalid child environment snapshot\n", stderr);
+            return 125;
+        }
+        active_child_environment = entries;
+        const int result = execute_pe(3, argv[2], argv[3], argv[4], 4);
+        active_child_environment = NULL;
+        free(entries);
+        free(storage);
+        return result;
     }
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
         usage(argv[0]);
