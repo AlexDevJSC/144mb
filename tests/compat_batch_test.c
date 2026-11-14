@@ -4,6 +4,8 @@
 #include "winfile.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -283,6 +285,8 @@ static void check_files(void)
     BOUND(KERNEL, MoveFileW);
     BOUND(KERNEL, CopyFileA);
     BOUND(KERNEL, CopyFileW);
+    BOUND(KERNEL, SetFileAttributesA);
+    BOUND(KERNEL, SetFileAttributesW);
     BOUND(KERNEL, GetCurrentDirectoryA);
     BOUND(KERNEL, SetCurrentDirectoryA);
     BOUND(KERNEL, GetFullPathNameA);
@@ -362,6 +366,8 @@ static void check_files(void)
     CHECK(symlink("data", link) == 0);
     CHECK(nt_fopen("link\\outside", "wb") == NULL && errno == ELOOP);
     CHECK(nt_fopen("LINK\\outside", "wb") == NULL && errno == ELOOP);
+    CHECK(nt_MoveFileExA("link", "link-renamed", 0) == 0 &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
     CHECK(unlink(link) == 0);
 
     /* Exact spelling wins; two non-exact ASCII-folded host names are
@@ -404,6 +410,32 @@ static void check_files(void)
           last_error() == NT_ERROR_FILE_EXISTS);
     CHECK(nt_CopyFileA("data/SCORES.TXT", "DATA/BACKUP.txt", 0) != 0);
     CHECK(nt_CopyFileA("data/scores.txt", "DATA/SCORES.TXT", 0) == 0);
+    /* Preserve the Linux inode's basic Windows-visible metadata when
+     * copying: readonly mode and modification time. */
+    char source_native[512], readonly_native[512];
+    CHECK(snprintf(source_native, sizeof(source_native), "%s/data/scores.txt", root) > 0);
+    CHECK(snprintf(readonly_native, sizeof(readonly_native), "%s/data/ReadonlyCopy.bin", root) > 0);
+    const struct timespec fixed_times[2] = {{1700000000, 0}, {1700000042, 123456789}};
+    CHECK(utimensat(AT_FDCWD, source_native, fixed_times, 0) == 0);
+    CHECK(nt_SetFileAttributesA("DATA/SCORES.TXT", 1u) != 0);
+    CHECK(nt_CopyFileA("data/SCORES.txt", "data/ReadonlyCopy.bin", 1) != 0);
+    struct stat source_stat, copy_stat;
+    CHECK(stat(source_native, &source_stat) == 0 &&
+          stat(readonly_native, &copy_stat) == 0 &&
+          (source_stat.st_mode & 0777) == (copy_stat.st_mode & 0777) &&
+          copy_stat.st_mtim.tv_sec == source_stat.st_mtim.tv_sec &&
+          copy_stat.st_mtim.tv_nsec == source_stat.st_mtim.tv_nsec &&
+          (nt_GetFileAttributesA("data/READONLYCOPY.bin") & 1u) != 0);
+    static const uint16_t wide_readonly[] = {
+        'C', ':', '\\', 'd', 'a', 't', 'a', '\\',
+        'R', 'e', 'a', 'd', 'o', 'n', 'l', 'y', 'C', 'o', 'p', 'y', '.', 'b', 'i', 'n', 0
+    };
+    CHECK(nt_SetFileAttributesW(wide_readonly, 0x80u) != 0);
+    CHECK((nt_GetFileAttributesA("data/readonlycopy.bin") & 1u) == 0);
+    CHECK(nt_DeleteFileA("data/READONLYCOPY.BIN") != 0);
+    CHECK(nt_SetFileAttributesA("data/scores.txt", 0x80u) != 0);
+    CHECK(nt_SetFileAttributesA("data/scores.txt", 0x2u) == 0 &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
     CHECK(nt_MoveFileA("DATA/backup.txt", "data/Copied.TXT") != 0);
     folded = nt_fopen("data/cOPIED.txt", "rb");
     char copied[6] = {0};
