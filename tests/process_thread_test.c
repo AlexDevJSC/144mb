@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <spawn.h>
 #include <errno.h>
+#include <sys/stat.h>
 extern char **environ;
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +52,128 @@ static int environment_child(void)
     free(entries);
     free(storage);
     return 0;
+}
+
+/* A trustworthy native integration route exercises the same CreateProcessA/W
+ * argument decoder, host PE validation, environment and returned HANDLEs.
+ * The fake launcher stands in for the bubblewrap PE entrypoint (which CI
+ * cannot enter because its namespace policy disallows nested sandboxes). */
+static bool observed_ansi_launch;
+
+static int capture_ansi_launch(int fd, const char *dos_path, const char *command,
+                               const char *directory, bool suspended, int environment_fd,
+                               const struct nt_child_file_transfer *files,
+                               pid_t *pid, int *status_fd, int *start_fd)
+{
+    if (fd < 0 || dos_path == NULL || command == NULL || directory == NULL ||
+        suspended || environment_fd < 0 || files == NULL || files->manifest_fd < 0)
+        return EINVAL;
+    char **entries = NULL;
+    char *storage = NULL;
+    size_t inherited_count = SIZE_MAX;
+    if (!nt_runtime_read_child_environment(environment_fd, &entries, &storage) ||
+        !nt_runtime_inherited_file_count(files->manifest_fd, &inherited_count))
+        return EINVAL;
+    bool correct = strstr(command, "/ansi-test") != NULL &&
+                   strstr(command, "\xc3\xa4") != NULL &&
+                   entries[0] != NULL &&
+                   strcmp(entries[0], "NT_CHILD_ANSI=ni\xc3\xb1o") == 0 &&
+                   entries[1] == NULL && inherited_count == 0;
+    free(entries);
+    free(storage);
+    if (!correct)
+        return EINVAL;
+    int channel[2];
+    if (pipe(channel) != 0)
+        return errno;
+    const pid_t started = fork();
+    if (started < 0) {
+        int error = errno;
+        close(channel[0]);
+        close(channel[1]);
+        return error;
+    }
+    if (started == 0) {
+        close(channel[0]);
+        const uint32_t result = UINT32_C(0x12345678);
+        if (write(channel[1], &result, sizeof(result)) != sizeof(result))
+            _Exit(41);
+        close(channel[1]);
+        _Exit(0);
+    }
+    close(channel[1]);
+    *pid = started;
+    *status_fd = channel[0];
+    *start_fd = -1;
+    observed_ansi_launch = true;
+    return 0;
+}
+
+static void test_ansi_process_creation(void)
+{
+    char directory[] = "/tmp/nt-stage4-ansi-child-XXXXXX";
+    const char *root = mkdtemp(directory);
+    check(root != NULL, "create isolated PE volume for ANSI test");
+    check(nt_runtime_set_file_root(root), "mount private guest root");
+    char file[256];
+    check(snprintf(file, sizeof(file), "%s/child.exe", root) > 0,
+          "construct isolated guest PE path");
+    int fd = open(file, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    check(fd >= 0, "create isolated PE header");
+    unsigned char header[256] = {'M', 'Z'};
+    header[0x3c] = 0x80; /* e_lfanew */
+    header[0x80] = 'P'; header[0x81] = 'E';
+    header[0x84] = 0x64; header[0x85] = 0x86; /* AMD64 */
+    header[0x94] = 0xf0;                     /* optional header size */
+    header[0x96] = 2;                        /* EXE, not DLL */
+    header[0x98] = 0x0b; header[0x99] = 2;   /* PE32+ */
+    check(write(fd, header, sizeof(header)) == sizeof(header),
+          "write valid AMD64 synthetic header");
+    close(fd);
+
+    /* ACP=CP1252; neither the parent Linux locale nor the runner's
+     * environment can reinterpret bytes passed by a Windows caller. */
+    char command[] = "\"C:\\child.exe\" /ansi-test \xe4";
+    const char environment[] = "NT_CHILD_ANSI=ni\xf1o\0";
+    const char current[] = "C:\\";
+    struct nt_startup_info startup = {.size = sizeof(startup)};
+    struct nt_process_information process = {0};
+    struct {uint32_t size; const void *descriptor; int32_t inherit;} proc_sa =
+        {24u, NULL, 1}, thread_sa = {24u, NULL, 0};
+    nt_runtime_set_child_launcher(capture_ansi_launch);
+    check(nt_CreateProcessA(NULL, command, &proc_sa, &thread_sa, 0, 0,
+                            environment, current, &startup, &process) &&
+          observed_ansi_launch, "CreateProcessA executes ACP and security-attributes path");
+    uint32_t pflags = 0, tflags = 0;
+    check(nt_GetHandleInformation(process.process, &pflags) &&
+          nt_GetHandleInformation(process.thread, &tflags) &&
+          pflags == 1 && tflags == 0,
+          "returned process/thread handles preserve independent inheritance");
+    check(nt_WaitForSingleObject(process.process, 5000) == 0,
+          "fake launch child reaped");
+    uint32_t code = 0;
+    check(nt_GetExitCodeProcess(process.process, &code) && code == UINT32_C(0x12345678),
+          "full 32-bit child status preserved via CreateProcessA");
+    check(nt_runtime_close_waitable(process.thread) &&
+          nt_runtime_close_waitable(process.process), "close independently inherited handles");
+
+    proc_sa.size = 4;
+    observed_ansi_launch = false;
+    nt_SetLastError(0);
+    check(!nt_CreateProcessA(NULL, command, &proc_sa, NULL, 0, 0,
+                             environment, current, &startup, &process) &&
+          !observed_ansi_launch && nt_GetLastError() == NT_ERROR_INVALID_PARAMETER,
+          "reject malformed process SECURITY_ATTRIBUTES before launching");
+    proc_sa.size = 24;
+    proc_sa.descriptor = (void *)(uintptr_t)1;
+    nt_SetLastError(0);
+    check(!nt_CreateProcessA(NULL, command, &proc_sa, NULL, 0, 0,
+                             environment, current, &startup, &process) &&
+          !observed_ansi_launch && nt_GetLastError() == NT_ERROR_NOT_SUPPORTED,
+          "reject NT descriptors that require unimplemented token/ACL security");
+    nt_runtime_set_child_launcher(NULL);
+    check(nt_runtime_set_file_root(NULL), "release temporary guest PE root");
+    check(unlink(file) == 0 && rmdir(root) == 0, "remove isolated PE fixture");
 }
 
 int main(int argc, char **argv)
@@ -102,12 +225,47 @@ int main(int argc, char **argv)
     free(entries);
     free(storage);
     close(environment_fd);
+    /* Windows ANSI means guest ACP=1252, not the host Linux locale.
+     * The final double NUL and each entry's name/value must survive. */
+    static const char cp1252_env[] = "NT_CP1252=Espa\xf1" "a\0NT_ACCENT=caf\xe9\0";
+    uint16_t *converted_cp = nt_runtime_ansi_child_environment(cp1252_env);
+    check(converted_cp != NULL &&
+          memcmp(converted_cp, u"NT_CP1252=España", sizeof(u"NT_CP1252=España")) == 0 &&
+          memcmp(converted_cp + sizeof(u"NT_CP1252=España") / sizeof(uint16_t),
+                 u"NT_ACCENT=café", sizeof(u"NT_ACCENT=café")) == 0,
+          "convert CP1252 ANSI multi-SZ to exact UTF16 entries");
+    check(nt_runtime_build_child_environment(converted_cp, &environment_fd) ==
+          NT_ERROR_SUCCESS &&
+          nt_runtime_read_child_environment(environment_fd, &entries, &storage) &&
+          strcmp(entries[0], "NT_CP1252=España") == 0 &&
+          strcmp(entries[1], "NT_ACCENT=café") == 0 &&
+          entries[2] == NULL,
+          "sealed child environment represents CP1252 input as UTF8");
+    free(converted_cp);
+    free(entries);
+    free(storage);
+    close(environment_fd);
+    const char empty_ansi[] = {0, 0};
+    converted_cp = nt_runtime_ansi_child_environment(empty_ansi);
+    check(converted_cp != NULL && converted_cp[0] == 0 && converted_cp[1] == 0,
+          "empty ANSI multi-SZ is double-terminated");
+    free(converted_cp);
+    static const char broken_ansi[] = "BROKEN_RECORD\0";
+    converted_cp = nt_runtime_ansi_child_environment(broken_ansi);
+    check(converted_cp != NULL &&
+          nt_runtime_build_child_environment(converted_cp, &environment_fd) ==
+          NT_ERROR_INVALID_PARAMETER,
+          "reject malformed converted environment entry without equals sign");
+    free(converted_cp);
+
     int unsealed[2];
     check(pipe(unsealed) == 0, "unsealed test pipe");
     check(!nt_runtime_read_child_environment(unsealed[0], &entries, &storage),
           "reject non-sealed environment descriptor");
     close(unsealed[0]);
     close(unsealed[1]);
+
+    test_ansi_process_creation();
 
     int channel[2];
     check(pipe(channel) == 0, "pipe");

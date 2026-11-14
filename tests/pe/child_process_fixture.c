@@ -102,6 +102,12 @@ int import_fixture_entry(void)
             GetEnvironmentVariableW(L"NT_CHILD_INHERITED", env, 80) != 0 ||
             GetLastError() != ERROR_ENVVAR_NOT_FOUND)
             return 96;
+    } else if (contains_command_marker(command, L"/nt-ansi-env")) {
+        if (GetEnvironmentVariableW(L"NT_CHILD_ANSI", env, 80) != 4 ||
+            lstrcmpW(env, L"niño") != 0 ||
+            GetEnvironmentVariableW(L"NT_CHILD_INHERITED", env, 80) != 0 ||
+            GetLastError() != ERROR_ENVVAR_NOT_FOUND)
+            return 130;
     } else {
         if (GetEnvironmentVariableW(L"NT_CHILD_INHERITED", env, 80) != 5 ||
             lstrcmpW(env, L"Grüße") != 0)
@@ -137,6 +143,35 @@ int import_fixture_entry(void)
         return 21;
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
+
+    /* Supported SECURITY_ATTRIBUTES only carry inheritability, not ACLs.
+     * hProcess and hThread must remain independent HANDLE entries. */
+    SECURITY_ATTRIBUTES process_security = {sizeof(process_security), NULL, TRUE};
+    SECURITY_ATTRIBUTES thread_security = {sizeof(thread_security), NULL, FALSE};
+    if (!CreateProcessW(NULL, command, &process_security, &thread_security, FALSE,
+                        0, NULL, directory, &startup, &process))
+        return 135;
+    DWORD process_flags = 0, thread_flags = 0;
+    if (!GetHandleInformation(process.hProcess, &process_flags) ||
+        !GetHandleInformation(process.hThread, &thread_flags) ||
+        process_flags != HANDLE_FLAG_INHERIT || thread_flags != 0 ||
+        WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 136;
+    process_security.nLength = 1;
+    SetLastError(0);
+    if (CreateProcessW(NULL, command, &process_security, NULL, FALSE,
+                       0, NULL, directory, &startup, &process) ||
+        GetLastError() != ERROR_INVALID_PARAMETER)
+        return 137;
+    process_security.nLength = sizeof(process_security);
+    process_security.lpSecurityDescriptor = (void *)(uintptr_t)1;
+    SetLastError(0);
+    if (CreateProcessW(NULL, command, &process_security, NULL, FALSE,
+                       0, NULL, directory, &startup, &process) ||
+        GetLastError() != ERROR_NOT_SUPPORTED)
+        return 138;
     if (CreateProcessW(L"C:\\ChildDir", NULL, NULL, NULL, FALSE, 0, NULL, directory, &startup, &process) ||
         GetLastError() != ERROR_FILE_NOT_FOUND)
         return 22;
@@ -202,7 +237,7 @@ int import_fixture_entry(void)
     SetLastError(0);
     if (CreateProcessW(NULL, custom_command, NULL, NULL, FALSE, 0,
                        (void *)environment, directory, &startup, &process) ||
-        GetLastError() != ERROR_NOT_SUPPORTED)
+        GetLastError() != ERROR_INVALID_PARAMETER)
         return 101;
     /* A regular file can be inherited with its Windows HANDLE identity,
      * rights and shared offset. Inheritance disabled must not leak it. */
@@ -293,6 +328,28 @@ int import_fixture_entry(void)
         return 124;
     if (!CloseHandle(read_pipe))
         return 125;
+    /* ANSI paths, argv and custom environment use Windows CP_ACP=1252,
+     * not UTF-8 or the Linux host locale. */
+    STARTUPINFOA startup_a = {.cb = sizeof(startup_a)};
+    const char directory_a[] = "C:\\ChildDir";
+    char command_a[] = "\"C:\\Test child.exe\" /nt-ansi-env \xe4";
+    static const char environment_a[] = "NT_CHILD_ANSI=ni\xf1o\0";
+    if (!CreateProcessA(NULL, command_a, NULL, NULL, FALSE, 0,
+                        (void *)environment_a, directory_a, &startup_a, &process))
+        return 131;
+    if (WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 132;
+    /* W also permits an ANSI block when CREATE_UNICODE_ENVIRONMENT is absent. */
+    WCHAR command_w_ansi[] = L"\"C:\\Test child.exe\" /nt-ansi-env ä";
+    if (!CreateProcessW(NULL, command_w_ansi, NULL, NULL, FALSE, 0,
+                        (void *)environment_a, directory, &startup, &process))
+        return 133;
+    if (WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 134;
     if (!SetEnvironmentVariableW(L"NT_CHILD_INHERITED", NULL))
         return 102;
     return 0;

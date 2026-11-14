@@ -1,7 +1,7 @@
 # Fase 4: procesos e hilos — contratos, garantías y trabajo pendiente
 
 Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-order.md):
-**4 → 5 → 2 → 3 → 1 → 6 → 7**. Esta fase permanece activa.
+**4 → 1 → 5 → 2 → 3 → 6 → 7** (nueva instrucción expresa del 14-11-2026; el orden original era 4 → 5 → 2 → 3 → 1 → 6 → 7). **Esta fase permanece activa** y el cargador PE/DLL no empieza hasta que se satisfagan los criterios de salida.
 
 ## Contratos implementados y perfil probado
 
@@ -16,6 +16,8 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 | Descripción Unicode | `SetThreadDescription`, `GetThreadDescription` | Conserva el nombre UTF-16 completo en el objeto canónico y entrega búfer liberable con `LocalFree`. El nombre abreviado de pthread es solo diagnóstico. |
 | Terminación de hilos | `ExitThread`, `NtTerminateThread`, `TerminateThread`, `GetExitCodeThread` | Salida normal o nativa del propio hilo; terminación solicitada sobre un hilo en su puerta de arranque, sin ejecutar la entrada ni callbacks de adjunción que no correspondan. Nunca se cancela arbitrariamente un pthread activo. |
 | Suspensión | `SuspendThread`, `NtSuspendThread`, `ResumeThread`, `NtResumeThread` | Contadores acotados a 127 en la puerta inicial del hilo. El hilo ya ejecutándose no admite suspensión arbitraria. |
+| Atributos de seguridad básicos de creación | `CreateProcessA/W` con `SECURITY_ATTRIBUTES` para hProcess/hThread | Admite estructuras del tamaño AMD64 correcto con `lpSecurityDescriptor=NULL`: `bInheritHandle` se aplica por separado a los dos HANDLE devueltos, con los derechos originales. Rechaza tamaño inválido y descriptor de seguridad arbitrario; no finge ACL ni tokens NT. |
+| Creación ANSI de procesos hijo | `CreateProcessA`, `CreateProcessW` con entorno ANSI o Unicode | `CreateProcessA` transforma nombres y argumentos usando el ACP de invitado CP1252 y comparte el mismo sandbox, control de handles y código de salida de `CreateProcessW`. Ambos aceptan bloques de entorno ANSI de múltiples cadenas terminados en doble NUL, convertidos a UTF-16 y enviados por memfd sellado; no utiliza la configuración regional del host. Siguen sin estar implementadas las páginas de códigos DBCS y las variables ocultas `=C:`. |
 | Entornos de procesos hijo | `CreateProcessW` con `lpEnvironment = NULL` o bloque UTF-16 `CREATE_UNICODE_ENVIRONMENT` | Instantánea completa de variables Windows del padre o entorno Unicode explícito y sustitutivo; transferencia al hijo por descriptor `memfd` sellado y validado dentro del sandbox, sin tocar `envp` del lanzador Linux. No se aceptan bloques ANSI ni variables de directorio ocultas `=C:` sin su correspondiente modelo. |
 | Procesos hijo | `CreateProcessW`, `GetExitCodeProcess`, `GetProcessId`, `OpenProcess`, `NtOpenProcess` | Ejecuta PE x64 del volumen invitado bajo el mismo sandbox; handles y códigos de salida DWORD; nombres/argumentos Unicode y carpeta de trabajo, `CREATE_SUSPENDED` con puerta fd5 validada por el lanzador |
 | Terminación de hijos | `TerminateProcess`, `NtTerminateProcess` | Solamente hijos gestionados por el runtime. Usa `pidfd_open` y `pidfd_send_signal`, y almacena el código DWORD pedido para las consultas del padre. Sin pidfd, falla explícitamente; jamás usa un PID arbitrario como sustituto. |
@@ -31,7 +33,7 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 2. **Terminación remota de hilos activos:** no implementada. `TerminateThread` solo admite la puerta de arranque; `NtTerminateThread` admite además la terminación del propio hilo.
 3. **Contextos AMD64 de terceros:** faltan `GetThreadContext`, `SetThreadContext`, contextos de hilos suspendidos en ejecución y sincronización completa con SEH.
 4. **Procesos externos y tokens NT:** no se abren procesos ajenos al runtime. La herencia de archivos regulares funciona con límite de 32 descriptores, pero falta la herencia de eventos/semáforos/hilos y objetos NT en general, compartir derechos de apertura de archivos entre procesos y un broker común. Tampoco hay tokens NT, sesiones, impersonación ni acceso a procesos de otros usuarios.
-5. **Creación avanzada:** faltan atributos extendidos de `NtCreateThreadEx`/`CreateProcessW`, herencia general de HANDLE, bloques ANSI con codepage Windows, flags generales, espacios remotos y compatibilidad x86/WOW64.
+5. **Creación avanzada:** faltan atributos extendidos de `NtCreateThreadEx`/`CreateProcessW`, herencia general de HANDLE, otras páginas de códigos ANSI/DBCS y bloques de entorno con `=C:`, flags generales, espacios remotos y compatibilidad x86/WOW64.
 6. **Planificación:** la afinidad de hilos en un grupo de 64 CPU usa el planificador Linux; se admiten prioridades Win32 discretas mediante `nice`. Siguen faltando los grupos de procesadores mayores de 64, prioridades dinámicas de Windows, clases de prioridad del proceso, afinidad remota, quantum y equivalencia completa de planificación.
 7. **APC y señalización completas:** variantes de APC de kernel, `NtQueueApcThreadEx`, E/S asíncrona con APC, `IoCompletionPort`, suspensión de hilos remotos y carreras de desconexión.
 8. **Concurrencia y seguridad:** queda una batería de estrés, pruebas diferenciales Windows reales, auditoría del sandbox y casos de carreras de salida/descarga del loader. Un fixture sintético y una CI verde no equivalen a paridad total.
@@ -82,6 +84,10 @@ Uso desde la raíz del repositorio: `bash scripts/fedora-check-stage4.sh`.
 **El objetivo del 100 % solicitado significa que todos los contratos de procesos/hilos deben estar implementados, probados en CI y que únicamente reste esta puerta final de Fedora físico. Aún no se cumple:** siguen sin implementarse suspensión/terminación arbitrarias de hilos activos, contextos AMD64 remotos, herencia general de handles, tokens y permisos NT, procesos ajenos, APC completas y equivalencia del planificador. No se considera 100 % por el mero éxito del script ni por los fixtures sintéticos existentes.
 
 ## Madurez del componente
+
+- **Propuesta de ampliación de creación de procesos (PR #90, en revisión): 90 % → 91 % (+1 punto porcentual estimado, sujeto a CI).** Soporta `CreateProcessA`, conversión ACP y bloques ANSI en `CreateProcessA/W`, y las `SECURITY_ATTRIBUTES` sin descriptor NT con herencia separada de HANDLE. Una prueba Linux crea realmente un hijo mediante el backend de `CreateProcessA`, valida memfd Unicode, códigos DWORD, permisos y errores; el fixture PE hijo dentro de Bubblewrap permanece pendiente por las restricciones del runner. No incluye contextos AMD64 ni suspensión asíncrona de hilos activos.
+
+
 
 - **Actual tras PR #88 integrada: 90 %** (**+6 puntos porcentuales estimados** desde el 84 % anterior; [CI Linux, UBSan y Fedora RPM superada](https://github.com/AlexDevJSC/144mb/actions/runs/43600342005)). El progreso deriva de IPC operativo entre procesos, no de implementar suspensión arbitraria o contextos de hilo. Un 90 % no es un porcentaje medido de APIs NT ni una garantía de que solo falte Fedora físico. Quedan contratos importantes y la estimación deberá revisarse con su peso real.
 

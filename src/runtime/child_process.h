@@ -33,6 +33,11 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
                             struct nt_process_information *info);
 nt_status nt_runtime_terminate_child_process(uintptr_t handle, uint32_t exit_code);
 
+uint16_t *nt_runtime_ansi_child_environment(const char *source);
+int32_t NT_MS_ABI nt_CreateProcessA(const char *application, char *command,
+        const void *process_security, const void *thread_security, int32_t inherit_handles,
+        uint32_t flags, const void *environment, const char *directory,
+        const struct nt_startup_info *startup, struct nt_process_information *info);
 int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t *command,
         const void *process_security, const void *thread_security, int32_t inherit_handles,
         uint32_t flags, const void *environment, const uint16_t *directory,
