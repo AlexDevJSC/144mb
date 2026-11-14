@@ -13,9 +13,11 @@ struct nt_child_file_transfer {
     int source_fds[NT_CHILD_FILE_LIMIT];
     size_t count;
 };
-uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer);
+uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer,
+                                             const uintptr_t standard_handles[3]);
 void nt_runtime_release_inherited_files(struct nt_child_file_transfer *transfer);
 bool nt_runtime_inherited_file_count(int manifest_fd, size_t *count);
+bool nt_runtime_inherited_standard_handles(int manifest_fd, uintptr_t handles[3]);
 bool nt_runtime_restore_inherited_files(int manifest_fd);
 
 int32_t NT_MS_ABI nt_CreatePipe(uintptr_t *reader, uintptr_t *writer, const void *security, uint32_t size_hint);
