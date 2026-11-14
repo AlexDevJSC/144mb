@@ -1041,6 +1041,47 @@ int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path)
     return change_path(path, REMOVE_DIRECTORY);
 }
 
+/* Check that cross-root copy+delete will be permitted before a new
+ * destination is created. Otherwise a readonly or non-delete-shared
+ * source can leave a completed but unwanted copy behind on failure. */
+static bool move_source_can_be_deleted(const char *path)
+{
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0)
+        return false;
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, relative, leaf);
+    const int open_error = errno;
+    close(root);
+    if (parent < 0) {
+        errno = open_error;
+        return false;
+    }
+    struct stat info;
+    int error = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW) != 0 ? errno : 0;
+    if (error == 0) {
+        if (S_ISLNK(info.st_mode))
+            error = EACCES;
+        else if (!S_ISREG(info.st_mode))
+            error = ENOTSUP;
+        else if ((info.st_mode & 0222) == 0)
+            error = EACCES;
+    }
+    if (error == 0 && faccessat(parent, ".", W_OK | X_OK, AT_EACCESS) != 0)
+        error = errno;
+    if (error == 0) {
+        pthread_mutex_lock(&file_lock);
+        const bool blocked = file_blocks_delete(&info);
+        pthread_mutex_unlock(&file_lock);
+        if (blocked)
+            error = EBUSY;
+    }
+    close(parent);
+    errno = error;
+    return error == 0;
+}
+
 int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
 {
     return nt_MoveFileExA(from, to, 0);
@@ -1073,6 +1114,10 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
             /* Different authorized roots must never be joined using a
              * host path. A regular file is copied via guest handles, then
              * deleted only after the copy is complete. */
+            if (!move_source_can_be_deleted(source)) {
+                nt_SetLastError(path_error(errno, false));
+                return 0;
+            }
             if (!nt_CopyFileA(from, to, (flags & 1u) == 0))
                 return 0;
             if (nt_DeleteFileA(from))
