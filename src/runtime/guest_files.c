@@ -601,7 +601,7 @@ static uint32_t path_error(int error, bool parent)
 
 enum {
     FILE_READ = 1, FILE_WRITE = 2, FILE_DELETE = 4, FILE_TABLE_SIZE = 256,
-    HANDLE_FLAG_INHERIT = 1,
+    HANDLE_FLAG_INHERIT = 1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 2,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
     TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80
 };
@@ -852,14 +852,65 @@ int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
     return file != NULL;
 }
 
+int32_t NT_MS_ABI nt_SetHandleInformation(uintptr_t handle, uint32_t mask, uint32_t flags)
+{
+    if (((mask | flags) & ~(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE)) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file = find_handle(handle);
+    if (file != NULL)
+        file->handle_flags = (file->handle_flags & ~mask) | (flags & mask);
+    pthread_mutex_unlock(&file_lock);
+    if (file != NULL)
+        return 1;
+    if (nt_runtime_set_waitable_flags(handle, mask, flags))
+        return 1;
+    nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return 0;
+}
+
+int32_t NT_MS_ABI nt_GetProcessHandleCount(uintptr_t process, uint32_t *count)
+{
+    if (count == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const nt_status status = nt_runtime_check_self_process(process, 0x1400u);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    pthread_mutex_lock(&file_lock);
+    uint32_t handles = 0;
+    for (size_t i = 0; i < FILE_TABLE_SIZE; ++i)
+        if (files[i].owner == WIN_HANDLE && files[i].handle != 0)
+            ++handles;
+    pthread_mutex_unlock(&file_lock);
+    *count = handles + nt_runtime_count_waitable_handles();
+    return 1;
+}
+
 static int close_object(uintptr_t handle)
 {
     pthread_mutex_lock(&file_lock);
     struct guest_file *file = find_handle(handle);
-    const int error = !file ? EBADF : close_file(file) == 0 ? 0 : errno;
+    int error = EBADF;
+    if (file != NULL) {
+        if (file->handle_flags & HANDLE_FLAG_PROTECT_FROM_CLOSE)
+            error = EACCES;
+        else
+            error = close_file(file) == 0 ? 0 : errno;
+    }
     pthread_mutex_unlock(&file_lock);
-    if (file == NULL && nt_runtime_close_waitable(handle))
-        return 0;
+    if (file == NULL) {
+        const nt_status status = nt_runtime_close_waitable_status(handle);
+        if (status == NT_STATUS_SUCCESS)
+            return 0;
+        if (status == NT_STATUS_ACCESS_DENIED)
+            return EACCES;
+    }
     return error;
 }
 
@@ -872,16 +923,45 @@ nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t sou
     if (!target)
         return NT_STATUS_ACCESS_VIOLATION;
     *target = 0;
-    if (source_process != UINTPTR_MAX || target_process != UINTPTR_MAX)
-        return NT_STATUS_NOT_SUPPORTED;
+    /* Same-process handles are distinct from pseudo handles. A real handle
+     * must grant PROCESS_DUP_HANDLE; arbitrary child/foreign processes are
+     * not handled by a shared NT namespace and remain unsupported. */
+    nt_status status = nt_runtime_check_self_process(source_process, 0x40u);
+    if (status != NT_STATUS_SUCCESS)
+        return status;
+    status = nt_runtime_check_self_process(target_process, 0x40u);
+    if (status != NT_STATUS_SUCCESS)
+        return status;
     if ((options & ~7u) || (attributes & ~2u))
         return NT_STATUS_INVALID_PARAMETER;
-    nt_status status = nt_runtime_duplicate_waitable(source, access, attributes, options, target);
+    if (options & 1u) {
+        /* Don't create an alias when closing the protected source would
+         * fail: CLOSE_SOURCE is not permitted to bypass handle protection. */
+        uint32_t flags = 0;
+        bool found = nt_runtime_get_waitable_flags(source, &flags);
+        if (!found) {
+            pthread_mutex_lock(&file_lock);
+            const struct guest_file *file = find_handle(source);
+            if (file != NULL) {
+                flags = file->handle_flags;
+                found = true;
+            }
+            pthread_mutex_unlock(&file_lock);
+        }
+        if (found && (flags & HANDLE_FLAG_PROTECT_FROM_CLOSE))
+            return NT_STATUS_ACCESS_DENIED;
+    }
+    status = nt_runtime_duplicate_waitable(source, access, attributes, options, target);
     if (status == NT_STATUS_INVALID_HANDLE)
         status = duplicate_file_handle(source, attributes, options, target);
     if (status == NT_STATUS_SUCCESS && (options & 1u)) {
         /* After successful duplication each handle has an independent life. */
-        (void)nt_NtClose(source);
+        const nt_status closed = nt_NtClose(source);
+        if (closed != NT_STATUS_SUCCESS) {
+            (void)nt_NtClose(*target);
+            *target = 0;
+            return closed;
+        }
     }
     return status;
 }
