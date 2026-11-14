@@ -56,6 +56,12 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 
 `CreateRemoteThread` y `CreateRemoteThreadEx` aceptan un seudohandle o HANDLE real del proceso actual con derecho `PROCESS_CREATE_THREAD`. `NtCreateThreadEx` comparte esa validación. Se prueba con un PE AMD64 que las tres rutas pueden crear hilos suspendidos, reanudarlos y observar el código de salida; los handles de solo consulta o los atributos no implementados devuelven error.
 
+### Entrega 72 % → 90 %: pruebas y límites
+
+Se integraron tres PRs: [#85](https://github.com/AlexDevJSC/144mb/pull/85), [#87](https://github.com/AlexDevJSC/144mb/pull/87) y [#88](https://github.com/AlexDevJSC/144mb/pull/88). En GitHub Actions completaron las pruebas Linux, UBSan y Fedora RPM, incluidas pruebas reales de transferencia de entorno, handles de archivos y tuberías a través de `posix_spawn` y `exec`. Los nuevos fixtures Win64 se compilan con MinGW. **La ruta de procesos PE anidados no se ejecuta en ese runner porque Bubblewrap no puede crear el aislamiento**; un `SKIP` no constituye un resultado positivo.
+
+El **90 % es una estimación de madurez relativa al trabajo desarrollado**; no es cobertura medida de todas las APIs NT ni 90 % de paridad de Windows. **No alcanza todavía el criterio de "solo queda probarlo en Fedora"**: la suspensión y terminación arbitrarias de hilos activos, la obtención/restauración de contexto AMD64 de otros hilos, herencia de objetos NT no basados en FD, tokens, seguridad NT, APC avanzadas y pruebas diferenciales Windows siguen siendo trabajo funcional, no solo de instalación. La fase 4 permanece activa.
+
 ### Verificación de herencia de archivos
 
 `tests/inherited_file_test.c` cruza una frontera **real de `posix_spawn`+`exec`**: hereda un descriptor con identidad HANDLE Windows, comprueba el contenido y demuestra que su lectura mueve el desplazamiento observado por el padre. Repite con la herencia deshabilitada y comprueba que el handle no aparece, rechaza manifests sin sello y no admite la herencia ficticia de eventos. Se ejecuta con `make check` y UBSan en Linux/Fedora. El fixture PE `child_process_fixture.c` verifica los mismos contratos dentro de un sandbox, pero solo si Bubblewrap permite lanzar el hijo; `SKIP` no cuenta como prueba de ese extremo.
@@ -77,13 +83,13 @@ Uso desde la raíz del repositorio: `bash scripts/fedora-check-stage4.sh`.
 
 ## Madurez del componente
 
-- **Propuesta de ampliación de IPC y stdio: 84 % → 90 % (+6 puntos porcentuales estimados, pendiente de CI).** El progreso deriva de IPC operativo entre procesos, no de implementar suspensión arbitraria o contextos de hilo. Un 90 % no es un porcentaje medido de APIs NT ni una garantía de que solo falte Fedora físico. Quedan contratos importantes y la estimación deberá revisarse con su peso real.
+- **Actual tras PR #88 integrada: 90 %** (**+6 puntos porcentuales estimados** desde el 84 % anterior; [CI Linux, UBSan y Fedora RPM superada](https://github.com/AlexDevJSC/144mb/actions/runs/43600342005)). El progreso deriva de IPC operativo entre procesos, no de implementar suspensión arbitraria o contextos de hilo. Un 90 % no es un porcentaje medido de APIs NT ni una garantía de que solo falte Fedora físico. Quedan contratos importantes y la estimación deberá revisarse con su peso real.
 
 
 - **Actual tras PR #87 integrada: 84 %** (**+6 puntos porcentuales estimados** desde 78 %; [CI Linux, UBSan y Fedora RPM superada](https://github.com/AlexDevJSC/144mb/actions/runs/43599531683)). Hay comunicación entre procesos PE para datos de ambiente y archivos heredados, con tests Linux reales y PE sintéticos. La seguridad NT, los handles de objetos compartidos y la suspensión asíncrona no están completados. Esta cifra no debe elevarse sin validar los contratos descritos.
 
 
-- **Propuesta de entrega grande, fase 4 — entornos hijo aislados: 72 % → 78 % (+6 puntos estimados, pendiente de pruebas CI y revisión).** Se transfiere al hijo un bloque de variables Unicode validado y sellado, independiente de la configuración del proceso Linux, y se prueban herencia, reemplazo, Unicode y errores. La cifra no puede darse por confirmada hasta verificar ejecución real de hijos PE en Fedora; un `SKIP` de Bubblewrap sigue siendo un bloqueo de validación.
+- **PR #85 integrada — entornos hijo aislados: 72 % → 78 % (+6 puntos estimados; [CI Linux/UBSan/Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43598240412)).** Se transfiere al hijo un bloque de variables Unicode validado y sellado, independiente de la configuración del proceso Linux, y se prueban herencia, reemplazo, Unicode y errores. La transferencia entre dos procesos Linux está verificada. La ejecución de hijos PE anidados en Bubblewrap no pudo comprobarse en CI: el `SKIP` sigue siendo un bloqueo específico de validación.
 
 
 - **Actual tras PR #82 fusionada: 72 %** (**+2 puntos porcentuales estimados** desde el 70 %). [CI Linux, UBSan y Fedora RPM superada](https://github.com/AlexDevJSC/144mb/actions/runs/43550562358). Incorpora flags independientes por handle, rechazo de cierre protegido, duplicación con permiso `PROCESS_DUP_HANDLE` usando handles reales y contabilización de handles. **No** implementa la herencia entre procesos ni permisos NT avanzados.
