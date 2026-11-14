@@ -72,7 +72,9 @@ int32_t NT_MS_ABI nt_GetCPInfo(uint32_t page, struct nt_cp_info *info)
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    *info = (struct nt_cp_info){.maximum = page == 65001 ? 4 : 1, .replacement = {'?', 0}};
+    const uint32_t maximum = page == 65001 ? 4 :
+                             page == 932 || page == 936 || page == 949 || page == 950 ? 2 : 1;
+    *info = (struct nt_cp_info){.maximum = maximum, .replacement = {'?', 0}};
     return 1;
 }
 
