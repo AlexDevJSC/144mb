@@ -379,6 +379,10 @@ static void check_files(void)
     CHECK(nt_runtime_set_unc_root("lab", "assets", NULL));
     CHECK(nt_runtime_set_drive_root('D', NULL));
     CHECK(rmdir(share) == 0 && rmdir(second) == 0);
+    const char cp1252_dir[] = {'C', ':', '\\', 'c', 'a', 'f', (char)0xe9, 0};
+    CHECK(nt_CreateDirectoryA(cp1252_dir, NULL) != 0);
+    CHECK((nt_GetFileAttributesA(cp1252_dir) & 0x10u) != 0);
+    CHECK(nt_RemoveDirectoryA(cp1252_dir) != 0);
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
     CHECK(nt_CreateDirectoryA("data", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
     CHECK(nt_CreateDirectoryA("DATA", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
