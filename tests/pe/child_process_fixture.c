@@ -315,7 +315,7 @@ int import_fixture_entry(void)
     /* W also permits an ANSI block when CREATE_UNICODE_ENVIRONMENT is absent. */
     WCHAR command_w_ansi[] = L"\"C:\\Test child.exe\" /nt-ansi-env ä";
     if (!CreateProcessW(NULL, command_w_ansi, NULL, NULL, FALSE, 0,
-                        environment_a, directory, &startup, &process))
+                        (void *)environment_a, directory, &startup, &process))
         return 133;
     if (WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
         !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
