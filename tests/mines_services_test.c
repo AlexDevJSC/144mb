@@ -134,6 +134,20 @@ static void check_user_folders(void)
     CHECK(nt_fopen("C:/Users/guest/Documents/../input.txt", "rb") == NULL && errno == EACCES);
     CHECK(nt_fopen("C:/Users/guest/DocumentsX/input.txt", "rb") == NULL);
     CHECK(!nt_MoveFileExA(filename, "C:/input.txt", 0) && last_error() == NT_ERROR_NOT_SAME_DEVICE);
+    /* Two distinct authorized roots remain separate even when the copy is
+     * allowed. The transfer must use native files, not a temporary drive. */
+    char copied[160], moved[160];
+    CHECK(snprintf(copied, sizeof(copied), "%s/from-shared.txt", drive) > 0);
+    CHECK(snprintf(moved, sizeof(moved), "%s/transferred.txt", drive) > 0);
+    CHECK(nt_CopyFileA(filename, "C:/from-shared.txt", 1) != 0);
+    host = fopen(copied, "rb");
+    CHECK(host != NULL && fread(bytes, 1, 7, host) == 7 &&
+          memcmp(bytes, "native!", 7) == 0 && fclose(host) == 0);
+    CHECK(nt_DeleteFileA("C:/FROM-SHARED.txt") != 0);
+    CHECK(nt_MoveFileExA(filename, "C:/transferred.txt", 2u) != 0);
+    CHECK(access(input, F_OK) < 0 && errno == ENOENT && access(moved, F_OK) == 0);
+    CHECK(nt_MoveFileExA("C:/TRANSFERRED.txt", filename, 2u) != 0);
+    CHECK(access(moved, F_OK) < 0 && errno == ENOENT && access(input, F_OK) == 0);
     CHECK(nt_CreateDirectoryA("C:/Users/guest/Documents/sub", NULL));
     CHECK(nt_MoveFileExA(filename, "C:/Users/guest/Documents/sub/output.txt", 0));
     CHECK(access(input, F_OK) < 0 && errno == ENOENT);
