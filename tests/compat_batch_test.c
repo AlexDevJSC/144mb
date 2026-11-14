@@ -430,6 +430,10 @@ static void check_files(void)
     CHECK(nt_DeleteFileA("data/delete-me.bin") == 0 &&
           last_error() == NT_ERROR_SHARING_VIOLATION);
     CHECK(nt_CloseHandle(delete_handle) != 0);
+    CHECK(nt_SetFileAttributesA("data/delete-me.bin", 1u) != 0);
+    CHECK(nt_DeleteFileA("DATA/DELETE-ME.BIN") == 0 &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_SetFileAttributesA("data/delete-me.bin", 0x80u) != 0);
     delete_handle = nt_CreateFileA("data/delete-me.bin",
         UINT32_C(0x80000000), 1u | 4u, NULL, 3u, 0x80u, 0);
     CHECK(delete_handle != UINTPTR_MAX);
