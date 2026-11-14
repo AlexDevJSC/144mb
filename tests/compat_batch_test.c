@@ -424,6 +424,9 @@ static void check_files(void)
     CHECK(nt_CreateDirectoryA("C:\\Étage", NULL) != 0);
     CHECK(nt_CreateDirectoryA("c:\\étage", NULL) == 0 &&
           last_error() == NT_ERROR_ALREADY_EXISTS);
+    CHECK(nt_SetFileAttributesA("C:\\éTAGE", 1u | 2u) != 0 &&
+          (nt_GetFileAttributesW(u"C:\\Étage") & (1u | 2u | 0x10u)) ==
+          (1u | 2u | 0x10u));
     void *international = nt_fopen("C:\\Étage\\Résumé.TXT", "wb");
     CHECK(international != NULL && nt_fwrite("ok", 1, 2, international) == 2 &&
           nt_fclose(international) == 0);
