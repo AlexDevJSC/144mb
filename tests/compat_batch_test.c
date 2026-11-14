@@ -558,6 +558,48 @@ static void check_files(void)
     CHECK(nt_CloseHandle(delete_handle) != 0);
     CHECK(nt_GetFileAttributesA("data/delete-me.bin") == UINT32_MAX);
 
+    /* Linux OFD advisory locks are backed by the actual inode and survive
+     * temporary fd duplicates. Distinct Windows opens may conflict. */
+    const uintptr_t first_lock = nt_CreateFileA("data/locked.bin", UINT32_C(0xc0000000),
+                                                  3u, NULL, 2u, 0x80u, 0);
+    CHECK(first_lock != UINTPTR_MAX);
+    const uintptr_t second_lock = nt_CreateFileA("DATA/LOCKED.bin", UINT32_C(0xc0000000),
+                                                   3u, NULL, 3u, 0x80u, 0);
+    CHECK(second_lock != UINTPTR_MAX);
+    CHECK(nt_LockFile(first_lock, 0, 0, 8, 0) != 0);
+    CHECK(nt_LockFile(second_lock, 0, 0, 8, 0) == 0 &&
+          last_error() == NT_ERROR_LOCK_VIOLATION);
+    CHECK(nt_UnlockFile(first_lock, 0, 0, 8, 0) != 0 &&
+          nt_LockFile(second_lock, 0, 0, 8, 0) != 0 &&
+          nt_UnlockFile(second_lock, 0, 0, 8, 0) != 0);
+
+    const uintptr_t completed = nt_CreateEventW(NULL, 1, 0, NULL);
+    CHECK(completed != 0 && completed != UINTPTR_MAX);
+    struct nt_overlapped overlapped = {.offset = 16u, .event = completed};
+    CHECK(nt_LockFileEx(first_lock, 1u, 0, 4, 0, &overlapped) != 0);
+    CHECK(nt_WaitForSingleObject(completed, 0) == 0);
+    CHECK(nt_LockFileEx(second_lock, 3u, 0, 4, 0, &overlapped) == 0 &&
+          last_error() == NT_ERROR_LOCK_VIOLATION);
+    CHECK(nt_UnlockFileEx(first_lock, 0, 4, 0, &overlapped) != 0);
+
+    uint32_t written_bytes = 0;
+    CHECK(nt_WriteFile(first_lock, "abc", 3, &written_bytes, NULL) != 0 &&
+          written_bytes == 3);
+    overlapped.offset = 1;
+    CHECK(nt_WriteFile(first_lock, "Z", 1, NULL, &overlapped) != 0);
+    CHECK(nt_GetOverlappedResult(first_lock, &overlapped, &written_bytes, 1) != 0 &&
+          written_bytes == 1);
+    int64_t file_position = -1;
+    CHECK(nt_SetFilePointerEx(first_lock, 0, &file_position, 1) != 0 &&
+          file_position == 3);
+    overlapped.offset = 0;
+    char positional[4] = {0};
+    CHECK(nt_ReadFile(first_lock, positional, 3, NULL, &overlapped) != 0 &&
+          nt_GetOverlappedResult(first_lock, &overlapped, &written_bytes, 1) != 0 &&
+          written_bytes == 3 && memcmp(positional, "aZc", 3) == 0);
+    CHECK(nt_CloseHandle(completed) != 0 && nt_CloseHandle(second_lock) != 0 &&
+          nt_CloseHandle(first_lock) != 0 && nt_DeleteFileA("data/LOCKED.bin") != 0);
+
     CHECK(nt_CopyFileA("C:\\DATA\\SCORES.TXT", "C:\\data\\Backup.TXT", 1) != 0);
     CHECK(nt_CopyFileA("data/scores.txt", "DATA/backup.txt", 1) == 0 &&
           last_error() == NT_ERROR_FILE_EXISTS);
