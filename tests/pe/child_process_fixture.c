@@ -58,8 +58,8 @@ int import_fixture_entry(void)
                 uintptr_t handle = 0;
                 for (unsigned int digit = 0; digit < 16; ++digit) {
                     WCHAR c = q[digit];
-                    unsigned int value = c >= L'0' && c <= L'9' ? c - L'0' :
-                                         c >= L'A' && c <= L'F' ? c - L'A' + 10u : 16u;
+                    unsigned int value = c >= L'0' && c <= L'9' ? (unsigned int)(c - L'0') :
+                                         c >= L'A' && c <= L'F' ? (unsigned int)(c - L'A') + 10u : 16u;
                     if (value >= 16u)
                         return 103;
                     handle = (handle << 4) | value;
