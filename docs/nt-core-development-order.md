@@ -61,7 +61,7 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **13-11-2026, preparación de pruebas físicas Fedora (esta PR): 70 % → 70 % (+0 puntos).** Se añade `scripts/fedora-check-stage4.sh`, que ejecuta pruebas de runtime Linux, PE Windows, UBSan y procesos hijo aislados, y rechaza explícitamente suites omitidas (`SKIP`). Un script de pruebas no añade contratos al runtime y no justifica aumentar el porcentaje.
 
-- **14-11-2026, fase 4 — flags y vida útil de handles (PR en curso): 70 % → 72 % (+2 puntos estimados, sujeto a CI).** `SetHandleInformation`, `GetProcessHandleCount` y cierre protegido por `HANDLE_FLAG_PROTECT_FROM_CLOSE` para handles de archivos/objetos NT; duplicación con handles reales del proceso propio bajo `PROCESS_DUP_HANDLE`. Tests PE verifican protección, independencia entre alias, errores y cierre. La herencia de handles entre procesos y el broker NT siguen pendientes.
+- **14-11-2026, PR #82 integrada — flags y vida útil de handles: 70 % → 72 % (+2 puntos porcentuales estimados).** `SetHandleInformation`, `GetProcessHandleCount` y cierre protegido por `HANDLE_FLAG_PROTECT_FROM_CLOSE` para handles de archivos/objetos NT; duplicación con handles reales del proceso propio bajo `PROCESS_DUP_HANDLE`. Tests PE verifican protección, independencia entre alias, errores y cierre. [CI Linux/UBSan/Fedora correcta (run 43550562358)](https://github.com/AlexDevJSC/144mb/actions/runs/43550562358). La herencia de handles entre procesos y el broker NT siguen pendientes.
 
 ### Formato de cierre para cambios futuros
 

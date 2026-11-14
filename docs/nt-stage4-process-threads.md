@@ -70,7 +70,7 @@ Uso desde la raíz del repositorio: `bash scripts/fedora-check-stage4.sh`.
 
 ## Madurez del componente
 
-- **Entrega de metadatos de handles (PR en revisión): 70 % → 72 % (+2 puntos porcentuales estimados, sujeto a CI).** Incorpora flags independientes por handle, rechazo de cierre protegido, duplicación con permiso `PROCESS_DUP_HANDLE` usando handles reales y contabilización de handles. **No** implementa la herencia entre procesos ni permisos NT avanzados.
+- **Actual tras PR #82 fusionada: 72 %** (**+2 puntos porcentuales estimados** desde el 70 %). [CI Linux, UBSan y Fedora RPM superada](https://github.com/AlexDevJSC/144mb/actions/runs/43550562358). Incorpora flags independientes por handle, rechazo de cierre protegido, duplicación con permiso `PROCESS_DUP_HANDLE` usando handles reales y contabilización de handles. **No** implementa la herencia entre procesos ni permisos NT avanzados.
 
 
 - **Actual tras PR #79 fusionada: 70 %** (estimación, **+2 puntos porcentuales** respecto a 68 %; [CI Linux/UBSan/Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43485165821)). El soporte remoto sigue limitado al proceso actual.
