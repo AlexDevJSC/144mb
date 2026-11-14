@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "compat.h"
 #include "user_folders.h"
+#include "winfile.h"
 
 #include <errno.h>
 #include <math.h>
