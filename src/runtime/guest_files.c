@@ -901,6 +901,7 @@ struct child_file_record {
 };
 struct child_file_manifest {
     uint32_t magic, count;
+    uintptr_t standard_handles[3]; /* 0 means no STARTF_USESTDHANDLES */
     struct child_file_record files[NT_CHILD_FILE_LIMIT];
 };
 
@@ -919,7 +920,8 @@ void nt_runtime_release_inherited_files(struct nt_child_file_transfer *transfer)
         transfer->source_fds[i] = -1;
 }
 
-uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer)
+uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer,
+                                             const uintptr_t standard_handles[3])
 {
     if (transfer == NULL)
         return NT_ERROR_INVALID_PARAMETER;
@@ -968,6 +970,27 @@ uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_
                 memcpy(out->path, entry->path, len + 1);
             }
             ++transfer->count;
+        }
+    }
+    if (error == NT_ERROR_SUCCESS && standard_handles != NULL) {
+        if (!enabled) {
+            error = NT_ERROR_NOT_SUPPORTED;
+        } else {
+            for (size_t stream = 0; stream < 3; ++stream) {
+                bool found = false;
+                const uint32_t required = stream == 0 ? FILE_READ : FILE_WRITE;
+                for (size_t i = 0; i < transfer->count; ++i)
+                    if (manifest->files[i].handle == standard_handles[stream] &&
+                        (manifest->files[i].access & required)) {
+                        found = true;
+                        break;
+                    }
+                if (!found) {
+                    error = NT_ERROR_ACCESS_DENIED;
+                    break;
+                }
+                manifest->standard_handles[stream] = standard_handles[stream];
+            }
         }
     }
     pthread_mutex_unlock(&file_lock);
@@ -1064,6 +1087,18 @@ bool nt_runtime_inherited_file_count(int manifest_fd, size_t *count)
     if (manifest == NULL)
         return false;
     *count = manifest->count;
+    free(manifest);
+    return true;
+}
+
+bool nt_runtime_inherited_standard_handles(int manifest_fd, uintptr_t handles[3])
+{
+    if (handles == NULL)
+        return false;
+    struct child_file_manifest *manifest = read_inherited_file_manifest(manifest_fd);
+    if (manifest == NULL)
+        return false;
+    memcpy(handles, manifest->standard_handles, sizeof(manifest->standard_handles));
     free(manifest);
     return true;
 }
