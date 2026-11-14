@@ -175,6 +175,88 @@ comprobaciones automatizadas de regresión. Cuando esos tests y la
 compilación Fedora final sean correctos, quedan listos para el
 *approve* manual del usuario.
 
+## Ampliación de los cuatro subsistemas (noviembre de 2026)
+
+### Unicode general y páginas de códigos
+
+Además de CP1252, CP437 y UTF-8, \`MultiByteToWideChar\` y
+\`WideCharToMultiByte\` disponen de conversores ICU para
+**CP850, 866, 874, 932, 936, 949, 950 y 1250, 1251, 1253–1258**.
+La selección del convertidor no depende del locale de Linux; los
+errores de bytes inválidos en modo estricto y las sustituciones
+se traducen explícitamente. \`GetCPInfo\` comunica longitud máxima de
+dos bytes para las páginas DBCS indicadas.
+
+En operaciones \`A\` del sistema de archivos que hasta aquí admitían
+UTF-8, se añade una transición segura para **bytes Windows-1252 cuando
+el texto no constituye UTF-8 válido**. Cuando un mismo texto es válido
+en ambas codificaciones se sigue priorizando UTF-8 para preservar las
+llamadas internas existentes. Por tanto, **todavía no es una
+implementación estricta de ACP en absolutamente todas las API ANSI**.
+
+### Compartición y bloqueos de rangos NT
+
+\`LockFile\`, \`UnlockFile\`, \`LockFileEx\` y \`UnlockFileEx\` gestionan
+rangos de bytes mediante **Linux open-file-description locks**
+(\`F_OFD_SETLK\`, \`F_OFD_SETLKW\`, \`F_OFD_GETLK\`). Dos handles
+independientes del runtime detectan bloqueos incompatibles; los
+descriptores duplicados de un mismo handle conservan su descripción
+abierta. \`ReadFile\`, \`WriteFile\` y las llamadas NT basadas en offset
+consultan estos bloqueos antes de transferir bytes.
+
+Los bloqueos de Linux siguen siendo *advisory* para aplicaciones que
+no cooperen y no son equivalentes a todas las reglas NT de
+compartición entre procesos o bloqueos de red. Hay una ventana entre
+la comprobación de lock y el acceso POSIX real: falta coordinación
+atómica interproceso y \`delete-pending\` completo.
+
+### Unidades adicionales y rutas UNC
+
+Un lanzador puede conceder **solo para esa ejecución**, por ejemplo:
+
+~~~sh
+pe-isolated-run --drive D=/ruta/linux/autorizada \
+  --unc lab/assets=/otra/ruta/autorizada -- ./programa.exe
+~~~
+
+El lanzador abre el directorio autorizado y Bubblewrap monta únicamente
+ese descriptor como \`/guest-drives/D\` o
+\`/guest-unc/lab/assets\`. En el proceso invitado, el runtime
+relaciona ese punto con \`D:\\...\` o \`\\\\lab\\assets\\...\`,
+manteniendo el confinamiento por directorios abiertos, sin enlazar a
+todo el sistema de archivos Linux ni montar servidores de red
+automáticamente. El prefijo DOS extendido \`\\\\?\\UNC\\...\`
+también se reconoce para recursos expresamente concedidos.
+Las rutas sin permiso, o con \`..\` por encima del recurso concedido,
+se rechazan. El montaje UNC es **una traducción a una carpeta local ya
+autorizada**, no un cliente SMB/CIFS.
+
+Para los **reparse points** se añade introspección no intrusiva:
+\`GetFileAttributesA/W\` y \`FindFirstFileW\` pueden reconocer un
+enlace simbólico Linux como \`FILE_ATTRIBUTE_REPARSE_POINT\`
+sin seguirlo. Sigue prohibido atravesar el symlink para evitar
+escapes de seguridad; no existen aún junctions, creación de reparse
+points Windows ni \`FSCTL_GET_REPARSE_POINT\` completo.
+
+### E/S asíncrona
+
+\`CreateFileA/W\` acepta \`FILE_FLAG_OVERLAPPED\`. Con ese handle,
+\`ReadFile\` y \`WriteFile\` aceptan \`OVERLAPPED\` y despachan
+\`pread/pwrite\` en un **trabajador Linux dedicado** con cola de
+hasta 32 solicitudes y descriptores duplicados. Devuelven
+\`ERROR_IO_PENDING\`, almacenan el resultado en
+\`OVERLAPPED.Internal/InternalHigh\`, señalizan un evento Win32
+opcional y permiten \`GetOverlappedResult\` con espera o consulta
+sin espera. La operación conserva su offset independiente del
+puntero secuencial del handle.
+
+Todavía faltan \`CancelIoEx\`, colas de finalización IOCP,
+APC NT asíncronas, operaciones de E/S vectorizadas, mayor paralelismo
+y cancelación de operaciones en curso. \`NtReadFile/NtWriteFile\`
+mantienen sus propias restricciones de event/APC. Las pruebas
+automatizadas incluyen los caminos básicos, **no sustituyen la
+aceptación final del usuario en Fedora**.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
