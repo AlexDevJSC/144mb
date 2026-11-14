@@ -1274,8 +1274,13 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
     }
-    if (!from_wide && disposition == OPEN_EXISTING)
+    if (!from_wide && disposition == OPEN_EXISTING) {
+        /* A successful Win32 operation must not leak GetLastError from
+         * the optional encoding probe into the calling thread. */
+        const uint32_t saved_error = nt_GetLastError();
         existing_ansi_path_fallback(input, path);
+        nt_SetLastError(saved_error);
+    }
     const char *resolved = path;
     const int root = duplicate_root(&resolved);
     if (root < 0) {
