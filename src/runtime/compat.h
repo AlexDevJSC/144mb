@@ -100,6 +100,7 @@ uint32_t NT_MS_ABI nt_GetACP(void);
 uint32_t NT_MS_ABI nt_GetOEMCP(void);
 int32_t NT_MS_ABI nt_IsValidCodePage(uint32_t page);
 int32_t NT_MS_ABI nt_IsDBCSLeadByte(uint8_t byte);
+int32_t NT_MS_ABI nt_IsDBCSLeadByteEx(uint32_t page, uint8_t byte);
 size_t nt_runtime_wide_length(const uint16_t *text, size_t limit);
 uint16_t *nt_runtime_utf8_to_wide(const char *text);
 
