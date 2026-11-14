@@ -186,16 +186,21 @@ respaldadas por los conversores ICU en vez de la configuración regional del
 host. Se comprueban secuencias DBCS (Shift-JIS/GBK), sustitución y decodificación
 estricta; `GetCPInfo` reconoce longitudes de dos bytes y los rangos de bytes
 iniciales, que también expone `IsDBCSLeadByteEx`. El ACP por defecto sigue
-siendo CP1252. Esto **no implica** que todas las API Win32 `A` de rutas
-hayan pasado de UTF-8 a la página ANSI del invitado; esa transición es un
-trabajo pendiente y no se presenta como concluido.
+siendo CP1252. Las API básicas `A` del sistema de archivos también
+admiten bytes CP1252 que no sean UTF-8 válido; si una secuencia es válida
+como UTF-8 sigue teniendo prioridad el tratamiento UTF-8 del puente
+actual. **Aún no es un modelo ACP estricto y uniforme** para todas las
+API ni para las secuencias ambiguas.
 
 **Bloqueos NT.** Las operaciones Win32 `LockFile`, `UnlockFile`,
 `LockFileEx` y `UnlockFileEx` utilizan bloqueos de intervalo OFD del
 kernel Linux (`F_OFD_SETLK` y `F_OFD_SETLKW`) con offset y longitud de
 64 bits; los bloqueos se mantienen mientras existe la descripción de archivo
 abierta. Se detectan conflictos incluso con otros descriptores del sistema
-Linux que participan en el protocolo de bloqueo. Son bloqueos Linux
+Linux que participan en el protocolo de bloqueo. Las lecturas y escrituras
+del runtime consultan el rango bloqueado antes de transferir datos,
+también en las operaciones NT basadas en offset. La consulta previa y la
+E/S aún no forman una transacción atómica. Son bloqueos Linux
 *advisory*, no una implementación completa de bloqueos obligatorios NT,
 compatibilidad entre procesos del modelo `FILE_SHARE_*`, `delete-pending`
 ni leases SMB.
@@ -208,23 +213,40 @@ la resolución posterior usa ese FD y prohíbe atravesar `..` fuera de su
 raíz, enlaces simbólicos y montajes no permitidos. El nombre del servidor
 UNC **no origina una conexión SMB**: designa una carpeta Linux autorizada.
 No se otorgan permisos automáticamente ni se lee todo el HOME. Se añaden
-`GetLogicalDrives` y `GetDriveTypeW`. Este es el nivel **runtime**;
-todavía faltan autorización y persistencia de esas nuevas raíces desde la
-interfaz/configuración del lanzador, así como cambios de directorio
-independientes por unidad (por ahora `D:relativa` se rechaza).
+`GetLogicalDrives` y `GetDriveTypeW`. El lanzador permite también
+**conceder unidades y recursos UNC en cada ejecución** dentro del
+aislamiento Bubblewrap:
+
+~~~sh
+pe-isolated-run --drive D=/ruta/linux/autorizada \
+  --unc lab/assets=/otra/ruta/autorizada -- ./programa.exe
+~~~
+
+Los directorios de origen se abren con FD y se montan bajo
+`/guest-drives/D` y `/guest-unc/lab/assets`, no como
+accesos globales al anfitrión. La persistencia de estas concesiones, la
+administración avanzada de unidades y los directorios de trabajo
+independientes por unidad siguen pendientes (por ahora `D:relativa`
+se rechaza).
 Los enlaces simbólicos Linux pueden identificarse como
 `FILE_ATTRIBUTE_REPARSE_POINT` sin abrir ni seguir su destino;
 todavía no se crean junctions/reparse points NTFS ni se soporta
 `FSCTL_GET_REPARSE_POINT`.
 
 **E/S con offset y señalización.** `ReadFile` y `WriteFile` admiten
-`OVERLAPPED` para operaciones de archivo con offset explícito:
-`pread/pwrite` conserva el puntero compartido del handle, comunica bytes
-transferidos, señaliza el evento proporcionado y puede consultarse mediante
-`GetOverlappedResult`. `NtReadFile/NtWriteFile` también pueden señalizar
-un evento en su ruta de finalización inmediata. **Todas esas operaciones
-siguen completándose inmediatamente**: no hay aún un planificador real de
-peticiones pendientes, IOCP, APC asíncronas ni cancelación.
+`OVERLAPPED` para operaciones de archivo con offset explícito. Los
+handles abiertos con `FILE_FLAG_OVERLAPPED` despachan la operación
+a un **trabajador real** con cola limitada a 32 solicitudes; se devuelve
+`ERROR_IO_PENDING` y `GetOverlappedResult` permite esperar o
+consultar su finalización. Se conserva el offset independiente del puntero
+de archivo, se duplica el descriptor mientras la operación está viva y
+se señaliza el evento opcional de Windows. Para los handles antiguos
+sin ese flag se mantiene la finalización inmediata que ya utilizaban
+los fixtures. `NtReadFile/NtWriteFile` todavía admiten solo finalización
+inmediata, aunque pueden señalar un evento.
+Siguen pendientes IOCP, APC asíncronas NT, cancelación (`CancelIoEx`),
+paralelismo de múltiples trabajadores y las semánticas completas de
+desvinculación de handles/eventos.
 
 ## Límites actuales
 
@@ -257,8 +279,8 @@ solo lectura. Esto aún no implementa por completo la semántica NT de
 `delete-pending` entre procesos o sobre archivos reabiertos por nombre.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
-points, UNC de red y unidades configurables desde el lanzador, compartición
-y borrado NT entre procesos, E/S asíncrona realmente pendiente, ACL y
+points, UNC de red y concesiones persistentes de unidades, compartición
+y borrado NT entre procesos, E/S asíncrona NT/APC/IOCP completa, ACL y
 otras funciones de ficheros. La lectura de metadatos de un symlink y la
 asignación explícita de una carpeta host a un nombre UNC no equivalen a
 esas funcionalidades avanzadas. No se modifica el kernel NT, el cargador
