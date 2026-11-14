@@ -2992,7 +2992,7 @@ static bool check_current_lock(int fd, uint32_t length, bool write_access)
     return range_unlocked(fd, (uint64_t)current, length, write_access);
 }
 
-enum { ASYNC_LIMIT = 32, ASYNC_PENDING = 0x103 };
+enum { ASYNC_LIMIT = 32, ASYNC_PENDING = NT_ERROR_IO_PENDING };
 struct async_request {
     bool occupied, queued;
     int fd;
