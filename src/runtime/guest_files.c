@@ -4783,8 +4783,8 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
  * A plain offset uses read/write and therefore updates the shared pointer;
  * an explicit non-negative offset uses pread/pwrite. The Windows async
  * event/APC contract is not implemented and must fail explicitly. */
-enum { FILE_STANDARD_INFORMATION_CLASS = 5, FILE_POSITION_INFORMATION_CLASS = 14,
-       FILE_END_OF_FILE_INFORMATION_CLASS = 20 };
+enum { FILE_STANDARD_INFORMATION_CLASS = 5, FILE_DISPOSITION_INFORMATION_CLASS = 13,
+       FILE_POSITION_INFORMATION_CLASS = 14, FILE_END_OF_FILE_INFORMATION_CLASS = 20 };
 
 struct nt_file_standard_information {
     int64_t allocation_size, end_of_file;
@@ -5001,12 +5001,29 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
     return nt_file_complete(io, NT_STATUS_SUCCESS, needed);
 }
 
+static int32_t set_file_disposition(uintptr_t handle, bool deleting);
+
 nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_status_block *io,
                                               const void *buffer, uint32_t length,
                                               uint32_t information_class)
 {
     if (io == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
+    if (information_class == FILE_DISPOSITION_INFORMATION_CLASS) {
+        if (buffer == NULL)
+            return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
+        if (length < sizeof(uint8_t))
+            return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
+        if (set_file_disposition(handle, *(const uint8_t *)buffer != 0))
+            return nt_file_complete(io, NT_STATUS_SUCCESS, 0);
+        const uint32_t error = nt_GetLastError();
+        const nt_status status = error == NT_ERROR_INVALID_HANDLE ? NT_STATUS_INVALID_HANDLE :
+                                 error == NT_ERROR_ACCESS_DENIED ? NT_STATUS_ACCESS_DENIED :
+                                 error == NT_ERROR_NOT_SUPPORTED ? NT_STATUS_NOT_SUPPORTED :
+                                 error == NT_ERROR_INVALID_PARAMETER ? NT_STATUS_INVALID_PARAMETER :
+                                 NT_STATUS_UNSUCCESSFUL;
+        return nt_file_complete(io, status, 0);
+    }
     if (information_class != FILE_POSITION_INFORMATION_CLASS &&
         information_class != FILE_END_OF_FILE_INFORMATION_CLASS)
         return nt_file_complete(io, NT_STATUS_INVALID_INFO_CLASS, 0);
