@@ -29,7 +29,7 @@ enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
        SYNCHRONIZE = 0x100000, EVENT_ALL_ACCESS = 0x1f0003,
        PROCESS_QUERY_INFORMATION = 0x400, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000,
        PROCESS_ALL_ACCESS = 0x1fffff,
-       THREAD_TERMINATE = 1, THREAD_SUSPEND_RESUME = 2,
+       THREAD_TERMINATE = 1, THREAD_SUSPEND_RESUME = 2, THREAD_ALERT = 4,
        THREAD_SET_INFORMATION = 0x20, THREAD_QUERY_INFORMATION = 0x40,
        THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
 enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
@@ -54,7 +54,7 @@ struct waitable {
     unsigned int links;
     uint32_t handle_flags;
     enum waitable_kind kind;
-    bool manual, signaled, started;
+    bool manual, signaled, started, alerted;
     bool termination_requested, child_guest, terminate_at_start, self_process;
     int32_t semaphore_count, semaphore_maximum;
     uintptr_t teb_base;
@@ -91,6 +91,7 @@ static _Thread_local sigjmp_buf thread_exit;
 /* A guest's primary thread is not represented by a waitable. Its own
  * pseudo-handle has a strictly thread-local queue, never a host TID. */
 static _Thread_local struct guest_apc_queue primary_apcs;
+static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
 /* Windows FILETIME counts 100 ns intervals since 1601-01-01 UTC. */
 static uint64_t windows_ticks(struct timespec clock)
@@ -201,6 +202,18 @@ static struct guest_apc_queue *current_apcs(void)
 
 /* The caller holds wait_lock. APC callbacks execute only on their target
  * thread, after dropping this lock, and never from a Linux signal handler. */
+/* The NT alerted bit is per thread and survives non-alertable waits.
+ * It is consumed by precisely one alertable wait or NtTestAlert.
+ * Called only under wait_lock so an alert cannot be lost before sleep. */
+static bool consume_alert_locked(void)
+{
+    bool *flag = running_thread != NULL ? &running_thread->alerted : &primary_alerted;
+    if (!*flag)
+        return false;
+    *flag = false;
+    return true;
+}
+
 static struct guest_apc *pop_apc_locked(void)
 {
     struct guest_apc_queue *queue = current_apcs();
@@ -306,15 +319,75 @@ nt_status NT_MS_ABI nt_NtQueueApcThread(uintptr_t thread, guest_native_apc routi
                                 (uintptr_t)first, (uintptr_t)second);
 }
 
+/* A NULL reserve behaves exactly as NtQueueApcThread. A special APC
+ * (reserve=1) requires interrupting a thread even outside alertable waits;
+ * no safe mechanism exists here, so refuse it instead of faking delivery. */
+nt_status NT_MS_ABI nt_NtQueueApcThreadEx(uintptr_t thread, uintptr_t reserve,
+                                         guest_native_apc routine,
+                                         void *context, void *first, void *second)
+{
+    if (reserve != 0)
+        return NT_STATUS_NOT_SUPPORTED;
+    return nt_NtQueueApcThread(thread, routine, context, first, second);
+}
+
+uint32_t NT_MS_ABI nt_QueueUserAPC2(guest_user_apc callback, uintptr_t handle,
+                                   uintptr_t data, uint32_t flags)
+{
+    /* QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC cannot run safely while the
+     * target holds internal pthread locks. Do not silently queue a normal
+     * APC in its place. */
+    if (flags != 0) {
+        nt_SetLastError(flags == 1 ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return nt_QueueUserAPC(callback, handle, data);
+}
+
+nt_status NT_MS_ABI nt_NtAlertThread(uintptr_t handle)
+{
+    pthread_mutex_lock(&wait_lock);
+    nt_status status = NT_STATUS_SUCCESS;
+    if (handle == nt_GetCurrentThread()) {
+        if (running_thread != NULL)
+            running_thread->alerted = true;
+        else
+            primary_alerted = true;
+    } else {
+        struct waitable *object = find_waitable(handle);
+        if (!object)
+            status = NT_STATUS_INVALID_HANDLE;
+        else if (object->kind != THREAD)
+            status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+        else if ((object->access & THREAD_ALERT) == 0)
+            status = NT_STATUS_ACCESS_DENIED;
+        else {
+            struct waitable *state = wait_state(object);
+            if (state->owner_pid != (uint32_t)getpid())
+                status = NT_STATUS_NOT_SUPPORTED;
+            else if (state->signaled || state->terminate_at_start)
+                status = NT_STATUS_THREAD_IS_TERMINATING;
+            else
+                state->alerted = true;
+        }
+    }
+    if (status == NT_STATUS_SUCCESS)
+        pthread_cond_broadcast(&wait_changed);
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
 nt_status NT_MS_ABI nt_NtTestAlert(void)
 {
     pthread_mutex_lock(&wait_lock);
     struct guest_apc *apc = pop_apc_locked();
+    const bool alerted = apc == NULL && consume_alert_locked();
     pthread_mutex_unlock(&wait_lock);
-    if (apc == NULL)
-        return NT_STATUS_SUCCESS;
-    invoke_apc(apc);
-    return NT_STATUS_USER_APC;
+    if (apc != NULL) {
+        invoke_apc(apc);
+        return NT_STATUS_USER_APC;
+    }
+    return alerted ? NT_STATUS_ALERTED : NT_STATUS_SUCCESS;
 }
 
 /* Same condition variable as waits and queueing: no lost wake-ups between
@@ -324,11 +397,16 @@ nt_status nt_runtime_alertable_delay(const struct nt_wait_deadline *deadline)
 {
     pthread_mutex_lock(&wait_lock);
     struct guest_apc *apc = NULL;
+    bool alerted = false;
     int error = 0;
     for (;;) {
         apc = pop_apc_locked();
         if (apc != NULL)
             break;
+        if (consume_alert_locked()) {
+            alerted = true;
+            break;
+        }
         if (deadline != NULL && deadline->time.tv_sec < 0) {
             error = ETIMEDOUT;
             break;
@@ -344,6 +422,8 @@ nt_status nt_runtime_alertable_delay(const struct nt_wait_deadline *deadline)
         invoke_apc(apc);
         return NT_STATUS_USER_APC;
     }
+    if (alerted)
+        return NT_STATUS_ALERTED;
     return error == 0 || error == ETIMEDOUT ? NT_STATUS_SUCCESS : NT_STATUS_UNSUCCESSFUL;
 }
 
@@ -1110,6 +1190,10 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
                 apc = pop_apc_locked();
                 if (apc != NULL) {
                     result = NT_STATUS_USER_APC;
+                    break;
+                }
+                if (consume_alert_locked()) {
+                    result = NT_STATUS_ALERTED;
                     break;
                 }
             }
