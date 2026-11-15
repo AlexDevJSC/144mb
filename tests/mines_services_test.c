@@ -127,6 +127,56 @@ static void check_crossprocess_delete_sharing(void)
     }
 }
 
+/* A crashed final holder cannot call CloseHandle to reap pending names.
+ * The next cooperating open must verify no OFD lease survived the crash
+ * and safely complete deletion before granting another Windows HANDLE. */
+static void check_crossprocess_crash_pending(void)
+{
+    const uintptr_t created = nt_CreateFileA("C:\\crashed-pending.bin",
+        UINT32_C(0x40000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(created != UINTPTR_MAX && nt_CloseHandle(created));
+    int ready[2], release[2];
+    CHECK(pipe(ready) == 0 && pipe(release) == 0);
+    const pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        close(ready[0]);
+        close(release[1]);
+        const uintptr_t held = nt_CreateFileA("C:\\crashed-pending.bin",
+            UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+        if (held == UINTPTR_MAX)
+            _exit(91);
+        char signal = 'R';
+        if (write(ready[1], &signal, 1) != 1)
+            _exit(92);
+        if (read(release[0], &signal, 1) != 1)
+            _exit(93);
+        /* Simulates a process crash: no Win32 close, only Linux fd
+         * teardown from the kernel's process lifetime accounting. */
+        _exit(0);
+    }
+    close(ready[1]);
+    close(release[0]);
+    char signal = 0;
+    CHECK(read(ready[0], &signal, 1) == 1 && signal == 'R');
+    close(ready[0]);
+    CHECK(nt_DeleteFileA("C:\\crashed-pending.bin"));
+    CHECK(nt_CreateFileA("C:\\crashed-pending.bin",
+                         UINT32_C(0x80000000), 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    signal = 'X';
+    CHECK(write(release[1], &signal, 1) == 1);
+    close(release[1]);
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child &&
+          WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(nt_CreateFileA("C:\\crashed-pending.bin",
+                         UINT32_C(0x80000000), 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_GetFileAttributesA("C:\\crashed-pending.bin") == UINT32_MAX);
+}
+
 /* A Windows current directory is active in *another* NT worker. The
  * original local-only guest_cwd string cannot protect it: the kernel-held
  * shared flock does, without requiring a privileged process supervisor. */
@@ -367,6 +417,7 @@ static void check_file_handles(void)
     CHECK(nt_GetFileAttributesA("C:\\native-dispose.bin") == UINT32_MAX);
 
     check_crossprocess_delete_sharing();
+    check_crossprocess_crash_pending();
     check_crossprocess_read_write_sharing();
     check_crossprocess_current_directory();
     check_drive_relative_cwds();
