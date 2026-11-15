@@ -108,8 +108,10 @@ static DWORD WINAPI worker(void *unused)
         return 36;
 
     typedef DWORD (WINAPI *queue_apc2)(PAPCFUNC, HANDLE, ULONG_PTR, DWORD);
-    queue_apc2 modern = (queue_apc2)GetProcAddress(
-        GetModuleHandleW(L"kernel32.dll"), "QueueUserAPC2");
+    union { FARPROC address; queue_apc2 call; } resolved = {
+        .address = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "QueueUserAPC2")
+    };
+    queue_apc2 modern = resolved.call;
     if (modern == NULL || !modern(self_apc, GetCurrentThread(), 0x177u, 0) ||
         NtTestAlert() != STATUS_USER_APC || self_count != 4)
         return 37;
