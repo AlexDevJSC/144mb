@@ -781,9 +781,12 @@ static void check_files(void)
     fprintf(stderr, "DBG-CANCEL RELEASED WORKER\n");
     CHECK(nt_GetOverlappedResultEx(background, &running, &async_completed, 1000, 0) &&
           async_completed == 0);
+    fprintf(stderr, "DBG-CANCEL RUNNING EX FINISHED\n");
     CHECK(nt_WaitForSingleObject(running_event, 1000) == 0);
+    fprintf(stderr, "DBG-CANCEL RUNNING EVENT FINISHED\n");
     CHECK(nt_CloseHandle(alternate) && nt_CloseHandle(running_event) &&
           nt_CloseHandle(cancelled_event));
+    fprintf(stderr, "DBG-CANCEL CLOSES FINISHED\n");
 
     fprintf(stderr, "DBG-IOCP\n");
     /* Per-process IOCP supports manual packets and associates native file
