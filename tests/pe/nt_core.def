@@ -22,3 +22,5 @@ EXPORTS
     NtSetInformationThread
     NtSuspendThread
     NtResumeThread
+    NtGetContextThread
+    NtSetContextThread
