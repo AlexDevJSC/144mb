@@ -849,6 +849,46 @@ static void check_files(void)
     CHECK(folded != NULL && nt_fclose(folded) == 0);
     CHECK(nt_RemoveDirectoryA("data") == 0 && last_error() == NT_ERROR_DIR_NOT_EMPTY);
     CHECK(nt_DeleteFileA("DATA/TARGET.TXT") != 0 && nt_RemoveDirectoryA("DATA") != 0);
+
+    /* Windows remembers a separate current directory per DOS drive.
+     * A drive-relative D:foo must use D:'s remembered directory even if
+     * the active process directory has moved back to C:. */
+    char second_drive[] = "/tmp/nt-mines-second-drive.XXXXXX";
+    CHECK(mkdtemp(second_drive) != NULL);
+    CHECK(nt_runtime_set_drive_root('D', second_drive));
+    CHECK(nt_CreateDirectoryA("D:\\games", NULL));
+    CHECK(nt_SetCurrentDirectoryA("D:\\games"));
+    CHECK(nt_GetCurrentDirectoryA(sizeof(win_cwd), win_cwd) ==
+          strlen("D:\\games") && strcmp(win_cwd, "D:\\games") == 0);
+    CHECK(nt_GetFullPathNameA("D:save.bin", sizeof(absolute_path),
+                              absolute_path, NULL) ==
+          strlen("D:\\games\\save.bin") &&
+          strcmp(absolute_path, "D:\\games\\save.bin") == 0);
+    CHECK(nt_CreateFileA("D:save.bin", UINT32_C(0x40000000), 7u, NULL,
+                          2u, 0x80u, 0) != UINTPTR_MAX);
+    /* A rooted path without a drive prefix uses the active drive. */
+    CHECK(nt_GetFullPathNameA("\\root.dat", sizeof(absolute_path),
+                              absolute_path, NULL) ==
+          strlen("D:\\root.dat") && strcmp(absolute_path, "D:\\root.dat") == 0);
+    CHECK(nt_SetCurrentDirectoryA("C:\\"));
+    CHECK(nt_GetFullPathNameA("D:save.bin", sizeof(absolute_path),
+                              absolute_path, NULL) ==
+          strlen("D:\\games\\save.bin") &&
+          strcmp(absolute_path, "D:\\games\\save.bin") == 0);
+    CHECK(nt_SetCurrentDirectoryA("D:"));
+    CHECK(nt_GetCurrentDirectoryA(sizeof(win_cwd), win_cwd) ==
+          strlen("D:\\games") && strcmp(win_cwd, "D:\\games") == 0);
+    CHECK(nt_SetCurrentDirectoryA("C:\\"));
+    CHECK(!nt_RemoveDirectoryA("D:\\games") &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_GetFullPathNameA("D:..\\..\\escape", sizeof(absolute_path),
+                              absolute_path, NULL) == 0);
+    CHECK(nt_SetCurrentDirectoryA("D:\\"));
+    CHECK(nt_SetCurrentDirectoryA("C:\\"));
+    CHECK(nt_DeleteFileA("D:\\games\\save.bin"));
+    CHECK(nt_RemoveDirectoryA("D:\\games"));
+    CHECK(nt_runtime_set_drive_root('D', NULL));
+    CHECK(rmdir(second_drive) == 0);
     CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS scoped files, text and binary I/O, and denied paths");
 }
