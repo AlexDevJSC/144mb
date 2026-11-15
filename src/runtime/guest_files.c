@@ -1138,6 +1138,226 @@ static int open_share_registry(const struct stat *info)
     return fd;
 }
 
+/* Deletion disposition for the private C: namespace. The record is
+ * durable per inode and protected by the exact same per-inode registry
+ * flock as FILE_SHARE_* leases. A pending name remains in Linux until
+ * the final cooperating HANDLE drops its OFD lease; reopens through
+ * CreateFile are rejected in the meantime. No privileged broker, no
+ * direct chmod and no host-wide pathname authority.
+ *
+ * Other DOS roots need a cross-process mount identity protocol first:
+ * treating a different process' D: alias as this process' D: would risk
+ * unlinking an unrelated Linux file, so they deliberately retain the
+ * older eager-delete contract. */
+enum { SHARE_PENDING_OFFSET = 8192, SHARE_PENDING_MAGIC = 0x44504e54u };
+struct share_pending_record {
+    uint32_t magic, pending;
+    uint64_t dev, ino;
+    char path[PATH_MAX];
+};
+
+static bool read_share_pending(int gate, struct share_pending_record *record)
+{
+    memset(record, 0, sizeof(*record));
+    ssize_t received;
+    do {
+        received = pread(gate, record, sizeof(*record), SHARE_PENDING_OFFSET);
+    } while (received < 0 && errno == EINTR);
+    if (received == 0)
+        return true;
+    if (received != (ssize_t)sizeof(*record) ||
+        record->magic != SHARE_PENDING_MAGIC || record->pending > 1u ||
+        memchr(record->path, '\0', sizeof(record->path)) == NULL) {
+        errno = EIO; /* Fail closed on partially-written/private state. */
+        return false;
+    }
+    return true;
+}
+
+static bool set_share_pending(int gate, const struct stat *file, const char *path)
+{
+    struct share_pending_record record;
+    if (!read_share_pending(gate, &record))
+        return false;
+    if (record.pending) {
+        errno = EACCES;
+        return false;
+    }
+    if (path == NULL || strncmp(path, "C:", 2) != 0 ||
+        strlen(path) >= sizeof(record.path)) {
+        errno = EINVAL;
+        return false;
+    }
+    memset(&record, 0, sizeof(record));
+    record.magic = SHARE_PENDING_MAGIC;
+    record.dev = (uint64_t)file->st_dev;
+    record.ino = (uint64_t)file->st_ino;
+    memcpy(record.path, path, strlen(path) + 1);
+    /* Commit the fully written name and inode *before* marking pending.
+     * A crash prior to the last four-byte write cannot expose an
+     * incomplete path as an active disposition. */
+    struct share_pending_record staged = record;
+    staged.pending = 0;
+    ssize_t written;
+    do {
+        written = pwrite(gate, &staged, sizeof(staged), SHARE_PENDING_OFFSET);
+    } while (written < 0 && errno == EINTR);
+    if (written != (ssize_t)sizeof(staged) || fsync(gate) != 0) {
+        if (written >= 0)
+            errno = EIO;
+        return false;
+    }
+    const uint32_t pending = 1;
+    do {
+        written = pwrite(gate, &pending, sizeof(pending),
+                         SHARE_PENDING_OFFSET + offsetof(struct share_pending_record, pending));
+    } while (written < 0 && errno == EINTR);
+    if (written != (ssize_t)sizeof(pending)) {
+        if (written >= 0)
+            errno = EIO;
+        return false;
+    }
+    return fsync(gate) == 0;
+}
+
+static bool clear_share_pending(int gate)
+{
+    const uint32_t zero = 0;
+    ssize_t written;
+    do {
+        written = pwrite(gate, &zero, sizeof(zero),
+                         SHARE_PENDING_OFFSET + offsetof(struct share_pending_record, pending));
+    } while (written < 0 && errno == EINTR);
+    if (written != (ssize_t)sizeof(zero)) {
+        if (written >= 0)
+            errno = EIO;
+        return false;
+    }
+    return fsync(gate) == 0;
+}
+
+static bool share_registry_has_leases(int gate, bool *active)
+{
+    *active = false;
+    for (int i = 0; i < SHARE_LEASE_LIMIT; ++i) {
+        struct flock query = {.l_type = F_WRLCK, .l_whence = SEEK_SET,
+                              .l_start = SHARE_LEASE_OFFSET + i, .l_len = 1};
+        if (fcntl(gate, F_OFD_GETLK, &query) < 0)
+            return false;
+        if (query.l_type != F_UNLCK) {
+            *active = true;
+            return true;
+        }
+    }
+    return true;
+}
+
+/* Called under flock(LOCK_EX) after the final lease is closed. All
+ * guest pathname traversal stays within the authorized C: descriptor.
+ * The inode check prevents removal of a replacement name supplied by a
+ * concurrent Linux user or a renamed/moved guest file. */
+static bool finalize_share_pending_locked(int gate,
+                                          const struct share_pending_record *pending)
+{
+    if (!pending->pending)
+        return true;
+    if (strncmp(pending->path, "C:", 2) != 0) {
+        errno = EIO;
+        return false;
+    }
+    const char *relative = pending->path;
+    const int root = duplicate_root(&relative);
+    if (root < 0)
+        return false;
+    char leaf[NAME_MAX + 1];
+    int parent = open_parent(root, relative, leaf);
+    const int opened_error = errno;
+    close(root);
+    if (parent < 0) {
+        if (opened_error == ENOENT || opened_error == ENOTDIR)
+            return clear_share_pending(gate);
+        errno = opened_error;
+        return false;
+    }
+    struct stat actual;
+    if (fstatat(parent, leaf, &actual, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!S_ISREG(actual.st_mode) ||
+            (uint64_t)actual.st_dev != pending->dev ||
+            (uint64_t)actual.st_ino != pending->ino) {
+            /* The old path no longer identifies the file: do not
+             * delete a different inode even if the name was reused. */
+            close(parent);
+            return clear_share_pending(gate);
+        }
+        if (unlinkat(parent, leaf, 0) != 0) {
+            const int error = errno;
+            close(parent);
+            errno = error;
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        const int error = errno;
+        close(parent);
+        errno = error;
+        return false;
+    }
+    close(parent);
+    return clear_share_pending(gate);
+}
+
+static bool reap_share_pending_locked(int gate)
+{
+    struct share_pending_record pending;
+    if (!read_share_pending(gate, &pending))
+        return false;
+    if (!pending.pending)
+        return true;
+    bool active = true;
+    if (!share_registry_has_leases(gate, &active))
+        return false;
+    return active || finalize_share_pending_locked(gate, &pending);
+}
+
+/* Obtain a fresh open description of an existing lease registry. dup()
+ * would share its OFD lock with the handle; an independent description
+ * is essential to observe that lock when deciding whether to reap. */
+static int reopen_share_gate(int lease)
+{
+    if (lease < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    char proc_path[64];
+    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", lease);
+    return open(proc_path, O_RDWR | O_CLOEXEC);
+}
+
+static void release_share_lease(int *lease)
+{
+    if (*lease <= 0)
+        return;
+    int gate = reopen_share_gate(*lease);
+    if (gate < 0) {
+        close(*lease);
+        *lease = 0;
+        return;
+    }
+    int locked;
+    do {
+        locked = flock(gate, LOCK_EX);
+    } while (locked < 0 && errno == EINTR);
+    close(*lease);
+    *lease = 0;
+    if (locked == 0) {
+        /* A failed final unlink is retained as pending, never retried
+         * against an unchecked inode. The next cooperating access will
+         * attempt safe reaping again if no handles remain. */
+        (void)reap_share_pending_locked(gate);
+        (void)flock(gate, LOCK_UN);
+    }
+    close(gate);
+}
+
 static int acquire_share_registry_lease(const struct stat *info,
                                         uint32_t access, uint32_t share)
 {
