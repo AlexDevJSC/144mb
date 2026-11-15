@@ -1034,7 +1034,7 @@ enum {
     HANDLE_FLAG_INHERIT = 1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 2,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
     TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80,
-    FILE_FLAG_OVERLAPPED = 0x40000000
+    FILE_FLAG_OVERLAPPED = 0x40000000, FILE_FLAG_DELETE_ON_CLOSE = 0x04000000
 };
 
 enum file_owner { FREE_FILE, WIN_HANDLE, CRT_DESCRIPTOR, CRT_STREAM };
@@ -2022,9 +2022,17 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     if ((desired & ~(generic_read | generic_write | UINT32_C(0x00010000))) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
-        (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED)) != 0 ||
+        (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
+                   FILE_FLAG_DELETE_ON_CLOSE)) != 0 ||
         template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return UINTPTR_MAX;
+    }
+    if ((flags & FILE_FLAG_DELETE_ON_CLOSE) != 0 &&
+        (desired & UINT32_C(0x00010000)) == 0) {
+        /* Do not request a guest deletion disposition without explicit
+         * NT DELETE access on the same object. */
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return UINTPTR_MAX;
     }
     const bool truncate = disposition == CREATE_ALWAYS || disposition == TRUNCATE_EXISTING;
@@ -2101,10 +2109,21 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     pthread_mutex_unlock(&file_lock);
     close(parent);
     free(saved_path);
-    if (result == UINTPTR_MAX)
+    if (result == UINTPTR_MAX) {
         nt_SetLastError(error == EEXIST ? NT_ERROR_FILE_EXISTS : path_error(error, false));
-    else if (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
-        nt_SetLastError(created ? NT_ERROR_SUCCESS : NT_ERROR_ALREADY_EXISTS);
+    } else {
+        if ((flags & FILE_FLAG_DELETE_ON_CLOSE) != 0) {
+            const uint8_t deleting = 1;
+            if (!nt_SetFileInformationByHandle(result, 4, &deleting, 1)) {
+                const uint32_t failure = nt_GetLastError();
+                (void)nt_CloseHandle(result);
+                nt_SetLastError(failure);
+                return UINTPTR_MAX;
+            }
+        }
+        if (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
+            nt_SetLastError(created ? NT_ERROR_SUCCESS : NT_ERROR_ALREADY_EXISTS);
+    }
     return result;
 }
 
