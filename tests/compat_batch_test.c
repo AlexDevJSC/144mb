@@ -356,6 +356,10 @@ static void check_files(void)
     BOUND(KERNEL, LockFileEx);
     BOUND(KERNEL, UnlockFileEx);
     BOUND(KERNEL, GetOverlappedResult);
+    BOUND(KERNEL, GetOverlappedResultEx);
+    BOUND(KERNEL, CreateIoCompletionPort);
+    BOUND(KERNEL, GetQueuedCompletionStatus);
+    BOUND(KERNEL, PostQueuedCompletionStatus);
     BOUND(KERNEL, CancelIoEx);
     BOUND(KERNEL, GetTempPathA);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
@@ -722,6 +726,21 @@ static void check_files(void)
     const uintptr_t alternate = nt_CreateFileA("data/background.bin", UINT32_C(0x80000000),
         7u, NULL, 3u, 0x40000080u, 0);
     CHECK(alternate != UINTPTR_MAX);
+    /* While background's first read is blocked, a second HANDLE must be
+     * served by another Linux worker rather than waiting for the entire
+     * worker queue to drain. */
+    struct nt_overlapped concurrent = {.offset = 5};
+    char concurrent_buffer[6] = {0};
+    CHECK(!nt_ReadFile(alternate, concurrent_buffer, 5, NULL, &concurrent) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_GetOverlappedResultEx(alternate, &concurrent, &async_completed, 1000, 0) &&
+          async_completed == 5 && memcmp(concurrent_buffer, "async", 5) == 0);
+    CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 0, 0) &&
+          last_error() == NT_ERROR_IO_INCOMPLETE);
+    CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 0) &&
+          last_error() == NT_ERROR_WAIT_TIMEOUT);
+    CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 1) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
     CHECK(!nt_CancelIoEx(alternate, &victim) && last_error() == NT_ERROR_NOT_FOUND);
     CHECK(nt_CancelIoEx(background, &victim));
     CHECK(!nt_GetOverlappedResult(background, &victim, &async_completed, 1) &&
@@ -747,12 +766,90 @@ static void check_files(void)
     async_hold_enabled = false;
     pthread_cond_broadcast(&async_test_changed);
     pthread_mutex_unlock(&async_test_lock);
-    CHECK(nt_GetOverlappedResult(background, &running, &async_completed, 1) &&
+    CHECK(nt_GetOverlappedResultEx(background, &running, &async_completed, 1000, 0) &&
           async_completed == 0);
     CHECK(nt_WaitForSingleObject(running_event, 1000) == 0);
     CHECK(nt_CloseHandle(alternate) && nt_CloseHandle(running_event) &&
           nt_CloseHandle(cancelled_event));
 
+    /* Per-process IOCP supports manual packets and associates native file
+     * completion notifications by file handle/key. Windows event low bit
+     * suppresses posting but does not prevent GetOverlappedResult. */
+    const uintptr_t port = nt_CreateIoCompletionPort(UINTPTR_MAX, 0, 0, 0);
+    CHECK(port != 0);
+    struct nt_overlapped posted = {0};
+    CHECK(nt_PostQueuedCompletionStatus(port, 17, 0xBEEFu, &posted));
+    uint32_t packet_bytes = 0;
+    uintptr_t packet_key = 0;
+    struct nt_overlapped *packet_overlapped = NULL;
+    CHECK(nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                        &packet_overlapped, 0) &&
+          packet_bytes == 17 && packet_key == 0xBEEFu &&
+          packet_overlapped == &posted);
+    packet_overlapped = &posted;
+    CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                         &packet_overlapped, 0) &&
+          last_error() == NT_ERROR_WAIT_TIMEOUT && packet_overlapped == NULL);
+    CHECK(nt_CreateIoCompletionPort(background, port, 0xCAFEu, 0) == port);
+    CHECK(nt_CreateIoCompletionPort(background, port, 0xDEADu, 0) == 0 &&
+          last_error() == NT_ERROR_INVALID_PARAMETER);
+    char port_read_buffer[6] = {0};
+    struct nt_overlapped port_read = {.offset = 5};
+    CHECK(!nt_ReadFile(background, port_read_buffer, 5, NULL, &port_read) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                        &packet_overlapped, 1000) &&
+          packet_bytes == 5 && packet_key == 0xCAFEu &&
+          packet_overlapped == &port_read &&
+          memcmp(port_read_buffer, "async", 5) == 0);
+    struct nt_overlapped suppressed = {.offset = 5, .event = background_event | 1u};
+    char suppressed_buffer[6] = {0};
+    CHECK(!nt_ReadFile(background, suppressed_buffer, 5, NULL, &suppressed) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_GetOverlappedResult(background, &suppressed, &async_completed, 1) &&
+          async_completed == 5 && memcmp(suppressed_buffer, "async", 5) == 0);
+    packet_overlapped = &posted;
+    CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                         &packet_overlapped, 0) &&
+          last_error() == NT_ERROR_WAIT_TIMEOUT && packet_overlapped == NULL);
+    /* Queue cancellation must also deliver an unsuccessful completion
+     * packet with the original completion key and OVERLAPPED identity. */
+    pthread_mutex_lock(&async_test_lock);
+    async_hold_enabled = true;
+    async_hold_entered = false;
+    async_hold_release = false;
+    pthread_mutex_unlock(&async_test_lock);
+    struct nt_overlapped blocked_iocp = {.offset = 4096};
+    struct nt_overlapped queued_iocp = {.offset = 0};
+    char blocked_byte = 0, cancelled_byte = 0;
+    CHECK(!nt_ReadFile(background, &blocked_byte, 1, NULL, &blocked_iocp) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    pthread_mutex_lock(&async_test_lock);
+    while (!async_hold_entered)
+        pthread_cond_wait(&async_test_changed, &async_test_lock);
+    pthread_mutex_unlock(&async_test_lock);
+    CHECK(!nt_ReadFile(background, &cancelled_byte, 1, NULL, &queued_iocp) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_CancelIoEx(background, &queued_iocp));
+    packet_overlapped = NULL;
+    CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                         &packet_overlapped, 1000) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED &&
+          packet_bytes == 0 && packet_key == 0xCAFEu &&
+          packet_overlapped == &queued_iocp);
+    pthread_mutex_lock(&async_test_lock);
+    async_hold_release = true;
+    async_hold_enabled = false;
+    pthread_cond_broadcast(&async_test_changed);
+    pthread_mutex_unlock(&async_test_lock);
+    CHECK(nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                        &packet_overlapped, 1000) &&
+          packet_bytes == 0 && packet_key == 0xCAFEu &&
+          packet_overlapped == &blocked_iocp);
+
+    CHECK(nt_CloseHandle(port));
+    CHECK(!nt_PostQueuedCompletionStatus(port, 1, 2, NULL) &&
+          last_error() == NT_ERROR_INVALID_HANDLE);
     CHECK(nt_CloseHandle(background) && nt_CloseHandle(background_event) &&
           nt_DeleteFileA("data/background.bin"));
 
@@ -849,6 +946,47 @@ static void check_files(void)
     CHECK(folded != NULL && nt_fclose(folded) == 0);
     CHECK(nt_RemoveDirectoryA("data") == 0 && last_error() == NT_ERROR_DIR_NOT_EMPTY);
     CHECK(nt_DeleteFileA("DATA/TARGET.TXT") != 0 && nt_RemoveDirectoryA("DATA") != 0);
+
+    /* Windows remembers a separate current directory per DOS drive.
+     * A drive-relative D:foo must use D:'s remembered directory even if
+     * the active process directory has moved back to C:. */
+    char second_drive[] = "/tmp/nt-mines-second-drive.XXXXXX";
+    CHECK(mkdtemp(second_drive) != NULL);
+    CHECK(nt_runtime_set_drive_root('D', second_drive));
+    CHECK(nt_CreateDirectoryA("D:\\games", NULL));
+    CHECK(nt_SetCurrentDirectoryA("D:\\games"));
+    CHECK(nt_GetCurrentDirectoryA(sizeof(win_cwd), win_cwd) ==
+          strlen("D:\\games") && strcmp(win_cwd, "D:\\games") == 0);
+    CHECK(nt_GetFullPathNameA("D:save.bin", sizeof(absolute_path),
+                              absolute_path, NULL) ==
+          strlen("D:\\games\\save.bin") &&
+          strcmp(absolute_path, "D:\\games\\save.bin") == 0);
+    const uintptr_t drive_handle = nt_CreateFileA("D:save.bin",
+        UINT32_C(0x40000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(drive_handle != UINTPTR_MAX && nt_CloseHandle(drive_handle));
+    /* A rooted path without a drive prefix uses the active drive. */
+    CHECK(nt_GetFullPathNameA("\\root.dat", sizeof(absolute_path),
+                              absolute_path, NULL) ==
+          strlen("D:\\root.dat") && strcmp(absolute_path, "D:\\root.dat") == 0);
+    CHECK(nt_SetCurrentDirectoryA("C:\\"));
+    CHECK(nt_GetFullPathNameA("D:save.bin", sizeof(absolute_path),
+                              absolute_path, NULL) ==
+          strlen("D:\\games\\save.bin") &&
+          strcmp(absolute_path, "D:\\games\\save.bin") == 0);
+    CHECK(nt_SetCurrentDirectoryA("D:"));
+    CHECK(nt_GetCurrentDirectoryA(sizeof(win_cwd), win_cwd) ==
+          strlen("D:\\games") && strcmp(win_cwd, "D:\\games") == 0);
+    CHECK(nt_SetCurrentDirectoryA("C:\\"));
+    CHECK(!nt_RemoveDirectoryA("D:\\games") &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_GetFullPathNameA("D:..\\..\\escape", sizeof(absolute_path),
+                              absolute_path, NULL) == 0);
+    CHECK(nt_SetCurrentDirectoryA("D:\\"));
+    CHECK(nt_SetCurrentDirectoryA("C:\\"));
+    CHECK(nt_DeleteFileA("D:\\games\\save.bin"));
+    CHECK(nt_RemoveDirectoryA("D:\\games"));
+    CHECK(nt_runtime_set_drive_root('D', NULL));
+    CHECK(rmdir(second_drive) == 0);
     CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS scoped files, text and binary I/O, and denied paths");
 }
