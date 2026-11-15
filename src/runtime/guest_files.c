@@ -3300,15 +3300,11 @@ void *NT_MS_ABI nt_fopen(const char *input, const char *mode)
         if (stream == NULL) {
             error = errno;
             close(fd);
-            if (opened->share_lease_fd > 0)
-                close(opened->share_lease_fd);
-            opened->share_lease_fd = 0;
+            release_share_lease(&opened->share_lease_fd);
         } else if ((parsed.flags & O_TRUNC) != 0 && !created && ftruncate(fd, 0) != 0) {
             error = errno;
             fclose(stream->file);
-            if (opened->share_lease_fd > 0)
-                close(opened->share_lease_fd);
-            opened->share_lease_fd = 0;
+            release_share_lease(&opened->share_lease_fd);
             free(stream);
             stream = NULL;
         } else {
@@ -3417,9 +3413,7 @@ int NT_MS_ABI nt_fclose(void *handle)
     }
     if (fclose(stream->file) != 0)
         result = EOF;
-    if (stream->opened->share_lease_fd > 0)
-        close(stream->opened->share_lease_fd);
-    stream->opened->share_lease_fd = 0;
+    release_share_lease(&stream->opened->share_lease_fd);
     free(stream->opened->path);
     stream->opened->path = NULL;
     stream->opened->owner = FREE_FILE;
