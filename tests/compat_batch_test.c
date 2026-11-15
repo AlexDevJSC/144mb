@@ -708,6 +708,38 @@ static void check_files(void)
     CHECK(nt_CloseHandle(disposition_reader));
     CHECK(nt_GetFileAttributesA("data/disposition.bin") == UINT32_MAX);
 
+    /* The pending namespace also blocks renames through the guest.
+     * If an external Linux process replaces the name anyway, the
+     * final close must NOT unlink the replacement inode. */
+    void *pending_stream = nt_fopen("data/pending-swap.bin", "wb");
+    CHECK(pending_stream != NULL &&
+          nt_fwrite("OLD", 1, 3, pending_stream) == 3 &&
+          nt_fclose(pending_stream) == 0);
+    const uintptr_t pending_handle = nt_CreateFileA("data/pending-swap.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(pending_handle != UINTPTR_MAX);
+    CHECK(nt_DeleteFileA("data/pending-swap.bin"));
+    CHECK(!nt_MoveFileExA("data/pending-swap.bin", "data/moved-pending.bin", 0) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    char pending_native[512], pending_backup[512];
+    CHECK(snprintf(pending_native, sizeof(pending_native),
+                   "%s/data/pending-swap.bin", root) > 0 &&
+          snprintf(pending_backup, sizeof(pending_backup),
+                   "%s/data/pending-swap-original.bin", root) > 0);
+    CHECK(rename(pending_native, pending_backup) == 0);
+    FILE *replacement = fopen(pending_native, "wb");
+    CHECK(replacement != NULL && fwrite("SAFE", 1, 4, replacement) == 4 &&
+          fclose(replacement) == 0);
+    CHECK(nt_CloseHandle(pending_handle));
+    pending_stream = nt_fopen("data/pending-swap.bin", "rb");
+    char replacement_bytes[5] = {0};
+    CHECK(pending_stream != NULL &&
+          nt_fread(replacement_bytes, 1, 4, pending_stream) == 4 &&
+          memcmp(replacement_bytes, "SAFE", 4) == 0 &&
+          nt_fclose(pending_stream) == 0);
+    CHECK(nt_DeleteFileA("data/pending-swap.bin") &&
+          nt_DeleteFileA("data/pending-swap-original.bin"));
+
     /* Linux OFD advisory locks are backed by the actual inode and survive
      * temporary fd duplicates. Distinct Windows opens may conflict. */
     const uintptr_t first_lock = nt_CreateFileA("data/locked.bin", UINT32_C(0xc0000000),
