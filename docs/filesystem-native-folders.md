@@ -478,9 +478,44 @@ liberación tras el cierre y una prueba entre procesos reales.
 permisos de lectura/escritura sobre él; los programas Linux externos
 que ignoran este protocolo siguen siendo libres de actuar sobre
 sus propios archivos. No es un servicio del kernel, ni un gestor
-de ACL NTFS. No implementa todavía el estado NT `delete-pending`
-previo a `unlinkat`, el borrado diferido por handle ni la
-atomicidad plena con programas Linux externos. No impide una
+de ACL NTFS. **Delete-pending cooperativo en C:.** Se añade un registro de estado
+por inodo que se serializa con el mismo bloqueo `flock` y los mismos
+leases OFD de `FILE_SHARE_*`. Cuando `DeleteFileA/W` encuentra al
+menos un HANDLE activo que permite compartir borrado, marca el nombre
+como pendiente **sin ejecutar todavía `unlinkat`**; las nuevas
+aperturas `CreateFileA/W` de ese inodo devuelven acceso denegado.
+El último cierre cooperante libera su lease y, si no queda ninguno,
+elimina el nombre original únicamente si todavía resuelve al **mismo
+dispositivo e inodo**. Los handles duplicados e hijos mantienen su
+lease hasta su cierre real.
+
+`SetFileInformationByHandle(FileDispositionInfo=4)` admite el
+`BOOLEAN DeleteFile` (un byte) para un HANDLE abierto con acceso
+`DELETE` (0x10000). Es posible marcar y desmarcar la disposición desde
+el mismo HANDLE antes del cierre. La ruta nativa
+`NtSetInformationFile(FileDispositionInformation=13)` consulta el
+mismo contrato, utilizando `IO_STATUS_BLOCK` y estados NTSTATUS.
+`CreateFileA/W` admite además `FILE_FLAG_DELETE_ON_CLOSE` (0x04000000)
+si el acceso solicitado contiene explícitamente `DELETE`: crea
+la disposición pendiente al abrir el archivo y la finaliza al último cierre.
+`GetFileInformationByHandleEx` en `FileStandardInfo=1` y
+`NtQueryInformationFile(FileStandardInformation=5)` reflejan el bit
+`DeletePending` aunque el archivo siga enlazado en el host. La marca se guarda en el registro privado
+`C:/:ntnative-file-leases/`; una caída del último proceso puede dejar
+una marca pendiente, y un acceso posterior del puente intenta
+finalizarla tras verificar que no queden leases.
+
+**Límites conocidos:** la política diferida de esta vuelta se aplica
+solamente al perfil `C:` compartido entre procesos NT: las letras
+D:–Z: y los alias UNC pueden identificar distintas carpetas Linux en
+procesos diferentes y no se pueden reconstruir de forma segura desde
+un alias ajeno. En ellos sigue vigente el borrado inmediato previo.
+Tampoco existe atomicidad con editores Linux que no utilizan este
+protocolo, ni cobertura completa para todos los tipos de objeto,
+enlaces múltiples o modificaciones externas de las concesiones.
+Una carrera con una sustitución externa nunca permite borrar un
+inodo nuevo: la operación falla conservadoramente o descarta la
+marca tras verificar la identidad. No son ACL NTFS. No impide una
 modificación host deliberada del registro por el mismo usuario.
 Reparse points, SMB real, 8.3 y otras semánticas avanzadas de IOCP permanecen pendientes.
 
@@ -516,13 +551,15 @@ concedida (o sus ancestros) se rechaza con un error de compartición,
 igual que su cambio de nombre, para no dejar una ruta DOS inválida;
 existe una regresión que comprueba el directorio de trabajo vacío.
 La comprobación del nombre y el borrado siguen sin ser atómicos frente
-a modificaciones concurrentes de otro proceso Linux. Esto aún no implementa
-por completo la semántica NT de `delete-pending` entre procesos o sobre
-archivos reabiertos por nombre.
+a modificaciones concurrentes de otro proceso Linux. La marca `delete-pending` ya impide reaperturas en el perfil C:
+entre procesos NT cooperantes y difiere la eliminación hasta el último
+cierre. Los demás volúmenes, los programas externos Linux y las
+transiciones NT más avanzadas siguen limitados por lo documentado
+en el apartado del registro de compartición.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
 points, conexiones UNC/SMB de red reales, coordinación de `FILE_SHARE_*`
-fuera de procesos NT cooperantes y el namespace `delete-pending` de NT,
+fuera de procesos NT cooperantes y `delete-pending` de NT fuera del perfil C:,
 E/S NT/APC/IOCP completa, cancelación de operaciones ya iniciadas, ACL
 NTFS y otras funciones avanzadas. La persistencia de las concesiones de
 unidades y recursos UNC y los directorios actuales por unidad sí están

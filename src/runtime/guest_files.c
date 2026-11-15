@@ -1034,7 +1034,7 @@ enum {
     HANDLE_FLAG_INHERIT = 1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 2,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
     TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80,
-    FILE_FLAG_OVERLAPPED = 0x40000000
+    FILE_FLAG_OVERLAPPED = 0x40000000, FILE_FLAG_DELETE_ON_CLOSE = 0x04000000
 };
 
 enum file_owner { FREE_FILE, WIN_HANDLE, CRT_DESCRIPTOR, CRT_STREAM };
@@ -1050,6 +1050,7 @@ struct guest_file {
     dev_t device;
     ino_t inode;
     bool text;
+    bool delete_disposition;
     bool overlapped_io;
     uintptr_t completion_port, completion_key;
     char *path;
@@ -1138,6 +1139,233 @@ static int open_share_registry(const struct stat *info)
     return fd;
 }
 
+/* Deletion disposition for the private C: namespace. The record is
+ * durable per inode and protected by the exact same per-inode registry
+ * flock as FILE_SHARE_* leases. A pending name remains in Linux until
+ * the final cooperating HANDLE drops its OFD lease; reopens through
+ * CreateFile are rejected in the meantime. No privileged broker, no
+ * direct chmod and no host-wide pathname authority.
+ *
+ * Other DOS roots need a cross-process mount identity protocol first:
+ * treating a different process' D: alias as this process' D: would risk
+ * unlinking an unrelated Linux file, so they deliberately retain the
+ * older eager-delete contract. */
+/* The runtime's canonical C: spelling omits a drive prefix entirely;
+ * D:-Z: and UNC paths retain their reserved root marker. */
+static bool private_c_path(const char *path)
+{
+    return path != NULL && *path != '\0' &&
+           strncmp(path, "@UNC:/", 6) != 0 && root_boundary(path) == 0;
+}
+
+enum { SHARE_PENDING_OFFSET = 8192, SHARE_PENDING_MAGIC = 0x44504e54u };
+struct share_pending_record {
+    uint32_t magic, pending;
+    uint64_t dev, ino;
+    char path[PATH_MAX];
+};
+
+static bool read_share_pending(int gate, struct share_pending_record *record)
+{
+    memset(record, 0, sizeof(*record));
+    ssize_t received;
+    do {
+        received = pread(gate, record, sizeof(*record), SHARE_PENDING_OFFSET);
+    } while (received < 0 && errno == EINTR);
+    if (received == 0)
+        return true;
+    if (received != (ssize_t)sizeof(*record) ||
+        record->magic != SHARE_PENDING_MAGIC || record->pending > 1u ||
+        memchr(record->path, '\0', sizeof(record->path)) == NULL) {
+        errno = EIO; /* Fail closed on partially-written/private state. */
+        return false;
+    }
+    return true;
+}
+
+static bool set_share_pending(int gate, const struct stat *file, const char *path)
+{
+    struct share_pending_record record;
+    if (!read_share_pending(gate, &record))
+        return false;
+    if (record.pending) {
+        errno = EACCES;
+        return false;
+    }
+    if (!private_c_path(path) || strlen(path) >= sizeof(record.path)) {
+        errno = EINVAL;
+        return false;
+    }
+    memset(&record, 0, sizeof(record));
+    record.magic = SHARE_PENDING_MAGIC;
+    record.dev = (uint64_t)file->st_dev;
+    record.ino = (uint64_t)file->st_ino;
+    memcpy(record.path, path, strlen(path) + 1);
+    /* Commit the fully written name and inode *before* marking pending.
+     * A crash prior to the last four-byte write cannot expose an
+     * incomplete path as an active disposition. */
+    struct share_pending_record staged = record;
+    staged.pending = 0;
+    ssize_t written;
+    do {
+        written = pwrite(gate, &staged, sizeof(staged), SHARE_PENDING_OFFSET);
+    } while (written < 0 && errno == EINTR);
+    if (written != (ssize_t)sizeof(staged) || fsync(gate) != 0) {
+        if (written >= 0)
+            errno = EIO;
+        return false;
+    }
+    const uint32_t pending = 1;
+    do {
+        written = pwrite(gate, &pending, sizeof(pending),
+                         SHARE_PENDING_OFFSET + offsetof(struct share_pending_record, pending));
+    } while (written < 0 && errno == EINTR);
+    if (written != (ssize_t)sizeof(pending)) {
+        if (written >= 0)
+            errno = EIO;
+        return false;
+    }
+    return fsync(gate) == 0;
+}
+
+static bool clear_share_pending(int gate)
+{
+    const uint32_t zero = 0;
+    ssize_t written;
+    do {
+        written = pwrite(gate, &zero, sizeof(zero),
+                         SHARE_PENDING_OFFSET + offsetof(struct share_pending_record, pending));
+    } while (written < 0 && errno == EINTR);
+    if (written != (ssize_t)sizeof(zero)) {
+        if (written >= 0)
+            errno = EIO;
+        return false;
+    }
+    return fsync(gate) == 0;
+}
+
+static bool share_registry_has_leases(int gate, bool *active)
+{
+    *active = false;
+    for (int i = 0; i < SHARE_LEASE_LIMIT; ++i) {
+        struct flock query = {.l_type = F_WRLCK, .l_whence = SEEK_SET,
+                              .l_start = SHARE_LEASE_OFFSET + i, .l_len = 1};
+        if (fcntl(gate, F_OFD_GETLK, &query) < 0)
+            return false;
+        if (query.l_type != F_UNLCK) {
+            *active = true;
+            return true;
+        }
+    }
+    return true;
+}
+
+/* Called under flock(LOCK_EX) after the final lease is closed. All
+ * guest pathname traversal stays within the authorized C: descriptor.
+ * The inode check prevents removal of a replacement name supplied by a
+ * concurrent Linux user or a renamed/moved guest file. */
+static bool finalize_share_pending_locked(int gate,
+                                          const struct share_pending_record *pending)
+{
+    if (!pending->pending)
+        return true;
+    if (!private_c_path(pending->path)) {
+        errno = EIO;
+        return false;
+    }
+    const char *relative = pending->path;
+    const int root = duplicate_root(&relative);
+    if (root < 0)
+        return false;
+    char leaf[NAME_MAX + 1];
+    int parent = open_parent(root, relative, leaf);
+    const int opened_error = errno;
+    close(root);
+    if (parent < 0) {
+        if (opened_error == ENOENT || opened_error == ENOTDIR)
+            return clear_share_pending(gate);
+        errno = opened_error;
+        return false;
+    }
+    struct stat actual;
+    if (fstatat(parent, leaf, &actual, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!S_ISREG(actual.st_mode) ||
+            (uint64_t)actual.st_dev != pending->dev ||
+            (uint64_t)actual.st_ino != pending->ino) {
+            /* The old path no longer identifies the file: do not
+             * delete a different inode even if the name was reused. */
+            close(parent);
+            return clear_share_pending(gate);
+        }
+        if (unlinkat(parent, leaf, 0) != 0) {
+            const int error = errno;
+            close(parent);
+            errno = error;
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        const int error = errno;
+        close(parent);
+        errno = error;
+        return false;
+    }
+    close(parent);
+    return clear_share_pending(gate);
+}
+
+static bool reap_share_pending_locked(int gate)
+{
+    struct share_pending_record pending;
+    if (!read_share_pending(gate, &pending))
+        return false;
+    if (!pending.pending)
+        return true;
+    bool active = true;
+    if (!share_registry_has_leases(gate, &active))
+        return false;
+    return active || finalize_share_pending_locked(gate, &pending);
+}
+
+/* Obtain a fresh open description of an existing lease registry. dup()
+ * would share its OFD lock with the handle; an independent description
+ * is essential to observe that lock when deciding whether to reap. */
+static int reopen_share_gate(int lease)
+{
+    if (lease < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    char proc_path[64];
+    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", lease);
+    return open(proc_path, O_RDWR | O_CLOEXEC);
+}
+
+static void release_share_lease(int *lease)
+{
+    if (*lease <= 0)
+        return;
+    int gate = reopen_share_gate(*lease);
+    if (gate < 0) {
+        close(*lease);
+        *lease = 0;
+        return;
+    }
+    int locked;
+    do {
+        locked = flock(gate, LOCK_EX);
+    } while (locked < 0 && errno == EINTR);
+    close(*lease);
+    *lease = 0;
+    if (locked == 0) {
+        /* A failed final unlink is retained as pending, never retried
+         * against an unchecked inode. The next cooperating access will
+         * attempt safe reaping again if no handles remain. */
+        (void)reap_share_pending_locked(gate);
+        (void)flock(gate, LOCK_UN);
+    }
+    close(gate);
+}
+
 static int acquire_share_registry_lease(const struct stat *info,
                                         uint32_t access, uint32_t share)
 {
@@ -1150,6 +1378,18 @@ static int acquire_share_registry_lease(const struct stat *info,
             continue;
         error = errno;
         break;
+    }
+    struct share_pending_record pending;
+    if (error == 0 && !read_share_pending(gate, &pending))
+        error = errno;
+    if (error == 0 && pending.pending) {
+        /* A crashed final holder may leave a durable disposition.
+         * Reap it only after proving that every OFD lease is gone.
+         * The current open attempt never receives a stale inode. */
+        if (!reap_share_pending_locked(gate))
+            error = errno;
+        else
+            error = EACCES;
     }
     int free_slot = -1;
     for (int i = 0; error == 0 && i < SHARE_LEASE_LIMIT; ++i) {
@@ -1680,7 +1920,29 @@ static int open_shared(struct guest_file *slot, int parent, const char *path,
         if (share_lease < 0)
             error = errno;
     }
+    /* The host may unlink/replace an entry between open() and the
+     * registry admission. Never hand an unlinked or replaced inode
+     * back to the guest as a successful new CreateFile. */
+    struct stat current;
+    char verified_leaf[NAME_MAX + 1];
+    if (error == 0) {
+        /* open_shared also serves CRT fopen of nested paths, so verify
+         * the complete case-insensitive directory walk, not just a
+         * single root-level leaf. */
+        const int verified_parent = open_parent(parent, path, verified_leaf);
+        if (verified_parent < 0) {
+            error = errno;
+        } else {
+            if (fstatat(verified_parent, verified_leaf, &current, AT_SYMLINK_NOFOLLOW) != 0)
+                error = errno;
+            else if (current.st_dev != info.st_dev || current.st_ino != info.st_ino)
+                error = EBUSY;
+            close(verified_parent);
+        }
+    }
     if (error != 0) {
+        if (share_lease >= 0)
+            release_share_lease(&share_lease);
         close(fd);
         errno = error;
         return -1;
@@ -1757,12 +2019,20 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return UINTPTR_MAX;
     }
-    if ((desired & ~(generic_read | generic_write)) != 0 ||
+    if ((desired & ~(generic_read | generic_write | UINT32_C(0x00010000))) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
-        (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED)) != 0 ||
+        (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
+                   FILE_FLAG_DELETE_ON_CLOSE)) != 0 ||
         template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return UINTPTR_MAX;
+    }
+    if ((flags & FILE_FLAG_DELETE_ON_CLOSE) != 0 &&
+        (desired & UINT32_C(0x00010000)) == 0) {
+        /* Do not request a guest deletion disposition without explicit
+         * NT DELETE access on the same object. */
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return UINTPTR_MAX;
     }
     const bool truncate = disposition == CREATE_ALWAYS || disposition == TRUNCATE_EXISTING;
@@ -1808,7 +2078,9 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         options |= O_CREAT;
     if (disposition == CREATE_NEW)
         options |= O_EXCL;
-    const unsigned int access = (read_access ? FILE_READ : 0) | (write_access ? FILE_WRITE : 0);
+    const unsigned int access = (read_access ? FILE_READ : 0) |
+                                (write_access ? FILE_WRITE : 0) |
+                                ((desired & UINT32_C(0x00010000)) ? FILE_DELETE : 0);
     pthread_mutex_lock(&file_lock);
     struct guest_file *slot = new_file();
     bool created = false;
@@ -1821,9 +2093,7 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
             if (truncate && !created && ftruncate(fd, 0) != 0) {
                 error = errno;
                 close(fd);
-                if (slot->share_lease_fd > 0)
-                    close(slot->share_lease_fd);
-                slot->share_lease_fd = 0;
+                release_share_lease(&slot->share_lease_fd);
             } else {
                 result = next_handle;
                 next_handle += 16;
@@ -1839,10 +2109,21 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     pthread_mutex_unlock(&file_lock);
     close(parent);
     free(saved_path);
-    if (result == UINTPTR_MAX)
+    if (result == UINTPTR_MAX) {
         nt_SetLastError(error == EEXIST ? NT_ERROR_FILE_EXISTS : path_error(error, false));
-    else if (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
-        nt_SetLastError(created ? NT_ERROR_SUCCESS : NT_ERROR_ALREADY_EXISTS);
+    } else {
+        if ((flags & FILE_FLAG_DELETE_ON_CLOSE) != 0) {
+            const uint8_t deleting = 1;
+            if (!nt_SetFileInformationByHandle(result, 4, &deleting, 1)) {
+                const uint32_t failure = nt_GetLastError();
+                (void)nt_CloseHandle(result);
+                nt_SetLastError(failure);
+                return UINTPTR_MAX;
+            }
+        }
+        if (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
+            nt_SetLastError(created ? NT_ERROR_SUCCESS : NT_ERROR_ALREADY_EXISTS);
+    }
     return result;
 }
 
@@ -1857,9 +2138,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
 static int close_file(struct guest_file *file)
 {
     const int result = close(file->fd);
-    if (file->share_lease_fd > 0)
-        close(file->share_lease_fd);
-    file->share_lease_fd = 0;
+    release_share_lease(&file->share_lease_fd);
     free(file->path);
     file->path = NULL;
     file->owner = FREE_FILE;
@@ -2471,6 +2750,92 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
     return !error;
 }
 
+/* DeleteFile is a namespace operation, not the close of a HANDLE.
+ * The ordinary C: profile uses the cooperative per-inode OFD registry
+ * to defer unlink until its final holder is released. The exclusive
+ * target flock, already held by change_path(), blocks new participating
+ * opens while this marker becomes visible. We refuse any mismatched
+ * path/inode pair instead of touching a replacement host file. */
+/* Conservative check before rename: a pending source or replacement
+ * destination must not be moved out of the guarded name. This uses the
+ * same private registry but is not a transaction with external Linux
+ * writers, which remain outside the NT guest's namespace protocol. */
+static int check_inode_not_pending(const struct stat *info, const char *path)
+{
+    if (!private_c_path(path) || !S_ISREG(info->st_mode))
+        return 0;
+    const int gate = open_share_registry(info);
+    if (gate < 0)
+        return -1;
+    int locked;
+    do {
+        locked = flock(gate, LOCK_SH);
+    } while (locked < 0 && errno == EINTR);
+    int error = locked < 0 ? errno : 0;
+    if (!error) {
+        struct share_pending_record marker;
+        if (!read_share_pending(gate, &marker))
+            error = errno;
+        else if (marker.pending)
+            error = EACCES;
+        (void)flock(gate, LOCK_UN);
+    }
+    close(gate);
+    if (error) {
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
+static int remove_file_or_defer(int parent, const char *leaf, const char *dos_path,
+                                const struct stat *target)
+{
+    if (!private_c_path(dos_path) || !S_ISREG(target->st_mode))
+        return unlinkat(parent, leaf, 0);
+    int gate = open_share_registry(target);
+    if (gate < 0)
+        return -1;
+    int status;
+    do {
+        status = flock(gate, LOCK_EX);
+    } while (status < 0 && errno == EINTR);
+    int error = status != 0 ? errno : 0;
+    if (error == 0) {
+        struct share_pending_record pending;
+        if (!read_share_pending(gate, &pending))
+            error = errno;
+        else if (pending.pending)
+            error = EACCES;
+    }
+    bool active = false;
+    if (error == 0 && !share_registry_has_leases(gate, &active))
+        error = errno;
+    if (error == 0) {
+        struct stat actual;
+        if (fstatat(parent, leaf, &actual, AT_SYMLINK_NOFOLLOW) != 0)
+            error = errno;
+        else if (actual.st_dev != target->st_dev || actual.st_ino != target->st_ino)
+            error = EBUSY;
+    }
+    if (error == 0) {
+        if (active) {
+            if (!set_share_pending(gate, target, dos_path))
+                error = errno;
+        } else if (unlinkat(parent, leaf, 0) != 0) {
+            error = errno;
+        }
+    }
+    if (status == 0)
+        (void)flock(gate, LOCK_UN);
+    close(gate);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
 /* Directory removal must obey the same DOS-name stability policy as rename.
  * A current directory or a granted known-folder root must not disappear
  * while its guest path is still in use. */
@@ -2531,7 +2896,9 @@ static int32_t change_path(const char *input, enum path_operation operation)
                 status = -1;
         }
         if (status == 0)
-            status = unlinkat(parent, leaf, operation == REMOVE_DIRECTORY ? AT_REMOVEDIR : 0);
+            status = operation == REMOVE_FILE ?
+                remove_file_or_defer(parent, leaf, path, &info) :
+                unlinkat(parent, leaf, AT_REMOVEDIR);
     }
     const int error = errno;
     if (deletion_guard >= 0)
@@ -2712,6 +3079,8 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         } else if (file_blocks_delete(&info)) {
             errno = EBUSY;
             status = -1;
+        } else if (check_inode_not_pending(&info, source) != 0) {
+            status = -1;
         } else {
             struct stat target;
             const int exists = fstatat(destination_parent, destination_leaf, &target,
@@ -2721,6 +3090,9 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
                 status = -1;
             } else if (exists == 0 && (flags & 1u) != 0 && file_blocks_delete(&target)) {
                 errno = EBUSY;
+                status = -1;
+            } else if (exists == 0 && (flags & 1u) != 0 &&
+                       check_inode_not_pending(&target, destination) != 0) {
                 status = -1;
             } else if (exists < 0 && errno != ENOENT) {
                 status = -1;
@@ -3004,15 +3376,11 @@ void *NT_MS_ABI nt_fopen(const char *input, const char *mode)
         if (stream == NULL) {
             error = errno;
             close(fd);
-            if (opened->share_lease_fd > 0)
-                close(opened->share_lease_fd);
-            opened->share_lease_fd = 0;
+            release_share_lease(&opened->share_lease_fd);
         } else if ((parsed.flags & O_TRUNC) != 0 && !created && ftruncate(fd, 0) != 0) {
             error = errno;
             fclose(stream->file);
-            if (opened->share_lease_fd > 0)
-                close(opened->share_lease_fd);
-            opened->share_lease_fd = 0;
+            release_share_lease(&opened->share_lease_fd);
             free(stream);
             stream = NULL;
         } else {
@@ -3121,9 +3489,7 @@ int NT_MS_ABI nt_fclose(void *handle)
     }
     if (fclose(stream->file) != 0)
         result = EOF;
-    if (stream->opened->share_lease_fd > 0)
-        close(stream->opened->share_lease_fd);
-    stream->opened->share_lease_fd = 0;
+    release_share_lease(&stream->opened->share_lease_fd);
     free(stream->opened->path);
     stream->opened->path = NULL;
     stream->opened->owner = FREE_FILE;
@@ -4417,8 +4783,8 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
  * A plain offset uses read/write and therefore updates the shared pointer;
  * an explicit non-negative offset uses pread/pwrite. The Windows async
  * event/APC contract is not implemented and must fail explicitly. */
-enum { FILE_STANDARD_INFORMATION_CLASS = 5, FILE_POSITION_INFORMATION_CLASS = 14,
-       FILE_END_OF_FILE_INFORMATION_CLASS = 20 };
+enum { FILE_STANDARD_INFORMATION_CLASS = 5, FILE_DISPOSITION_INFORMATION_CLASS = 13,
+       FILE_POSITION_INFORMATION_CLASS = 14, FILE_END_OF_FILE_INFORMATION_CLASS = 20 };
 
 struct nt_file_standard_information {
     int64_t allocation_size, end_of_file;
@@ -4539,6 +4905,47 @@ nt_status NT_MS_ABI nt_NtWriteFile(uintptr_t handle, uintptr_t event, void *apc,
                                length, offset, key, true);
 }
 
+/* NT and Win32 information classes must observe the same pending state.
+ * st_nlink remains nonzero until the final cooperating handle closes; a
+ * Linux stat by itself can no longer stand in for NT DeletePending. */
+static int file_delete_pending(uintptr_t handle, const struct stat *info)
+{
+    if (info->st_nlink == 0)
+        return 1;
+    if (!S_ISREG(info->st_mode))
+        return 0;
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    const int gate = file && file->share_lease_fd > 0 ?
+                     reopen_share_gate(file->share_lease_fd) : -1;
+    const bool has_registry = file && file->share_lease_fd > 0;
+    pthread_mutex_unlock(&file_lock);
+    if (gate < 0)
+        return has_registry ? -1 : 0;
+    int locked;
+    do {
+        locked = flock(gate, LOCK_SH);
+    } while (locked < 0 && errno == EINTR);
+    int result = 0;
+    if (locked < 0) {
+        result = -1;
+    } else {
+        struct share_pending_record marker;
+        if (!read_share_pending(gate, &marker))
+            result = -1;
+        else if (marker.pending && marker.dev == (uint64_t)info->st_dev &&
+                 marker.ino == (uint64_t)info->st_ino)
+            result = 1;
+        const int error = errno;
+        (void)flock(gate, LOCK_UN);
+        errno = error;
+    }
+    const int error = errno;
+    close(gate);
+    errno = error;
+    return result;
+}
+
 nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_status_block *io,
                                                 void *buffer, uint32_t length, uint32_t information_class)
 {
@@ -4565,14 +4972,19 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
         if (fstat(fd, &file) != 0) {
             error = errno;
         } else {
-            const struct nt_file_standard_information info = {
-                .allocation_size = (int64_t)file.st_blocks * 512,
-                .end_of_file = file.st_size,
-                .number_of_links = file.st_nlink > UINT32_MAX ? UINT32_MAX : (uint32_t)file.st_nlink,
-                .delete_pending = file.st_nlink == 0,
-                .directory = S_ISDIR(file.st_mode) != 0
-            };
-            memcpy(buffer, &info, sizeof(info));
+            const int pending = file_delete_pending(handle, &file);
+            if (pending < 0) {
+                error = errno;
+            } else {
+                const struct nt_file_standard_information info = {
+                    .allocation_size = (int64_t)file.st_blocks * 512,
+                    .end_of_file = file.st_size,
+                    .number_of_links = file.st_nlink > UINT32_MAX ? UINT32_MAX : (uint32_t)file.st_nlink,
+                    .delete_pending = pending != 0,
+                    .directory = S_ISDIR(file.st_mode) != 0
+                };
+                memcpy(buffer, &info, sizeof(info));
+            }
         }
     } else {
         const off_t position = lseek(fd, 0, SEEK_CUR);
@@ -4589,12 +5001,29 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
     return nt_file_complete(io, NT_STATUS_SUCCESS, needed);
 }
 
+static int32_t set_file_disposition(uintptr_t handle, bool deleting);
+
 nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_status_block *io,
                                               const void *buffer, uint32_t length,
                                               uint32_t information_class)
 {
     if (io == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
+    if (information_class == FILE_DISPOSITION_INFORMATION_CLASS) {
+        if (buffer == NULL)
+            return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
+        if (length < sizeof(uint8_t))
+            return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
+        if (set_file_disposition(handle, *(const uint8_t *)buffer != 0))
+            return nt_file_complete(io, NT_STATUS_SUCCESS, 0);
+        const uint32_t error = nt_GetLastError();
+        const nt_status status = error == NT_ERROR_INVALID_HANDLE ? NT_STATUS_INVALID_HANDLE :
+                                 error == NT_ERROR_ACCESS_DENIED ? NT_STATUS_ACCESS_DENIED :
+                                 error == NT_ERROR_NOT_SUPPORTED ? NT_STATUS_NOT_SUPPORTED :
+                                 error == NT_ERROR_INVALID_PARAMETER ? NT_STATUS_INVALID_PARAMETER :
+                                 NT_STATUS_UNSUCCESSFUL;
+        return nt_file_complete(io, status, 0);
+    }
     if (information_class != FILE_POSITION_INFORMATION_CLASS &&
         information_class != FILE_END_OF_FILE_INFORMATION_CLASS)
         return nt_file_complete(io, NT_STATUS_INVALID_INFO_CLASS, 0);
@@ -5123,9 +5552,12 @@ int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind
                                               ticks(file_time(stat_info.st_ctim)), attr.attributes};
         memcpy(info, &basic, sizeof(basic));
     } else if (kind == 1) {
+        const int pending = file_delete_pending(handle, &stat_info);
+        if (pending < 0)
+            return file_result(fd, false);
         const struct standard_file_info standard_info = {
             (int64_t)((uint64_t)stat_info.st_blocks * 512), stat_info.st_size,
-            (uint32_t)stat_info.st_nlink, stat_info.st_nlink == 0, S_ISDIR(stat_info.st_mode) != 0
+            (uint32_t)stat_info.st_nlink, pending != 0, S_ISDIR(stat_info.st_mode) != 0
         };
         memcpy(info, &standard_info, sizeof(standard_info));
     } else {
@@ -5228,11 +5660,101 @@ int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *cr
     return file_result(fd, valid);
 }
 
+/* FILE_DISPOSITION_INFO (FileInfoByHandleClass=4) contains a single
+ * BOOLEAN in the Win32 ABI. Only a HANDLE with explicit DELETE access
+ * may request disposition. We never use a host pathname stored in the
+ * record without rechecking its inode through an authorized directory. */
+static int32_t set_file_disposition(uintptr_t handle, bool deleting)
+{
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file = find_handle(handle);
+    int error = file == NULL ? EBADF :
+                (file->access & FILE_DELETE) == 0 ? EACCES : 0;
+    if (error == 0 && (!private_c_path(file->path) ||
+                       file->share_lease_fd <= 0))
+        error = ENOTSUP;
+    struct stat file_info;
+    if (error == 0 && fstat(file->fd, &file_info) != 0)
+        error = errno;
+    if (error == 0 && (!S_ISREG(file_info.st_mode) ||
+                       (file_info.st_mode & 0222) == 0))
+        error = EACCES;
+    if (error == 0 && deleting && !file->delete_disposition) {
+        const char *relative = file->path;
+        int root = duplicate_root(&relative);
+        if (root < 0)
+            error = errno;
+        else {
+            char leaf[NAME_MAX + 1];
+            int parent = open_parent(root, relative, leaf);
+            const int opened_error = errno;
+            close(root);
+            if (parent < 0) {
+                error = opened_error;
+            } else {
+                struct stat current;
+                if (fstatat(parent, leaf, &current, AT_SYMLINK_NOFOLLOW) != 0)
+                    error = errno;
+                else if (current.st_dev != file_info.st_dev ||
+                         current.st_ino != file_info.st_ino)
+                    error = EBUSY;
+                close(parent);
+            }
+        }
+    }
+    if (error == 0) {
+        int gate = reopen_share_gate(file->share_lease_fd);
+        if (gate < 0) {
+            error = errno;
+        } else {
+            int locked;
+            do {
+                locked = flock(gate, LOCK_EX);
+            } while (locked < 0 && errno == EINTR);
+            if (locked < 0) {
+                error = errno;
+            } else {
+                if (deleting) {
+                    if (!file->delete_disposition &&
+                        !set_share_pending(gate, &file_info, file->path))
+                        error = errno;
+                    else if (error == 0)
+                        file->delete_disposition = true;
+                } else if (file->delete_disposition) {
+                    if (!clear_share_pending(gate))
+                        error = errno;
+                    else
+                        file->delete_disposition = false;
+                } else {
+                    struct share_pending_record current;
+                    if (!read_share_pending(gate, &current))
+                        error = errno;
+                    else if (current.pending)
+                        error = EACCES; /* Cannot undo another opener's deletion. */
+                }
+                (void)flock(gate, LOCK_UN);
+            }
+            close(gate);
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    if (error != 0)
+        nt_SetLastError(path_error(error, false));
+    return error == 0;
+}
+
 int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, const void *info, uint32_t size)
 {
     if (info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
+    }
+    if (kind == 4) {
+        if (size < 1) {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        return set_file_disposition(handle, *(const uint8_t *)info != 0);
     }
     if (kind == 6) {
         int64_t length;

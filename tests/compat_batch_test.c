@@ -642,12 +642,123 @@ static void check_files(void)
         UINT32_C(0x80000000), 1u | 4u, NULL, 3u, 0x80u, 0);
     CHECK(delete_handle != UINTPTR_MAX);
     CHECK(nt_DeleteFileA("DATA/DELETE-ME.BIN") != 0);
+    /* DeleteFile is now pending while a cooperating open HANDLE remains.
+     * A new open is denied, even though the host inode still exists. */
+    const uintptr_t attempted_pending_open = nt_CreateFileA(
+        "data/delete-me.bin", UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    const uint32_t attempted_pending_error = last_error();
+    if (attempted_pending_open != UINTPTR_MAX ||
+        attempted_pending_error != NT_ERROR_ACCESS_DENIED)
+        fprintf(stderr, "DELETE_PENDING_DIAG handle=%llu error=%u expected=%u\n",
+                (unsigned long long)attempted_pending_open,
+                attempted_pending_error, NT_ERROR_ACCESS_DENIED);
+    CHECK(attempted_pending_open == UINTPTR_MAX &&
+          attempted_pending_error == NT_ERROR_ACCESS_DENIED);
     char still_open = 0;
     uint32_t got_delete = 0;
     CHECK(nt_ReadFile(delete_handle, &still_open, 1, &got_delete, NULL) != 0 &&
           got_delete == 1 && still_open == 'X');
     CHECK(nt_CloseHandle(delete_handle) != 0);
     CHECK(nt_GetFileAttributesA("data/delete-me.bin") == UINT32_MAX);
+
+    /* FileDispositionInfo (class 4) requires DELETE on the original
+     * HANDLE; its pending bit is visible to other handles through the
+     * same per-inode registry. Clearing the disposition before the last
+     * close must preserve the real Linux file. */
+    void *disposition_stream = nt_fopen("data/disposition.bin", "wb");
+    CHECK(disposition_stream != NULL && nt_fwrite("Y", 1, 1, disposition_stream) == 1 &&
+          nt_fclose(disposition_stream) == 0);
+    const uintptr_t disposition_owner = nt_CreateFileA("data/disposition.bin",
+        UINT32_C(0x80010000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(disposition_owner != UINTPTR_MAX);
+    const uintptr_t disposition_reader = nt_CreateFileA("DATA/DISPOSITION.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(disposition_reader != UINTPTR_MAX);
+    const uint8_t pending_on = 1, pending_off = 0;
+    CHECK(!nt_SetFileInformationByHandle(disposition_reader, 4, &pending_on, 1) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(!nt_SetFileInformationByHandle(disposition_owner, 4, &pending_on, 0) &&
+          last_error() == NT_ERROR_INSUFFICIENT_BUFFER);
+    CHECK(nt_SetFileInformationByHandle(disposition_owner, 4, &pending_on, 1));
+    struct {
+        int64_t allocation, file_size;
+        uint32_t links;
+        uint8_t pending, directory;
+        uint8_t padding[2];
+    } standard_info = {0};
+    _Static_assert(sizeof(standard_info) == 24, "Windows FILE_STANDARD_INFO layout");
+    CHECK(nt_GetFileInformationByHandleEx(disposition_reader, 1,
+                                         &standard_info, sizeof(standard_info)) &&
+          standard_info.pending == 1 && standard_info.file_size == 1);
+    CHECK(nt_CreateFileA("data/disposition.bin", UINT32_C(0x80000000), 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_SetFileInformationByHandle(disposition_owner, 4, &pending_off, 1));
+    CHECK(nt_GetFileInformationByHandleEx(disposition_reader, 1,
+                                         &standard_info, sizeof(standard_info)) &&
+          standard_info.pending == 0);
+    const uintptr_t disposition_probe = nt_CreateFileA("data/disposition.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(disposition_probe != UINTPTR_MAX && nt_CloseHandle(disposition_probe));
+    CHECK(nt_SetFileInformationByHandle(disposition_owner, 4, &pending_on, 1));
+    CHECK(nt_CloseHandle(disposition_owner));
+    CHECK(nt_GetFileInformationByHandleEx(disposition_reader, 1,
+                                         &standard_info, sizeof(standard_info)) &&
+          standard_info.pending == 1);
+    CHECK(nt_CloseHandle(disposition_reader));
+    CHECK(nt_GetFileAttributesA("data/disposition.bin") == UINT32_MAX);
+
+    /* The pending namespace also blocks renames through the guest.
+     * If an external Linux process replaces the name anyway, the
+     * final close must NOT unlink the replacement inode. */
+    void *pending_stream = nt_fopen("data/pending-swap.bin", "wb");
+    CHECK(pending_stream != NULL &&
+          nt_fwrite("OLD", 1, 3, pending_stream) == 3 &&
+          nt_fclose(pending_stream) == 0);
+    const uintptr_t pending_handle = nt_CreateFileA("data/pending-swap.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(pending_handle != UINTPTR_MAX);
+    CHECK(nt_DeleteFileA("data/pending-swap.bin"));
+    CHECK(!nt_MoveFileExA("data/pending-swap.bin", "data/moved-pending.bin", 0) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    char pending_native[512], pending_backup[512];
+    CHECK(snprintf(pending_native, sizeof(pending_native),
+                   "%s/data/pending-swap.bin", root) > 0 &&
+          snprintf(pending_backup, sizeof(pending_backup),
+                   "%s/data/pending-swap-original.bin", root) > 0);
+    CHECK(rename(pending_native, pending_backup) == 0);
+    FILE *replacement = fopen(pending_native, "wb");
+    CHECK(replacement != NULL && fwrite("SAFE", 1, 4, replacement) == 4 &&
+          fclose(replacement) == 0);
+    CHECK(nt_CloseHandle(pending_handle));
+    pending_stream = nt_fopen("data/pending-swap.bin", "rb");
+    char replacement_bytes[5] = {0};
+    CHECK(pending_stream != NULL &&
+          nt_fread(replacement_bytes, 1, 4, pending_stream) == 4 &&
+          memcmp(replacement_bytes, "SAFE", 4) == 0 &&
+          nt_fclose(pending_stream) == 0);
+    CHECK(nt_DeleteFileA("data/pending-swap.bin") &&
+          nt_DeleteFileA("data/pending-swap-original.bin"));
+
+    /* FILE_FLAG_DELETE_ON_CLOSE (0x04000000) creates the same pending
+     * disposition automatically, but only with explicit DELETE access.
+     * Neither the guest nor Linux may receive a live leaked temp name
+     * after the final cooperating close. */
+    const uintptr_t missing_delete_access = nt_CreateFileA("data/no-delete-right.bin",
+        UINT32_C(0xc0000000), 7u, NULL, 2u, UINT32_C(0x04000080), 0);
+    CHECK(missing_delete_access == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    const uintptr_t delete_on_close = nt_CreateFileA("data/delete-on-close.bin",
+        UINT32_C(0xc0010000), 7u, NULL, 2u, UINT32_C(0x04000080), 0);
+    CHECK(delete_on_close != UINTPTR_MAX);
+    CHECK(nt_GetFileInformationByHandleEx(delete_on_close, 1,
+                                         &standard_info, sizeof(standard_info)) &&
+          standard_info.pending == 1);
+    CHECK(nt_CreateFileA("data/delete-on-close.bin", UINT32_C(0x80000000),
+                         7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_CloseHandle(delete_on_close));
+    CHECK(nt_GetFileAttributesA("data/delete-on-close.bin") == UINT32_MAX);
 
     /* Linux OFD advisory locks are backed by the actual inode and survive
      * temporary fd duplicates. Distinct Windows opens may conflict. */

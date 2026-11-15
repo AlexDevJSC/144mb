@@ -103,6 +103,9 @@ static void check_crossprocess_delete_sharing(void)
         nt_SetLastError(0);
         if (permit_delete) {
             CHECK(nt_DeleteFileA("C:\\two-processes.bin"));
+            CHECK(nt_CreateFileA("C:\\two-processes.bin", read_access,
+                                 7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+                  last_error() == NT_ERROR_ACCESS_DENIED);
         } else {
             CHECK(!nt_DeleteFileA("C:\\two-processes.bin") &&
                   last_error() == NT_ERROR_SHARING_VIOLATION);
@@ -119,7 +122,59 @@ static void check_crossprocess_delete_sharing(void)
               WIFEXITED(status) && WEXITSTATUS(status) == 0);
         if (!permit_delete)
             CHECK(nt_DeleteFileA("C:\\two-processes.bin"));
+        else
+            CHECK(nt_GetFileAttributesA("C:\\two-processes.bin") == UINT32_MAX);
     }
+}
+
+/* A crashed final holder cannot call CloseHandle to reap pending names.
+ * The next cooperating open must verify no OFD lease survived the crash
+ * and safely complete deletion before granting another Windows HANDLE. */
+static void check_crossprocess_crash_pending(void)
+{
+    const uintptr_t created = nt_CreateFileA("C:\\crashed-pending.bin",
+        UINT32_C(0x40000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(created != UINTPTR_MAX && nt_CloseHandle(created));
+    int ready[2], release[2];
+    CHECK(pipe(ready) == 0 && pipe(release) == 0);
+    const pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        close(ready[0]);
+        close(release[1]);
+        const uintptr_t held = nt_CreateFileA("C:\\crashed-pending.bin",
+            UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+        if (held == UINTPTR_MAX)
+            _exit(91);
+        char signal = 'R';
+        if (write(ready[1], &signal, 1) != 1)
+            _exit(92);
+        if (read(release[0], &signal, 1) != 1)
+            _exit(93);
+        /* Simulates a process crash: no Win32 close, only Linux fd
+         * teardown from the kernel's process lifetime accounting. */
+        _exit(0);
+    }
+    close(ready[1]);
+    close(release[0]);
+    char signal = 0;
+    CHECK(read(ready[0], &signal, 1) == 1 && signal == 'R');
+    close(ready[0]);
+    CHECK(nt_DeleteFileA("C:\\crashed-pending.bin"));
+    CHECK(nt_CreateFileA("C:\\crashed-pending.bin",
+                         UINT32_C(0x80000000), 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    signal = 'X';
+    CHECK(write(release[1], &signal, 1) == 1);
+    close(release[1]);
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child &&
+          WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(nt_CreateFileA("C:\\crashed-pending.bin",
+                         UINT32_C(0x80000000), 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_GetFileAttributesA("C:\\crashed-pending.bin") == UINT32_MAX);
 }
 
 /* A Windows current directory is active in *another* NT worker. The
@@ -330,7 +385,39 @@ static void check_file_handles(void)
     stream = nt_fopen("scores", "rb");
     CHECK(stream != NULL && nt_fread(bytes, 1, 1, stream) == 0 && nt_fclose(stream) == 0);
     CHECK(nt_DeleteFileA("scores"));
+
+    /* Native FileDispositionInformation=13 shares the same durable
+     * per-inode pending state exposed by Win32 FileStandardInfo. */
+    const uintptr_t native_dispose = nt_CreateFileA("C:\\native-dispose.bin",
+        read | write | UINT32_C(0x00010000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(native_dispose != UINTPTR_MAX);
+    struct nt_io_status_block disposition_io = {0};
+    const uint8_t disposition_true = 1, disposition_false = 0;
+    CHECK(nt_NtSetInformationFile(native_dispose, &disposition_io,
+                                  &disposition_true, 0, 13) == NT_STATUS_INFO_LENGTH_MISMATCH);
+    CHECK(nt_NtSetInformationFile(native_dispose, &disposition_io,
+                                  &disposition_true, 1, 13) == NT_STATUS_SUCCESS &&
+          disposition_io.status == NT_STATUS_SUCCESS);
+    struct {
+        int64_t allocation, size;
+        uint32_t links;
+        uint8_t pending, directory, padding[2];
+    } native_standard = {0};
+    CHECK(nt_NtQueryInformationFile(native_dispose, &disposition_io,
+                                    &native_standard, sizeof(native_standard), 5) == NT_STATUS_SUCCESS &&
+          native_standard.pending == 1);
+    CHECK(nt_NtSetInformationFile(native_dispose, &disposition_io,
+                                  &disposition_false, 1, 13) == NT_STATUS_SUCCESS);
+    CHECK(nt_NtQueryInformationFile(native_dispose, &disposition_io,
+                                    &native_standard, sizeof(native_standard), 5) == NT_STATUS_SUCCESS &&
+          native_standard.pending == 0);
+    CHECK(nt_NtSetInformationFile(native_dispose, &disposition_io,
+                                  &disposition_true, 1, 13) == NT_STATUS_SUCCESS);
+    CHECK(nt_CloseHandle(native_dispose));
+    CHECK(nt_GetFileAttributesA("C:\\native-dispose.bin") == UINT32_MAX);
+
     check_crossprocess_delete_sharing();
+    check_crossprocess_crash_pending();
     check_crossprocess_read_write_sharing();
     check_crossprocess_current_directory();
     check_drive_relative_cwds();
