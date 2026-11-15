@@ -27,6 +27,7 @@
 #include <sys/syscall.h>
 #include <sys/xattr.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -3531,6 +3532,75 @@ int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped 
     }
     *done = (uint32_t)bytes;
     return 1;
+}
+
+/* Timed Win32 OVERLAPPED completion. Nonalertable waits share the same
+ * condition variable as the original GetOverlappedResult, with no polling.
+ * We intentionally reject alertable=TRUE until APC delivery semantics are
+ * implemented: reporting success without honoring alertable waits would be
+ * a false Windows compatibility claim. */
+int32_t NT_MS_ABI nt_GetOverlappedResultEx(uintptr_t handle,
+                                           struct nt_overlapped *overlap,
+                                           uint32_t *done, uint32_t milliseconds,
+                                           int32_t alertable)
+{
+    if (alertable) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (nt_GetOverlappedResult(handle, overlap, done, 0))
+        return 1;
+    if (nt_GetLastError() != NT_ERROR_IO_INCOMPLETE)
+        return 0;
+    if (milliseconds == 0) {
+        nt_SetLastError(NT_ERROR_WAIT_TIMEOUT);
+        return 0;
+    }
+    struct timespec deadline = {0};
+    const bool finite = milliseconds != UINT32_MAX;
+    if (finite) {
+        /* Use the host kernel clock rather than the guest Win32 clock
+         * wrapper; tests deliberately replace clock_gettime. */
+        if (syscall(SYS_clock_gettime, CLOCK_REALTIME, &deadline) != 0) {
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+        deadline.tv_sec += (time_t)(milliseconds / 1000);
+        deadline.tv_nsec += (long)(milliseconds % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_nsec -= 1000000000L;
+            ++deadline.tv_sec;
+        }
+    }
+    pthread_mutex_lock(&async_lock);
+    uintptr_t status = __atomic_load_n(&overlap->internal, __ATOMIC_ACQUIRE);
+    int waited = 0;
+    while (status == NT_ERROR_IO_PENDING) {
+        bool active = false;
+        for (size_t i = 0; i < ASYNC_LIMIT; ++i)
+            if (async_tasks[i].occupied && async_tasks[i].completion == overlap) {
+                active = true;
+                break;
+            }
+        if (!active)
+            break;
+        waited = finite ? pthread_cond_timedwait(&async_condition, &async_lock,
+                                                  &deadline) :
+                          pthread_cond_wait(&async_condition, &async_lock);
+        status = __atomic_load_n(&overlap->internal, __ATOMIC_ACQUIRE);
+        if (waited != 0)
+            break;
+    }
+    pthread_mutex_unlock(&async_lock);
+    if (waited != 0 && waited != ETIMEDOUT) {
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    if (nt_GetOverlappedResult(handle, overlap, done, 0))
+        return 1;
+    if (nt_GetLastError() == NT_ERROR_IO_INCOMPLETE)
+        nt_SetLastError(NT_ERROR_WAIT_TIMEOUT);
+    return 0;
 }
 
 static int32_t range_lock(uintptr_t handle, uint64_t offset, uint64_t length,
