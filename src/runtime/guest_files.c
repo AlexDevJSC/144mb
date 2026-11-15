@@ -1597,7 +1597,7 @@ static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
 enum { INHERITED_FILE_MAGIC = 0x3434464eu }; /* "NF44" */
 struct child_file_record {
     uintptr_t handle;
-    uint32_t access, share, flags;
+    uint32_t access, share, flags, lease_present;
     char path[PATH_MAX];
 };
 struct child_file_manifest {
@@ -1612,13 +1612,18 @@ void nt_runtime_release_inherited_files(struct nt_child_file_transfer *transfer)
         return;
     if (transfer->manifest_fd >= 0)
         close(transfer->manifest_fd);
-    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i) {
         if (transfer->source_fds[i] >= 0)
             close(transfer->source_fds[i]);
+        if (transfer->lease_fds[i] >= 0)
+            close(transfer->lease_fds[i]);
+    }
     transfer->manifest_fd = -1;
     transfer->count = 0;
-    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i) {
         transfer->source_fds[i] = -1;
+        transfer->lease_fds[i] = -1;
+    }
 }
 
 uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer,
@@ -1628,8 +1633,10 @@ uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_
         return NT_ERROR_INVALID_PARAMETER;
     transfer->manifest_fd = -1;
     transfer->count = 0;
-    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i) {
         transfer->source_fds[i] = -1;
+        transfer->lease_fds[i] = -1;
+    }
     /* Events/semaphores/threads cannot be serialized as Linux file FDs:
      * fail the process creation, don't silently lose an inherited HANDLE. */
     if (enabled && nt_runtime_has_inheritable_waitables())
@@ -1657,8 +1664,20 @@ uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_
                 break;
             }
             transfer->source_fds[index] = copy;
+            /* Retain the precise OFD lock description across exec. Reopening
+             * the registry would be a new file open and might conflict with
+             * a handle whose own parent denies its requested access. */
+            const int lease_copy = entry->share_lease_fd > 0 ?
+                fcntl(entry->share_lease_fd, F_DUPFD_CLOEXEC, 128) :
+                open("/dev/null", O_RDONLY | O_CLOEXEC);
+            if (lease_copy < 0) {
+                error = NT_ERROR_NOT_ENOUGH_MEMORY;
+                break;
+            }
+            transfer->lease_fds[index] = lease_copy;
             struct child_file_record *out = &manifest->files[index];
             out->handle = entry->handle;
+            out->lease_present = entry->share_lease_fd > 0;
             out->access = entry->access;
             out->share = entry->share;
             out->flags = entry->handle_flags;
@@ -1767,7 +1786,8 @@ static struct child_file_manifest *read_inherited_file_manifest(int fd)
             memchr(entry->path, '\0', sizeof(entry->path)) == NULL ||
             (entry->flags & ~(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE)) != 0 ||
             (entry->access & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
-            (entry->share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0) {
+            (entry->share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
+            entry->lease_present > 1) {
             free(manifest);
             return NULL;
         }
@@ -1809,16 +1829,27 @@ bool nt_runtime_restore_inherited_files(int manifest_fd)
     struct child_file_manifest *manifest = read_inherited_file_manifest(manifest_fd);
     if (manifest == NULL)
         return false;
-    int copies[NT_CHILD_FILE_LIMIT];
+    int copies[NT_CHILD_FILE_LIMIT], leases[NT_CHILD_FILE_LIMIT];
     char *names[NT_CHILD_FILE_LIMIT] = {0};
     struct stat stats[NT_CHILD_FILE_LIMIT];
-    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i) {
         copies[i] = -1;
+        leases[i] = -1;
+    }
     bool valid = true;
     for (size_t i = 0; i < manifest->count; ++i) {
         const int source = NT_CHILD_FILE_FD_BASE + (int)i;
         if (fstat(source, &stats[i]) != 0 ||
             (copies[i] = fcntl(source, F_DUPFD_CLOEXEC, 0)) < 0) {
+            valid = false;
+            break;
+        }
+        const int inherited_lease = NT_CHILD_LEASE_FD_BASE + (int)i;
+        struct stat lease_info;
+        if (fstat(inherited_lease, &lease_info) != 0 ||
+            (manifest->files[i].lease_present &&
+             (!S_ISREG(lease_info.st_mode) ||
+              (leases[i] = fcntl(inherited_lease, F_DUPFD_CLOEXEC, 3)) < 0))) {
             valid = false;
             break;
         }
@@ -1848,10 +1879,12 @@ bool nt_runtime_restore_inherited_files(int manifest_fd)
                 *slot = (struct guest_file){
                     .owner = WIN_HANDLE, .handle = entry->handle, .fd = copies[i],
                     .access = entry->access, .share = entry->share,
+                    .share_lease_fd = leases[i] > 0 ? leases[i] : 0,
                     .handle_flags = entry->flags, .device = stats[i].st_dev,
                     .inode = stats[i].st_ino, .path = names[i]
                 };
                 copies[i] = -1;
+                leases[i] = -1;
                 names[i] = NULL;
                 if (entry->handle >= next_handle)
                     next_handle = entry->handle + 16;
@@ -1862,10 +1895,14 @@ bool nt_runtime_restore_inherited_files(int manifest_fd)
     for (size_t i = 0; i < manifest->count; ++i) {
         if (copies[i] >= 0)
             close(copies[i]);
+        if (leases[i] >= 0)
+            close(leases[i]);
         free(names[i]);
-        /* The original descriptor is a protocol resource, not a public
-         * host FD available to the guest after the table is constructed. */
+        /* Original protocol FDs are not exposed to the PE process after
+         * restoring the sealed HANDLE table. The surviving dup retains
+         * the OFD lease until the last inherited HANDLE is closed. */
         close(NT_CHILD_FILE_FD_BASE + (int)i);
+        close(NT_CHILD_LEASE_FD_BASE + (int)i);
     }
     free(manifest);
     return valid;
