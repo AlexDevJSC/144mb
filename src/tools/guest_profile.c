@@ -677,7 +677,8 @@ static int read_unc_grants(int config, struct nt_guest_unc_grant grants[NT_GUEST
         char *equals = strchr(line, '=');
         char *slash = strchr(line, '/');
         if (equals == NULL || slash == NULL || slash > equals ||
-            strchr(slash + 1, '/') != equals || *count >= NT_GUEST_UNC_LIMIT) {
+            memchr(slash + 1, '/', (size_t)(equals - slash - 1)) != NULL ||
+            *count >= NT_GUEST_UNC_LIMIT) {
             error = EINVAL;
             goto fail;
         }
