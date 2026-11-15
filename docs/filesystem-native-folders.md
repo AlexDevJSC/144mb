@@ -98,9 +98,33 @@ propiedad/permisos, rutas canónicas, escritura atómica y revocación que
 `shares.conf` no dejan de leer las carpetas habituales.
 
 Solo acepta D:–Z: y cada carpeta debe existir antes de ser concedida.
-Los recursos UNC siguen necesitando `--unc` por ejecución. No añade
-SMB, unidades automáticas, directorios relativos por unidad ni semántica
-NTFS de reparse. Los accesos siguen sujetos a permisos Linux y SELinux.
+Las rutas UNC también pueden recordarse explícitamente sin activar SMB:
+
+~~~sh
+mkdir -p "$HOME/Windows-drives/UNC-lab-assets"
+pe-isolated-run --remember-unc "lab/assets=$HOME/Windows-drives/UNC-lab-assets"
+pe-isolated-run /ruta/juego.exe
+pe-isolated-run --unc "lab/assets=/ruta/alternativa" -- /ruta/juego.exe
+pe-isolated-run --forget-unc lab/assets
+~~~
+
+La autorización UNC se almacena de forma privada en `unc.conf`, admite
+hasta ocho pares `servidor/recurso` y respeta las mismas reglas de rutas
+canónicas, revocación, permisos Linux/SELinux, bloqueo y escritura atómica
+que el resto de concesiones. Un `--unc` explícito tiene prioridad en ese
+lanzamiento; la asociación no descubre servidores ni crea conexiones SMB.
+Una ruta UNC sigue representando un directorio Linux **previamente autorizado**.
+
+La resolución de rutas ahora recuerda un directorio actual por cada unidad
+DOS autorizada: al cambiar a `D:\Juegos` y después volver a `C:\`,
+una solicitud `D:datos.bin` se resuelve bajo el directorio recordado para
+`D:`. Las rutas comenzadas por una sola barra utilizan la unidad activa.
+El borrado o renombrado del directorio recordado se deniega mientras la
+asociación siga vigente. Los datos continúan en los directorios Linux
+originales, sin volúmenes emulados ni copias.
+
+Siguen fuera de alcance SMB automático y la semántica NTFS completa de
+reparse, ACL y directorios compartidos. Los accesos siguen sujetos a permisos Linux y SELinux.
 
 Si xdg-user-dir devuelve el propio $HOME (carpeta XDG deshabilitada), el programa rechaza la autorización: no se permite compartir todo el directorio personal por accidente. Las carpetas deben existir y las rutas del host deben ser absolutas.
 
@@ -271,10 +295,7 @@ pe-isolated-run --drive D=/ruta/linux/autorizada \
 
 Los directorios de origen se abren con FD y se montan bajo
 `/guest-drives/D` y `/guest-unc/lab/assets`, no como
-accesos globales al anfitrión. La persistencia de las concesiones UNC, la
-administración avanzada de unidades y los directorios de trabajo
-independientes por unidad siguen pendientes (por ahora `D:relativa`
-se rechaza).
+accesos globales al anfitrión. Las concesiones UNC y las unidades D:–Z: pueden recordarse desde el lanzador; los directorios de trabajo independientes por unidad ya se mantienen durante la vida del proceso. La gestión avanzada del namespace, la enumeración de montajes SMB y los enlaces NTFS siguen pendientes.
 Los enlaces simbólicos Linux pueden identificarse como
 `FILE_ATTRIBUTE_REPARSE_POINT` sin abrir ni seguir su destino;
 todavía no se crean junctions/reparse points NTFS ni se soporta
