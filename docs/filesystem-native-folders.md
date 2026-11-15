@@ -344,10 +344,22 @@ y el cierre del puerto se gestionan sin privilegios del anfitrión.
 El bit menos significativo del evento de `OVERLAPPED` suprime el paquete
 en IOCP, sin suprimir la finalización propia de la operación.
 
+`GetQueuedCompletionStatusEx` permite extraer varios paquetes de una sola
+vez, sin reordenarlos, utilizando el ABI x64 de `OVERLAPPED_ENTRY` (32
+bytes por entrada). Es compatible con el consumo individual por
+`GetQueuedCompletionStatus`. En las entradas, `Internal` contiene el
+NTSTATUS de la operación: `STATUS_SUCCESS` para paquetes manuales y
+lecturas correctas, `STATUS_CANCELLED` para una cancelación en cola y
+un error NTSTATUS genérico o equivalente para otros errores. Un batch que
+contiene errores sigue siendo una extracción correcta y devuelve TRUE.
+Las esperas alertables se rechazan explícitamente mientras no existan
+APC de E/S; las esperas de tiempo cero y expiradas devuelven
+`WAIT_TIMEOUT` sin consumir ni inventar paquetes.
+
 Esta entrega **no ofrece toda la semántica de IOCP de Windows**:
 el máximo actual son 16 puertos con 256 paquetes cada uno; no se aplica
-la limitación de hilos de `NumberOfConcurrentThreads`, ni están
-`GetQueuedCompletionStatusEx`, asociaciones con sockets y tuberías,
+la limitación de hilos de `NumberOfConcurrentThreads`, ni están las
+asociaciones con sockets y tuberías,
 propiedad de puertos con HANDLEs heredados/duplicados, notificaciones
 APC o cancelación garantizada de operaciones Linux ya despachadas.
 Las operaciones del mismo HANDLE se serializan deliberadamente.
@@ -468,7 +480,7 @@ de ACL NTFS. No implementa todavía el estado NT `delete-pending`
 previo a `unlinkat`, el borrado diferido por handle ni la
 atomicidad plena con programas Linux externos. No impide una
 modificación host deliberada del registro por el mismo usuario.
-Reparse points, SMB real, 8.3 e IOCP avanzado permanecen pendientes.
+Reparse points, SMB real, 8.3 y otras semánticas avanzadas de IOCP permanecen pendientes.
 
 ## Límites actuales
 
