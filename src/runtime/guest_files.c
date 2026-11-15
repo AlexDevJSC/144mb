@@ -3421,6 +3421,7 @@ struct async_request {
      * cancellation targets even if they refer to the same Linux inode. */
     uintptr_t owner_handle;
     pid_t owner_pid;
+    uintptr_t completion_port, completion_key;
     int fd;
     void *buffer;
     uint32_t size;
@@ -3492,6 +3493,10 @@ static void *async_worker_loop(void *argument)
         pthread_mutex_unlock(&async_lock);
         if (job.event)
             (void)nt_SetEvent(job.event);
+        if (job.completion_port)
+            (void)post_iocp_packet(job.completion_port,
+                                   result > 0 ? (uint32_t)result : 0,
+                                   job.completion_key, job.completion, status);
         pthread_mutex_lock(&async_lock);
         pthread_cond_broadcast(&async_condition);
         pthread_mutex_unlock(&async_lock);
@@ -3515,6 +3520,8 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     const struct guest_file *entry = find_handle(handle);
     const bool exists = entry != NULL;
     const bool enabled = exists && entry->overlapped_io;
+    const uintptr_t completion_port = enabled ? entry->completion_port : 0;
+    const uintptr_t completion_key = enabled ? entry->completion_key : 0;
     pthread_mutex_unlock(&file_lock);
     if (!enabled) {
         nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
@@ -3523,7 +3530,8 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     const int fd = duplicate_handle(handle, write_access ? FILE_WRITE : FILE_READ);
     if (fd < 0)
         return file_result(fd, false);
-    if (completion->event && !nt_ResetEvent(completion->event)) {
+    const uintptr_t event = completion->event & ~(uintptr_t)1;
+    if (event && !nt_ResetEvent(event)) {
         close(fd);
         return 0;
     }
@@ -3555,9 +3563,11 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
         async_tasks[slot] = (struct async_request) {
             .occupied = true, .queued = true,
             .owner_handle = handle, .owner_pid = getpid(),
+            .completion_port = (completion->event & 1) ? 0 : completion_port,
+            .completion_key = completion_key,
             .fd = fd, .buffer = buffer,
             .size = size, .offset = (off_t)offset, .write_access = write_access,
-            .completion = completion, .event = completion->event
+            .completion = completion, .event = event
         };
         __atomic_store_n(&completion->internal_high, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&completion->internal, ASYNC_PENDING, __ATOMIC_RELEASE);
@@ -3727,6 +3737,11 @@ int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *completi
         close(cancelled[i].fd);
         if (cancelled[i].event)
             (void)nt_SetEvent(cancelled[i].event);
+        if (cancelled[i].completion_port)
+            (void)post_iocp_packet(cancelled[i].completion_port, 0,
+                                   cancelled[i].completion_key,
+                                   cancelled[i].completion,
+                                   NT_ERROR_OPERATION_ABORTED);
     }
     if (count == 0) {
         nt_SetLastError(NT_ERROR_NOT_FOUND);
