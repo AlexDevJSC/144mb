@@ -7,6 +7,7 @@
 #include "sync.h"
 #include "winfile.h"
 #include "child_process.h"
+#include "file_share_cleanup.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -78,10 +79,14 @@ static void spawn_child(const char *executable, const char *mode,
     check(manifest >= 96, "clone sealed metadata descriptor");
     check(posix_spawn_file_actions_adddup2(&actions, manifest, 7) == 0,
           "inherit sealed metadata as fd7");
-    for (size_t i = 0; i < transfer->count; ++i)
+    for (size_t i = 0; i < transfer->count; ++i) {
         check(posix_spawn_file_actions_adddup2(&actions, transfer->source_fds[i],
                                                NT_CHILD_FILE_FD_BASE + (int)i) == 0,
               "inherit only selected host file descriptors");
+        check(posix_spawn_file_actions_adddup2(&actions, transfer->lease_fds[i],
+                                               NT_CHILD_LEASE_FD_BASE + (int)i) == 0,
+              "preserve file OFD lease or pipe placeholder across exec");
+    }
     char token[48];
     snprintf(token, sizeof(token), "%llu", (unsigned long long)handle);
     char *const arguments[] = {(char *)executable, (char *)mode, token, NULL};
@@ -178,7 +183,8 @@ int main(int argc, char **argv)
     check(nt_runtime_set_file_root(NULL), "release guest volume");
     char pathname[256];
     snprintf(pathname, sizeof(pathname), "%s/inherited.bin", root);
-    check(unlink(pathname) == 0 && rmdir(root) == 0, "delete isolated test files");
+    check(unlink(pathname) == 0 && nt_test_cleanup_share_registry(root) &&
+          rmdir(root) == 0, "delete isolated test files and share metadata");
     puts("PASS real exec-boundary file HANDLE inheritance, identity, rights, offset and isolation");
     return 0;
 }
