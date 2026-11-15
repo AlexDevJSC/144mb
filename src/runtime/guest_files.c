@@ -3195,7 +3195,7 @@ static bool check_current_lock(int fd, uint32_t length, bool write_access)
     return range_unlocked(fd, (uint64_t)current, length, write_access);
 }
 
-enum { ASYNC_LIMIT = 32, ASYNC_PENDING = NT_ERROR_IO_PENDING };
+enum { ASYNC_LIMIT = 32, ASYNC_WORKERS = 4, ASYNC_PENDING = NT_ERROR_IO_PENDING };
 struct async_request {
     bool occupied, queued;
     /* Per-process ownership: different Win32 HANDLE aliases are distinct
@@ -3220,14 +3220,31 @@ static void *async_worker_loop(void *argument)
     (void)argument;
     for (;;) {
         pthread_mutex_lock(&async_lock);
-        size_t index = 0;
+        size_t index;
         for (;;) {
-            while (index < ASYNC_LIMIT && !async_tasks[index].queued)
-                ++index;
+            index = ASYNC_LIMIT;
+            for (size_t i = 0; i < ASYNC_LIMIT; ++i) {
+                if (!async_tasks[i].queued)
+                    continue;
+                /* Serialize jobs from one guest HANDLE. Other handles
+                 * may execute in parallel across native Linux workers. */
+                bool busy_handle = false;
+                for (size_t j = 0; j < ASYNC_LIMIT; ++j)
+                    if (i != j && async_tasks[j].occupied &&
+                        !async_tasks[j].queued &&
+                        async_tasks[j].owner_handle == async_tasks[i].owner_handle &&
+                        async_tasks[j].owner_pid == async_tasks[i].owner_pid) {
+                        busy_handle = true;
+                        break;
+                    }
+                if (!busy_handle) {
+                    index = i;
+                    break;
+                }
+            }
             if (index < ASYNC_LIMIT)
                 break;
             pthread_cond_wait(&async_condition, &async_lock);
-            index = 0;
         }
         struct async_request job = async_tasks[index];
         async_tasks[index].queued = false;
@@ -3303,13 +3320,17 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
             slot = i;
     }
     if (slot >= 0 && !async_started) {
-        pthread_t worker;
-        if (pthread_create(&worker, NULL, async_worker_loop, NULL) == 0) {
+        size_t launched = 0;
+        for (size_t i = 0; i < ASYNC_WORKERS; ++i) {
+            pthread_t worker;
+            if (pthread_create(&worker, NULL, async_worker_loop, NULL) != 0)
+                break;
             pthread_detach(worker);
-            async_started = true;
-        } else {
-            slot = -1;
+            ++launched;
         }
+        async_started = launched != 0;
+        if (!async_started)
+            slot = -1;
     }
     if (slot >= 0) {
         async_tasks[slot] = (struct async_request) {
@@ -3321,7 +3342,7 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
         };
         __atomic_store_n(&completion->internal_high, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&completion->internal, ASYNC_PENDING, __ATOMIC_RELEASE);
-        pthread_cond_signal(&async_condition);
+        pthread_cond_broadcast(&async_condition);
     }
     pthread_mutex_unlock(&async_lock);
     if (slot < 0) {
