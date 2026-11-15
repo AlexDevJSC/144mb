@@ -1155,7 +1155,7 @@ static int open_share_registry(const struct stat *info)
 static bool private_c_path(const char *path)
 {
     return path != NULL && *path != '\0' &&
-           path[0] != '@' && !(path[0] >= 'D' && path[0] <= 'Z' && path[1] == ':');
+           strncmp(path, "@UNC:/", 6) != 0 && root_boundary(path) == 0;
 }
 
 enum { SHARE_PENDING_OFFSET = 8192, SHARE_PENDING_MAGIC = 0x44504e54u };
@@ -2737,6 +2737,38 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
  * target flock, already held by change_path(), blocks new participating
  * opens while this marker becomes visible. We refuse any mismatched
  * path/inode pair instead of touching a replacement host file. */
+/* Conservative check before rename: a pending source or replacement
+ * destination must not be moved out of the guarded name. This uses the
+ * same private registry but is not a transaction with external Linux
+ * writers, which remain outside the NT guest's namespace protocol. */
+static int check_inode_not_pending(const struct stat *info, const char *path)
+{
+    if (!private_c_path(path) || !S_ISREG(info->st_mode))
+        return 0;
+    const int gate = open_share_registry(info);
+    if (gate < 0)
+        return -1;
+    int locked;
+    do {
+        locked = flock(gate, LOCK_SH);
+    } while (locked < 0 && errno == EINTR);
+    int error = locked < 0 ? errno : 0;
+    if (!error) {
+        struct share_pending_record marker;
+        if (!read_share_pending(gate, &marker))
+            error = errno;
+        else if (marker.pending)
+            error = EACCES;
+        (void)flock(gate, LOCK_UN);
+    }
+    close(gate);
+    if (error) {
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
 static int remove_file_or_defer(int parent, const char *leaf, const char *dos_path,
                                 const struct stat *target)
 {
@@ -3028,6 +3060,8 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         } else if (file_blocks_delete(&info)) {
             errno = EBUSY;
             status = -1;
+        } else if (check_inode_not_pending(&info, source) != 0) {
+            status = -1;
         } else {
             struct stat target;
             const int exists = fstatat(destination_parent, destination_leaf, &target,
@@ -3037,6 +3071,9 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
                 status = -1;
             } else if (exists == 0 && (flags & 1u) != 0 && file_blocks_delete(&target)) {
                 errno = EBUSY;
+                status = -1;
+            } else if (exists == 0 && (flags & 1u) != 0 &&
+                       check_inode_not_pending(&target, destination) != 0) {
                 status = -1;
             } else if (exists < 0 && errno != ENOENT) {
                 status = -1;
