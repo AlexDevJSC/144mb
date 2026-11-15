@@ -1126,6 +1126,8 @@ static int share_live_count(int gate)
     return live;
 }
 
+static int lock_delete_target(int parent, const char *leaf, const struct stat *expected);
+
 /* Only a verified directory name is unlinked. Even after another host
  * writer swaps a name, it must not cause us to delete a different inode. */
 static int share_finish_pending(const char *path, const struct stat *expected)
@@ -1158,9 +1160,17 @@ static int share_finish_pending(const char *path, const struct stat *expected)
         errno = EBUSY;
         result = -1;
     }
+    int guard = -1;
+    if (result == 0) {
+        guard = lock_delete_target(parent, leaf, &now);
+        if (guard < 0)
+            result = -1;
+    }
     if (result == 0)
         result = unlinkat(parent, leaf, 0);
     const int error = errno;
+    if (guard >= 0)
+        close(guard);
     close(parent);
     errno = error;
     return result;
@@ -1336,7 +1346,7 @@ static int share_delete_path(int parent, const char *leaf,
     return error == 0 ? 0 : -1;
 }
 
-static int acquire_share_registry_lease(const struct stat *info,
+static int acquire_share_registry_lease(const struct stat *info, int file_fd,
                                         uint32_t access, uint32_t share)
 {
     const int gate = open_share_registry(info);
@@ -1353,9 +1363,12 @@ static int acquire_share_registry_lease(const struct stat *info,
     if (error == 0 && share_read_pending(gate, &pending) != 0)
         error = errno;
     if (error == 0 && pending.pending) {
-        /* If the last holder crashed, the next opener completes deletion
-         * before returning FILE_NOT_FOUND. Otherwise refuse reopen. */
-        if (share_cleanup_idle_pending(gate, info, &pending) == 0)
+        /* This incomplete open may already hold a shared FILE_SHARE_DELETE
+         * flock. It is not an NT HANDLE yet; release it before taking the
+         * exclusive removal guard used to finish an orphaned tombstone. */
+        if (flock(file_fd, LOCK_UN) != 0)
+            error = errno;
+        else if (share_cleanup_idle_pending(gate, info, &pending) == 0)
             error = ENOENT;
         else
             error = errno;
@@ -1643,7 +1656,7 @@ static int open_shared(struct guest_file *slot, int parent, const char *path,
         error = errno;
     int share_lease = -1;
     if (error == 0) {
-        share_lease = acquire_share_registry_lease(&info, access, share);
+        share_lease = acquire_share_registry_lease(&info, fd, access, share);
         if (share_lease < 0)
             error = errno;
     }
