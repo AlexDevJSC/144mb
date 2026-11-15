@@ -1568,6 +1568,96 @@ int32_t NT_MS_ABI nt_GetQueuedCompletionStatus(uintptr_t port_handle, uint32_t *
     return 1;
 }
 
+/* GetQueuedCompletionStatusEx consumes consecutive packets in FIFO order.
+ * OVERLAPPED_ENTRY.Internal is an NTSTATUS (not Win32 GetLastError).
+ * Only a documented subset of NTSTATUS mappings is available in this
+ * user-mode runtime; never report a failed request as STATUS_SUCCESS. */
+static uintptr_t iocp_packet_ntstatus(uint32_t status)
+{
+    switch (status) {
+    case NT_ERROR_SUCCESS: return 0;
+    case NT_ERROR_OPERATION_ABORTED: return UINT32_C(0xc0000120); /* STATUS_CANCELLED */
+    case NT_ERROR_ACCESS_DENIED: return UINT32_C(0xc0000022);
+    case NT_ERROR_LOCK_VIOLATION: return UINT32_C(0xc0000054);
+    case NT_ERROR_INVALID_PARAMETER: return UINT32_C(0xc000000d);
+    case NT_ERROR_FILE_NOT_FOUND: return UINT32_C(0xc0000034);
+    case NT_ERROR_PATH_NOT_FOUND: return UINT32_C(0xc000003a);
+    default: return UINT32_C(0xc0000001); /* STATUS_UNSUCCESSFUL */
+    }
+}
+
+int32_t NT_MS_ABI nt_GetQueuedCompletionStatusEx(uintptr_t port_handle,
+                                                 struct nt_overlapped_entry *entries,
+                                                 uint32_t capacity, uint32_t *removed,
+                                                 uint32_t milliseconds, int32_t alertable)
+{
+    if (entries == NULL || removed == NULL || capacity == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *removed = 0;
+    /* The runtime does not implement alertable NT APC delivery, so it
+     * must reject, not silently ignore, an alertable wait. */
+    if (alertable) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+
+    struct timespec until = {0};
+    const bool timed = milliseconds != 0 && milliseconds != UINT32_MAX;
+    if (timed) {
+        if (syscall(SYS_clock_gettime, CLOCK_REALTIME, &until) != 0) {
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+        until.tv_sec += (time_t)(milliseconds / 1000);
+        until.tv_nsec += (long)(milliseconds % 1000) * 1000000L;
+        if (until.tv_nsec >= 1000000000L) {
+            until.tv_nsec -= 1000000000L;
+            ++until.tv_sec;
+        }
+    }
+    pthread_mutex_lock(&iocp_lock);
+    struct iocp_port *port = find_iocp_port(port_handle);
+    if (port == NULL) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    int waited = 0;
+    while (port->active && port->handle == port_handle &&
+           port->count == 0 && milliseconds != 0) {
+        waited = timed ? pthread_cond_timedwait(&iocp_changed, &iocp_lock, &until) :
+                         pthread_cond_wait(&iocp_changed, &iocp_lock);
+        if (waited != 0)
+            break;
+    }
+    if (!port->active || port->handle != port_handle) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(NT_ERROR_ABANDONED_WAIT_0);
+        return 0;
+    }
+    if (port->count == 0) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(waited != 0 && waited != ETIMEDOUT ?
+                        NT_ERROR_GEN_FAILURE : NT_ERROR_WAIT_TIMEOUT);
+        return 0;
+    }
+    const size_t take = capacity < port->count ? capacity : port->count;
+    for (size_t i = 0; i < take; ++i) {
+        const struct iocp_packet packet = port->packets[(port->head + i) % IOCP_PACKETS];
+        entries[i] = (struct nt_overlapped_entry) {
+            .completion_key = packet.key, .overlap = packet.overlap,
+            .internal = iocp_packet_ntstatus(packet.status), .bytes = packet.bytes
+        };
+    }
+    port->head = (port->head + take) % IOCP_PACKETS;
+    port->count -= take;
+    pthread_mutex_unlock(&iocp_lock);
+    *removed = (uint32_t)take;
+    return 1;
+}
+
 static int open_shared(struct guest_file *slot, int parent, const char *path,
                        int flags, unsigned int access, unsigned int share, bool *created)
 {
