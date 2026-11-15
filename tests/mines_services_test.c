@@ -335,6 +335,37 @@ static void check_file_handles(void)
     stream = nt_fopen("scores", "rb");
     CHECK(stream != NULL && nt_fread(bytes, 1, 1, stream) == 0 && nt_fclose(stream) == 0);
     CHECK(nt_DeleteFileA("scores"));
+
+    /* Native FileDispositionInformation=13 shares the same durable
+     * per-inode pending state exposed by Win32 FileStandardInfo. */
+    const uintptr_t native_dispose = nt_CreateFileA("C:\\native-dispose.bin",
+        read | write | UINT32_C(0x00010000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(native_dispose != UINTPTR_MAX);
+    struct nt_io_status_block disposition_io = {0};
+    const uint8_t disposition_true = 1, disposition_false = 0;
+    CHECK(nt_NtSetInformationFile(native_dispose, &disposition_io,
+                                  &disposition_true, 0, 13) == NT_STATUS_INFO_LENGTH_MISMATCH);
+    CHECK(nt_NtSetInformationFile(native_dispose, &disposition_io,
+                                  &disposition_true, 1, 13) == NT_STATUS_SUCCESS &&
+          disposition_io.status == NT_STATUS_SUCCESS);
+    struct {
+        int64_t allocation, size;
+        uint32_t links;
+        uint8_t pending, directory, padding[2];
+    } native_standard = {0};
+    CHECK(nt_NtQueryInformationFile(native_dispose, &disposition_io,
+                                    &native_standard, sizeof(native_standard), 5) == NT_STATUS_SUCCESS &&
+          native_standard.pending == 1);
+    CHECK(nt_NtSetInformationFile(native_dispose, &disposition_io,
+                                  &disposition_false, 1, 13) == NT_STATUS_SUCCESS);
+    CHECK(nt_NtQueryInformationFile(native_dispose, &disposition_io,
+                                    &native_standard, sizeof(native_standard), 5) == NT_STATUS_SUCCESS &&
+          native_standard.pending == 0);
+    CHECK(nt_NtSetInformationFile(native_dispose, &disposition_io,
+                                  &disposition_true, 1, 13) == NT_STATUS_SUCCESS);
+    CHECK(nt_CloseHandle(native_dispose));
+    CHECK(nt_GetFileAttributesA("C:\\native-dispose.bin") == UINT32_MAX);
+
     check_crossprocess_delete_sharing();
     check_crossprocess_read_write_sharing();
     check_crossprocess_current_directory();
