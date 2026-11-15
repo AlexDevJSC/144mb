@@ -103,6 +103,11 @@ static void check_crossprocess_delete_sharing(void)
         nt_SetLastError(0);
         if (permit_delete) {
             CHECK(nt_DeleteFileA("C:\\two-processes.bin"));
+            /* The Linux pathname is left in place until the last NT handle
+             * closes, while Windows reopens see DELETE_PENDING. */
+            CHECK(nt_CreateFileA("C:\\two-processes.bin",
+                                 read_access, 7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+                  last_error() == NT_ERROR_DELETE_PENDING);
         } else {
             CHECK(!nt_DeleteFileA("C:\\two-processes.bin") &&
                   last_error() == NT_ERROR_SHARING_VIOLATION);
@@ -117,14 +122,66 @@ static void check_crossprocess_delete_sharing(void)
         int status = 0;
         CHECK(waitpid(child, &status, 0) == child &&
               WIFEXITED(status) && WEXITSTATUS(status) == 0);
-        if (!permit_delete)
+        if (!permit_delete) {
             CHECK(nt_DeleteFileA("C:\\two-processes.bin"));
+        } else {
+            CHECK(nt_CreateFileA("C:\\two-processes.bin",
+                                 read_access, 7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+                  last_error() == NT_ERROR_FILE_NOT_FOUND);
+        }
     }
 }
 
 /* A Windows current directory is active in *another* NT worker. The
  * original local-only guest_cwd string cannot protect it: the kernel-held
  * shared flock does, without requiring a privileged process supervisor. */
+static void check_deferred_disposition(void)
+{
+    const uint32_t read_access = UINT32_C(0x80000000);
+    const uint32_t write_access = UINT32_C(0x40000000);
+    const uintptr_t setup = nt_CreateFileA("C:\\disposition.bin",
+        write_access, 7u, NULL, 2u, 0x80u, 0);
+    CHECK(setup != UINTPTR_MAX && nt_CloseHandle(setup));
+    const uintptr_t deleting = nt_CreateFileA("C:\\disposition.bin",
+        read_access | 0x10000u, 7u, NULL, 3u, 0x80u, 0);
+    const uintptr_t observer = nt_CreateFileA("c:\\DISPOSITION.bin",
+        read_access, 7u, NULL, 3u, 0x80u, 0);
+    CHECK(deleting != UINTPTR_MAX && observer != UINTPTR_MAX);
+
+    const uint8_t yes = 1;
+    struct nt_io_status_block io = {0};
+    CHECK(nt_NtSetInformationFile(deleting, &io, &yes, sizeof(yes), 13u) ==
+          NT_STATUS_SUCCESS && io.status == NT_STATUS_SUCCESS);
+    struct {
+        int64_t allocation, length;
+        uint32_t links;
+        uint8_t pending, directory, unused[2];
+    } std = {0};
+    CHECK(nt_NtQueryInformationFile(observer, &io, &std,
+                                    sizeof(std), 5u) == NT_STATUS_SUCCESS &&
+          std.pending == 1);
+    CHECK(nt_CreateFileA("C:\\disposition.bin",
+                         read_access, 7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_DELETE_PENDING);
+
+    const uint32_t no = 0;
+    CHECK(nt_SetFileInformationByHandle(deleting, 4, &no, sizeof(no)));
+    const uintptr_t reopened = nt_CreateFileA("C:\\disposition.bin",
+        read_access, 7u, NULL, 3u, 0x80u, 0);
+    CHECK(reopened != UINTPTR_MAX && nt_CloseHandle(reopened));
+
+    const uint32_t marked = 1;
+    CHECK(nt_SetFileInformationByHandle(deleting, 4, &marked, sizeof(marked)));
+    CHECK(nt_CloseHandle(deleting));
+    CHECK(nt_NtQueryInformationFile(observer, &io, &std,
+                                    sizeof(std), 5u) == NT_STATUS_SUCCESS &&
+          std.pending == 1);
+    CHECK(nt_CloseHandle(observer));
+    CHECK(nt_CreateFileA("C:\\disposition.bin",
+                         read_access, 7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_FILE_NOT_FOUND);
+}
+
 static void check_crossprocess_read_write_sharing(void)
 {
     const uint32_t read_access = UINT32_C(0x80000000), write_access = UINT32_C(0x40000000);
@@ -331,6 +388,7 @@ static void check_file_handles(void)
     CHECK(stream != NULL && nt_fread(bytes, 1, 1, stream) == 0 && nt_fclose(stream) == 0);
     CHECK(nt_DeleteFileA("scores"));
     check_crossprocess_delete_sharing();
+    check_deferred_disposition();
     check_crossprocess_read_write_sharing();
     check_crossprocess_current_directory();
     check_drive_relative_cwds();
@@ -339,6 +397,7 @@ static void check_file_handles(void)
     puts("PASS shared Win32 files and ownership from HANDLE to CRT fd to FILE");
     puts("PASS cross-process FILE_SHARE_DELETE using Linux flock leases");
     puts("PASS cross-process FILE_SHARE_READ/WRITE with crash-safe OFD leases");
+    puts("PASS delete-pending NT/Win32 disposition, reopened-name denial and last-handle unlink");
     puts("PASS cross-process active guest CWD blocks remove and rename");
     puts("PASS independent C:/D: drive-relative working directory semantics");
 }
