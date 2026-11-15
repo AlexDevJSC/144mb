@@ -740,6 +740,26 @@ static void check_files(void)
     CHECK(nt_DeleteFileA("data/pending-swap.bin") &&
           nt_DeleteFileA("data/pending-swap-original.bin"));
 
+    /* FILE_FLAG_DELETE_ON_CLOSE (0x04000000) creates the same pending
+     * disposition automatically, but only with explicit DELETE access.
+     * Neither the guest nor Linux may receive a live leaked temp name
+     * after the final cooperating close. */
+    const uintptr_t missing_delete_access = nt_CreateFileA("data/no-delete-right.bin",
+        UINT32_C(0xc0000000), 7u, NULL, 2u, UINT32_C(0x04000080), 0);
+    CHECK(missing_delete_access == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    const uintptr_t delete_on_close = nt_CreateFileA("data/delete-on-close.bin",
+        UINT32_C(0xc0010000), 7u, NULL, 2u, UINT32_C(0x04000080), 0);
+    CHECK(delete_on_close != UINTPTR_MAX);
+    CHECK(nt_GetFileInformationByHandleEx(delete_on_close, 1,
+                                         &standard_info, sizeof(standard_info)) &&
+          standard_info.pending == 1);
+    CHECK(nt_CreateFileA("data/delete-on-close.bin", UINT32_C(0x80000000),
+                         7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_CloseHandle(delete_on_close));
+    CHECK(nt_GetFileAttributesA("data/delete-on-close.bin") == UINT32_MAX);
+
     /* Linux OFD advisory locks are backed by the actual inode and survive
      * temporary fd duplicates. Distinct Windows opens may conflict. */
     const uintptr_t first_lock = nt_CreateFileA("data/locked.bin", UINT32_C(0xc0000000),
