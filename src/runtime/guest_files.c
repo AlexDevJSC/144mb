@@ -440,6 +440,18 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         used = strlen(guest_cwd);
         memcpy(output, guest_cwd, used);
         pthread_mutex_unlock(&root_lock);
+    } else {
+        /* A single slash is relative to the current drive's root. */
+        pthread_mutex_lock(&root_lock);
+        if (guest_cwd[0] >= 'D' && guest_cwd[0] <= 'Z' && guest_cwd[1] == ':') {
+            output[0] = guest_cwd[0];
+            output[1] = ':';
+            used = 2;
+        } else if (strncmp(guest_cwd, "@UNC:/", 6) == 0) {
+            used = root_boundary(guest_cwd);
+            memcpy(output, guest_cwd, used);
+        }
+        pthread_mutex_unlock(&root_lock);
     }
     while (*input != '\0') {
         while (separator(*input))
@@ -475,9 +487,10 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
                 errno = EACCES;
                 return false;
             }
-            while (used != 0 && output[used - 1] != '/')
+            const size_t boundary = root_boundary(output);
+            while (used > boundary && output[used - 1] != '/')
                 --used;
-            if (used != 0)
+            if (used > boundary)
                 --used;
             continue;
         }
@@ -2305,6 +2318,12 @@ static bool path_breaks_guest_root(const char *source)
 {
     pthread_mutex_lock(&root_lock);
     bool blocked = guest_cwd[0] != '\0' && guest_path_prefix(guest_cwd, source);
+    /* A remembered drive-relative directory cannot be removed locally
+     * before the drive CWD is reset, even after switching to another drive. */
+    for (size_t i = 2; !blocked && i < 26; ++i)
+        if (guest_drive_cwds[i][0] != '\0' &&
+            guest_path_prefix(guest_drive_cwds[i], source))
+            blocked = true;
     for (size_t i = 0; !blocked && i < NT_USER_FOLDER_COUNT; ++i)
         if (folder_roots[i].active &&
             guest_path_prefix(nt_user_folders[i].relative, source))
