@@ -642,12 +642,64 @@ static void check_files(void)
         UINT32_C(0x80000000), 1u | 4u, NULL, 3u, 0x80u, 0);
     CHECK(delete_handle != UINTPTR_MAX);
     CHECK(nt_DeleteFileA("DATA/DELETE-ME.BIN") != 0);
+    /* DeleteFile is now pending while a cooperating open HANDLE remains.
+     * A new open is denied, even though the host inode still exists. */
+    CHECK(nt_CreateFileA("data/delete-me.bin", UINT32_C(0x80000000), 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
     char still_open = 0;
     uint32_t got_delete = 0;
     CHECK(nt_ReadFile(delete_handle, &still_open, 1, &got_delete, NULL) != 0 &&
           got_delete == 1 && still_open == 'X');
     CHECK(nt_CloseHandle(delete_handle) != 0);
     CHECK(nt_GetFileAttributesA("data/delete-me.bin") == UINT32_MAX);
+
+    /* FileDispositionInfo (class 4) requires DELETE on the original
+     * HANDLE; its pending bit is visible to other handles through the
+     * same per-inode registry. Clearing the disposition before the last
+     * close must preserve the real Linux file. */
+    void *disposition_stream = nt_fopen("data/disposition.bin", "wb");
+    CHECK(disposition_stream != NULL && nt_fwrite("Y", 1, 1, disposition_stream) == 1 &&
+          nt_fclose(disposition_stream) == 0);
+    const uintptr_t disposition_owner = nt_CreateFileA("data/disposition.bin",
+        UINT32_C(0x80010000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(disposition_owner != UINTPTR_MAX);
+    const uintptr_t disposition_reader = nt_CreateFileA("DATA/DISPOSITION.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(disposition_reader != UINTPTR_MAX);
+    const uint8_t pending_on = 1, pending_off = 0;
+    CHECK(!nt_SetFileInformationByHandle(disposition_reader, 4, &pending_on, 1) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(!nt_SetFileInformationByHandle(disposition_owner, 4, &pending_on, 0) &&
+          last_error() == NT_ERROR_INSUFFICIENT_BUFFER);
+    CHECK(nt_SetFileInformationByHandle(disposition_owner, 4, &pending_on, 1));
+    struct {
+        int64_t allocation, file_size;
+        uint32_t links;
+        uint8_t pending, directory;
+        uint8_t padding[2];
+    } standard_info = {0};
+    _Static_assert(sizeof(standard_info) == 24, "Windows FILE_STANDARD_INFO layout");
+    CHECK(nt_GetFileInformationByHandleEx(disposition_reader, 1,
+                                         &standard_info, sizeof(standard_info)) &&
+          standard_info.pending == 1 && standard_info.file_size == 1);
+    CHECK(nt_CreateFileA("data/disposition.bin", UINT32_C(0x80000000), 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_SetFileInformationByHandle(disposition_owner, 4, &pending_off, 1));
+    CHECK(nt_GetFileInformationByHandleEx(disposition_reader, 1,
+                                         &standard_info, sizeof(standard_info)) &&
+          standard_info.pending == 0);
+    const uintptr_t disposition_probe = nt_CreateFileA("data/disposition.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(disposition_probe != UINTPTR_MAX && nt_CloseHandle(disposition_probe));
+    CHECK(nt_SetFileInformationByHandle(disposition_owner, 4, &pending_on, 1));
+    CHECK(nt_CloseHandle(disposition_owner));
+    CHECK(nt_GetFileInformationByHandleEx(disposition_reader, 1,
+                                         &standard_info, sizeof(standard_info)) &&
+          standard_info.pending == 1);
+    CHECK(nt_CloseHandle(disposition_reader));
+    CHECK(nt_GetFileAttributesA("data/disposition.bin") == UINT32_MAX);
 
     /* Linux OFD advisory locks are backed by the actual inode and survive
      * temporary fd duplicates. Distinct Windows opens may conflict. */
