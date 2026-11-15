@@ -1978,7 +1978,7 @@ nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous)
     return suspend_guest_thread(handle, previous);
 }
 
-static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
+static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool alert)
 {
     pthread_mutex_lock(&wait_lock);
     struct waitable *thread = find_waitable(handle);
@@ -1995,9 +1995,13 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled)
             status = NT_STATUS_THREAD_IS_TERMINATING;
+        else if (alert && state->child_guest)
+            status = NT_STATUS_NOT_SUPPORTED; /* No cross-process alert broker. */
         else {
             if (previous != NULL)
                 *previous = state->suspend_count;
+            if (alert)
+                state->alerted = true; /* Set before lifting the startup gate. */
             if (state->suspend_count != 0) {
                 /* For a child created suspended, release the private fd5
                  * execution gate only on the final ResumeThread. Never
@@ -2027,7 +2031,7 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous)
 uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle)
 {
     uint32_t previous = UINT32_MAX;
-    const nt_status status = resume_guest_thread(handle, &previous);
+    const nt_status status = resume_guest_thread(handle, &previous, false);
     if (status != NT_STATUS_SUCCESS)
         nt_SetLastError(nt_runtime_nt_error(status));
     return status == NT_STATUS_SUCCESS ? previous : UINT32_MAX;
@@ -2035,7 +2039,15 @@ uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle)
 
 nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous)
 {
-    return resume_guest_thread(handle, previous);
+    return resume_guest_thread(handle, previous, false);
+}
+
+/* Serialize the alert flag and count decrement in one wait_lock critical
+ * section, including the final release of a CREATE_SUSPENDED startup gate.
+ * A child process has a different wait namespace and must be rejected. */
+nt_status NT_MS_ABI nt_NtAlertResumeThread(uintptr_t handle, uint32_t *previous)
+{
+    return resume_guest_thread(handle, previous, true);
 }
 
 /* A Win64 SetThreadAffinityMask operates on one 64-bit processor group.
