@@ -492,9 +492,15 @@ lease hasta su cierre real.
 `SetFileInformationByHandle(FileDispositionInfo=4)` admite el
 `BOOLEAN DeleteFile` (un byte) para un HANDLE abierto con acceso
 `DELETE` (0x10000). Es posible marcar y desmarcar la disposición desde
-el mismo HANDLE antes del cierre. `GetFileInformationByHandleEx` en
-`FileStandardInfo=1` refleja el bit `DeletePending` aunque el archivo
-siga enlazado en el host. La marca se guarda en el registro privado
+el mismo HANDLE antes del cierre. La ruta nativa
+`NtSetInformationFile(FileDispositionInformation=13)` consulta el
+mismo contrato, utilizando `IO_STATUS_BLOCK` y estados NTSTATUS.
+`CreateFileA/W` admite además `FILE_FLAG_DELETE_ON_CLOSE` (0x04000000)
+si el acceso solicitado contiene explícitamente `DELETE`: crea
+la disposición pendiente al abrir el archivo y la finaliza al último cierre.
+`GetFileInformationByHandleEx` en `FileStandardInfo=1` y
+`NtQueryInformationFile(FileStandardInformation=5)` reflejan el bit
+`DeletePending` aunque el archivo siga enlazado en el host. La marca se guarda en el registro privado
 `C:/:ntnative-file-leases/`; una caída del último proceso puede dejar
 una marca pendiente, y un acceso posterior del puente intenta
 finalizarla tras verificar que no queden leases.
