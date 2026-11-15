@@ -7,10 +7,12 @@
 /* Start-up file HANDLE inheritance between PE children. The source FDs
  * are private duplicates, pinned until posix_spawn has duplicated them.
  * The target uses a sealed manifest and the exact guest HANDLE values. */
-enum { NT_CHILD_FILE_LIMIT = 32, NT_CHILD_FILE_FD_BASE = 32 };
+enum { NT_CHILD_FILE_LIMIT = 32, NT_CHILD_FILE_FD_BASE = 32,
+       NT_CHILD_LEASE_FD_BASE = NT_CHILD_FILE_FD_BASE + NT_CHILD_FILE_LIMIT };
 struct nt_child_file_transfer {
     int manifest_fd;
     int source_fds[NT_CHILD_FILE_LIMIT];
+    int lease_fds[NT_CHILD_FILE_LIMIT]; /* OFD lease, or /dev/null for pipe HANDLE */
     size_t count;
 };
 uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer,

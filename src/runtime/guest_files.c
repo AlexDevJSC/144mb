@@ -1030,6 +1030,8 @@ struct guest_file {
     uintptr_t handle;
     int fd;
     unsigned int access, share;
+    /* Sidecar OFD lock. A dup shares one lease lifetime with its NT HANDLE. */
+    int share_lease_fd;
     uint32_t handle_flags;
     dev_t device;
     ino_t inode;
@@ -1047,6 +1049,149 @@ static bool same_file(const struct guest_file *file, const struct stat *info)
 {
     return file->owner != FREE_FILE && file->device == info->st_dev &&
            file->inode == info->st_ino;
+}
+
+/* File-sharing leases complement the per-process table. All NT workers
+ * bind the same private C: profile; each regular file's (device,inode)
+ * identifies one per-user registry file. flock serializes registry edits,
+ * and an OFD byte-range lock pins each live record. A crash releases the
+ * OFD lock without needing PID tracking or a privileged NT service.
+ *
+ * The registry is only coordination between participants in this bridge.
+ * It does not enforce access controls on external Linux applications.
+ * Deny access to the namespace from DOS paths in normalize_path so PE
+ * guests cannot accidentally overwrite its metadata through Win32.
+ */
+enum { SHARE_LEASE_LIMIT = 512, SHARE_LEASE_OFFSET = 4096 };
+struct share_lease_record { uint32_t access, share; };
+_Static_assert(sizeof(struct share_lease_record) == 8, "share lease record layout");
+
+static int open_share_registry(const struct stat *info)
+{
+    pthread_mutex_lock(&root_lock);
+    const int root = drive_root >= 0 ? fcntl(drive_root, F_DUPFD_CLOEXEC, 3) : -1;
+    pthread_mutex_unlock(&root_lock);
+    if (root < 0) {
+        errno = EACCES;
+        return -1;
+    }
+    if (mkdirat(root, ":ntnative-file-leases", 0700) < 0 && errno != EEXIST) {
+        const int error = errno;
+        close(root);
+        errno = error;
+        return -1;
+    }
+    const int directory = confined_open_raw(root, ":ntnative-file-leases",
+                                             O_RDONLY | O_DIRECTORY, 0);
+    const int directory_error = errno;
+    close(root);
+    if (directory < 0) {
+        errno = directory_error;
+        return -1;
+    }
+    struct stat dir_stat;
+    if (fstat(directory, &dir_stat) != 0 ||
+        dir_stat.st_uid != geteuid() || (dir_stat.st_mode & 077u) != 0) {
+        const int error = errno;
+        close(directory);
+        errno = error == 0 ? EACCES : error;
+        return -1;
+    }
+    char filename[64];
+    const int n = snprintf(filename, sizeof(filename), "%jx-%jx",
+                           (uintmax_t)info->st_dev, (uintmax_t)info->st_ino);
+    if (n < 0 || (size_t)n >= sizeof(filename)) {
+        close(directory);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    const int fd = confined_open_raw(directory, filename, O_RDWR | O_CREAT, 0600);
+    const int error = errno;
+    close(directory);
+    if (fd < 0) {
+        errno = error;
+        return -1;
+    }
+    struct stat lock_stat;
+    if (fstat(fd, &lock_stat) != 0 || !S_ISREG(lock_stat.st_mode) ||
+        lock_stat.st_uid != geteuid() || (lock_stat.st_mode & 077u) != 0) {
+        const int cause = errno;
+        close(fd);
+        errno = cause == 0 ? EACCES : cause;
+        return -1;
+    }
+    return fd;
+}
+
+static int acquire_share_registry_lease(const struct stat *info,
+                                        uint32_t access, uint32_t share)
+{
+    const int gate = open_share_registry(info);
+    if (gate < 0)
+        return -1;
+    int error = 0, lease = -1;
+    while (flock(gate, LOCK_EX) < 0) {
+        if (errno == EINTR)
+            continue;
+        error = errno;
+        break;
+    }
+    int free_slot = -1;
+    for (int i = 0; error == 0 && i < SHARE_LEASE_LIMIT; ++i) {
+        struct flock query = {
+            .l_type = F_WRLCK, .l_whence = SEEK_SET,
+            .l_start = SHARE_LEASE_OFFSET + i, .l_len = 1
+        };
+        if (fcntl(gate, F_OFD_GETLK, &query) < 0) {
+            error = errno;
+            break;
+        }
+        if (query.l_type == F_UNLCK) {
+            if (free_slot < 0)
+                free_slot = i;
+            continue;
+        }
+        struct share_lease_record record;
+        const ssize_t count = pread(gate, &record, sizeof(record),
+                                    (off_t)i * sizeof(record));
+        if (count != sizeof(record)) {
+            error = EIO;
+            break;
+        }
+        if ((access & ~record.share) != 0 || (record.access & ~share) != 0) {
+            error = EBUSY;
+            break;
+        }
+    }
+    if (error == 0 && free_slot < 0)
+        error = ENOSPC;
+    if (error == 0) {
+        char file_path[64];
+        snprintf(file_path, sizeof(file_path), "/proc/self/fd/%d", gate);
+        lease = open(file_path, O_RDWR | O_CLOEXEC);
+        if (lease < 0)
+            error = errno;
+        struct flock hold = {
+            .l_type = F_WRLCK, .l_whence = SEEK_SET,
+            .l_start = SHARE_LEASE_OFFSET + free_slot, .l_len = 1
+        };
+        if (!error && fcntl(lease, F_OFD_SETLK, &hold) < 0)
+            error = errno;
+        const struct share_lease_record record = {access, share};
+        if (!error && pwrite(gate, &record, sizeof(record),
+                             (off_t)free_slot * sizeof(record)) != sizeof(record))
+            error = errno ? errno : EIO;
+    }
+    if (flock(gate, LOCK_UN) < 0 && error == 0)
+        error = errno;
+    close(gate);
+    if (error != 0) {
+        if (lease >= 0)
+            close(lease);
+        errno = error;
+        return -1;
+    }
+    return lease;
 }
 
 /* Windows permits rename/unlink of an open file only when every existing
@@ -1206,12 +1351,19 @@ static int open_shared(struct guest_file *slot, int parent, const char *path,
     }
     if (error == 0 && !acquire_open_delete_lease(fd, share))
         error = errno;
+    int share_lease = -1;
+    if (error == 0) {
+        share_lease = acquire_share_registry_lease(&info, access, share);
+        if (share_lease < 0)
+            error = errno;
+    }
     if (error != 0) {
         close(fd);
         errno = error;
         return -1;
     }
     *slot = (struct guest_file){.fd = fd, .access = access, .share = share,
+                               .share_lease_fd = share_lease,
                                .device = info.st_dev, .inode = info.st_ino};
     return fd;
 }
@@ -1346,6 +1498,9 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
             if (truncate && !created && ftruncate(fd, 0) != 0) {
                 error = errno;
                 close(fd);
+                if (slot->share_lease_fd > 0)
+                    close(slot->share_lease_fd);
+                slot->share_lease_fd = 0;
             } else {
                 result = next_handle;
                 next_handle += 16;
@@ -1379,6 +1534,9 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
 static int close_file(struct guest_file *file)
 {
     const int result = close(file->fd);
+    if (file->share_lease_fd > 0)
+        close(file->share_lease_fd);
+    file->share_lease_fd = 0;
     free(file->path);
     file->path = NULL;
     file->owner = FREE_FILE;
@@ -1405,15 +1563,20 @@ static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
             status = NT_STATUS_NO_MEMORY;
         } else {
             const int fd = fcntl(original->fd, F_DUPFD_CLOEXEC, 0);
+            const int lease = fd >= 0 && original->share_lease_fd > 0 ?
+                fcntl(original->share_lease_fd, F_DUPFD_CLOEXEC, 3) : 0;
             char *path = original->path ? strdup(original->path) : NULL;
-            if (fd < 0 || (original->path && !path)) {
+            if (fd < 0 || lease < 0 || (original->path && !path)) {
                 if (fd >= 0)
                     close(fd);
+                if (lease > 0)
+                    close(lease);
                 free(path);
                 status = NT_STATUS_NO_MEMORY;
             } else {
                 *copy = *original;
                 copy->fd = fd;
+                copy->share_lease_fd = lease;
                 copy->path = path;
                 copy->handle = next_handle++;
                 copy->handle_flags = (options & 4u) ? original->handle_flags :
@@ -1434,7 +1597,7 @@ static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
 enum { INHERITED_FILE_MAGIC = 0x3434464eu }; /* "NF44" */
 struct child_file_record {
     uintptr_t handle;
-    uint32_t access, share, flags;
+    uint32_t access, share, flags, lease_present;
     char path[PATH_MAX];
 };
 struct child_file_manifest {
@@ -1449,13 +1612,18 @@ void nt_runtime_release_inherited_files(struct nt_child_file_transfer *transfer)
         return;
     if (transfer->manifest_fd >= 0)
         close(transfer->manifest_fd);
-    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i) {
         if (transfer->source_fds[i] >= 0)
             close(transfer->source_fds[i]);
+        if (transfer->lease_fds[i] >= 0)
+            close(transfer->lease_fds[i]);
+    }
     transfer->manifest_fd = -1;
     transfer->count = 0;
-    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i) {
         transfer->source_fds[i] = -1;
+        transfer->lease_fds[i] = -1;
+    }
 }
 
 uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_transfer *transfer,
@@ -1465,8 +1633,10 @@ uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_
         return NT_ERROR_INVALID_PARAMETER;
     transfer->manifest_fd = -1;
     transfer->count = 0;
-    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i) {
         transfer->source_fds[i] = -1;
+        transfer->lease_fds[i] = -1;
+    }
     /* Events/semaphores/threads cannot be serialized as Linux file FDs:
      * fail the process creation, don't silently lose an inherited HANDLE. */
     if (enabled && nt_runtime_has_inheritable_waitables())
@@ -1494,8 +1664,20 @@ uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_
                 break;
             }
             transfer->source_fds[index] = copy;
+            /* Retain the precise OFD lock description across exec. Reopening
+             * the registry would be a new file open and might conflict with
+             * a handle whose own parent denies its requested access. */
+            const int lease_copy = entry->share_lease_fd > 0 ?
+                fcntl(entry->share_lease_fd, F_DUPFD_CLOEXEC, 128) :
+                open("/dev/null", O_RDONLY | O_CLOEXEC);
+            if (lease_copy < 0) {
+                error = NT_ERROR_NOT_ENOUGH_MEMORY;
+                break;
+            }
+            transfer->lease_fds[index] = lease_copy;
             struct child_file_record *out = &manifest->files[index];
             out->handle = entry->handle;
+            out->lease_present = entry->share_lease_fd > 0;
             out->access = entry->access;
             out->share = entry->share;
             out->flags = entry->handle_flags;
@@ -1604,7 +1786,8 @@ static struct child_file_manifest *read_inherited_file_manifest(int fd)
             memchr(entry->path, '\0', sizeof(entry->path)) == NULL ||
             (entry->flags & ~(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE)) != 0 ||
             (entry->access & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
-            (entry->share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0) {
+            (entry->share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
+            entry->lease_present > 1) {
             free(manifest);
             return NULL;
         }
@@ -1646,16 +1829,27 @@ bool nt_runtime_restore_inherited_files(int manifest_fd)
     struct child_file_manifest *manifest = read_inherited_file_manifest(manifest_fd);
     if (manifest == NULL)
         return false;
-    int copies[NT_CHILD_FILE_LIMIT];
+    int copies[NT_CHILD_FILE_LIMIT], leases[NT_CHILD_FILE_LIMIT];
     char *names[NT_CHILD_FILE_LIMIT] = {0};
     struct stat stats[NT_CHILD_FILE_LIMIT];
-    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i)
+    for (size_t i = 0; i < NT_CHILD_FILE_LIMIT; ++i) {
         copies[i] = -1;
+        leases[i] = -1;
+    }
     bool valid = true;
     for (size_t i = 0; i < manifest->count; ++i) {
         const int source = NT_CHILD_FILE_FD_BASE + (int)i;
         if (fstat(source, &stats[i]) != 0 ||
             (copies[i] = fcntl(source, F_DUPFD_CLOEXEC, 0)) < 0) {
+            valid = false;
+            break;
+        }
+        const int inherited_lease = NT_CHILD_LEASE_FD_BASE + (int)i;
+        struct stat lease_info;
+        if (fstat(inherited_lease, &lease_info) != 0 ||
+            (manifest->files[i].lease_present &&
+             (!S_ISREG(lease_info.st_mode) ||
+              (leases[i] = fcntl(inherited_lease, F_DUPFD_CLOEXEC, 3)) < 0))) {
             valid = false;
             break;
         }
@@ -1685,10 +1879,12 @@ bool nt_runtime_restore_inherited_files(int manifest_fd)
                 *slot = (struct guest_file){
                     .owner = WIN_HANDLE, .handle = entry->handle, .fd = copies[i],
                     .access = entry->access, .share = entry->share,
+                    .share_lease_fd = leases[i] > 0 ? leases[i] : 0,
                     .handle_flags = entry->flags, .device = stats[i].st_dev,
                     .inode = stats[i].st_ino, .path = names[i]
                 };
                 copies[i] = -1;
+                leases[i] = -1;
                 names[i] = NULL;
                 if (entry->handle >= next_handle)
                     next_handle = entry->handle + 16;
@@ -1699,10 +1895,14 @@ bool nt_runtime_restore_inherited_files(int manifest_fd)
     for (size_t i = 0; i < manifest->count; ++i) {
         if (copies[i] >= 0)
             close(copies[i]);
+        if (leases[i] >= 0)
+            close(leases[i]);
         free(names[i]);
-        /* The original descriptor is a protocol resource, not a public
-         * host FD available to the guest after the table is constructed. */
+        /* Original protocol FDs are not exposed to the PE process after
+         * restoring the sealed HANDLE table. The surviving dup retains
+         * the OFD lease until the last inherited HANDLE is closed. */
         close(NT_CHILD_FILE_FD_BASE + (int)i);
+        close(NT_CHILD_LEASE_FD_BASE + (int)i);
     }
     free(manifest);
     return valid;
@@ -2479,9 +2679,15 @@ void *NT_MS_ABI nt_fopen(const char *input, const char *mode)
         if (stream == NULL) {
             error = errno;
             close(fd);
+            if (opened->share_lease_fd > 0)
+                close(opened->share_lease_fd);
+            opened->share_lease_fd = 0;
         } else if ((parsed.flags & O_TRUNC) != 0 && !created && ftruncate(fd, 0) != 0) {
             error = errno;
             fclose(stream->file);
+            if (opened->share_lease_fd > 0)
+                close(opened->share_lease_fd);
+            opened->share_lease_fd = 0;
             free(stream);
             stream = NULL;
         } else {
@@ -2590,6 +2796,9 @@ int NT_MS_ABI nt_fclose(void *handle)
     }
     if (fclose(stream->file) != 0)
         result = EOF;
+    if (stream->opened->share_lease_fd > 0)
+        close(stream->opened->share_lease_fd);
+    stream->opened->share_lease_fd = 0;
     free(stream->opened->path);
     stream->opened->path = NULL;
     stream->opened->owner = FREE_FILE;
