@@ -121,6 +121,97 @@ static void check_crossprocess_delete_sharing(void)
     }
 }
 
+/* A Windows current directory is active in *another* NT worker. The
+ * original local-only guest_cwd string cannot protect it: the kernel-held
+ * shared flock does, without requiring a privileged process supervisor. */
+static void check_crossprocess_current_directory(void)
+{
+    static const uint16_t occupied[] = {
+        'C', ':', '\\', 'a', 'c', 't', 'i', 'v', 'e', '-', 'c', 'w', 'd', 0
+    };
+    static const uint16_t root_path[] = {'C', ':', '\\', 0};
+    CHECK(nt_CreateDirectoryA("C:\\active-cwd", NULL));
+
+    int ready[2], gate[2];
+    CHECK(pipe(ready) == 0 && pipe(gate) == 0);
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        close(ready[0]);
+        close(gate[1]);
+        if (!nt_SetCurrentDirectoryW(occupied))
+            _exit(71);
+        char byte = 'R';
+        if (write(ready[1], &byte, 1) != 1)
+            _exit(72);
+        if (read(gate[0], &byte, 1) != 1)
+            _exit(73);
+        if (!nt_SetCurrentDirectoryW(root_path))
+            _exit(74);
+        _exit(0);
+    }
+    close(ready[1]);
+    close(gate[0]);
+    char byte = 0;
+    CHECK(read(ready[0], &byte, 1) == 1 && byte == 'R');
+    close(ready[0]);
+
+    CHECK(!nt_RemoveDirectoryA("C:\\ACTIVE-CWD") &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(!nt_MoveFileExA("C:\\active-cwd", "C:\\renamed-cwd", 0) &&
+          last_error() == NT_ERROR_SHARING_VIOLATION);
+    /* Other workers may share this directory as a CWD, as on Windows.
+     * The parent leaves it again before requesting deletion. */
+    CHECK(nt_SetCurrentDirectoryW(occupied));
+    CHECK(nt_SetCurrentDirectoryW(root_path));
+
+    byte = 'G';
+    CHECK(write(gate[1], &byte, 1) == 1);
+    close(gate[1]);
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child &&
+          WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(nt_RemoveDirectoryA("C:\\active-cwd"));
+}
+
+/* Windows retains per-drive working directories even after the process
+ * switches to another drive. Drive-relative D:name is NOT D:\\name. */
+static void check_drive_relative_cwds(void)
+{
+    static const uint16_t c_remembered[] = {
+        'C', ':', '\\', 'r', 'e', 'm', 'e', 'm', 'b', 'e', 'r', 'e', 'd', 0
+    };
+    static const uint16_t d_first[] = {
+        'D', ':', '\\', 'f', 'i', 'r', 's', 't', 0
+    };
+    static const uint16_t c_root[] = {'C', ':', '\\', 0};
+    char drive[] = "/tmp/nt-drive-cwd.XXXXXX";
+    CHECK(mkdtemp(drive) && nt_runtime_set_drive_root('D', drive));
+    CHECK(nt_CreateDirectoryA("C:\\remembered", NULL));
+    CHECK(nt_CreateDirectoryA("D:\\first", NULL));
+    CHECK(nt_SetCurrentDirectoryW(c_remembered));
+    CHECK(nt_SetCurrentDirectoryW(d_first));
+
+    /* C:relative retains the C: working directory even when D: is active. */
+    CHECK(nt_CreateDirectoryA("C:from-d", NULL));
+    CHECK(nt_RemoveDirectoryA("C:\\remembered\\from-d"));
+
+    CHECK(nt_CreateDirectoryA("D:inside", NULL));
+    CHECK(nt_SetCurrentDirectoryW(c_root));
+    /* D:relative still resolves to the previously remembered D:\\first. */
+    CHECK(nt_CreateDirectoryA("D:after-switch", NULL));
+    CHECK(nt_RemoveDirectoryA("D:\\first\\inside"));
+    CHECK(nt_RemoveDirectoryA("D:\\first\\after-switch"));
+    CHECK(nt_RemoveDirectoryA("D:\\first"));
+    CHECK(nt_RemoveDirectoryA("C:\\remembered"));
+
+    /* Revoke the D: grant; the same names must no longer resolve there. */
+    CHECK(nt_runtime_set_drive_root('D', NULL));
+    CHECK(!nt_CreateDirectoryA("D:orphan", NULL) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(rmdir(drive) == 0);
+}
+
 static void check_file_handles(void)
 {
     BOUND(KERNEL, "CreateFileA", nt_CreateFileA);
@@ -171,9 +262,13 @@ static void check_file_handles(void)
     CHECK(stream != NULL && nt_fread(bytes, 1, 1, stream) == 0 && nt_fclose(stream) == 0);
     CHECK(nt_DeleteFileA("scores"));
     check_crossprocess_delete_sharing();
+    check_crossprocess_current_directory();
+    check_drive_relative_cwds();
     CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS shared Win32 files and ownership from HANDLE to CRT fd to FILE");
     puts("PASS cross-process FILE_SHARE_DELETE using Linux flock leases");
+    puts("PASS cross-process active guest CWD blocks remove and rename");
+    puts("PASS independent C:/D: drive-relative working directory semantics");
 }
 
 static void check_user_folders(void)
