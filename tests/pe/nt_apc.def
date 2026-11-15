@@ -3,6 +3,7 @@ EXPORTS
     NtQueueApcThread
     NtQueueApcThreadEx
     NtAlertThread
+    NtAlertResumeThread
     NtWaitForSingleObject
     NtTestAlert
     NtDelayExecution
