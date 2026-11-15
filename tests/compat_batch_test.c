@@ -320,6 +320,31 @@ static void check_crt(void)
     puts("PASS C locale, numeric overflow, isolated environment and callback order");
 }
 
+struct copy_progress_test {
+    int64_t expected, last;
+    uint32_t switches, chunks, action;
+};
+
+static uint32_t NT_MS_ABI test_copy_progress(int64_t total, int64_t bytes,
+                                             int64_t stream_total, int64_t stream_bytes,
+                                             uint32_t stream_number, uint32_t reason,
+                                             uintptr_t source, uintptr_t destination,
+                                             void *user_data)
+{
+    struct copy_progress_test *test = user_data;
+    CHECK(test != NULL && total == test->expected && stream_total == total &&
+          bytes == stream_bytes && bytes >= test->last && bytes <= total &&
+          source != UINTPTR_MAX && destination != UINTPTR_MAX && stream_number == 1u);
+    test->last = bytes;
+    if (reason == 1u)
+        ++test->switches;
+    else {
+        CHECK(reason == 0u);
+        ++test->chunks;
+    }
+    return test->action;
+}
+
 static void check_files(void)
 {
     BOUND(KERNEL, CreateDirectoryA);
@@ -330,6 +355,8 @@ static void check_files(void)
     BOUND(KERNEL, MoveFileW);
     BOUND(KERNEL, CopyFileA);
     BOUND(KERNEL, CopyFileW);
+    BOUND(KERNEL, CopyFileExA);
+    BOUND(KERNEL, CopyFileExW);
     BOUND(KERNEL, SetFileAttributesA);
     BOUND(KERNEL, SetFileAttributesW);
     BOUND(KERNEL, GetFinalPathNameByHandleW);
@@ -600,6 +627,52 @@ static void check_files(void)
 
     raw = nt_fopen("data/target.txt", "wb");
     CHECK(raw != NULL && nt_fclose(raw) == 0);
+    /* CopyFileEx reuses the regular native copy and preserves its xattrs.
+     * Verify Microsoft x64 callback arguments and Windows abort semantics. */
+    struct copy_progress_test progress = {.expected = 6};
+    CHECK(nt_CopyFileExA("data/scores.txt", "data/copyex.txt",
+                          test_copy_progress, &progress, NULL, 0) &&
+          progress.switches == 1 && progress.chunks == 1 && progress.last == 6);
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex.txt",
+                           NULL, NULL, NULL, 1u) &&
+          last_error() == NT_ERROR_FILE_EXISTS);
+    CHECK(nt_DeleteFileA("data/copyex.txt"));
+
+    progress = (struct copy_progress_test){.expected = 6, .action = 3};
+    CHECK(nt_CopyFileExA("data/scores.txt", "data/copyex-quiet.bin",
+                          test_copy_progress, &progress, NULL, 0) &&
+          progress.switches == 1 && progress.chunks == 0 &&
+          nt_DeleteFileA("data/copyex-quiet.bin"));
+
+    progress = (struct copy_progress_test){.expected = 6, .action = 1};
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex-cancel.bin",
+                           test_copy_progress, &progress, NULL, 0) &&
+          last_error() == NT_ERROR_REQUEST_ABORTED &&
+          nt_GetFileAttributesA("data/copyex-cancel.bin") == UINT32_MAX);
+
+    progress = (struct copy_progress_test){.expected = 6, .action = 2};
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex-stop.bin",
+                           test_copy_progress, &progress, NULL, 0) &&
+          last_error() == NT_ERROR_REQUEST_ABORTED);
+    const uintptr_t stopped = nt_CreateFileA("data/copyex-stop.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    int64_t stopped_size = -1;
+    CHECK(stopped != UINTPTR_MAX && nt_GetFileSizeEx(stopped, &stopped_size) &&
+          stopped_size == 0 && nt_CloseHandle(stopped) &&
+          nt_DeleteFileA("data/copyex-stop.bin"));
+
+    int32_t cancel_flag = 1;
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex-preabort.bin",
+                           NULL, NULL, &cancel_flag, 0) &&
+          last_error() == NT_ERROR_REQUEST_ABORTED &&
+          nt_GetFileAttributesA("data/copyex-preabort.bin") == UINT32_MAX);
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex-badflag.bin",
+                           NULL, NULL, NULL, 2u) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
+    CHECK(nt_CopyFileExW(u"data/scores.txt", u"data/copyex-wide.bin",
+                          NULL, NULL, NULL, 1u) &&
+          nt_DeleteFileA("data/copyex-wide.bin"));
+
     /* Native copy does not invoke cp(1), create an alternate drive, or
      * duplicate files merely because the Windows caller changes case. */
     /* An open handle without delete sharing blocks the operation; an
