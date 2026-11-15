@@ -1917,9 +1917,18 @@ static int open_shared(struct guest_file *slot, int parent, const char *path,
      * registry admission. Never hand an unlinked or replaced inode
      * back to the guest as a successful new CreateFile. */
     struct stat current;
-    if (error == 0 && (fstatat(parent, path, &current, AT_SYMLINK_NOFOLLOW) != 0 ||
-                       current.st_dev != info.st_dev || current.st_ino != info.st_ino))
-        error = errno ? errno : EBUSY;
+    char verified_leaf[NAME_MAX + 1];
+    if (error == 0) {
+        const int found = resolve_name(parent, path, verified_leaf);
+        if (found < 0)
+            error = errno;
+        else if (!found)
+            error = ENOENT;
+        else if (fstatat(parent, verified_leaf, &current, AT_SYMLINK_NOFOLLOW) != 0)
+            error = errno;
+        else if (current.st_dev != info.st_dev || current.st_ino != info.st_ino)
+            error = EBUSY;
+    }
     if (error != 0) {
         if (share_lease >= 0)
             release_share_lease(&share_lease);
