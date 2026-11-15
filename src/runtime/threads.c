@@ -2065,6 +2065,9 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool 
             status = NT_STATUS_THREAD_IS_TERMINATING;
         else if (alert && state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED; /* No cross-process alert broker. */
+        else if (state->cooperative_pause_requested &&
+                 !state->cooperative_pause_acknowledged)
+            status = NT_STATUS_NOT_SUPPORTED; /* Suspension not confirmed yet. */
         else {
             if (previous != NULL)
                 *previous = state->suspend_count;
