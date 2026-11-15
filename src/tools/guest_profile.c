@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <unistd.h>
@@ -591,4 +592,284 @@ int nt_guest_drive_update(const char *config_home, const char *home,
     return grant_update(config_home, home, names, NT_GUEST_EXTRA_DRIVES,
                         names[letter - 'D'], directory,
                         NT_DRIVE_FILE, NT_DRIVE_LOCK, ".drives.tmp.");
+}
+
+
+/* Each UNC grant is an independently authorized ordinary Linux directory.
+ * This configuration is not an SMB discovery protocol and never grants
+ * access beyond the actual user/mount/SELinux permissions. */
+#define NT_UNC_FILE "unc.conf"
+#define NT_UNC_LOCK ".unc.lock"
+
+static bool unc_label_valid(const char *name)
+{
+    if (!name || !*name || name[0] == '.' || strlen(name) >= 64)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)name; *p; ++p)
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.'))
+            return false;
+    return true;
+}
+
+void nt_guest_unc_free(struct nt_guest_unc_grant grants[NT_GUEST_UNC_LIMIT], size_t count)
+{
+    if (!grants)
+        return;
+    if (count > NT_GUEST_UNC_LIMIT)
+        count = NT_GUEST_UNC_LIMIT;
+    for (size_t i = 0; i < count; ++i) {
+        free(grants[i].directory);
+        grants[i].directory = NULL;
+    }
+}
+
+/* Parse exactly one validated snapshot. Duplicate server/share keys are
+ * rejected rather than choosing an arbitrary mapping. */
+static int load_unc_config(int dir,
+                           struct nt_guest_unc_grant grants[NT_GUEST_UNC_LIMIT],
+                           size_t *count)
+{
+    *count = 0;
+    const int fd = openat(dir, NT_UNC_FILE, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return errno == ENOENT ? 0 : -1;
+    struct stat info;
+    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_uid != geteuid() || (info.st_mode & 0077) != 0 ||
+        info.st_size < 0 || info.st_size > NT_SHARE_MAX_BYTES) {
+        const int error = info.st_size > NT_SHARE_MAX_BYTES ? EFBIG : EACCES;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    char data[NT_SHARE_MAX_BYTES + 1];
+    size_t used = 0;
+    for (;;) {
+        const ssize_t got = read(fd, data + used, sizeof(data) - used);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got < 0 || used + (size_t)got > NT_SHARE_MAX_BYTES) {
+            const int error = got < 0 ? errno : EFBIG;
+            close(fd);
+            errno = error;
+            return -1;
+        }
+        if (got == 0)
+            break;
+        used += (size_t)got;
+    }
+    close(fd);
+    if (memchr(data, '\0', used) != NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    data[used] = '\0';
+    char *cursor = data;
+    while (*cursor) {
+        char *newline = strchr(cursor, '\n');
+        if (newline)
+            *newline = '\0';
+        if (*cursor) {
+            char *equals = strchr(cursor, '=');
+            char *slash = strchr(cursor, '/');
+            const size_t server_length = slash ? (size_t)(slash - cursor) : 0;
+            const size_t share_length = slash && equals && slash < equals ?
+                                         (size_t)(equals - slash - 1) : 0;
+            if (!equals || !slash || slash > equals ||
+                server_length == 0 || server_length >= 64 ||
+                share_length == 0 || share_length >= 64 ||
+                * (equals + 1) != '/' || strlen(equals + 1) >= PATH_MAX ||
+                *count == NT_GUEST_UNC_LIMIT) {
+                errno = EINVAL;
+                goto invalid;
+            }
+            struct nt_guest_unc_grant *grant = &grants[*count];
+            memcpy(grant->server, cursor, server_length);
+            grant->server[server_length] = '\0';
+            memcpy(grant->share, slash + 1, share_length);
+            grant->share[share_length] = '\0';
+            if (!unc_label_valid(grant->server) || !unc_label_valid(grant->share)) {
+                errno = EINVAL;
+                goto invalid;
+            }
+            for (const unsigned char *p = (const unsigned char *)(equals + 1); *p; ++p)
+                if (*p < 32 || *p == 127) {
+                    errno = EINVAL;
+                    goto invalid;
+                }
+            for (size_t i = 0; i < *count; ++i)
+                if (strcasecmp(grant->server, grants[i].server) == 0 &&
+                    strcasecmp(grant->share, grants[i].share) == 0) {
+                    errno = EINVAL;
+                    goto invalid;
+                }
+            grant->directory = strdup(equals + 1);
+            if (!grant->directory)
+                goto invalid;
+            ++*count;
+        }
+        if (!newline)
+            break;
+        cursor = newline + 1;
+    }
+    return 0;
+
+invalid:
+    {
+        const int error = errno;
+        nt_guest_unc_free(grants, *count + (*count < NT_GUEST_UNC_LIMIT));
+        *count = 0;
+        errno = error;
+        return -1;
+    }
+}
+
+int nt_guest_unc_load(const char *config_home, const char *home,
+                      struct nt_guest_unc_grant grants[NT_GUEST_UNC_LIMIT],
+                      size_t *count)
+{
+    if (!grants || !count) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(grants, 0, sizeof(*grants) * NT_GUEST_UNC_LIMIT);
+    *count = 0;
+    const int dir = share_config_directory(config_home, home, false);
+    if (dir < 0)
+        return errno == ENOENT ? 0 : -1;
+    const int result = load_unc_config(dir, grants, count);
+    const int error = errno;
+    close(dir);
+    errno = error;
+    return result;
+}
+
+int nt_guest_unc_update(const char *config_home, const char *home,
+                        const char *server, const char *share, const char *directory)
+{
+    if (!unc_label_valid(server) || !unc_label_valid(share)) {
+        errno = EINVAL;
+        return -1;
+    }
+    char canonical[PATH_MAX];
+    if (directory != NULL) {
+        int old = nt_open_shared_folder(directory, home);
+        if (old < 0)
+            return -1;
+        if (realpath(directory, canonical) == NULL) {
+            const int error = errno;
+            close(old);
+            errno = error;
+            return -1;
+        }
+        int fresh = nt_open_shared_folder(canonical, home);
+        struct stat before, after;
+        const bool same = fresh >= 0 && fstat(old, &before) == 0 &&
+                          fstat(fresh, &after) == 0 &&
+                          before.st_dev == after.st_dev && before.st_ino == after.st_ino;
+        close(old);
+        if (fresh >= 0)
+            close(fresh);
+        if (!same) {
+            errno = fresh < 0 ? EACCES : EAGAIN;
+            return -1;
+        }
+        if (strchr(canonical, '\n') || strchr(canonical, '\r')) {
+            errno = EINVAL;
+            return -1;
+        }
+        directory = canonical;
+    }
+    const int dir = share_config_directory(config_home, home, directory != NULL);
+    if (dir < 0)
+        return directory == NULL && errno == ENOENT ? 0 : -1;
+    const int lock = openat(dir, NT_UNC_LOCK,
+                            O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    struct stat info;
+    if (lock < 0 || fstat(lock, &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_uid != geteuid() || (info.st_mode & 0077) != 0 ||
+        flock(lock, LOCK_EX) != 0) {
+        const int error = lock < 0 ? errno : EACCES;
+        if (lock >= 0)
+            close(lock);
+        close(dir);
+        errno = error;
+        return -1;
+    }
+    struct nt_guest_unc_grant grants[NT_GUEST_UNC_LIMIT] = {0};
+    size_t count = 0;
+    int status = load_unc_config(dir, grants, &count);
+    size_t index = count;
+    if (status == 0) {
+        for (size_t i = 0; i < count; ++i)
+            if (strcasecmp(grants[i].server, server) == 0 &&
+                strcasecmp(grants[i].share, share) == 0) {
+                index = i;
+                break;
+            }
+        if (directory != NULL && index == count && count == NT_GUEST_UNC_LIMIT) {
+            errno = ENOSPC;
+            status = -1;
+        } else if (directory != NULL) {
+            if (index == count) {
+                ++count;
+                snprintf(grants[index].server, sizeof(grants[index].server), "%s", server);
+                snprintf(grants[index].share, sizeof(grants[index].share), "%s", share);
+            }
+            char *copy = strdup(directory);
+            if (!copy) {
+                status = -1;
+            } else {
+                free(grants[index].directory);
+                grants[index].directory = copy;
+            }
+        } else if (index < count) {
+            free(grants[index].directory);
+            memmove(&grants[index], &grants[index + 1],
+                    (count - index - 1) * sizeof(*grants));
+            --count;
+            memset(&grants[count], 0, sizeof(*grants));
+        }
+    }
+    char temp[64] = {0};
+    int fd = -1;
+    if (status == 0) {
+        for (unsigned int attempt = 0; attempt < 64; ++attempt) {
+            snprintf(temp, sizeof(temp), ".unc.tmp.%ld.%u", (long)getpid(), attempt);
+            fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+            if (fd >= 0 || errno != EEXIST)
+                break;
+        }
+        if (fd < 0)
+            status = -1;
+    }
+    for (size_t i = 0; status == 0 && i < count; ++i) {
+        if (!share_write_all(fd, grants[i].server, strlen(grants[i].server)) ||
+            !share_write_all(fd, "/", 1) ||
+            !share_write_all(fd, grants[i].share, strlen(grants[i].share)) ||
+            !share_write_all(fd, "=", 1) ||
+            !share_write_all(fd, grants[i].directory, strlen(grants[i].directory)) ||
+            !share_write_all(fd, "\n", 1))
+            status = -1;
+    }
+    if (fd >= 0) {
+        if (status == 0 && fsync(fd) != 0)
+            status = -1;
+        if (close(fd) != 0 && status == 0)
+            status = -1;
+        if (status == 0 && renameat(dir, temp, dir, NT_UNC_FILE) != 0)
+            status = -1;
+        if (status == 0 && fsync(dir) != 0)
+            status = -1;
+        if (status != 0)
+            (void)unlinkat(dir, temp, 0);
+    }
+    const int error = errno;
+    nt_guest_unc_free(grants, count);
+    (void)flock(lock, LOCK_UN);
+    close(lock);
+    close(dir);
+    errno = error;
+    return status;
 }
