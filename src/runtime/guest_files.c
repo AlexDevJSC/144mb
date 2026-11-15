@@ -1919,15 +1919,19 @@ static int open_shared(struct guest_file *slot, int parent, const char *path,
     struct stat current;
     char verified_leaf[NAME_MAX + 1];
     if (error == 0) {
-        const int found = resolve_name(parent, path, verified_leaf);
-        if (found < 0)
+        /* open_shared also serves CRT fopen of nested paths, so verify
+         * the complete case-insensitive directory walk, not just a
+         * single root-level leaf. */
+        const int verified_parent = open_parent(parent, path, verified_leaf);
+        if (verified_parent < 0) {
             error = errno;
-        else if (!found)
-            error = ENOENT;
-        else if (fstatat(parent, verified_leaf, &current, AT_SYMLINK_NOFOLLOW) != 0)
-            error = errno;
-        else if (current.st_dev != info.st_dev || current.st_ino != info.st_ino)
-            error = EBUSY;
+        } else {
+            if (fstatat(verified_parent, verified_leaf, &current, AT_SYMLINK_NOFOLLOW) != 0)
+                error = errno;
+            else if (current.st_dev != info.st_dev || current.st_ino != info.st_ino)
+                error = EBUSY;
+            close(verified_parent);
+        }
     }
     if (error != 0) {
         if (share_lease >= 0)
