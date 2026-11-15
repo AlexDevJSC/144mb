@@ -5,6 +5,8 @@
 
 __declspec(dllimport) LONG NTAPI NtSuspendThread(HANDLE, ULONG *);
 __declspec(dllimport) LONG NTAPI NtResumeThread(HANDLE, ULONG *);
+__declspec(dllimport) LONG NTAPI NtGetContextThread(HANDLE, PCONTEXT);
+__declspec(dllimport) LONG NTAPI NtSetContextThread(HANDLE, const CONTEXT *);
 __declspec(dllimport) LONG NTAPI NtCreateThreadEx(HANDLE *, ACCESS_MASK, void *,
     HANDLE, DWORD (WINAPI *)(void *), void *, ULONG, SIZE_T, SIZE_T, SIZE_T, void *);
 __declspec(dllimport) LONG NTAPI NtTerminateThread(HANDLE, LONG);
@@ -335,6 +337,44 @@ int import_fixture_entry(void)
             GetLastError() != 0x1234u ||
             WaitForSingleObject(parked, 0) != WAIT_TIMEOUT)
             return 63;
+
+        /* An acknowledged runtime checkpoint has a real CPU snapshot.
+         * The returned RIP belongs to the guest thread while parked in
+         * native wait code, not a fabricated PE instruction address. */
+        CONTEXT captured;
+        captured.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        SetLastError(0x1234u);
+        if (!GetThreadContext(parked, &captured) ||
+            GetLastError() != 0x1234u ||
+            captured.Rip == 0 || captured.Rsp == 0 ||
+            captured.ContextFlags != (CONTEXT_CONTROL | CONTEXT_INTEGER))
+            return 71;
+        CONTEXT native_ctx;
+        native_ctx.ContextFlags = CONTEXT_CONTROL;
+        if (NtGetContextThread(parked, &native_ctx) != 0 ||
+            native_ctx.Rip != captured.Rip ||
+            native_ctx.Rsp != captured.Rsp ||
+            native_ctx.ContextFlags != CONTEXT_CONTROL)
+            return 72;
+        HANDLE no_context = OpenThread(THREAD_QUERY_LIMITED_INFORMATION,
+                                      FALSE, GetThreadId(parked));
+        if (!no_context)
+            return 73;
+        native_ctx.ContextFlags = CONTEXT_CONTROL;
+        SetLastError(0x1235u);
+        if (GetThreadContext(no_context, &native_ctx) ||
+            GetLastError() != ERROR_ACCESS_DENIED ||
+            !CloseHandle(no_context))
+            return 74;
+        SetLastError(0x1234u);
+        if (NtSetContextThread(parked, &captured) != STATUS_NOT_SUPPORTED ||
+            GetLastError() != 0x1234u)
+            return 75;
+        SetLastError(0);
+        if (SetThreadContext(parked, &captured) ||
+            GetLastError() != ERROR_NOT_SUPPORTED)
+            return 76;
+
         if (SuspendThread(parked) != 1)
             return 64;
         if (!QueueUserAPC(cooperative_apc, parked, 0x59u))

@@ -70,6 +70,8 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
                                    void *parameter, uint32_t flags, uint32_t *thread_id);
 uint32_t NT_MS_ABI nt_SuspendThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);
+int32_t NT_MS_ABI nt_GetThreadContext(uintptr_t handle, struct nt_context64 *context);
+int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context64 *context);
 uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask);
 int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority);
 int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle);
