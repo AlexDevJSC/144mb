@@ -284,6 +284,8 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(SetInformationThread),
     NT_EXPORT(SuspendThread),
     NT_EXPORT(ResumeThread),
+    NT_EXPORT(GetContextThread),
+    NT_EXPORT(SetContextThread),
     NT_EXPORT(SetEvent),
     NT_EXPORT(ResetEvent),
     NT_EXPORT(WaitForSingleObject),
