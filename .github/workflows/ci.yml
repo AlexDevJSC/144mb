@@ -104,3 +104,11 @@ jobs:
           runuser -u nt-installer -- env "VK_DRIVER_FILES=$icd" "LD_LIBRARY_PATH=$dxc" \
             make -j2 -C "$install_home/share/nt-native-linux/source" "BUILD_DIR=build-fedora-$INSTALL_REVISION" \
             check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-memory check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-teb-tls
+
+      - name: Publish tested Fedora 45 RPM for download
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nt-native-linux-fedora45-${{ github.sha }}
+          path: build-rpm/RPMS/x86_64/*.rpm
+          if-no-files-found: error
+          retention-days: 14
