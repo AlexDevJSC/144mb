@@ -2006,7 +2006,7 @@ static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
         struct waitable *state = wait_state(thread);
         if (state->owner_pid != (uint32_t)getpid() && !state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED;
-        else if (state->signaled)
+        else if (state->signaled || state->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
         else if (state->suspend_count == MAXIMUM_SUSPEND_COUNT)
             status = NT_STATUS_SUSPEND_COUNT_EXCEEDED;
@@ -2086,7 +2086,7 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool 
         struct waitable *state = wait_state(thread);
         if (state->owner_pid != (uint32_t)getpid() && !state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED;
-        else if (state->signaled)
+        else if (state->signaled || state->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
         else if (alert && state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED; /* No cross-process alert broker. */
