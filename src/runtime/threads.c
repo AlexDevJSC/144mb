@@ -60,6 +60,9 @@ struct waitable {
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
     uint32_t suspend_count;
+    /* Running guest threads can only be paused at an explicit runtime
+     * alertable checkpoint, never through an asynchronous Linux signal. */
+    bool cooperative_pause_requested, cooperative_pause_acknowledged;
     uint32_t access;
     pthread_t host;
     uint32_t thread_id, exit_code, owner_pid;
@@ -226,6 +229,24 @@ static struct guest_apc *pop_apc_locked(void)
         apc->next = NULL;
     }
     return apc;
+}
+
+/* Called under wait_lock in the target thread at an alertable waiting
+ * boundary. The condition wait releases the mutex, so other guest threads
+ * can use handles, resume the target, and queue APCs without deadlocking.
+ * APCs are dispatched only after the final resume, by the original thread.
+ * This is NOT an asynchronous suspension of arbitrary guest instructions. */
+static void cooperative_suspend_checkpoint_locked(void)
+{
+    struct waitable *thread = running_thread;
+    if (thread == NULL || !thread->cooperative_pause_requested)
+        return;
+    thread->cooperative_pause_acknowledged = true;
+    pthread_cond_broadcast(&wait_changed);
+    while (thread->suspend_count != 0 && !thread->signaled)
+        pthread_cond_wait(&wait_changed, &wait_lock);
+    thread->cooperative_pause_acknowledged = false;
+    pthread_cond_broadcast(&wait_changed);
 }
 
 static void invoke_apc(struct guest_apc *apc)
@@ -400,6 +421,7 @@ nt_status nt_runtime_alertable_delay(const struct nt_wait_deadline *deadline)
     bool alerted = false;
     int error = 0;
     for (;;) {
+        cooperative_suspend_checkpoint_locked();
         apc = pop_apc_locked();
         if (apc != NULL)
             break;
@@ -1187,6 +1209,7 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
         int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
         for (;;) {
             if (alertable != 0) {
+                cooperative_suspend_checkpoint_locked();
                 apc = pop_apc_locked();
                 if (apc != NULL) {
                     result = NT_STATUS_USER_APC;
@@ -1895,7 +1918,7 @@ static nt_status terminate_suspended_thread(uintptr_t handle, uint32_t exit_code
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled || state->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
-        else if (state->suspend_count == 0)
+        else if (state->suspend_count == 0 || state->cooperative_pause_requested)
             status = NT_STATUS_NOT_SUPPORTED;
         else {
             state->terminate_at_start = true;
@@ -1950,14 +1973,49 @@ static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled)
             status = NT_STATUS_THREAD_IS_TERMINATING;
-        else if (state->suspend_count == 0)
-            status = NT_STATUS_NOT_SUPPORTED;
         else if (state->suspend_count == MAXIMUM_SUSPEND_COUNT)
             status = NT_STATUS_SUSPEND_COUNT_EXCEEDED;
-        else {
+        else if (state->suspend_count != 0) {
             if (previous != NULL)
                 *previous = state->suspend_count;
             ++state->suspend_count;
+        } else if (state->child_guest ||
+                   pthread_equal(state->host, pthread_self())) {
+            /* No cross-sandbox broker and no self-suspension. */
+            status = NT_STATUS_NOT_SUPPORTED;
+        } else {
+            /* A running thread may acknowledge a pause ONLY when it enters
+             * SleepEx/WaitFor*Ex with alertable=TRUE. If it stays in
+             * uninstrumented PE code or a non-alertable wait, rollback the
+             * request and return NOT_SUPPORTED without claiming success. */
+            struct timespec limit;
+            if (clock_gettime(CLOCK_MONOTONIC, &limit) != 0) {
+                status = NT_STATUS_UNSUCCESSFUL;
+            } else {
+                limit.tv_nsec += 500000000L;
+                if (limit.tv_nsec >= 1000000000L) {
+                    ++limit.tv_sec;
+                    limit.tv_nsec -= 1000000000L;
+                }
+                state->cooperative_pause_requested = true;
+                state->suspend_count = 1;
+                pthread_cond_broadcast(&wait_changed);
+                int error = 0;
+                while (!state->cooperative_pause_acknowledged &&
+                       !state->signaled && error == 0)
+                    error = pthread_cond_clockwait(&wait_changed, &wait_lock,
+                                                   CLOCK_MONOTONIC, &limit);
+                if (state->cooperative_pause_acknowledged) {
+                    if (previous != NULL)
+                        *previous = 0;
+                } else {
+                    state->cooperative_pause_requested = false;
+                    state->suspend_count = 0;
+                    pthread_cond_broadcast(&wait_changed);
+                    status = state->signaled ? NT_STATUS_THREAD_IS_TERMINATING :
+                             NT_STATUS_NOT_SUPPORTED;
+                }
+            }
         }
     }
     pthread_mutex_unlock(&wait_lock);
@@ -2019,6 +2077,8 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool 
                 }
                 if (status == NT_STATUS_SUCCESS) {
                     --state->suspend_count;
+                    if (state->suspend_count == 0)
+                        state->cooperative_pause_requested = false;
                     pthread_cond_broadcast(&wait_changed);
                 }
             }
