@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "compat.h"
 #include "winfile.h"
+#include "file_share_cleanup.h"
 #include "sync.h"
 
 #include <errno.h>
@@ -849,7 +850,8 @@ static void check_files(void)
     CHECK(folded != NULL && nt_fclose(folded) == 0);
     CHECK(nt_RemoveDirectoryA("data") == 0 && last_error() == NT_ERROR_DIR_NOT_EMPTY);
     CHECK(nt_DeleteFileA("DATA/TARGET.TXT") != 0 && nt_RemoveDirectoryA("DATA") != 0);
-    CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
+    CHECK(nt_runtime_set_file_root(NULL) &&
+          nt_test_cleanup_share_registry(root) && rmdir(root) == 0);
     puts("PASS scoped files, text and binary I/O, and denied paths");
 }
 
