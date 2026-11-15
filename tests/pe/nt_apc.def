@@ -1,5 +1,9 @@
 LIBRARY ntdll.dll
 EXPORTS
     NtQueueApcThread
+    NtQueueApcThreadEx
+    NtAlertThread
+    NtAlertResumeThread
+    NtWaitForSingleObject
     NtTestAlert
     NtDelayExecution

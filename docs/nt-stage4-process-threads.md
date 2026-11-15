@@ -124,3 +124,48 @@ Uso desde la raíz del repositorio: `bash scripts/fedora-check-stage4.sh`.
 Este número **no mide aceleración de CPU**. No se ha realizado ni demostrado una mejora 2× en rendimiento; «duplicar porcentaje» y «duplicar rendimiento» son objetivos distintos.
 
 La [CI del último commit de la rama de integración](https://github.com/AlexDevJSC/144mb/actions/runs/43341757354) terminó correctamente tanto en Linux como en Fedora RPM. Las pruebas omitidas por restricciones del entorno no constituyen validación. Permanecen necesarios tests diferenciales Windows y de estrés para justificar porcentajes mayores.
+
+## Fase 4 — alertas por hilo y variantes acotadas de APC (15-11-2026)
+
+Esta contribución modifica **solamente el núcleo de procesos/hilos**, no el
+filesystem ni el cargador. Añade el estado `alerted` por hilo NT canónico,
+independiente de su cola APC, protegido por `wait_lock` y señalado mediante
+`wait_changed`. El pseudo-handle del hilo principal mantiene su propio
+estado TLS (no se usa el PID/TID Linux como HANDLE).
+
+- `NtAlertThread` requiere `THREAD_ALERT` (0x4) sobre un HANDLE real
+  de hilo propio. Un alert consume su marca **una vez**, en
+  `NtTestAlert`, `NtDelayExecution(alertable=TRUE)` o una espera NT
+  alertable; devuelve `STATUS_ALERTED` (0x101). No despacha callbacks
+  arbitrarios ni interrumpe esperas no alertables.
+- `NtAlertResumeThread` combina bajo el mismo mutex el aviso y el
+  decremento del contador de suspensión de un hilo local. Permite que
+  una alerta anterior a la salida del `CREATE_SUSPENDED` no se pierda.
+  Para procesos hijo en otro sandbox no existe señalización cruzada:
+  devuelve `STATUS_NOT_SUPPORTED` en vez de simularla.
+- `NtQueueApcThreadEx` con reserva nula reutiliza la cola APC normal
+  y su control de `THREAD_SET_CONTEXT`. Las reservas especiales y
+  `SPECIAL_USER_APC` que requieren ejecutar fuera de esperas alertables
+  se rechazan con `STATUS_NOT_SUPPORTED`.
+- `QueueUserAPC2` con flags 0 conserva la semántica de `QueueUserAPC`.
+  El flag de APC especial se rechaza con `ERROR_NOT_SUPPORTED`; flags
+  desconocidos, con `ERROR_INVALID_PARAMETER`. No altera la cola.
+
+`tests/pe/apc_fixture.c` prueba importaciones Win64 con ABI Microsoft
+x64, conservación de `LastError` en NTDLL, derechos insuficientes,
+tipos de objeto, avisos antes y durante las esperas, no consumo en
+esperas no alertables, aborto tras el fin del hilo, `AlertResumeThread`
+y rechazo explícito de ejecución asíncrona insegura. Se ejecuta con
+`make check-pe-apc` desde la CI general Linux/Fedora/UBSan.
+
+**Continúa pendiente:** suspensión y terminación arbitrarias de hilos
+activos, captura/cambio de `CONTEXT` AMD64 de otros hilos, entrega de
+APC especial realmente asíncrona, objetos NT entre procesos, tokens,
+seguridad NT, planificador de grupos múltiples, comparación diferencial
+con Windows real y prueba aislada en un Fedora físico (la prueba
+Bubblewrap omitida NO cuenta como éxito).
+
+Contratos de referencia de las funciones: NtDoc basado en cabeceras
+phnt de System Informer (`NtAlertThread`, `NtAlertResumeThread`,
+`NtQueueApcThreadEx`); para los estados nativos de esperas, Microsoft
+Learn `KeDelayExecutionThread`. No se ha copiado código de terceros.
