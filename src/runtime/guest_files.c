@@ -32,6 +32,14 @@
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 static int drive_root = -1;
 static char guest_cwd[PATH_MAX];
+/* An open O_RDONLY directory fd carries a shared flock for the current
+ * Windows directory. Unlike a string-only CWD, it blocks another NT
+ * worker's exclusive DeleteFile/MoveFileEx guard on the same Linux inode. */
+static int guest_cwd_fd = -1;
+/* DOS keeps a separate current directory for each mounted drive. The
+ * visible process CWD may be D:, but C:relative must still resolve
+ * against the last C: directory, and vice versa. */
+static char guest_drive_cwds[26][PATH_MAX];
 static struct { int fd; bool active; } drive_roots[26];
 enum { UNC_LIMIT = 8, UNC_PART_MAX = 63 };
 static struct {
@@ -69,11 +77,21 @@ bool nt_runtime_set_drive_root(char letter, const char *directory)
         return false;
     pthread_mutex_lock(&root_lock);
     const size_t index = (size_t)(letter - 'A');
+    const int previous_cwd = guest_cwd[0] == letter && guest_cwd[1] == ':' ?
+                             guest_cwd_fd : -1;
+    if (previous_cwd >= 0) {
+        guest_cwd_fd = -1;
+        guest_cwd[0] = '\0';
+    }
+    /* A revoked/replaced grant must not keep the previous drive's CWD. */
+    guest_drive_cwds[index][0] = '\0';
     if (drive_roots[index].active)
         close(drive_roots[index].fd);
     drive_roots[index].fd = fd;
     drive_roots[index].active = fd >= 0;
     pthread_mutex_unlock(&root_lock);
+    if (previous_cwd >= 0)
+        close(previous_cwd);
     return true;
 }
 
@@ -125,6 +143,8 @@ bool nt_runtime_set_file_root(const char *directory)
         return false;
     pthread_mutex_lock(&root_lock);
     const int previous = drive_root;
+    const int previous_cwd = guest_cwd_fd;
+    guest_cwd_fd = -1;
     drive_root = next;
     for (size_t i = 0; i < 26; ++i)
         if (drive_roots[i].active) {
@@ -137,6 +157,7 @@ bool nt_runtime_set_file_root(const char *directory)
             unc_roots[i].active = false;
         }
     guest_cwd[0] = '\0';
+    memset(guest_drive_cwds, 0, sizeof(guest_drive_cwds));
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         if (folder_roots[i].active) {
             close(folder_roots[i].fd);
@@ -146,6 +167,8 @@ bool nt_runtime_set_file_root(const char *directory)
     pthread_mutex_unlock(&root_lock);
     if (previous >= 0)
         close(previous);
+    if (previous_cwd >= 0)
+        close(previous_cwd);
     return true;
 }
 
@@ -389,19 +412,22 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
                 errno = EACCES;
                 return false;
             }
-            if (!absolute) {
-                errno = EINVAL; /* No independent D: per-drive CWD yet. */
-                return false;
-            }
             output[0] = drive;
             output[1] = ':';
             used = 2;
+            if (!absolute) {
+                pthread_mutex_lock(&root_lock);
+                const char *remembered = guest_drive_cwds[drive - 'A'];
+                if (remembered[0] != '\0') {
+                    used = strlen(remembered);
+                    memcpy(output, remembered, used);
+                }
+                pthread_mutex_unlock(&root_lock);
+            }
         } else if (!absolute) {
             pthread_mutex_lock(&root_lock);
-            if (guest_cwd[0] != '@' && !(guest_cwd[1] == ':' && guest_cwd[0] != 'C')) {
-                used = strlen(guest_cwd);
-                memcpy(output, guest_cwd, used);
-            }
+            used = strlen(guest_drive_cwds['C' - 'A']);
+            memcpy(output, guest_drive_cwds['C' - 'A'], used);
             pthread_mutex_unlock(&root_lock);
         }
         input += 2;
@@ -2889,10 +2915,30 @@ int32_t NT_MS_ABI nt_SetCurrentDirectoryW(const uint16_t *path)
         nt_SetLastError(path_error(error, true));
         return 0;
     }
+    /* Linux flock locks belong to an open-file description, not to a PID.
+     * Keep this fd alive across child processes and prevent another NT
+     * worker from deleting/renaming the directory until CWD changes.
+     * A concurrent protected rename wins by holding LOCK_EX first. */
+    if (flock(fd, LOCK_SH | LOCK_NB) != 0) {
+        const int error = errno == EWOULDBLOCK || errno == EAGAIN ? EBUSY : errno;
+        close(fd);
+        nt_SetLastError(path_error(error, true));
+        return 0;
+    }
     pthread_mutex_lock(&root_lock);
+    const int previous = guest_cwd_fd;
+    guest_cwd_fd = fd;
     strcpy(guest_cwd, relative);
+    if (relative[0] == '\0') {
+        guest_drive_cwds['C' - 'A'][0] = '\0';
+    } else if (relative[0] >= 'D' && relative[0] <= 'Z' && relative[1] == ':') {
+        strcpy(guest_drive_cwds[relative[0] - 'A'], relative);
+    } else if (relative[0] != '@') {
+        strcpy(guest_drive_cwds['C' - 'A'], relative);
+    }
     pthread_mutex_unlock(&root_lock);
-    close(fd);
+    if (previous >= 0)
+        close(previous);
     return 1;
 }
 

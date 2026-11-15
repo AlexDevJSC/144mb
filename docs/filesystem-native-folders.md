@@ -99,8 +99,8 @@ propiedad/permisos, rutas canónicas, escritura atómica y revocación que
 
 Solo acepta D:–Z: y cada carpeta debe existir antes de ser concedida.
 Los recursos UNC siguen necesitando `--unc` por ejecución. No añade
-SMB, unidades automáticas, directorios relativos por unidad ni semántica
-NTFS de reparse. Los accesos siguen sujetos a permisos Linux y SELinux.
+SMB, unidades automáticas ni semántica NTFS de reparse. La sintaxis
+de directorio relativo por unidad se implementa más abajo. Los accesos siguen sujetos a permisos Linux y SELinux.
 
 Si xdg-user-dir devuelve el propio $HOME (carpeta XDG deshabilitada), el programa rechaza la autorización: no se permite compartir todo el directorio personal por accidente. Las carpetas deben existir y las rutas del host deben ser absolutas.
 
@@ -271,10 +271,15 @@ pe-isolated-run --drive D=/ruta/linux/autorizada \
 
 Los directorios de origen se abren con FD y se montan bajo
 `/guest-drives/D` y `/guest-unc/lab/assets`, no como
-accesos globales al anfitrión. La persistencia de las concesiones UNC, la
-administración avanzada de unidades y los directorios de trabajo
-independientes por unidad siguen pendientes (por ahora `D:relativa`
-se rechaza).
+accesos globales al anfitrión. La persistencia de las concesiones UNC y
+la administración avanzada de unidades siguen pendientes. Se conservan
+ahora **directorios de trabajo independientes por unidad** dentro del
+proceso: después de visitar `D:\\datos`, una ruta `D:archivo.txt`
+usa ese directorio incluso si el directorio activo pasó a `C:`. Del
+mismo modo, `C:archivo.txt` recuerda el último directorio de C:. Una
+concesión D: revocada o sustituida invalida su directorio recordado,
+y cambiar el perfil privado C: borra toda la caché. No se infiere
+ninguna unidad del host a partir de una ruta DOS.
 Los enlaces simbólicos Linux pueden identificarse como
 `FILE_ATTRIBUTE_REPARSE_POINT` sin abrir ni seguir su destino;
 todavía no se crean junctions/reparse points NTFS ni se soporta
@@ -352,6 +357,33 @@ por un broker de usuario sin privilegios o una estructura IPC segura;
 debe conservar el aislamiento de Bubblewrap, validar a sus clientes,
 recuperarse de caídas y no permitir que un invitado controle procesos host.
 
+## Directorio de trabajo activo protegido entre procesos
+
+Una carpeta establecida mediante `SetCurrentDirectoryA/W` queda abierta
+con un descriptor Linux y un `flock(LOCK_SH | LOCK_NB)` durante todo el
+tiempo que siga siendo el directorio de trabajo activo. Otro proceso que
+utilice el mismo runtime NT no puede completar `RemoveDirectoryA/W` ni
+`MoveFileExA/W` sobre ese mismo inodo: esas operaciones requieren un
+`flock(LOCK_EX | LOCK_NB)` independiente y responden
+`ERROR_SHARING_VIOLATION` si el directorio está ocupado. Dos procesos
+sí pueden mantener la misma carpeta como directorio de trabajo; el último
+cierre libera su bloqueo. El directorio anterior se libera después de un
+cambio válido. Sustituir el perfil privado libera los descriptores activos
+del proceso.
+
+Hay pruebas con dos procesos Linux distintos sincronizados mediante
+tuberías, y otras de `C:ruta` y `D:ruta` que comprueban la memoria por
+unidad y la revocación del montaje. No requiere etiquetar procesos con
+privilegios ni alterar el kernel.
+
+**Límites:** `flock` es *advisory*: un editor Linux ajeno al runtime puede
+ignorar los bloqueos y renombrar el directorio. La protección es por
+inodo activo y no impide necesariamente renombrar un ancestro del
+directorio de otro proceso; para controlar todo el árbol de rutas y las
+transiciones `delete-pending` se necesita un namespace/gestor de archivos
+entre procesos de mayor alcance. Las ACL NTFS, SMB real y el resto de
+las funciones avanzadas siguen fuera de este cambio.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
@@ -389,7 +421,7 @@ por completo la semántica NT de `delete-pending` entre procesos o sobre
 archivos reabiertos por nombre.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
-points, UNC de red y concesiones persistentes de unidades, compartición
+points, UNC de red y concesiones persistentes UNC, compartición
 y borrado NT entre procesos, E/S asíncrona NT/APC/IOCP completa, ACL y
 otras funciones de ficheros. La lectura de metadatos de un symlink y la
 asignación explícita de una carpeta host a un nombre UNC no equivalen a
