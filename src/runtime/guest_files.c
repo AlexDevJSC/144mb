@@ -5419,9 +5419,33 @@ int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind
                                               ticks(file_time(stat_info.st_ctim)), attr.attributes};
         memcpy(info, &basic, sizeof(basic));
     } else if (kind == 1) {
+        bool pending = stat_info.st_nlink == 0;
+        /* A delete-pending inode remains linked on Linux until its last
+         * cooperating Windows handle closes. StandardInfo reports the
+         * guest disposition rather than the host st_nlink shortcut. */
+        pthread_mutex_lock(&file_lock);
+        const struct guest_file *entry = find_handle(handle);
+        const int gate = entry != NULL && entry->share_lease_fd > 0 ?
+                         reopen_share_gate(entry->share_lease_fd) : -1;
+        pthread_mutex_unlock(&file_lock);
+        if (gate >= 0) {
+            int locked;
+            do {
+                locked = flock(gate, LOCK_SH);
+            } while (locked < 0 && errno == EINTR);
+            if (locked == 0) {
+                struct share_pending_record marker;
+                if (read_share_pending(gate, &marker) && marker.pending &&
+                    marker.dev == (uint64_t)stat_info.st_dev &&
+                    marker.ino == (uint64_t)stat_info.st_ino)
+                    pending = true;
+                (void)flock(gate, LOCK_UN);
+            }
+            close(gate);
+        }
         const struct standard_file_info standard_info = {
             (int64_t)((uint64_t)stat_info.st_blocks * 512), stat_info.st_size,
-            (uint32_t)stat_info.st_nlink, stat_info.st_nlink == 0, S_ISDIR(stat_info.st_mode) != 0
+            (uint32_t)stat_info.st_nlink, pending, S_ISDIR(stat_info.st_mode) != 0
         };
         memcpy(info, &standard_info, sizeof(standard_info));
     } else {
