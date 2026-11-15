@@ -4141,8 +4141,42 @@ int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved,
  * as CreateFile. In particular, OPEN_ALWAYS does not truncate until
  * both descriptors are safely opened and the source/destination inodes
  * have been checked for identity. */
-int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
-                              int32_t fail_if_exists)
+/* CopyFileEx shares exactly the same confined real-Linux file traversal as
+ * CopyFile. The callback is a Windows guest function (ms_abi) and must not
+ * run with file_lock held: it may invoke Win32 file APIs recursively. */
+static bool copy_progress(nt_copy_progress_routine routine, void *context,
+                          const int32_t *cancel, int64_t total, int64_t done,
+                          uintptr_t from, uintptr_t to, uint32_t reason,
+                          bool *quiet, bool *leave_partial, uint32_t *error)
+{
+    if (cancel && *cancel) {
+        *error = NT_ERROR_REQUEST_ABORTED;
+        return false;
+    }
+    if (!routine || *quiet)
+        return true;
+    const uint32_t action = routine(total, done, total, done, 1, reason, from, to, context);
+    if (cancel && *cancel) {
+        *error = NT_ERROR_REQUEST_ABORTED;
+        return false;
+    }
+    if (action == 0)
+        return true; /* PROGRESS_CONTINUE */
+    if (action == 3) {
+        *quiet = true;
+        return true; /* PROGRESS_QUIET */
+    }
+    if (action == 2)
+        *leave_partial = true; /* PROGRESS_STOP keeps partial output. */
+    *error = action == 1 || action == 2 ? NT_ERROR_REQUEST_ABORTED :
+             NT_ERROR_INVALID_PARAMETER;
+    return false;
+}
+
+static int32_t copy_file_common(const char *source, const char *destination,
+                                int32_t fail_if_exists,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel)
 {
     const uint32_t generic_read = UINT32_C(0x80000000);
     const uint32_t generic_write = UINT32_C(0x40000000);
@@ -4188,6 +4222,7 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
 
     uint32_t error = NT_ERROR_SUCCESS;
     int32_t success = 0;
+    bool quiet = false, leave_partial = false;
     unsigned char *buffer = NULL;
     if (identical) {
         error = NT_ERROR_ACCESS_DENIED;
@@ -4197,8 +4232,14 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
         error = nt_GetLastError();
     } else {
         bool finished = false;
-        for (;;) {
-            uint32_t received = 0;
+        int64_t transferred = 0;
+        /* First switch to the one regular-file data stream. Subsequent
+         * progress events report committed bytes after each write chunk. */
+        if (copy_progress(progress, context, cancel, source_info.st_size,
+                          transferred, from, to, 1u, &quiet,
+                          &leave_partial, &error)) {
+            for (;;) {
+                uint32_t received = 0;
             if (!nt_ReadFile(from, buffer, 64u * 1024u, &received, NULL)) {
                 error = nt_GetLastError();
                 break;
@@ -4220,10 +4261,16 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
                 }
                 position += written;
             }
-            if (error != NT_ERROR_SUCCESS)
-                break;
+                if (error != NT_ERROR_SUCCESS)
+                    break;
+                transferred += received;
+                if (!copy_progress(progress, context, cancel, source_info.st_size,
+                                   transferred, from, to, 0u, &quiet,
+                                   &leave_partial, &error))
+                    break;
+            }
         }
-        if (finished) {
+        if (finished && error == NT_ERROR_SUCCESS) {
             const int output_fd = duplicate_handle(to, FILE_WRITE);
             if (output_fd < 0) {
                 error = path_error(errno, false);
@@ -4263,11 +4310,45 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
     }
     if (!success) {
         /* A newly created partial destination is not a valid copy. */
-        if (created)
+        if (created && !leave_partial)
             nt_DeleteFileA(destination);
         nt_SetLastError(error);
     }
     return success;
+}
+
+int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
+                               int32_t fail_if_exists)
+{
+    return copy_file_common(source, destination, fail_if_exists,
+                            NULL, NULL, NULL);
+}
+
+int32_t NT_MS_ABI nt_CopyFileExA(const char *source, const char *destination,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel, uint32_t flags)
+{
+    /* COPY_FILE_FAIL_IF_EXISTS is implemented; all other flags have
+     * different NT semantics and must not be silently ignored. */
+    if ((flags & ~1u) != 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (cancel && *cancel) {
+        nt_SetLastError(NT_ERROR_REQUEST_ABORTED);
+        return 0;
+    }
+    return copy_file_common(source, destination, (flags & 1u) != 0,
+                            progress, context, cancel);
+}
+
+int32_t NT_MS_ABI nt_CopyFileExW(const uint16_t *source, const uint16_t *destination,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel, uint32_t flags)
+{
+    char from[PATH_MAX], to[PATH_MAX];
+    return wide_path(source, from) && wide_path(destination, to) &&
+           nt_CopyFileExA(from, to, progress, context, cancel, flags);
 }
 
 /* Native NTDLL file operations use the same guest HANDLE table and the
