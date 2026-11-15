@@ -339,3 +339,16 @@ Contratos de referencia de las funciones: NtDoc basado en cabeceras
 phnt de System Informer (`NtAlertThread`, `NtAlertResumeThread`,
 `NtQueueApcThreadEx`); para los estados nativos de esperas, Microsoft
 Learn `KeDelayExecutionThread`. No se ha copiado código de terceros.
+
+## Suspensión segura en esperas alertables
+
+El puente de hilos ahora negocia una suspensión con el hilo destino
+en el mismo mutex de objetos NT. Solo devuelve éxito para un hilo
+**ya arrancado** después de que ese hilo haya reconocido un punto
+seguro de espera alertable y se haya estacionado. La solicitud sin
+confirmación vence a los 500 ms y se revierte. Las esperas no
+alertables y el código invitado sin puntos cooperativos conservan
+`STATUS_NOT_SUPPORTED`, en vez de simular suspensión arbitraria.
+La reanudación y el despacho de APC mantienen el orden del hilo de
+destino; no se usan señales de Linux ni cancelación asíncrona.
+Detalles, límites y pruebas en `nt-stage4-process-threads.md`.
