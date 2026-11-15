@@ -1150,6 +1150,14 @@ static int open_share_registry(const struct stat *info)
  * treating a different process' D: alias as this process' D: would risk
  * unlinking an unrelated Linux file, so they deliberately retain the
  * older eager-delete contract. */
+/* The runtime's canonical C: spelling omits a drive prefix entirely;
+ * D:-Z: and UNC paths retain their reserved root marker. */
+static bool private_c_path(const char *path)
+{
+    return path != NULL && *path != '\0' &&
+           path[0] != '@' && !(path[0] >= 'D' && path[0] <= 'Z' && path[1] == ':');
+}
+
 enum { SHARE_PENDING_OFFSET = 8192, SHARE_PENDING_MAGIC = 0x44504e54u };
 struct share_pending_record {
     uint32_t magic, pending;
@@ -1184,8 +1192,7 @@ static bool set_share_pending(int gate, const struct stat *file, const char *pat
         errno = EACCES;
         return false;
     }
-    if (path == NULL || strncmp(path, "C:", 2) != 0 ||
-        strlen(path) >= sizeof(record.path)) {
+    if (!private_c_path(path) || strlen(path) >= sizeof(record.path)) {
         errno = EINVAL;
         return false;
     }
@@ -1262,7 +1269,7 @@ static bool finalize_share_pending_locked(int gate,
 {
     if (!pending->pending)
         return true;
-    if (strncmp(pending->path, "C:", 2) != 0) {
+    if (!private_c_path(pending->path)) {
         errno = EIO;
         return false;
     }
@@ -2733,7 +2740,7 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
 static int remove_file_or_defer(int parent, const char *leaf, const char *dos_path,
                                 const struct stat *target)
 {
-    if (strncmp(dos_path, "C:", 2) != 0 || !S_ISREG(target->st_mode))
+    if (!private_c_path(dos_path) || !S_ISREG(target->st_mode))
         return unlinkat(parent, leaf, 0);
     int gate = open_share_registry(target);
     if (gate < 0)
@@ -5590,8 +5597,7 @@ static int32_t set_file_disposition(uintptr_t handle, bool deleting)
     struct guest_file *file = find_handle(handle);
     int error = file == NULL ? EBADF :
                 (file->access & FILE_DELETE) == 0 ? EACCES : 0;
-    if (error == 0 && (file->path == NULL ||
-                       strncmp(file->path, "C:", 2) != 0 ||
+    if (error == 0 && (!private_c_path(file->path) ||
                        file->share_lease_fd <= 0))
         error = ENOTSUP;
     struct stat file_info;
