@@ -98,9 +98,33 @@ propiedad/permisos, rutas canónicas, escritura atómica y revocación que
 `shares.conf` no dejan de leer las carpetas habituales.
 
 Solo acepta D:–Z: y cada carpeta debe existir antes de ser concedida.
-Los recursos UNC siguen necesitando `--unc` por ejecución. No añade
-SMB, unidades automáticas ni semántica NTFS de reparse. La sintaxis
-de directorio relativo por unidad se implementa más abajo. Los accesos siguen sujetos a permisos Linux y SELinux.
+Las rutas UNC también pueden recordarse explícitamente sin activar SMB:
+
+~~~sh
+mkdir -p "$HOME/Windows-drives/UNC-lab-assets"
+pe-isolated-run --remember-unc "lab/assets=$HOME/Windows-drives/UNC-lab-assets"
+pe-isolated-run /ruta/juego.exe
+pe-isolated-run --unc "lab/assets=/ruta/alternativa" -- /ruta/juego.exe
+pe-isolated-run --forget-unc lab/assets
+~~~
+
+La autorización UNC se almacena de forma privada en `unc.conf`, admite
+hasta ocho pares `servidor/recurso` y respeta las mismas reglas de rutas
+canónicas, revocación, permisos Linux/SELinux, bloqueo y escritura atómica
+que el resto de concesiones. Un `--unc` explícito tiene prioridad en ese
+lanzamiento; la asociación no descubre servidores ni crea conexiones SMB.
+Una ruta UNC sigue representando un directorio Linux **previamente autorizado**.
+
+La resolución de rutas ahora recuerda un directorio actual por cada unidad
+DOS autorizada: al cambiar a `D:\Juegos` y después volver a `C:\`,
+una solicitud `D:datos.bin` se resuelve bajo el directorio recordado para
+`D:`. Las rutas comenzadas por una sola barra utilizan la unidad activa.
+El borrado o renombrado del directorio recordado se deniega mientras la
+asociación siga vigente. Los datos continúan en los directorios Linux
+originales, sin volúmenes emulados ni copias.
+
+Siguen fuera de alcance SMB automático y la semántica NTFS completa de
+reparse, ACL y directorios compartidos. Los accesos siguen sujetos a permisos Linux y SELinux.
 
 Si xdg-user-dir devuelve el propio $HOME (carpeta XDG deshabilitada), el programa rechaza la autorización: no se permite compartir todo el directorio personal por accidente. Las carpetas deben existir y las rutas del host deben ser absolutas.
 
@@ -271,15 +295,7 @@ pe-isolated-run --drive D=/ruta/linux/autorizada \
 
 Los directorios de origen se abren con FD y se montan bajo
 `/guest-drives/D` y `/guest-unc/lab/assets`, no como
-accesos globales al anfitrión. La persistencia de las concesiones UNC y
-la administración avanzada de unidades siguen pendientes. Se conservan
-ahora **directorios de trabajo independientes por unidad** dentro del
-proceso: después de visitar `D:\\datos`, una ruta `D:archivo.txt`
-usa ese directorio incluso si el directorio activo pasó a `C:`. Del
-mismo modo, `C:archivo.txt` recuerda el último directorio de C:. Una
-concesión D: revocada o sustituida invalida su directorio recordado,
-y cambiar el perfil privado C: borra toda la caché. No se infiere
-ninguna unidad del host a partir de una ruta DOS.
+accesos globales al anfitrión. Las concesiones UNC y las unidades D:–Z: pueden recordarse desde el lanzador; los directorios de trabajo independientes por unidad ya se mantienen durante la vida del proceso. La gestión avanzada del namespace, la enumeración de montajes SMB y los enlaces NTFS siguen pendientes.
 Los enlaces simbólicos Linux pueden identificarse como
 `FILE_ATTRIBUTE_REPARSE_POINT` sin abrir ni seguir su destino;
 todavía no se crean junctions/reparse points NTFS ni se soporta
@@ -288,7 +304,10 @@ todavía no se crean junctions/reparse points NTFS ni se soporta
 **E/S con offset y señalización.** `ReadFile` y `WriteFile` admiten
 `OVERLAPPED` para operaciones de archivo con offset explícito. Los
 handles abiertos con `FILE_FLAG_OVERLAPPED` despachan la operación
-a un **trabajador real** con cola limitada a 32 solicitudes; se devuelve
+a un grupo de **hasta cuatro trabajadores Linux** con cola limitada a
+32 solicitudes. Las operaciones de un mismo HANDLE se ejecutan en orden,
+mientras que las pertenecientes a handles distintos pueden completarse
+en paralelo; se devuelve
 `ERROR_IO_PENDING` y `GetOverlappedResult` permite esperar o
 consultar su finalización. Se conserva el offset independiente del puntero
 de archivo, se duplica el descriptor mientras la operación está viva y
@@ -306,10 +325,33 @@ solicitud que el trabajador ya empezó no se cancela mediante `pthread_cancel`
 ni se reporta falsamente como cancelada: devuelve `ERROR_NOT_FOUND`
 cuando no hay solicitudes en cola para ese criterio.
 
-Siguen pendientes IOCP, APC asíncronas NT, cancelación real de operaciones
-ya despachadas, varios trabajadores y las semánticas completas de
-cierre, señalización y desvinculación de handles/eventos. La cancelación
-de cola no implica que este bloque esté completo.
+Se ofrece `GetOverlappedResultEx` con espera no alertable y tiempo máximo
+configurable: devuelve `ERROR_IO_INCOMPLETE` para espera cero y
+`WAIT_TIMEOUT` al agotarse un plazo distinto de cero, sin detener
+la operación en curso. Utiliza la condición del trabajador y el reloj
+real del kernel Linux; no ejecuta bucles de sondeo. La variante
+`bAlertable=TRUE` se rechaza expresamente hasta disponer del comportamiento
+de APC de Windows.
+
+**IOCP básico por proceso.** Ya se ofrecen `CreateIoCompletionPort`,
+`PostQueuedCompletionStatus` y `GetQueuedCompletionStatus`. Un programa
+puede crear una cola, asociar un HANDLE de archivo abierto con
+`FILE_FLAG_OVERLAPPED`, publicar paquetes manuales y recuperar resultados
+de E/S, incluyendo la clave de finalización, bytes transferidos, dirección
+de `OVERLAPPED` y errores de solicitudes canceladas. Los tiempos de espera
+y el cierre del puerto se gestionan sin privilegios del anfitrión.
+El bit menos significativo del evento de `OVERLAPPED` suprime el paquete
+en IOCP, sin suprimir la finalización propia de la operación.
+
+Esta entrega **no ofrece toda la semántica de IOCP de Windows**:
+el máximo actual son 16 puertos con 256 paquetes cada uno; no se aplica
+la limitación de hilos de `NumberOfConcurrentThreads`, ni están
+`GetQueuedCompletionStatusEx`, asociaciones con sockets y tuberías,
+propiedad de puertos con HANDLEs heredados/duplicados, notificaciones
+APC o cancelación garantizada de operaciones Linux ya despachadas.
+Las operaciones del mismo HANDLE se serializan deliberadamente.
+Las semánticas completas de cierre, señalización y desvinculación de
+handles/eventos continúan pendientes.
 
 ## Coordinación de borrados entre procesos NT (extensión incremental)
 
@@ -421,9 +463,12 @@ por completo la semántica NT de `delete-pending` entre procesos o sobre
 archivos reabiertos por nombre.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
-points, UNC de red y concesiones persistentes UNC, compartición
-y borrado NT entre procesos, E/S asíncrona NT/APC/IOCP completa, ACL y
-otras funciones de ficheros. La lectura de metadatos de un symlink y la
+points, conexiones UNC/SMB de red reales, compartición `FILE_SHARE_READ`
+y `FILE_SHARE_WRITE` entre procesos, el namespace `delete-pending` de NT,
+E/S NT/APC/IOCP completa, cancelación de operaciones ya iniciadas, ACL
+NTFS y otras funciones avanzadas. La persistencia de las concesiones de
+unidades y recursos UNC y los directorios actuales por unidad sí están
+implementados en este cambio; esto no equivale a soporte SMB ni NTFS total. La lectura de metadatos de un symlink y la
 asignación explícita de una carpeta host a un nombre UNC no equivalen a
 esas funcionalidades avanzadas. No se modifica el kernel NT, el cargador
 PE ni la red.
