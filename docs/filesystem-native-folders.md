@@ -422,9 +422,12 @@ por completo la semántica NT de `delete-pending` entre procesos o sobre
 archivos reabiertos por nombre.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
-points, UNC de red y concesiones persistentes de unidades, compartición
-y borrado NT entre procesos, E/S asíncrona NT/APC/IOCP completa, ACL y
-otras funciones de ficheros. La lectura de metadatos de un symlink y la
+points, conexiones UNC/SMB de red reales, compartición `FILE_SHARE_READ`
+y `FILE_SHARE_WRITE` entre procesos, el namespace `delete-pending` de NT,
+E/S NT/APC/IOCP completa, cancelación de operaciones ya iniciadas, ACL
+NTFS y otras funciones avanzadas. La persistencia de las concesiones de
+unidades y recursos UNC y los directorios actuales por unidad sí están
+implementados en este cambio; esto no equivale a soporte SMB ni NTFS total. La lectura de metadatos de un symlink y la
 asignación explícita de una carpeta host a un nombre UNC no equivalen a
 esas funcionalidades avanzadas. No se modifica el kernel NT, el cargador
 PE ni la red.
