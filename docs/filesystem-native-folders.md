@@ -119,8 +119,9 @@ La resolución de rutas ahora recuerda un directorio actual por cada unidad
 DOS autorizada: al cambiar a `D:\Juegos` y después volver a `C:\`,
 una solicitud `D:datos.bin` se resuelve bajo el directorio recordado para
 `D:`. Las rutas comenzadas por una sola barra utilizan la unidad activa.
-El borrado o renombrado del directorio recordado se deniega mientras la
-asociación siga vigente. Los datos continúan en los directorios Linux
+El directorio de trabajo **activo** se protege contra borrado y
+renombrado; los directorios recordados de unidades **inactivas** son solo
+rutas y no mantienen por sí mismos un bloqueo del inodo. Los datos continúan en los directorios Linux
 originales, sin volúmenes emulados ni copias.
 
 Siguen fuera de alcance SMB automático y la semántica NTFS completa de
