@@ -32,6 +32,10 @@
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 static int drive_root = -1;
 static char guest_cwd[PATH_MAX];
+/* The active directory belongs to the process. Windows additionally remembers
+ * the most recent directory for every authorized DOS drive. Both values are
+ * guarded by root_lock and never contain Linux host paths. */
+static char drive_cwds[26][PATH_MAX];
 static struct { int fd; bool active; } drive_roots[26];
 enum { UNC_LIMIT = 8, UNC_PART_MAX = 63 };
 static struct {
@@ -73,6 +77,7 @@ bool nt_runtime_set_drive_root(char letter, const char *directory)
         close(drive_roots[index].fd);
     drive_roots[index].fd = fd;
     drive_roots[index].active = fd >= 0;
+    drive_cwds[index][0] = '\0';
     pthread_mutex_unlock(&root_lock);
     return true;
 }
@@ -137,6 +142,7 @@ bool nt_runtime_set_file_root(const char *directory)
             unc_roots[i].active = false;
         }
     guest_cwd[0] = '\0';
+    memset(drive_cwds, 0, sizeof(drive_cwds));
     for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
         if (folder_roots[i].active) {
             close(folder_roots[i].fd);
@@ -389,19 +395,21 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
                 errno = EACCES;
                 return false;
             }
-            if (!absolute) {
-                errno = EINVAL; /* No independent D: per-drive CWD yet. */
-                return false;
+            pthread_mutex_lock(&root_lock);
+            const char *directory = drive_cwds[drive - 'A'];
+            if (!absolute && directory[0]) {
+                used = strlen(directory);
+                memcpy(output, directory, used);
+            } else {
+                output[0] = drive;
+                output[1] = ':';
+                used = 2;
             }
-            output[0] = drive;
-            output[1] = ':';
-            used = 2;
+            pthread_mutex_unlock(&root_lock);
         } else if (!absolute) {
             pthread_mutex_lock(&root_lock);
-            if (guest_cwd[0] != '@' && !(guest_cwd[1] == ':' && guest_cwd[0] != 'C')) {
-                used = strlen(guest_cwd);
-                memcpy(output, guest_cwd, used);
-            }
+            used = strlen(drive_cwds['C' - 'A']);
+            memcpy(output, drive_cwds['C' - 'A'], used);
             pthread_mutex_unlock(&root_lock);
         }
         input += 2;
@@ -412,6 +420,20 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         pthread_mutex_lock(&root_lock);
         used = strlen(guest_cwd);
         memcpy(output, guest_cwd, used);
+        pthread_mutex_unlock(&root_lock);
+    } else {
+        /* A single leading slash is rooted on the active DOS drive,
+         * not unconditionally on C:. An active UNC share retains its
+         * canonical root marker as well. */
+        pthread_mutex_lock(&root_lock);
+        if (guest_cwd[0] >= 'D' && guest_cwd[0] <= 'Z' && guest_cwd[1] == ':') {
+            output[0] = guest_cwd[0];
+            output[1] = ':';
+            used = 2;
+        } else if (strncmp(guest_cwd, "@UNC:/", 6) == 0) {
+            used = root_boundary(guest_cwd);
+            memcpy(output, guest_cwd, used);
+        }
         pthread_mutex_unlock(&root_lock);
     }
     while (*input != '\0') {
@@ -2061,6 +2083,9 @@ static bool path_breaks_guest_root(const char *source)
 {
     pthread_mutex_lock(&root_lock);
     bool blocked = guest_cwd[0] != '\0' && guest_path_prefix(guest_cwd, source);
+    for (size_t i = 2; !blocked && i < 26; ++i)
+        if (drive_cwds[i][0] != '\0' && guest_path_prefix(drive_cwds[i], source))
+            blocked = true;
     for (size_t i = 0; !blocked && i < NT_USER_FOLDER_COUNT; ++i)
         if (folder_roots[i].active &&
             guest_path_prefix(nt_user_folders[i].relative, source))
@@ -2891,6 +2916,10 @@ int32_t NT_MS_ABI nt_SetCurrentDirectoryW(const uint16_t *path)
     }
     pthread_mutex_lock(&root_lock);
     strcpy(guest_cwd, relative);
+    const char letter = relative[0] >= 'D' && relative[0] <= 'Z' && relative[1] == ':' ?
+                        relative[0] : relative[0] == '@' ? '\0' : 'C';
+    if (letter != '\0')
+        strcpy(drive_cwds[letter - 'A'], relative);
     pthread_mutex_unlock(&root_lock);
     close(fd);
     return 1;
