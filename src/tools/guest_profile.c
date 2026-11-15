@@ -634,7 +634,7 @@ static int load_unc_config(int dir,
     const int fd = openat(dir, NT_UNC_FILE, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0)
         return errno == ENOENT ? 0 : -1;
-    struct stat info;
+    struct stat info = {0};
     if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
         info.st_uid != geteuid() || (info.st_mode & 0077) != 0 ||
         info.st_size < 0 || info.st_size > NT_SHARE_MAX_BYTES) {
