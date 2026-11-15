@@ -724,7 +724,7 @@ static void check_files(void)
         7u, NULL, 3u, 0x40000080u, 0);
     CHECK(alternate != UINTPTR_MAX);
     CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 0, 0) &&
-          last_error() == NT_ERROR_WAIT_TIMEOUT);
+          last_error() == NT_ERROR_IO_INCOMPLETE);
     CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 0) &&
           last_error() == NT_ERROR_WAIT_TIMEOUT);
     CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 1) &&
