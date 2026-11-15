@@ -529,6 +529,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(SetEndOfFile),
     WIN_EXPORT(SetEnvironmentVariableW),
     WIN_EXPORT(SetEvent),
+    WIN_EXPORT(ResetEvent),
     WIN_EXPORT(SetFileInformationByHandle),
     WIN_EXPORT(SetFileTime),
     WIN_EXPORT(SetFilePointerEx),
