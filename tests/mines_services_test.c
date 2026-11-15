@@ -126,21 +126,21 @@ static void check_crossprocess_delete_sharing(void)
  * shared flock does, without requiring a privileged process supervisor. */
 static void check_crossprocess_read_write_sharing(void)
 {
-    const uint32_t read = UINT32_C(0x80000000), write = UINT32_C(0x40000000);
+    const uint32_t read_access = UINT32_C(0x80000000), write_access = UINT32_C(0x40000000);
     struct {
         uint32_t child_access, child_share, parent_access, parent_share;
         bool allowed;
     } cases[] = {
-        {read, 1u, write, 7u, false},   /* Earlier reader denies writing. */
-        {read, 1u, read, 7u, true},     /* Concurrent readers allowed. */
-        {write, 2u, read, 7u, false},  /* Earlier writer denies reading. */
-        {write, 2u, write, 7u, true},  /* Concurrent writers allowed. */
-        {read, 7u, read, 2u, false},   /* New opener denies existing READ. */
-        {write, 7u, write, 1u, false}, /* New opener denies existing WRITE. */
-        {read, 7u, write, 7u, true},   /* Fully shared open. */
+        {read_access, 1u, write_access, 7u, false},   /* Earlier reader denies writing. */
+        {read_access, 1u, read_access, 7u, true},     /* Concurrent readers allowed. */
+        {write_access, 2u, read_access, 7u, false},  /* Earlier writer denies reading. */
+        {write_access, 2u, write_access, 7u, true},  /* Concurrent writers allowed. */
+        {read_access, 7u, read_access, 2u, false},   /* New opener denies existing READ. */
+        {write_access, 7u, write_access, 1u, false}, /* New opener denies existing WRITE. */
+        {read_access, 7u, write_access, 7u, true},   /* Fully shared open. */
     };
     uintptr_t file = nt_CreateFileA("C:\\sharing-across-workers.bin",
-                                    write, 7u, NULL, 2u, 0x80u, 0);
+                                    write_access, 7u, NULL, 2u, 0x80u, 0);
     CHECK(file != UINTPTR_MAX && nt_CloseHandle(file));
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         int ready[2], gate[2];
