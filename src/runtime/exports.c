@@ -512,6 +512,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(MoveFileExW),
     WIN_EXPORT(ReadFile),
     WIN_EXPORT(GetOverlappedResult),
+    WIN_EXPORT(GetOverlappedResultEx),
     WIN_EXPORT(CancelIoEx),
     WIN_EXPORT(ReleaseSRWLockExclusive),
     WIN_EXPORT(RtlPcToFileHeader),
