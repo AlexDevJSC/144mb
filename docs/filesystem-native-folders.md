@@ -323,7 +323,8 @@ ni se reporta falsamente como cancelada: devuelve `ERROR_NOT_FOUND`
 cuando no hay solicitudes en cola para ese criterio.
 
 Se ofrece `GetOverlappedResultEx` con espera no alertable y tiempo máximo
-configurable: devuelve `WAIT_TIMEOUT` al agotarse el plazo, sin detener
+configurable: devuelve `ERROR_IO_INCOMPLETE` para espera cero y
+`WAIT_TIMEOUT` al agotarse un plazo distinto de cero, sin detener
 la operación en curso. Utiliza la condición del trabajador y el reloj
 real del kernel Linux; no ejecuta bucles de sondeo. La variante
 `bAlertable=TRUE` se rechaza expresamente hasta disponer del comportamiento
