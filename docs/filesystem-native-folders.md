@@ -304,7 +304,10 @@ todavía no se crean junctions/reparse points NTFS ni se soporta
 **E/S con offset y señalización.** `ReadFile` y `WriteFile` admiten
 `OVERLAPPED` para operaciones de archivo con offset explícito. Los
 handles abiertos con `FILE_FLAG_OVERLAPPED` despachan la operación
-a un **trabajador real** con cola limitada a 32 solicitudes; se devuelve
+a un grupo de **hasta cuatro trabajadores Linux** con cola limitada a
+32 solicitudes. Las operaciones de un mismo HANDLE se ejecutan en orden,
+mientras que las pertenecientes a handles distintos pueden completarse
+en paralelo; se devuelve
 `ERROR_IO_PENDING` y `GetOverlappedResult` permite esperar o
 consultar su finalización. Se conserva el offset independiente del puntero
 de archivo, se duplica el descriptor mientras la operación está viva y
@@ -331,8 +334,9 @@ real del kernel Linux; no ejecuta bucles de sondeo. La variante
 de APC de Windows.
 
 Siguen pendientes IOCP, APC asíncronas NT, cancelación real de operaciones
-ya despachadas, varios trabajadores y las semánticas completas de
-cierre, señalización y desvinculación de handles/eventos. La cancelación
+ya despachadas, integración con IOCP, paralelismo dentro de un mismo
+HANDLE y las semánticas completas de cierre, señalización y desvinculación
+de handles/eventos. La cancelación
 de cola no implica que este bloque esté completo.
 
 ## Coordinación de borrados entre procesos NT (extensión incremental)
