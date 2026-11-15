@@ -169,3 +169,42 @@ Contratos de referencia de las funciones: NtDoc basado en cabeceras
 phnt de System Informer (`NtAlertThread`, `NtAlertResumeThread`,
 `NtQueueApcThreadEx`); para los estados nativos de esperas, Microsoft
 Learn `KeDelayExecutionThread`. No se ha copiado código de terceros.
+
+## Hilos activos: suspensión en puntos alertables del runtime (15-11-2026)
+
+Se amplía `SuspendThread` y `NtSuspendThread` para que puedan detener
+**realmente un hilo gestionado que ya ha arrancado**, únicamente cuando
+el hilo alcanza una llamada de espera **alertable** (`SleepEx(TRUE)`,
+`NtDelayExecution(TRUE)` o `WaitFor*ObjectEx(TRUE)`). La solicitud
+se anuncia con la condición protegida por `wait_lock`, y el hilo de
+destino debe **confirmar** que está aparcado antes de que la llamada
+de suspensión devuelva éxito. La espera cooperativa libera el mutex
+mientras el hilo se encuentra aparcado. Las APC pendientes no se
+despachan hasta el último `ResumeThread`.
+
+Se admiten hasta 127 suspensiones contadas, incluidas llamadas anidadas.
+Si el destino nunca llega al checkpoint en un plazo acotado de 500 ms,
+la solicitud se revierte y se devuelve `STATUS_NOT_SUPPORTED` /
+`ERROR_NOT_SUPPORTED` sin modificar el contador ni afirmar que el
+hilo dejó de ejecutarse. Los hilos en código PE activo, espera **no
+alertable**, rutina del host o proceso hijo externo continúan fuera
+de este alcance. Se rechaza la terminación de un hilo activo incluso
+si está aparcado en un checkpoint, para no saltarse las obligaciones
+CLR/TLS y de descarga de pila. No se instala controlador de señales,
+no se usa `pthread_cancel`, no se cambia la pila ni el GS de otro hilo.
+
+La prueba Win64 `tests/pe/suspended_thread_fixture.c` cubre dos rutas
+independientes de aparcamiento: `SleepEx` y
+`WaitForSingleObjectEx`; verifica suspensión real, incremento del
+contador, persistencia de APC sin ejecutar, reanudación parcial
+sin progreso del hilo y entrega tras reanudación definitiva. El mismo
+fixture conserva el test negativo de suspensión de una espera normal.
+
+**Límite de salida de fase:** esto **no es suspensión asíncrona Windows
+arbitraria**, y no permite capturar/modificar `CONTEXT` AMD64 de un
+hilo interrumpido en cualquier instrucción. Siguen pendientes
+`GetThreadContext`, `SetThreadContext`, broker de objetos NT entre
+procesos, tokens/ACL, protección de contextos remotos, pruebas
+diferenciales Windows y validación de procesos PE anidados en un Fedora
+físico con Bubblewrap. Un fixture PE ejecutado sin esos casos nunca
+justifica 100 % del componente.
