@@ -925,9 +925,9 @@ int main(int argc, char **argv)
             return 2;
         }
         snprintf(requested_unc[requested_unc_count].server,
-                 sizeof(requested_unc[requested_unc_count].server), "%s", grant->server);
+                 sizeof(requested_unc[requested_unc_count].server), "%.63s", grant->server);
         snprintf(requested_unc[requested_unc_count].share,
-                 sizeof(requested_unc[requested_unc_count].share), "%s", grant->share);
+                 sizeof(requested_unc[requested_unc_count].share), "%.63s", grant->share);
         requested_unc[requested_unc_count++].directory = grant->directory;
     }
     const int result = run_isolated(argv[arg], folders, argc - arg - 1, argv + arg + 1);
