@@ -2322,12 +2322,6 @@ static bool path_breaks_guest_root(const char *source)
 {
     pthread_mutex_lock(&root_lock);
     bool blocked = guest_cwd[0] != '\0' && guest_path_prefix(guest_cwd, source);
-    /* A remembered drive-relative directory cannot be removed locally
-     * before the drive CWD is reset, even after switching to another drive. */
-    for (size_t i = 2; !blocked && i < 26; ++i)
-        if (guest_drive_cwds[i][0] != '\0' &&
-            guest_path_prefix(guest_drive_cwds[i], source))
-            blocked = true;
     for (size_t i = 0; !blocked && i < NT_USER_FOLDER_COUNT; ++i)
         if (folder_roots[i].active &&
             guest_path_prefix(nt_user_folders[i].relative, source))
