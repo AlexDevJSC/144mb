@@ -1075,13 +1075,13 @@ static int open_share_registry(const struct stat *info)
         errno = EACCES;
         return -1;
     }
-    if (mkdirat(root, ".ntnative-file-leases", 0700) < 0 && errno != EEXIST) {
+    if (mkdirat(root, ":ntnative-file-leases", 0700) < 0 && errno != EEXIST) {
         const int error = errno;
         close(root);
         errno = error;
         return -1;
     }
-    const int directory = confined_open_raw(root, ".ntnative-file-leases",
+    const int directory = confined_open_raw(root, ":ntnative-file-leases",
                                              O_RDONLY | O_DIRECTORY, 0);
     const int directory_error = errno;
     close(root);
