@@ -63,6 +63,21 @@ ssize_t __wrap_pread(int fd, void *buffer, size_t count, off_t offset)
     return __real_pread(fd, buffer, count, offset);
 }
 
+/* Guest-thread identity for CancelIo must not be confused with the
+ * process-wide handle, inode or the Linux worker performing pread. */
+struct other_thread_read {
+    uintptr_t handle;
+    struct nt_overlapped overlap;
+    char byte;
+};
+static void *enqueue_other_thread(void *argument)
+{
+    struct other_thread_read *job = argument;
+    CHECK(!nt_ReadFile(job->handle, &job->byte, 1, NULL, &job->overlap) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    return NULL;
+}
+
 int __wrap_clock_gettime(clockid_t clock, struct timespec *value)
 {
     if (clock_fails) {
@@ -360,7 +375,9 @@ static void check_files(void)
     BOUND(KERNEL, GetOverlappedResultEx);
     BOUND(KERNEL, CreateIoCompletionPort);
     BOUND(KERNEL, GetQueuedCompletionStatus);
+    BOUND(KERNEL, GetQueuedCompletionStatusEx);
     BOUND(KERNEL, PostQueuedCompletionStatus);
+    BOUND(KERNEL, CancelIo);
     BOUND(KERNEL, CancelIoEx);
     BOUND(KERNEL, GetTempPathA);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
@@ -765,6 +782,25 @@ static void check_files(void)
     CHECK(!nt_GetOverlappedResult(background, &all_two, &async_completed, 1) &&
           last_error() == NT_ERROR_OPERATION_ABORTED);
     CHECK(!nt_CancelIoEx(background, &running) && last_error() == NT_ERROR_NOT_FOUND);
+    /* CancelIo only selects I/O submitted by the calling thread. A
+     * different thread's queued read survives this call. */
+    struct other_thread_read foreign = {.handle = background, .overlap = {.offset = 0}};
+    pthread_t issuing_thread;
+    CHECK(pthread_create(&issuing_thread, NULL, enqueue_other_thread, &foreign) == 0);
+    CHECK(pthread_join(issuing_thread, NULL) == 0);
+    CHECK(!nt_CancelIo(background) && last_error() == NT_ERROR_NOT_FOUND);
+    CHECK(nt_CancelIoEx(background, &foreign.overlap));
+    CHECK(!nt_GetOverlappedResult(background, &foreign.overlap, &async_completed, 1) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED);
+    /* A request submitted here can be canceled by CancelIo but is never
+     * confused with the running request on the same HANDLE. */
+    struct nt_overlapped local_pending = {.offset = 1};
+    char local_pending_byte = 0;
+    CHECK(!nt_ReadFile(background, &local_pending_byte, 1, NULL, &local_pending) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_CancelIo(background));
+    CHECK(!nt_GetOverlappedResult(background, &local_pending, &async_completed, 1) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED);
     pthread_mutex_lock(&async_test_lock);
     async_hold_release = true;
     async_hold_enabled = false;
@@ -790,6 +826,33 @@ static void check_files(void)
                                         &packet_overlapped, 0) &&
           packet_bytes == 17 && packet_key == 0xBEEFu &&
           packet_overlapped == &posted);
+    /* Native x64 OVERLAPPED_ENTRY ABI, ordered batch dequeue and mixed
+     * consumers on the same IOCP. Reject invalid/alertable waits without
+     * consuming packets or leaving a false success in the result count. */
+    struct nt_overlapped_entry batch[3] = {0};
+    uint32_t removed = 77;
+    CHECK(!nt_GetQueuedCompletionStatusEx(port, batch, 0, &removed, 0, 0) &&
+          last_error() == NT_ERROR_INVALID_PARAMETER);
+    CHECK(!nt_GetQueuedCompletionStatusEx(port, NULL, 1, &removed, 0, 0) &&
+          last_error() == NT_ERROR_INVALID_PARAMETER);
+    CHECK(!nt_GetQueuedCompletionStatusEx(port, batch, 1, &removed, 0, 1) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED && removed == 0);
+    CHECK(!nt_GetQueuedCompletionStatusEx(port, batch, 1, &removed, 0, 0) &&
+          last_error() == NT_ERROR_WAIT_TIMEOUT && removed == 0);
+    CHECK(nt_PostQueuedCompletionStatus(port, 11, 111, &posted));
+    CHECK(nt_PostQueuedCompletionStatus(port, 22, 222, NULL));
+    CHECK(nt_PostQueuedCompletionStatus(port, 33, 333, &posted));
+    CHECK(nt_GetQueuedCompletionStatusEx(port, batch, 2, &removed, 0, 0) &&
+          removed == 2 && batch[0].completion_key == 111 &&
+          batch[0].overlap == &posted && batch[0].internal == 0 &&
+          batch[0].bytes == 11 && batch[1].completion_key == 222 &&
+          batch[1].overlap == NULL && batch[1].internal == 0 &&
+          batch[1].bytes == 22);
+    CHECK(nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                        &packet_overlapped, 0) &&
+          packet_bytes == 33 && packet_key == 333 &&
+          packet_overlapped == &posted);
+
     packet_overlapped = &posted;
     CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
                                          &packet_overlapped, 0) &&
@@ -841,6 +904,17 @@ static void check_files(void)
           last_error() == NT_ERROR_OPERATION_ABORTED &&
           packet_bytes == 0 && packet_key == 0xCAFEu &&
           packet_overlapped == &queued_iocp);
+    /* A canceled OVERLAPPED reported by GQCSEx remains a valid dequeued
+     * entry, with STATUS_CANCELLED in Internal rather than a Win32 error. */
+    struct nt_overlapped cancelled_batch = {.offset = 0};
+    char cancelled_batch_byte = 0;
+    CHECK(!nt_ReadFile(background, &cancelled_batch_byte, 1, NULL, &cancelled_batch) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_CancelIoEx(background, &cancelled_batch));
+    CHECK(nt_GetQueuedCompletionStatusEx(port, batch, 3, &removed, 1000, 0) &&
+          removed == 1 && batch[0].completion_key == 0xCAFEu &&
+          batch[0].overlap == &cancelled_batch &&
+          batch[0].bytes == 0 && batch[0].internal == UINT32_C(0xc0000120));
     pthread_mutex_lock(&async_test_lock);
     async_hold_release = true;
     async_hold_enabled = false;
@@ -854,6 +928,8 @@ static void check_files(void)
     CHECK(nt_CloseHandle(port));
     CHECK(!nt_PostQueuedCompletionStatus(port, 1, 2, NULL) &&
           last_error() == NT_ERROR_INVALID_HANDLE);
+    CHECK(!nt_GetQueuedCompletionStatusEx(port, batch, 1, &removed, 0, 0) &&
+          last_error() == NT_ERROR_INVALID_HANDLE && removed == 0);
     CHECK(nt_CloseHandle(background) && nt_CloseHandle(background_event) &&
           nt_DeleteFileA("data/background.bin"));
 

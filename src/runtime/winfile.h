@@ -105,6 +105,7 @@ int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved, uint32_t 
                                   uint32_t length_high, struct nt_overlapped *overlap);
 int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,
                                          uint32_t *done, int32_t wait);
+int32_t NT_MS_ABI nt_CancelIo(uintptr_t handle);
 int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *overlap);
 int32_t NT_MS_ABI nt_GetOverlappedResultEx(uintptr_t handle, struct nt_overlapped *overlap,
                                            uint32_t *done, uint32_t milliseconds, int32_t alertable);
@@ -115,6 +116,19 @@ int32_t NT_MS_ABI nt_PostQueuedCompletionStatus(uintptr_t port, uint32_t bytes,
 int32_t NT_MS_ABI nt_GetQueuedCompletionStatus(uintptr_t port, uint32_t *bytes,
                                                uintptr_t *completion_key, struct nt_overlapped **overlap,
                                                uint32_t milliseconds);
+/* Windows OVERLAPPED_ENTRY (x64): KEY, LPOVERLAPPED, Internal NTSTATUS, DWORD bytes.
+ * The final 4 bytes are ABI tail padding (32 bytes total). */
+struct nt_overlapped_entry {
+    uintptr_t completion_key;
+    struct nt_overlapped *overlap;
+    uintptr_t internal;
+    uint32_t bytes;
+};
+_Static_assert(sizeof(struct nt_overlapped_entry) == 32, "OVERLAPPED_ENTRY x64 layout");
+int32_t NT_MS_ABI nt_GetQueuedCompletionStatusEx(uintptr_t port,
+                                                 struct nt_overlapped_entry *entries,
+                                                 uint32_t count, uint32_t *removed,
+                                                 uint32_t milliseconds, int32_t alertable);
 int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle);
 int32_t NT_MS_ABI nt_GetFileSizeEx(uintptr_t handle, int64_t *size);
 int32_t NT_MS_ABI nt_SetFilePointerEx(uintptr_t handle, int64_t offset, int64_t *position, uint32_t method);
