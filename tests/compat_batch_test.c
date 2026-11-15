@@ -812,6 +812,41 @@ static void check_files(void)
     CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
                                          &packet_overlapped, 0) &&
           last_error() == NT_ERROR_WAIT_TIMEOUT && packet_overlapped == NULL);
+    /* Queue cancellation must also deliver an unsuccessful completion
+     * packet with the original completion key and OVERLAPPED identity. */
+    pthread_mutex_lock(&async_test_lock);
+    async_hold_enabled = true;
+    async_hold_entered = false;
+    async_hold_release = false;
+    pthread_mutex_unlock(&async_test_lock);
+    struct nt_overlapped blocked_iocp = {.offset = 4096};
+    struct nt_overlapped queued_iocp = {.offset = 0};
+    char blocked_byte = 0, cancelled_byte = 0;
+    CHECK(!nt_ReadFile(background, &blocked_byte, 1, NULL, &blocked_iocp) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    pthread_mutex_lock(&async_test_lock);
+    while (!async_hold_entered)
+        pthread_cond_wait(&async_test_changed, &async_test_lock);
+    pthread_mutex_unlock(&async_test_lock);
+    CHECK(!nt_ReadFile(background, &cancelled_byte, 1, NULL, &queued_iocp) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_CancelIoEx(background, &queued_iocp));
+    packet_overlapped = NULL;
+    CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                         &packet_overlapped, 1000) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED &&
+          packet_bytes == 0 && packet_key == 0xCAFEu &&
+          packet_overlapped == &queued_iocp);
+    pthread_mutex_lock(&async_test_lock);
+    async_hold_release = true;
+    async_hold_enabled = false;
+    pthread_cond_broadcast(&async_test_changed);
+    pthread_mutex_unlock(&async_test_lock);
+    CHECK(nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                        &packet_overlapped, 1000) &&
+          packet_bytes == 0 && packet_key == 0xCAFEu &&
+          packet_overlapped == &blocked_iocp);
+
     CHECK(nt_CloseHandle(port));
     CHECK(!nt_PostQueuedCompletionStatus(port, 1, 2, NULL) &&
           last_error() == NT_ERROR_INVALID_HANDLE);
