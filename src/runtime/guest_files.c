@@ -470,9 +470,13 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
                 errno = EACCES;
                 return false;
             }
-            while (used != 0 && output[used - 1] != '/')
+            /* D:relative is represented as D:dir without a slash after
+             * the colon. Clamping to the volume marker prevents a '..'
+             * component from silently changing the root to C:. */
+            const size_t boundary = root_boundary(output);
+            while (used > boundary && output[used - 1] != '/')
                 --used;
-            if (used != 0)
+            if (used > boundary)
                 --used;
             continue;
         }
