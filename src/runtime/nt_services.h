@@ -80,6 +80,7 @@ nt_status NT_MS_ABI nt_NtQueueApcThreadEx(uintptr_t thread, uintptr_t reserve,
     void (NT_MS_ABI *routine)(void *, void *, void *),
     void *context, void *first, void *second);
 nt_status NT_MS_ABI nt_NtAlertThread(uintptr_t thread);
+nt_status NT_MS_ABI nt_NtAlertResumeThread(uintptr_t thread, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtTestAlert(void);
 nt_status NT_MS_ABI nt_NtClose(uintptr_t handle);
 nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t source,
