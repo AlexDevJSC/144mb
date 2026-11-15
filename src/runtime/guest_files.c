@@ -78,6 +78,9 @@ bool nt_runtime_set_drive_root(char letter, const char *directory)
         close(drive_roots[index].fd);
     drive_roots[index].fd = fd;
     drive_roots[index].active = fd >= 0;
+    /* Detaching a DOS root must not retain it as the process CWD. */
+    if (fd < 0 && guest_cwd[0] == letter && guest_cwd[1] == ':')
+        strcpy(guest_cwd, drive_cwds['C' - 'A']);
     drive_cwds[index][0] = '\0';
     pthread_mutex_unlock(&root_lock);
     return true;
