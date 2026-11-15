@@ -3553,7 +3553,9 @@ int32_t NT_MS_ABI nt_GetOverlappedResultEx(uintptr_t handle,
     if (nt_GetLastError() != NT_ERROR_IO_INCOMPLETE)
         return 0;
     if (milliseconds == 0) {
-        nt_SetLastError(NT_ERROR_WAIT_TIMEOUT);
+        /* Windows distinguishes a zero-time poll (IO_INCOMPLETE) from
+         * expiration of an actual timed wait (WAIT_TIMEOUT). */
+        nt_SetLastError(NT_ERROR_IO_INCOMPLETE);
         return 0;
     }
     struct timespec deadline = {0};
