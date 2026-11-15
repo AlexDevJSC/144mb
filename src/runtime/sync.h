@@ -53,6 +53,8 @@ uint32_t NT_MS_ABI nt_GetProcessIdOfThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_QueueUserAPC(void (NT_MS_ABI *callback)(uintptr_t),
                                    uintptr_t handle, uintptr_t data);
 uint32_t NT_MS_ABI nt_SleepEx(uint32_t milliseconds, int32_t alertable);
+uint32_t NT_MS_ABI nt_QueueUserAPC2(void (NT_MS_ABI *callback)(uintptr_t),
+                                     uintptr_t handle, uintptr_t data, uint32_t flags);
 uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t thread_id);
 nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
