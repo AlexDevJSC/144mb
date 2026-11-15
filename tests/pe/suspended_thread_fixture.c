@@ -18,6 +18,22 @@ __declspec(dllimport) LONG NTAPI NtSetInformationThread(HANDLE, ULONG, const voi
 static volatile DWORD entered;
 static volatile DWORD waiting;
 static HANDLE release_running;
+static HANDLE cooperative_ready, cooperative_never;
+static volatile DWORD cooperative_delivered;
+static void CALLBACK cooperative_apc(ULONG_PTR data)
+{
+    if (data == (ULONG_PTR)0x59u)
+        cooperative_delivered = 1;
+}
+static DWORD WINAPI cooperative_worker(void *mode)
+{
+    if (!SetEvent(cooperative_ready))
+        return 0x201u;
+    const DWORD result = mode == NULL ? SleepEx(INFINITE, TRUE) :
+        WaitForSingleObjectEx(cooperative_never, INFINITE, TRUE);
+    return result == WAIT_IO_COMPLETION && cooperative_delivered == 1 ?
+           0x202u : 0x203u;
+}
 
 static DWORD WINAPI worker(void *unused)
 {
@@ -295,5 +311,49 @@ int import_fixture_entry(void)
         GetLastError() != ERROR_NOT_SUPPORTED ||
         !CloseHandle(self) || !CloseHandle(no_create))
         return 57;
+
+    /* Running Win64 threads MAY be suspended after acknowledging a safe
+     * alertable-wait checkpoint. This is not asynchronous instruction-level
+     * suspension: an arbitrary busy loop or non-alertable wait is still
+     * explicitly unsupported, as checked above. */
+    cooperative_ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    cooperative_never = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!cooperative_ready || !cooperative_never)
+        return 60;
+    for (unsigned int mode = 0; mode < 2; ++mode) {
+        cooperative_delivered = 0;
+        if (!ResetEvent(cooperative_ready))
+            return 61;
+        HANDLE parked = CreateThread(NULL, 0, cooperative_worker,
+                                     (void *)(uintptr_t)mode, 0, NULL);
+        if (parked == NULL ||
+            WaitForSingleObject(cooperative_ready, 5000) != WAIT_OBJECT_0)
+            return 62;
+        ULONG before = 999;
+        SetLastError(0x1234u);
+        if (NtSuspendThread(parked, &before) != 0 || before != 0 ||
+            GetLastError() != 0x1234u ||
+            WaitForSingleObject(parked, 0) != WAIT_TIMEOUT)
+            return 63;
+        if (SuspendThread(parked) != 1)
+            return 64;
+        if (!QueueUserAPC(cooperative_apc, parked, 0x59u))
+            return 65;
+        Sleep(20);
+        if (cooperative_delivered != 0)
+            return 66;
+        if (ResumeThread(parked) != 2)
+            return 67;
+        Sleep(20);
+        if (cooperative_delivered != 0 || WaitForSingleObject(parked, 0) != WAIT_TIMEOUT)
+            return 68;
+        if (ResumeThread(parked) != 1 ||
+            WaitForSingleObject(parked, 5000) != WAIT_OBJECT_0 ||
+            !GetExitCodeThread(parked, &exit_code) || exit_code != 0x202u ||
+            !CloseHandle(parked))
+            return 69;
+    }
+    if (!CloseHandle(cooperative_ready) || !CloseHandle(cooperative_never))
+        return 70;
     return 0;
 }
