@@ -258,6 +258,7 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(QueueApcThread),
     NT_EXPORT(QueueApcThreadEx),
     NT_EXPORT(AlertThread),
+    NT_EXPORT(AlertResumeThread),
     NT_EXPORT(TestAlert),
     NT_EXPORT(Close),
     NT_EXPORT(CreateFile),
