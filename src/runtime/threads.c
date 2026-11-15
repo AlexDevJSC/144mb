@@ -30,6 +30,7 @@ enum { EVENT_QUERY_STATE = 1, EVENT_MODIFY_STATE = 2, READ_CONTROL = 0x20000,
        PROCESS_QUERY_INFORMATION = 0x400, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000,
        PROCESS_ALL_ACCESS = 0x1fffff,
        THREAD_TERMINATE = 1, THREAD_SUSPEND_RESUME = 2, THREAD_ALERT = 4,
+       THREAD_GET_CONTEXT = 8, THREAD_SET_CONTEXT = 0x10,
        THREAD_SET_INFORMATION = 0x20, THREAD_QUERY_INFORMATION = 0x40,
        THREAD_QUERY_LIMITED_INFORMATION = 0x800, THREAD_ALL_ACCESS = 0x1fffff };
 enum waitable_kind { EVENT, THREAD, PROCESS, SEMAPHORE };
@@ -60,6 +61,13 @@ struct waitable {
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
     uint32_t suspend_count;
+    /* Running guest threads can only be paused at an explicit runtime
+     * alertable checkpoint, never through an asynchronous Linux signal. */
+    bool cooperative_pause_requested, cooperative_pause_acknowledged;
+    /* Full real AMD64 register snapshot from the target's own safe-point
+     * execution, not a fabricated PC/stack or a remote ptrace operation. */
+    bool cooperative_context_valid;
+    struct nt_context64 cooperative_context;
     uint32_t access;
     pthread_t host;
     uint32_t thread_id, exit_code, owner_pid;
@@ -226,6 +234,29 @@ static struct guest_apc *pop_apc_locked(void)
         apc->next = NULL;
     }
     return apc;
+}
+
+/* Called under wait_lock in the target thread at an alertable waiting
+ * boundary. The condition wait releases the mutex, so other guest threads
+ * can use handles, resume the target, and queue APCs without deadlocking.
+ * APCs are dispatched only after the final resume, by the original thread.
+ * This is NOT an asynchronous suspension of arbitrary guest instructions. */
+static void cooperative_suspend_checkpoint_locked(void)
+{
+    struct waitable *thread = running_thread;
+    if (thread == NULL || !thread->cooperative_pause_requested)
+        return;
+    _Alignas(16) struct nt_context64 context = {0};
+    nt_RtlCaptureContext(&context);
+    thread->cooperative_context = context;
+    thread->cooperative_context_valid = true;
+    thread->cooperative_pause_acknowledged = true;
+    pthread_cond_broadcast(&wait_changed);
+    while (thread->suspend_count != 0 && !thread->signaled)
+        pthread_cond_wait(&wait_changed, &wait_lock);
+    thread->cooperative_pause_acknowledged = false;
+    thread->cooperative_context_valid = false;
+    pthread_cond_broadcast(&wait_changed);
 }
 
 static void invoke_apc(struct guest_apc *apc)
@@ -400,6 +431,7 @@ nt_status nt_runtime_alertable_delay(const struct nt_wait_deadline *deadline)
     bool alerted = false;
     int error = 0;
     for (;;) {
+        cooperative_suspend_checkpoint_locked();
         apc = pop_apc_locked();
         if (apc != NULL)
             break;
@@ -1187,6 +1219,7 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
         int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
         for (;;) {
             if (alertable != 0) {
+                cooperative_suspend_checkpoint_locked();
                 apc = pop_apc_locked();
                 if (apc != NULL) {
                     result = NT_STATUS_USER_APC;
@@ -1895,7 +1928,7 @@ static nt_status terminate_suspended_thread(uintptr_t handle, uint32_t exit_code
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled || state->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
-        else if (state->suspend_count == 0)
+        else if (state->suspend_count == 0 || state->cooperative_pause_requested)
             status = NT_STATUS_NOT_SUPPORTED;
         else {
             state->terminate_at_start = true;
@@ -1950,14 +1983,49 @@ static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled)
             status = NT_STATUS_THREAD_IS_TERMINATING;
-        else if (state->suspend_count == 0)
-            status = NT_STATUS_NOT_SUPPORTED;
         else if (state->suspend_count == MAXIMUM_SUSPEND_COUNT)
             status = NT_STATUS_SUSPEND_COUNT_EXCEEDED;
-        else {
+        else if (state->suspend_count != 0) {
             if (previous != NULL)
                 *previous = state->suspend_count;
             ++state->suspend_count;
+        } else if (state->child_guest ||
+                   pthread_equal(state->host, pthread_self())) {
+            /* No cross-sandbox broker and no self-suspension. */
+            status = NT_STATUS_NOT_SUPPORTED;
+        } else {
+            /* A running thread may acknowledge a pause ONLY when it enters
+             * SleepEx/WaitFor*Ex with alertable=TRUE. If it stays in
+             * uninstrumented PE code or a non-alertable wait, rollback the
+             * request and return NOT_SUPPORTED without claiming success. */
+            struct timespec limit;
+            if (clock_gettime(CLOCK_MONOTONIC, &limit) != 0) {
+                status = NT_STATUS_UNSUCCESSFUL;
+            } else {
+                limit.tv_nsec += 500000000L;
+                if (limit.tv_nsec >= 1000000000L) {
+                    ++limit.tv_sec;
+                    limit.tv_nsec -= 1000000000L;
+                }
+                state->cooperative_pause_requested = true;
+                state->suspend_count = 1;
+                pthread_cond_broadcast(&wait_changed);
+                int error = 0;
+                while (!state->cooperative_pause_acknowledged &&
+                       !state->signaled && error == 0)
+                    error = pthread_cond_clockwait(&wait_changed, &wait_lock,
+                                                   CLOCK_MONOTONIC, &limit);
+                if (state->cooperative_pause_acknowledged) {
+                    if (previous != NULL)
+                        *previous = 0;
+                } else {
+                    state->cooperative_pause_requested = false;
+                    state->suspend_count = 0;
+                    pthread_cond_broadcast(&wait_changed);
+                    status = state->signaled ? NT_STATUS_THREAD_IS_TERMINATING :
+                             NT_STATUS_NOT_SUPPORTED;
+                }
+            }
         }
     }
     pthread_mutex_unlock(&wait_lock);
@@ -1997,6 +2065,9 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool 
             status = NT_STATUS_THREAD_IS_TERMINATING;
         else if (alert && state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED; /* No cross-process alert broker. */
+        else if (state->cooperative_pause_requested &&
+                 !state->cooperative_pause_acknowledged)
+            status = NT_STATUS_NOT_SUPPORTED; /* Suspension not confirmed yet. */
         else {
             if (previous != NULL)
                 *previous = state->suspend_count;
@@ -2019,6 +2090,10 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool 
                 }
                 if (status == NT_STATUS_SUCCESS) {
                     --state->suspend_count;
+                    if (state->suspend_count == 0) {
+                        state->cooperative_pause_requested = false;
+                        state->cooperative_context_valid = false;
+                    }
                     pthread_cond_broadcast(&wait_changed);
                 }
             }
@@ -2048,6 +2123,102 @@ nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous)
 nt_status NT_MS_ABI nt_NtAlertResumeThread(uintptr_t handle, uint32_t *previous)
 {
     return resume_guest_thread(handle, previous, true);
+}
+
+/* Read a real context captured by the target's own CPU at a negotiated
+ * safe alertable boundary. Do NOT fabricate a guest RIP for startup-gated
+ * threads: the guest entry hasn't run. Control register mutation and the
+ * ability to stop arbitrary PE instructions still require a separate safe
+ * context-restoration mechanism. Win32 and native NTSTATUS share rights
+ * checks, but only Win32 modifies LastError. */
+enum { CONTEXT_AMD64 = 0x100000, CONTEXT_CORE_GROUPS = 0x0f };
+
+static nt_status get_guest_thread_context(uintptr_t handle, struct nt_context64 *output)
+{
+    if (output == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (((uintptr_t)output & 15u) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    const uint32_t requested = output->flags;
+    if ((requested & CONTEXT_AMD64) == 0 ||
+        (requested & CONTEXT_CORE_GROUPS) == 0 ||
+        (requested & ~(CONTEXT_AMD64 | CONTEXT_CORE_GROUPS)) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *entry = find_waitable(handle);
+    nt_status result = NT_STATUS_SUCCESS;
+    if (entry == NULL)
+        result = NT_STATUS_INVALID_HANDLE;
+    else if (entry->kind != THREAD)
+        result = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if ((entry->access & THREAD_GET_CONTEXT) == 0)
+        result = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(entry);
+        if (state->owner_pid != (uint32_t)getpid() || state->child_guest)
+            result = NT_STATUS_NOT_SUPPORTED;
+        else if (state->signaled)
+            result = NT_STATUS_THREAD_IS_TERMINATING;
+        else if (!state->cooperative_pause_acknowledged ||
+                 !state->cooperative_context_valid || state->suspend_count == 0)
+            result = NT_STATUS_NOT_SUPPORTED;
+        else {
+            /* Groups requested by the caller are the only supported x64
+             * groups (control, integer, segments, legacy floating point).
+             * Debug registers and XSTATE require additional kernel work. */
+            *output = state->cooperative_context;
+            output->flags = requested;
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return result;
+}
+
+nt_status NT_MS_ABI nt_NtGetContextThread(uintptr_t handle, struct nt_context64 *context)
+{
+    return get_guest_thread_context(handle, context);
+}
+
+int32_t NT_MS_ABI nt_GetThreadContext(uintptr_t handle, struct nt_context64 *context)
+{
+    const nt_status status = get_guest_thread_context(handle, context);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
+}
+
+/* A context change is deliberately unsupported until a verified scheme
+ * can apply it to the target CPU on resume without skipping host cleanup
+ * or compromising Linux signal/stack safety. Returning success without
+ * a real register write would be a dangerous compatibility false positive. */
+nt_status NT_MS_ABI nt_NtSetContextThread(uintptr_t handle, const struct nt_context64 *context)
+{
+    if (context == NULL)
+        return NT_STATUS_ACCESS_VIOLATION;
+    if (((uintptr_t)context & 15u) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *entry = find_waitable(handle);
+    nt_status result = NT_STATUS_NOT_SUPPORTED;
+    if (entry == NULL)
+        result = NT_STATUS_INVALID_HANDLE;
+    else if (entry->kind != THREAD)
+        result = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if ((entry->access & THREAD_SET_CONTEXT) == 0)
+        result = NT_STATUS_ACCESS_DENIED;
+    else if (wait_state(entry)->signaled)
+        result = NT_STATUS_THREAD_IS_TERMINATING;
+    pthread_mutex_unlock(&wait_lock);
+    return result;
+}
+
+int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context64 *context)
+{
+    const nt_status status = nt_NtSetContextThread(handle, context);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
 }
 
 /* A Win64 SetThreadAffinityMask operates on one 64-bit processor group.

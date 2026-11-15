@@ -5,6 +5,8 @@
 
 __declspec(dllimport) LONG NTAPI NtSuspendThread(HANDLE, ULONG *);
 __declspec(dllimport) LONG NTAPI NtResumeThread(HANDLE, ULONG *);
+__declspec(dllimport) LONG NTAPI NtGetContextThread(HANDLE, PCONTEXT);
+__declspec(dllimport) LONG NTAPI NtSetContextThread(HANDLE, const CONTEXT *);
 __declspec(dllimport) LONG NTAPI NtCreateThreadEx(HANDLE *, ACCESS_MASK, void *,
     HANDLE, DWORD (WINAPI *)(void *), void *, ULONG, SIZE_T, SIZE_T, SIZE_T, void *);
 __declspec(dllimport) LONG NTAPI NtTerminateThread(HANDLE, LONG);
@@ -18,6 +20,22 @@ __declspec(dllimport) LONG NTAPI NtSetInformationThread(HANDLE, ULONG, const voi
 static volatile DWORD entered;
 static volatile DWORD waiting;
 static HANDLE release_running;
+static HANDLE cooperative_ready, cooperative_never;
+static volatile DWORD cooperative_delivered;
+static void CALLBACK cooperative_apc(ULONG_PTR data)
+{
+    if (data == (ULONG_PTR)0x59u)
+        cooperative_delivered = 1;
+}
+static DWORD WINAPI cooperative_worker(void *mode)
+{
+    if (!SetEvent(cooperative_ready))
+        return 0x201u;
+    const DWORD result = mode == NULL ? SleepEx(INFINITE, TRUE) :
+        WaitForSingleObjectEx(cooperative_never, INFINITE, TRUE);
+    return result == WAIT_IO_COMPLETION && cooperative_delivered == 1 ?
+           0x202u : 0x203u;
+}
 
 static DWORD WINAPI worker(void *unused)
 {
@@ -295,5 +313,87 @@ int import_fixture_entry(void)
         GetLastError() != ERROR_NOT_SUPPORTED ||
         !CloseHandle(self) || !CloseHandle(no_create))
         return 57;
+
+    /* Running Win64 threads MAY be suspended after acknowledging a safe
+     * alertable-wait checkpoint. This is not asynchronous instruction-level
+     * suspension: an arbitrary busy loop or non-alertable wait is still
+     * explicitly unsupported, as checked above. */
+    cooperative_ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    cooperative_never = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!cooperative_ready || !cooperative_never)
+        return 60;
+    for (unsigned int mode = 0; mode < 2; ++mode) {
+        cooperative_delivered = 0;
+        if (!ResetEvent(cooperative_ready))
+            return 61;
+        HANDLE parked = CreateThread(NULL, 0, cooperative_worker,
+                                     (void *)(uintptr_t)mode, 0, NULL);
+        if (parked == NULL ||
+            WaitForSingleObject(cooperative_ready, 5000) != WAIT_OBJECT_0)
+            return 62;
+        ULONG before = 999;
+        SetLastError(0x1234u);
+        if (NtSuspendThread(parked, &before) != 0 || before != 0 ||
+            GetLastError() != 0x1234u ||
+            WaitForSingleObject(parked, 0) != WAIT_TIMEOUT)
+            return 63;
+
+        /* An acknowledged runtime checkpoint has a real CPU snapshot.
+         * The returned RIP belongs to the guest thread while parked in
+         * native wait code, not a fabricated PE instruction address. */
+        CONTEXT captured;
+        captured.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        SetLastError(0x1234u);
+        if (!GetThreadContext(parked, &captured) ||
+            GetLastError() != 0x1234u ||
+            captured.Rip == 0 || captured.Rsp == 0 ||
+            captured.ContextFlags != (CONTEXT_CONTROL | CONTEXT_INTEGER))
+            return 71;
+        CONTEXT native_ctx;
+        native_ctx.ContextFlags = CONTEXT_CONTROL;
+        if (NtGetContextThread(parked, &native_ctx) != 0 ||
+            native_ctx.Rip != captured.Rip ||
+            native_ctx.Rsp != captured.Rsp ||
+            native_ctx.ContextFlags != CONTEXT_CONTROL)
+            return 72;
+        HANDLE no_context = OpenThread(THREAD_QUERY_LIMITED_INFORMATION,
+                                      FALSE, GetThreadId(parked));
+        if (!no_context)
+            return 73;
+        native_ctx.ContextFlags = CONTEXT_CONTROL;
+        SetLastError(0x1235u);
+        if (GetThreadContext(no_context, &native_ctx) ||
+            GetLastError() != ERROR_ACCESS_DENIED ||
+            !CloseHandle(no_context))
+            return 74;
+        SetLastError(0x1234u);
+        if (NtSetContextThread(parked, &captured) != STATUS_NOT_SUPPORTED ||
+            GetLastError() != 0x1234u)
+            return 75;
+        SetLastError(0);
+        if (SetThreadContext(parked, &captured) ||
+            GetLastError() != ERROR_NOT_SUPPORTED)
+            return 76;
+
+        if (SuspendThread(parked) != 1)
+            return 64;
+        if (!QueueUserAPC(cooperative_apc, parked, 0x59u))
+            return 65;
+        Sleep(20);
+        if (cooperative_delivered != 0)
+            return 66;
+        if (ResumeThread(parked) != 2)
+            return 67;
+        Sleep(20);
+        if (cooperative_delivered != 0 || WaitForSingleObject(parked, 0) != WAIT_TIMEOUT)
+            return 68;
+        if (ResumeThread(parked) != 1 ||
+            WaitForSingleObject(parked, 5000) != WAIT_OBJECT_0 ||
+            !GetExitCodeThread(parked, &exit_code) || exit_code != 0x202u ||
+            !CloseHandle(parked))
+            return 69;
+    }
+    if (!CloseHandle(cooperative_ready) || !CloseHandle(cooperative_never))
+        return 70;
     return 0;
 }

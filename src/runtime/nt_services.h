@@ -118,6 +118,9 @@ nt_status NT_MS_ABI nt_NtSetInformationThread(uintptr_t thread, uint32_t info_cl
                                               const void *buffer, uint32_t length);
 nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtResumeThread(uintptr_t handle, uint32_t *previous);
+struct nt_context64;
+nt_status NT_MS_ABI nt_NtGetContextThread(uintptr_t thread, struct nt_context64 *context);
+nt_status NT_MS_ABI nt_NtSetContextThread(uintptr_t thread, const struct nt_context64 *context);
 nt_status NT_MS_ABI nt_NtSetEvent(uintptr_t handle, int32_t *previous);
 nt_status NT_MS_ABI nt_NtResetEvent(uintptr_t handle, int32_t *previous);
 nt_status NT_MS_ABI nt_NtWaitForSingleObject(uintptr_t handle, uint8_t alertable, const int64_t *timeout);

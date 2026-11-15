@@ -339,3 +339,58 @@ Contratos de referencia de las funciones: NtDoc basado en cabeceras
 phnt de System Informer (`NtAlertThread`, `NtAlertResumeThread`,
 `NtQueueApcThreadEx`); para los estados nativos de esperas, Microsoft
 Learn `KeDelayExecutionThread`. No se ha copiado código de terceros.
+
+## Suspensión segura en esperas alertables
+
+El puente de hilos ahora negocia una suspensión con el hilo destino
+en el mismo mutex de objetos NT. Solo devuelve éxito para un hilo
+**ya arrancado** después de que ese hilo haya reconocido un punto
+seguro de espera alertable y se haya estacionado. La solicitud sin
+confirmación vence a los 500 ms y se revierte. Las esperas no
+alertables y el código invitado sin puntos cooperativos conservan
+`STATUS_NOT_SUPPORTED`, en vez de simular suspensión arbitraria.
+La reanudación y el despacho de APC mantienen el orden del hilo de
+destino; no se usan señales de Linux ni cancelación asíncrona.
+Detalles, límites y pruebas en `nt-stage4-process-threads.md`.
+
+## Lectura AMD64 de un contexto realmente suspendido (15-11-2026)
+
+`GetThreadContext` y `NtGetContextThread` devuelven una instantánea
+**real** de registros x64 capturada mediante `RtlCaptureContext` en el
+**hilo objetivo**, una vez que este ha reconocido y confirmado su
+suspensión en el checkpoint alertable del runtime. El estado se almacena
+en el objeto canónico del hilo, sirve para todos los alias de HANDLE y
+solo se publica mientras el hilo sigue aparcado bajo el contador de
+suspensión. Se requiere `THREAD_GET_CONTEXT` (0x8); los hilos de otro
+proceso, los hilos ya terminados, los hilos activos sin confirmación y
+los hilos creados suspendidos pero que no han ejecutado todavía ningún
+checkpoint rechazan el acceso de manera explícita. No se inventa un
+`RIP` de inicio ni un `RSP` que no haya existido.
+
+Se aceptan únicamente `CONTEXT_AMD64` con grupos CONTROL, INTEGER,
+SEGMENTS y FLOATING_POINT que respalda la captura nativa. Se rechazan
+las peticiones de registros de depuración y XSTATE no capturados.
+Las variantes Win32 traducen NTSTATUS a `LastError`, mientras la API
+NT preserva dicho valor.
+
+**Precisión del contrato:** la instantánea representa la ubicación
+verdadera del CPU en el código de espera *del runtime*, no
+necesariamente una instrucción PE. No es el equivalente general de un
+GetThreadContext de Windows para hilos suspendidos asíncronamente.
+`NtSetContextThread` y `SetThreadContext` se exportan, validan
+permisos de `THREAD_SET_CONTEXT` y parámetros, pero **rechazan
+cualquier escritura de registros con NOT_SUPPORTED**: modificar el
+puntero de instrucción o la pila de un pthread pausado sin un mecanismo
+verificado de restauración violaría el aislamiento y las garantías
+de limpieza del host. Su mera presencia en la export table NO cuenta
+como una implementación de cambio de contexto.
+
+Un fixture PE AMD64 comprueba `RIP`/`RSP` no ficticios,
+`ContextFlags`, permisos limitados, conservación de LastError y
+rechazo de escrituras. La captura mantiene la alineación AMD64 de
+16 bytes que requiere `FXSAVE64`. Ningún hilo del host se detiene
+con ptrace ni señales.
+
+Siguen pendientes la captura en cualquier PC PE, `SetThreadContext`
+funcional, suspensión asíncrona universal, threads externos, tokens/
+ACL, broker de objetos NT y pruebas comparativas con Windows real.
