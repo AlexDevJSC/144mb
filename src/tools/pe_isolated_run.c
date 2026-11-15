@@ -232,12 +232,16 @@ static bool worker_ready(bool child, bool suspended)
     if (child) {
         for (size_t i = 0; i < inherited_files; ++i) {
             struct stat inherited;
-            if (fstat(NT_CHILD_FILE_FD_BASE + (int)i, &inherited) != 0)
+            if (fstat(NT_CHILD_FILE_FD_BASE + (int)i, &inherited) != 0 ||
+                fstat(NT_CHILD_LEASE_FD_BASE + (int)i, &inherited) != 0)
                 return false;
         }
     }
     if ((child ? (close_range(8u, NT_CHILD_FILE_FD_BASE - 1u, 0) != 0 ||
-                  close_range(NT_CHILD_FILE_FD_BASE + (unsigned int)inherited_files,
+                  ((unsigned int)inherited_files < NT_CHILD_FILE_LIMIT &&
+                   close_range(NT_CHILD_FILE_FD_BASE + (unsigned int)inherited_files,
+                               NT_CHILD_LEASE_FD_BASE - 1u, 0) != 0) ||
+                  close_range(NT_CHILD_LEASE_FD_BASE + (unsigned int)inherited_files,
                               UINT_MAX, 0) != 0) :
                  close_range(3u, UINT_MAX, 0) != 0)) {
         perror("Cannot close sandbox setup descriptors");
@@ -373,9 +377,13 @@ static int launch_child(int fd, const char *dos_path, const char *command,
                 error = posix_spawn_file_actions_adddup2(&actions, environment_reader, 6);
             if (!error)
                 error = posix_spawn_file_actions_adddup2(&actions, manifest_reader, 7);
-            for (size_t i = 0; !error && i < files->count; ++i)
+            for (size_t i = 0; !error && i < files->count; ++i) {
                 error = posix_spawn_file_actions_adddup2(&actions, files->source_fds[i],
                                                          NT_CHILD_FILE_FD_BASE + (int)i);
+                if (!error)
+                    error = posix_spawn_file_actions_adddup2(&actions, files->lease_fds[i],
+                                                             NT_CHILD_LEASE_FD_BASE + (int)i);
+            }
             if (!error) {
                 char *const args[] = {"/runner", suspended ? "--child-suspended" : "--child",
                                       (char *)dos_path, (char *)command, (char *)directory, NULL};

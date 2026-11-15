@@ -381,9 +381,9 @@ observación **no** equivale a disponer del estado de borrado pendiente
 previo al `unlinkat` que ofrece Windows. No se requiere root, un
 usuario NT privilegiado ni una modificación del kernel.
 
-**Límites que impiden declararlo completado:** esta barrera coordina
-`FILE_SHARE_DELETE`, **no** los conflictos de `FILE_SHARE_READ` y
-`FILE_SHARE_WRITE` entre procesos. Tampoco implementa un namespace
+**Límites restantes:** la barrera original de `flock` coordina
+`FILE_SHARE_DELETE`; el registro OFD descrito más abajo incorpora
+`FILE_SHARE_READ` y `FILE_SHARE_WRITE` entre procesos. Tampoco implementa un namespace
 `delete-pending` como Windows (rechazo de aperturas durante ese estado),
 operaciones de `MoveFileEx` por copia entre raíces con el mismo bloqueo
 retenido durante todo el traslado, ni atomicidad total con escritores
@@ -394,11 +394,10 @@ lectura o escritura puede resultar no borrable por la capa porque
 conservador, no una equivalencia completa de ACL NT. No se afirma
 simulación de NTFS ni que todos los programas PE funcionen.
 
-El próximo paso de la misma línea de trabajo es un namespace de permisos
-y borrados pendientes **por usuario y volumen autorizado**, respaldado
-por un broker de usuario sin privilegios o una estructura IPC segura;
-debe conservar el aislamiento de Bubblewrap, validar a sus clientes,
-recuperarse de caídas y no permitir que un invitado controle procesos host.
+El siguiente paso de esta línea de trabajo es ampliar el registro
+compartido con un **namespace de borrados pendientes**, con restricciones
+sobre reapertura, vínculos existentes y finalización, sin exponer rutas
+anfitrión fuera de las concesiones ni ampliar privilegios.
 
 ## Directorio de trabajo activo protegido entre procesos
 
@@ -426,6 +425,50 @@ directorio de otro proceso; para controlar todo el árbol de rutas y las
 transiciones `delete-pending` se necesita un namespace/gestor de archivos
 entre procesos de mayor alcance. Las ACL NTFS, SMB real y el resto de
 las funciones avanzadas siguen fuera de este cambio.
+
+## Registro de compartición entre procesos (nueva extensión)
+
+El subsistema ya comprueba conjuntamente **`FILE_SHARE_READ`,
+`FILE_SHARE_WRITE` y `FILE_SHARE_DELETE` entre procesos NT, sobre los
+archivos Linux reales. Los controles de acceso se comparan en ambas
+direcciones: el acceso solicitado no puede estar prohibido por los
+handles existentes y el nuevo modo de compartición tampoco puede
+denegar accesos ya concedidos. La tabla local `files[]` sigue
+validando duplicación, derechos y operaciones del propio proceso.
+
+Para la coordinación entre procesos se utiliza un registro por
+`(st_dev, st_ino)` bajo `C:/:ntnative-file-leases/`. El directorio
+físico tiene permisos 0700 y los archivos 0600, con comprobación
+de propietario; el carácter `:` en el nombre del directorio hace que
+ningún nombre DOS válido pueda abrirlo mediante las API del puente.
+`flock(LOCK_EX)` serializa lectura y modificación de registros. Cada
+apertura conserva un bloqueo **OFD** (`F_OFD_SETLK`) de un byte sobre
+un registro propio. Antes de comprobar conflictos, se consulta el
+estado real de ese bloqueo mediante `F_OFD_GETLK`: los registros
+huérfanos de procesos que terminaron no se consideran activos y
+pueden reutilizarse. Se admiten hasta 512 aperturas simultáneas
+por inodo en este protocolo; el límite está documentado y un
+agotamiento se devuelve como error, no sobrescribe un registro vivo.
+
+Los handles duplicados comparten la descripción OFD de su apertura,
+de modo que liberar una copia no extingue la autorización de las
+demás. Los handles heredados por `CreateProcess` transportan
+también el descriptor de la autorización en el manifiesto sellado
+y los FD validados, evitando recrear de forma incorrecta una apertura
+que ya existe. La caída de un proceso o el último cierre libera
+automáticamente su bloqueo. La batería de pruebas abarca los
+conflictos cruzados de lectura/escritura, acuerdos compatibles,
+liberación tras el cierre y una prueba entre procesos reales.
+
+**Límites:** el registro está en el perfil privado C: y precisa
+permisos de lectura/escritura sobre él; los programas Linux externos
+que ignoran este protocolo siguen siendo libres de actuar sobre
+sus propios archivos. No es un servicio del kernel, ni un gestor
+de ACL NTFS. No implementa todavía el estado NT `delete-pending`
+previo a `unlinkat`, el borrado diferido por handle ni la
+atomicidad plena con programas Linux externos. No impide una
+modificación host deliberada del registro por el mismo usuario.
+Reparse points, SMB real, 8.3 e IOCP avanzado permanecen pendientes.
 
 ## Límites actuales
 
@@ -464,8 +507,8 @@ por completo la semántica NT de `delete-pending` entre procesos o sobre
 archivos reabiertos por nombre.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
-points, conexiones UNC/SMB de red reales, compartición `FILE_SHARE_READ`
-y `FILE_SHARE_WRITE` entre procesos, el namespace `delete-pending` de NT,
+points, conexiones UNC/SMB de red reales, coordinación de `FILE_SHARE_*`
+fuera de procesos NT cooperantes y el namespace `delete-pending` de NT,
 E/S NT/APC/IOCP completa, cancelación de operaciones ya iniciadas, ACL
 NTFS y otras funciones avanzadas. La persistencia de las concesiones de
 unidades y recursos UNC y los directorios actuales por unidad sí están

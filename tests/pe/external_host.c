@@ -12,6 +12,7 @@
 #include "desktop_resources.h"
 #include "winbase.h"
 #include "sync.h"
+#include "../file_share_cleanup.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -180,7 +181,8 @@ int main(int argc, char **argv)
     pe_dll_graph_destroy(graph);
     if (status != 0)
         fprintf(stderr, "External PE fixture returned %d\n", status);
-    if (rmdir(temp) != 0) {
+    if (!nt_runtime_set_file_root(NULL) ||
+        !nt_test_cleanup_share_registry(temp) || rmdir(temp) != 0) {
         perror("Temporary fixture directory");
         return 9;
     }
