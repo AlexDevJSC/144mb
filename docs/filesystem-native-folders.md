@@ -340,21 +340,20 @@ usuario NT privilegiado ni una modificación del kernel.
 
 **Límites restantes:** la barrera original de `flock` coordina
 `FILE_SHARE_DELETE`; el registro OFD descrito más abajo incorpora
-`FILE_SHARE_READ` y `FILE_SHARE_WRITE` entre procesos. Tampoco implementa un namespace
-`delete-pending` como Windows (rechazo de aperturas durante ese estado),
-operaciones de `MoveFileEx` por copia entre raíces con el mismo bloqueo
-retenido durante todo el traslado, ni atomicidad total con escritores
-Linux externos. `flock` es *advisory*: un programa Linux que no coopera
+`FILE_SHARE_READ` y `FILE_SHARE_WRITE` entre procesos. El namespace clásico de `delete-pending` se implementa en una
+extensión posterior, descrita más abajo; siguen pendientes sus variantes
+extendidas, el movimiento `MoveFileEx` por copia reteniendo el bloqueo
+durante todo el traslado y la atomicidad total con escritores Linux
+externos. `flock` es *advisory*: un programa Linux que no coopera
 puede renombrar o borrar el inodo. Un archivo sin ningún permiso Linux de
 lectura o escritura puede resultar no borrable por la capa porque
 `flock` necesita un FD real y no admite `O_PATH`; ese error es
 conservador, no una equivalencia completa de ACL NT. No se afirma
 simulación de NTFS ni que todos los programas PE funcionen.
 
-El siguiente paso de esta línea de trabajo es ampliar el registro
-compartido con un **namespace de borrados pendientes**, con restricciones
-sobre reapertura, vínculos existentes y finalización, sin exponer rutas
-anfitrión fuera de las concesiones ni ampliar privilegios.
+La extensión siguiente implementa el estado básico compartido de
+borrados pendientes; la revisión continúa con las variantes POSIX
+extendidas y los casos límite de vínculos y concurrencia externa.
 
 ## Directorio de trabajo activo protegido entre procesos
 
@@ -421,11 +420,63 @@ liberación tras el cierre y una prueba entre procesos reales.
 permisos de lectura/escritura sobre él; los programas Linux externos
 que ignoran este protocolo siguen siendo libres de actuar sobre
 sus propios archivos. No es un servicio del kernel, ni un gestor
-de ACL NTFS. No implementa todavía el estado NT `delete-pending`
-previo a `unlinkat`, el borrado diferido por handle ni la
-atomicidad plena con programas Linux externos. No impide una
+de ACL NTFS. El `delete-pending` clásico y la disposición por handle se
+implementan en el siguiente bloque; quedan fuera las variantes
+avanzadas, recuperación autónoma sin actividad posterior y
+la atomicidad plena con programas Linux externos. No impide una
 modificación host deliberada del registro por el mismo usuario.
 Reparse points, SMB real, 8.3 e IOCP permanecen pendientes.
+
+## Delete-pending NT entre procesos sobre archivos nativos
+
+La apertura de un archivo puede solicitar ahora el derecho **DELETE**
+(`0x10000`) de Win32/NT. El runtime implementa
+`NtSetInformationFile(FileDispositionInformation=13)` y
+`SetFileInformationByHandle(FileDispositionInfo=4)` para archivos
+regulares que posean ese derecho. Un byte BOOL de valor no cero marca
+la disposición, y cero la cancela. No se simulan permisos que Linux o
+SELinux no concedan; la ruta debe continuar identificando el mismo
+inodo. Las consultas `NtQueryInformationFile(FileStandardInformation)`
+y `GetFileInformationByHandleEx(FileStandardInfo)` consultan también el
+registro compartido, no solo el contador Linux de enlaces.
+
+`DeleteFileA/W` sobre un archivo sin handles vivos ejecuta `unlinkat`
+inmediatamente. Si existen handles NT que admiten
+`FILE_SHARE_DELETE`, registra primero una **tumba de borrado pendiente**
+en el mismo fichero de coordinación por inodo. El nombre Linux se
+conserva temporalmente para que los handles abiertos continúen
+funcionando; cualquier reapertura NT por nombre recibe
+`ERROR_DELETE_PENDING`/`STATUS_DELETE_PENDING`. La marca persiste
+mientras existan leases OFD, aunque el proceso que solicitó el borrado
+termine antes que los demás.
+
+Al cerrar el último handle, el runtime comprueba que no quedan leases
+activas, obtiene un bloqueo exclusivo sobre el inodo, verifica
+`st_dev/st_ino` y ejecuta el `unlinkat` diferido. Si el último proceso
+terminó abruptamente, la siguiente apertura NT sobre ese inodo
+recupera la tumba y completa el borrado antes de devolver
+`FILE_NOT_FOUND`. La ruta registrada es siempre un nombre
+normalizado dentro de una raíz expresamente concedida, **nunca**
+una ruta host arbitraria. Si un proceso Linux externo ha sustituido
+el inodo o ha revocado la concesión, la operación falla sin borrar
+el archivo sustituto.
+
+La batería incluye borrado desde un proceso mientras otro mantiene
+el archivo abierto, reintentos de apertura, consulta de estado,
+cancelación de disposición, finalización al último cierre y el
+contrato de API nativa/Win32.
+
+**No equivale al conjunto completo de NTFS:** no hay todavía
+`FileDispositionInformationEx` (POSIX semantics, ignore-readonly,
+force-image-section-check), ni borrado de directorios abiertos,
+operaciones con múltiples enlaces NTFS equivalentes, oplocks, ACL,
+transacciones de filesystem o atomicidad frente a procesos Linux
+ajenos que ignoren nuestro protocolo. Las tumba persistentes pueden
+quedar pendientes de recuperación si un cierre/crash ocurre sin
+ninguna operación NT posterior. Un registro dañado falla en modo
+seguro y necesita reparación explícita; no se improvisan
+borrados sobre nombres incompatibles. La revisión de seguridad
+de estas garantías precede a su aceptación definitiva.
 
 ## Límites actuales
 
