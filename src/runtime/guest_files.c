@@ -2710,6 +2710,60 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
     return !error;
 }
 
+/* DeleteFile is a namespace operation, not the close of a HANDLE.
+ * The ordinary C: profile uses the cooperative per-inode OFD registry
+ * to defer unlink until its final holder is released. The exclusive
+ * target flock, already held by change_path(), blocks new participating
+ * opens while this marker becomes visible. We refuse any mismatched
+ * path/inode pair instead of touching a replacement host file. */
+static int remove_file_or_defer(int parent, const char *leaf, const char *dos_path,
+                                const struct stat *target)
+{
+    if (strncmp(dos_path, "C:", 2) != 0 || !S_ISREG(target->st_mode))
+        return unlinkat(parent, leaf, 0);
+    int gate = open_share_registry(target);
+    if (gate < 0)
+        return -1;
+    int status;
+    do {
+        status = flock(gate, LOCK_EX);
+    } while (status < 0 && errno == EINTR);
+    int error = status != 0 ? errno : 0;
+    if (error == 0) {
+        struct share_pending_record pending;
+        if (!read_share_pending(gate, &pending))
+            error = errno;
+        else if (pending.pending)
+            error = EACCES;
+    }
+    bool active = false;
+    if (error == 0 && !share_registry_has_leases(gate, &active))
+        error = errno;
+    if (error == 0) {
+        struct stat actual;
+        if (fstatat(parent, leaf, &actual, AT_SYMLINK_NOFOLLOW) != 0)
+            error = errno;
+        else if (actual.st_dev != target->st_dev || actual.st_ino != target->st_ino)
+            error = EBUSY;
+    }
+    if (error == 0) {
+        if (active) {
+            if (!set_share_pending(gate, target, dos_path))
+                error = errno;
+        } else if (unlinkat(parent, leaf, 0) != 0) {
+            error = errno;
+        }
+    }
+    if (status == 0)
+        (void)flock(gate, LOCK_UN);
+    close(gate);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
 /* Directory removal must obey the same DOS-name stability policy as rename.
  * A current directory or a granted known-folder root must not disappear
  * while its guest path is still in use. */
@@ -2770,7 +2824,9 @@ static int32_t change_path(const char *input, enum path_operation operation)
                 status = -1;
         }
         if (status == 0)
-            status = unlinkat(parent, leaf, operation == REMOVE_DIRECTORY ? AT_REMOVEDIR : 0);
+            status = operation == REMOVE_FILE ?
+                remove_file_or_defer(parent, leaf, path, &info) :
+                unlinkat(parent, leaf, AT_REMOVEDIR);
     }
     const int error = errno;
     if (deletion_guard >= 0)
