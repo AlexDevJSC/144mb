@@ -4842,6 +4842,47 @@ nt_status NT_MS_ABI nt_NtWriteFile(uintptr_t handle, uintptr_t event, void *apc,
                                length, offset, key, true);
 }
 
+/* NT and Win32 information classes must observe the same pending state.
+ * st_nlink remains nonzero until the final cooperating handle closes; a
+ * Linux stat by itself can no longer stand in for NT DeletePending. */
+static int file_delete_pending(uintptr_t handle, const struct stat *info)
+{
+    if (info->st_nlink == 0)
+        return 1;
+    if (!S_ISREG(info->st_mode))
+        return 0;
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    const int gate = file && file->share_lease_fd > 0 ?
+                     reopen_share_gate(file->share_lease_fd) : -1;
+    const bool has_registry = file && file->share_lease_fd > 0;
+    pthread_mutex_unlock(&file_lock);
+    if (gate < 0)
+        return has_registry ? -1 : 0;
+    int locked;
+    do {
+        locked = flock(gate, LOCK_SH);
+    } while (locked < 0 && errno == EINTR);
+    int result = 0;
+    if (locked < 0) {
+        result = -1;
+    } else {
+        struct share_pending_record marker;
+        if (!read_share_pending(gate, &marker))
+            result = -1;
+        else if (marker.pending && marker.dev == (uint64_t)info->st_dev &&
+                 marker.ino == (uint64_t)info->st_ino)
+            result = 1;
+        const int error = errno;
+        (void)flock(gate, LOCK_UN);
+        errno = error;
+    }
+    const int error = errno;
+    close(gate);
+    errno = error;
+    return result;
+}
+
 nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_status_block *io,
                                                 void *buffer, uint32_t length, uint32_t information_class)
 {
@@ -4868,14 +4909,19 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
         if (fstat(fd, &file) != 0) {
             error = errno;
         } else {
-            const struct nt_file_standard_information info = {
-                .allocation_size = (int64_t)file.st_blocks * 512,
-                .end_of_file = file.st_size,
-                .number_of_links = file.st_nlink > UINT32_MAX ? UINT32_MAX : (uint32_t)file.st_nlink,
-                .delete_pending = file.st_nlink == 0,
-                .directory = S_ISDIR(file.st_mode) != 0
-            };
-            memcpy(buffer, &info, sizeof(info));
+            const int pending = file_delete_pending(handle, &file);
+            if (pending < 0) {
+                error = errno;
+            } else {
+                const struct nt_file_standard_information info = {
+                    .allocation_size = (int64_t)file.st_blocks * 512,
+                    .end_of_file = file.st_size,
+                    .number_of_links = file.st_nlink > UINT32_MAX ? UINT32_MAX : (uint32_t)file.st_nlink,
+                    .delete_pending = pending != 0,
+                    .directory = S_ISDIR(file.st_mode) != 0
+                };
+                memcpy(buffer, &info, sizeof(info));
+            }
         }
     } else {
         const off_t position = lseek(fd, 0, SEEK_CUR);
@@ -5426,33 +5472,12 @@ int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind
                                               ticks(file_time(stat_info.st_ctim)), attr.attributes};
         memcpy(info, &basic, sizeof(basic));
     } else if (kind == 1) {
-        bool pending = stat_info.st_nlink == 0;
-        /* A delete-pending inode remains linked on Linux until its last
-         * cooperating Windows handle closes. StandardInfo reports the
-         * guest disposition rather than the host st_nlink shortcut. */
-        pthread_mutex_lock(&file_lock);
-        const struct guest_file *entry = find_handle(handle);
-        const int gate = entry != NULL && entry->share_lease_fd > 0 ?
-                         reopen_share_gate(entry->share_lease_fd) : -1;
-        pthread_mutex_unlock(&file_lock);
-        if (gate >= 0) {
-            int locked;
-            do {
-                locked = flock(gate, LOCK_SH);
-            } while (locked < 0 && errno == EINTR);
-            if (locked == 0) {
-                struct share_pending_record marker;
-                if (read_share_pending(gate, &marker) && marker.pending &&
-                    marker.dev == (uint64_t)stat_info.st_dev &&
-                    marker.ino == (uint64_t)stat_info.st_ino)
-                    pending = true;
-                (void)flock(gate, LOCK_UN);
-            }
-            close(gate);
-        }
+        const int pending = file_delete_pending(handle, &stat_info);
+        if (pending < 0)
+            return file_result(fd, false);
         const struct standard_file_info standard_info = {
             (int64_t)((uint64_t)stat_info.st_blocks * 512), stat_info.st_size,
-            (uint32_t)stat_info.st_nlink, pending, S_ISDIR(stat_info.st_mode) != 0
+            (uint32_t)stat_info.st_nlink, pending != 0, S_ISDIR(stat_info.st_mode) != 0
         };
         memcpy(info, &standard_info, sizeof(standard_info));
     } else {
