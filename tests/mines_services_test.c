@@ -182,6 +182,58 @@ static void check_deferred_disposition(void)
           last_error() == NT_ERROR_FILE_NOT_FOUND);
 }
 
+/* Crash recovery: the last Windows HANDLE disappears without a CloseHandle
+ * call, leaving only the persistent pending marker. The next open must
+ * complete the deferred unlink before reporting FILE_NOT_FOUND. */
+static void check_crashed_pending_delete(void)
+{
+    const uint32_t read_access = UINT32_C(0x80000000);
+    const uint32_t write_access = UINT32_C(0x40000000);
+    const uintptr_t created = nt_CreateFileA("C:\\crashed-delete.bin",
+        write_access, 7u, NULL, 2u, 0x80u, 0);
+    CHECK(created != UINTPTR_MAX && nt_CloseHandle(created));
+
+    int ready[2], gate[2];
+    CHECK(pipe(ready) == 0 && pipe(gate) == 0);
+    const pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        close(ready[0]);
+        close(gate[1]);
+        const uintptr_t held = nt_CreateFileA("C:\\crashed-delete.bin",
+            read_access, 7u, NULL, 3u, 0x80u, 0);
+        if (held == UINTPTR_MAX)
+            _exit(91);
+        const char token = 'R';
+        if (write(ready[1], &token, 1) != 1)
+            _exit(92);
+        char release = 0;
+        if (read(gate[0], &release, 1) != 1)
+            _exit(93);
+        /* Simulated abrupt termination: deliberately bypass CloseHandle. */
+        _exit(0);
+    }
+    close(ready[1]);
+    close(gate[0]);
+    char ready_token = 0;
+    CHECK(read(ready[0], &ready_token, 1) == 1 && ready_token == 'R');
+    close(ready[0]);
+    CHECK(nt_DeleteFileA("C:\\crashed-delete.bin"));
+    CHECK(nt_CreateFileA("C:\\crashed-delete.bin", read_access, 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_DELETE_PENDING);
+    const char resume = 'G';
+    CHECK(write(gate[1], &resume, 1) == 1);
+    close(gate[1]);
+    int status = 0;
+    CHECK(waitpid(child, &status, 0) == child &&
+          WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    CHECK(nt_CreateFileA("C:\\crashed-delete.bin", read_access, 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_FILE_NOT_FOUND);
+}
+
 static void check_crossprocess_read_write_sharing(void)
 {
     const uint32_t read_access = UINT32_C(0x80000000), write_access = UINT32_C(0x40000000);
@@ -389,6 +441,7 @@ static void check_file_handles(void)
     CHECK(nt_DeleteFileA("scores"));
     check_crossprocess_delete_sharing();
     check_deferred_disposition();
+    check_crashed_pending_delete();
     check_crossprocess_read_write_sharing();
     check_crossprocess_current_directory();
     check_drive_relative_cwds();
