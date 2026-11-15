@@ -357,6 +357,9 @@ static void check_files(void)
     BOUND(KERNEL, UnlockFileEx);
     BOUND(KERNEL, GetOverlappedResult);
     BOUND(KERNEL, GetOverlappedResultEx);
+    BOUND(KERNEL, CreateIoCompletionPort);
+    BOUND(KERNEL, GetQueuedCompletionStatus);
+    BOUND(KERNEL, PostQueuedCompletionStatus);
     BOUND(KERNEL, CancelIoEx);
     BOUND(KERNEL, GetTempPathA);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
@@ -769,6 +772,49 @@ static void check_files(void)
     CHECK(nt_CloseHandle(alternate) && nt_CloseHandle(running_event) &&
           nt_CloseHandle(cancelled_event));
 
+    /* Per-process IOCP supports manual packets and associates native file
+     * completion notifications by file handle/key. Windows event low bit
+     * suppresses posting but does not prevent GetOverlappedResult. */
+    const uintptr_t port = nt_CreateIoCompletionPort(UINTPTR_MAX, 0, 0, 0);
+    CHECK(port != 0);
+    struct nt_overlapped posted = {0};
+    CHECK(nt_PostQueuedCompletionStatus(port, 17, 0xBEEFu, &posted));
+    uint32_t packet_bytes = 0;
+    uintptr_t packet_key = 0;
+    struct nt_overlapped *packet_overlapped = NULL;
+    CHECK(nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                        &packet_overlapped, 0) &&
+          packet_bytes == 17 && packet_key == 0xBEEFu &&
+          packet_overlapped == &posted);
+    packet_overlapped = &posted;
+    CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                         &packet_overlapped, 0) &&
+          last_error() == NT_ERROR_WAIT_TIMEOUT && packet_overlapped == NULL);
+    CHECK(nt_CreateIoCompletionPort(background, port, 0xCAFEu, 0) == port);
+    CHECK(nt_CreateIoCompletionPort(background, port, 0xDEADu, 0) == 0 &&
+          last_error() == NT_ERROR_INVALID_PARAMETER);
+    char port_read_buffer[6] = {0};
+    struct nt_overlapped port_read = {.offset = 5};
+    CHECK(!nt_ReadFile(background, port_read_buffer, 5, NULL, &port_read) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                        &packet_overlapped, 1000) &&
+          packet_bytes == 5 && packet_key == 0xCAFEu &&
+          packet_overlapped == &port_read &&
+          memcmp(port_read_buffer, "async", 5) == 0);
+    struct nt_overlapped suppressed = {.offset = 5, .event = background_event | 1u};
+    char suppressed_buffer[6] = {0};
+    CHECK(!nt_ReadFile(background, suppressed_buffer, 5, NULL, &suppressed) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_GetOverlappedResult(background, &suppressed, &async_completed, 1) &&
+          async_completed == 5 && memcmp(suppressed_buffer, "async", 5) == 0);
+    packet_overlapped = &posted;
+    CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
+                                         &packet_overlapped, 0) &&
+          last_error() == NT_ERROR_WAIT_TIMEOUT && packet_overlapped == NULL);
+    CHECK(nt_CloseHandle(port));
+    CHECK(!nt_PostQueuedCompletionStatus(port, 1, 2, NULL) &&
+          last_error() == NT_ERROR_INVALID_HANDLE);
     CHECK(nt_CloseHandle(background) && nt_CloseHandle(background_event) &&
           nt_DeleteFileA("data/background.bin"));
 
