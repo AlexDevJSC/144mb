@@ -720,12 +720,15 @@ static void check_files(void)
     char pending_byte = 0, unused_byte = 0;
     CHECK(!nt_ReadFile(background, &pending_byte, 1, NULL, &running) &&
           last_error() == NT_ERROR_IO_PENDING);
+    fprintf(stderr, "DBG-CANCEL AFTER FIRST READ\n");
     pthread_mutex_lock(&async_test_lock);
     while (!async_hold_entered)
         pthread_cond_wait(&async_test_changed, &async_test_lock);
     pthread_mutex_unlock(&async_test_lock);
+    fprintf(stderr, "DBG-CANCEL WORKER ENTERED\n");
     CHECK(!nt_ReadFile(background, &unused_byte, 1, NULL, &victim) &&
           last_error() == NT_ERROR_IO_PENDING);
+    fprintf(stderr, "DBG-CANCEL VICTIM QUEUED\n");
     const uintptr_t alternate = nt_CreateFileA("data/background.bin", UINT32_C(0x80000000),
         7u, NULL, 3u, 0x40000080u, 0);
     CHECK(alternate != UINTPTR_MAX);
@@ -736,16 +739,21 @@ static void check_files(void)
     char concurrent_buffer[6] = {0};
     CHECK(!nt_ReadFile(alternate, concurrent_buffer, 5, NULL, &concurrent) &&
           last_error() == NT_ERROR_IO_PENDING);
+    fprintf(stderr, "DBG-CANCEL ALTERNATE READ STARTED\n");
     CHECK(nt_GetOverlappedResultEx(alternate, &concurrent, &async_completed, 1000, 0) &&
           async_completed == 5 && memcmp(concurrent_buffer, "async", 5) == 0);
+    fprintf(stderr, "DBG-CANCEL ALT COMPLETED\n");
     CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 0, 0) &&
           last_error() == NT_ERROR_IO_INCOMPLETE);
     CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 0) &&
           last_error() == NT_ERROR_WAIT_TIMEOUT);
     CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 1) &&
           last_error() == NT_ERROR_NOT_SUPPORTED);
+    fprintf(stderr, "DBG-CANCEL TIMED WAITS DONE\n");
     CHECK(!nt_CancelIoEx(alternate, &victim) && last_error() == NT_ERROR_NOT_FOUND);
+    fprintf(stderr, "DBG-CANCEL WRONG HANDLE REJECTED\n");
     CHECK(nt_CancelIoEx(background, &victim));
+    fprintf(stderr, "DBG-CANCEL VICTIM ABORTED\n");
     CHECK(!nt_GetOverlappedResult(background, &victim, &async_completed, 1) &&
           last_error() == NT_ERROR_OPERATION_ABORTED);
     CHECK(nt_WaitForSingleObject(cancelled_event, 1000) == 0);
@@ -758,6 +766,7 @@ static void check_files(void)
           last_error() == NT_ERROR_IO_PENDING);
     CHECK(!nt_ReadFile(background, &all_two_byte, 1, NULL, &all_two) &&
           last_error() == NT_ERROR_IO_PENDING);
+    fprintf(stderr, "DBG-CANCEL ALL QUEUED\n");
     CHECK(nt_CancelIoEx(background, NULL));
     CHECK(!nt_GetOverlappedResult(background, &all_one, &async_completed, 1) &&
           last_error() == NT_ERROR_OPERATION_ABORTED);
@@ -769,6 +778,7 @@ static void check_files(void)
     async_hold_enabled = false;
     pthread_cond_broadcast(&async_test_changed);
     pthread_mutex_unlock(&async_test_lock);
+    fprintf(stderr, "DBG-CANCEL RELEASED WORKER\n");
     CHECK(nt_GetOverlappedResultEx(background, &running, &async_completed, 1000, 0) &&
           async_completed == 0);
     CHECK(nt_WaitForSingleObject(running_event, 1000) == 0);
