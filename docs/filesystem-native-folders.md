@@ -322,6 +322,13 @@ solicitud que el trabajador ya empezó no se cancela mediante `pthread_cancel`
 ni se reporta falsamente como cancelada: devuelve `ERROR_NOT_FOUND`
 cuando no hay solicitudes en cola para ese criterio.
 
+Se ofrece `GetOverlappedResultEx` con espera no alertable y tiempo máximo
+configurable: devuelve `WAIT_TIMEOUT` al agotarse el plazo, sin detener
+la operación en curso. Utiliza la condición del trabajador y el reloj
+real del kernel Linux; no ejecuta bucles de sondeo. La variante
+`bAlertable=TRUE` se rechaza expresamente hasta disponer del comportamiento
+de APC de Windows.
+
 Siguen pendientes IOCP, APC asíncronas NT, cancelación real de operaciones
 ya despachadas, varios trabajadores y las semánticas completas de
 cierre, señalización y desvinculación de handles/eventos. La cancelación
