@@ -73,6 +73,19 @@ int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path);
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags);
 int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination);
 int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destination, int32_t fail_if_exists);
+/* LPPROGRESS_ROUTINE, Microsoft x64 ABI; stream_number=1 for a regular file.
+ * CALLBACK_STREAM_SWITCH=1, CALLBACK_CHUNK_FINISHED=0.
+ * PROGRESS_CONTINUE=0, CANCEL=1, STOP=2, QUIET=3. */
+typedef uint32_t (NT_MS_ABI *nt_copy_progress_routine)(
+    int64_t total, int64_t transferred, int64_t stream_size,
+    int64_t stream_transferred, uint32_t stream_number, uint32_t reason,
+    uintptr_t source_handle, uintptr_t destination_handle, void *context);
+int32_t NT_MS_ABI nt_CopyFileExA(const char *source, const char *destination,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel, uint32_t flags);
+int32_t NT_MS_ABI nt_CopyFileExW(const uint16_t *source, const uint16_t *destination,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel, uint32_t flags);
 uint32_t NT_MS_ABI nt_GetLogicalDrives(void);
 uint32_t NT_MS_ABI nt_GetDriveTypeW(const uint16_t *root);
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer);
