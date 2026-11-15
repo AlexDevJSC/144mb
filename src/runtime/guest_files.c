@@ -1347,6 +1347,10 @@ int32_t NT_MS_ABI nt_PostQueuedCompletionStatus(uintptr_t port, uint32_t bytes,
                                                 uintptr_t completion_key,
                                                 struct nt_overlapped *overlap)
 {
+    if (port == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
     if (!post_iocp_packet(port, bytes, completion_key, overlap, NT_ERROR_SUCCESS)) {
         nt_SetLastError(errno == ENOSPC ? NT_ERROR_NOT_ENOUGH_MEMORY : NT_ERROR_INVALID_HANDLE);
         return 0;
