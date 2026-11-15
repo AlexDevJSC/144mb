@@ -341,7 +341,7 @@ int import_fixture_entry(void)
         /* An acknowledged runtime checkpoint has a real CPU snapshot.
          * The returned RIP belongs to the guest thread while parked in
          * native wait code, not a fabricated PE instruction address. */
-        CONTEXT captured = {0};
+        CONTEXT captured;
         captured.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
         SetLastError(0x1234u);
         if (!GetThreadContext(parked, &captured) ||
@@ -349,7 +349,7 @@ int import_fixture_entry(void)
             captured.Rip == 0 || captured.Rsp == 0 ||
             captured.ContextFlags != (CONTEXT_CONTROL | CONTEXT_INTEGER))
             return 71;
-        CONTEXT native_ctx = {0};
+        CONTEXT native_ctx;
         native_ctx.ContextFlags = CONTEXT_CONTROL;
         if (NtGetContextThread(parked, &native_ctx) != 0 ||
             native_ctx.Rip != captured.Rip ||
