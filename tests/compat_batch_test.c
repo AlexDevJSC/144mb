@@ -979,9 +979,9 @@ static void check_files(void)
     CHECK(nt_SetCurrentDirectoryA("D:"));
     CHECK(nt_GetCurrentDirectoryA(sizeof(win_cwd), win_cwd) ==
           strlen("D:\\games") && strcmp(win_cwd, "D:\\games") == 0);
-    CHECK(nt_SetCurrentDirectoryA("C:\\"));
     CHECK(!nt_RemoveDirectoryA("D:\\games") &&
           last_error() == NT_ERROR_SHARING_VIOLATION);
+    CHECK(nt_SetCurrentDirectoryA("C:\\"));
     CHECK(nt_GetFullPathNameA("D:..\\..\\escape", sizeof(absolute_path),
                               absolute_path, NULL) == 0);
     CHECK(nt_SetCurrentDirectoryA("D:\\"));
