@@ -264,6 +264,41 @@ int main(void)
     CHECK(nt_guest_drive_load(NULL, root, saved_drives) < 0 && errno == EACCES);
     CHECK(chmod(drives_config, 0600) == 0);
 
+    /* UNC grants are explicit named Linux roots, independently stored from
+     * C:, D: and the six known folders. They persist, can be revoked, and
+     * must not silently grant the HOME or accept unsafe aliases. */
+    struct nt_guest_unc_grant unc[NT_GUEST_UNC_LIMIT] = {0};
+    size_t unc_count = 0;
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 && unc_count == 0);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "assets", other) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 && unc_count == 1);
+    CHECK(strcmp(unc[0].server, "lab") == 0 &&
+          strcmp(unc[0].share, "assets") == 0 &&
+          strcmp(unc[0].directory, other) == 0);
+    nt_guest_unc_free(unc, unc_count);
+    CHECK(nt_guest_unc_update(NULL, root, "LAB", "ASSETS", other) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 && unc_count == 1);
+    nt_guest_unc_free(unc, unc_count);
+    CHECK(nt_guest_unc_update(NULL, root, "..", "assets", other) < 0 && errno == EINVAL);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "assets", root) < 0 && errno == EACCES);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "assets", "relative") < 0 &&
+          errno == EINVAL);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "assets", NULL) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 && unc_count == 0);
+    nt_guest_unc_free(unc, unc_count);
+    char unc_config[512];
+    CHECK(snprintf(unc_config, sizeof(unc_config),
+                   "%s/.config/nt-native-linux/unc.conf", root) > 0);
+    CHECK(stat(unc_config, &info) == 0 && S_ISREG(info.st_mode) &&
+          (info.st_mode & 0077) == 0 && info.st_uid == geteuid());
+    CHECK(chmod(unc_config, 0644) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) < 0 && errno == EACCES);
+    CHECK(chmod(unc_config, 0600) == 0);
+    CHECK(unlink(unc_config) == 0);
+    CHECK(symlink(other, unc_config) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) < 0);
+    CHECK(unlink(unc_config) == 0);
+
     char config_path[512];
     CHECK(snprintf(config_path, sizeof(config_path),
                    "%s/.config/nt-native-linux/shares.conf", root) > 0);
@@ -278,6 +313,6 @@ int main(void)
     CHECK(unlink(config_path) == 0);
 
     CHECK(nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
-    puts("PASS persistent profile, known-folder and DOS drive grants, atomic updates and symlink denial");
+    puts("PASS persistent profile, known-folder, drive and UNC grants, atomic updates and symlink denial");
     return 0;
 }

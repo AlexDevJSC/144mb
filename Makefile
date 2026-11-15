@@ -227,8 +227,8 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 20s $(BUILD_DIR)/process-thread-test
 	timeout 20s $(BUILD_DIR)/thread-affinity-test
 	timeout 20s $(BUILD_DIR)/inherited-file-test
-	$(BUILD_DIR)/compat-batch-test
-	$(BUILD_DIR)/mines-services-test
+	timeout 30s $(BUILD_DIR)/compat-batch-test
+	timeout 30s $(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test
 	$(BUILD_DIR)/guest-thread-test
 	$(BUILD_DIR)/guest-profile-test

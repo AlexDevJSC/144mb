@@ -78,7 +78,10 @@ struct waitable {
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
-static uintptr_t next_handle = 0x76000001;
+/* Win32 HANDLE values reserve the low bits for API-specific flags
+ * (notably OVERLAPPED.hEvent bit zero). Never allocate an object handle
+ * which aliases a tagged handle when that bit is set. */
+static uintptr_t next_handle = 0x76000004;
 static struct waitable *current_process_state;
 static pthread_mutex_t wait_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wait_changed = PTHREAD_COND_INITIALIZER;
@@ -372,12 +375,13 @@ static struct waitable *find_waitable(uintptr_t handle)
 
 static struct waitable *new_waitable(enum waitable_kind kind)
 {
-    if (next_handle == UINTPTR_MAX)
+    if (next_handle > UINTPTR_MAX - 4)
         return NULL;
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         if (waitables[i].refs == 0 && waitables[i].links == 0) {
-            waitables[i] = (struct waitable){.handle = next_handle++, .refs = 1, .kind = kind,
+            waitables[i] = (struct waitable){.handle = next_handle, .refs = 1, .kind = kind,
                                              .access = SYNCHRONIZE, .pidfd = -1, .start_gate_fd = -1};
+            next_handle += 4;
             return &waitables[i];
         }
     }

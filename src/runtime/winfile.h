@@ -106,6 +106,15 @@ int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved, uint32_t 
 int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,
                                          uint32_t *done, int32_t wait);
 int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *overlap);
+int32_t NT_MS_ABI nt_GetOverlappedResultEx(uintptr_t handle, struct nt_overlapped *overlap,
+                                           uint32_t *done, uint32_t milliseconds, int32_t alertable);
+uintptr_t NT_MS_ABI nt_CreateIoCompletionPort(uintptr_t file, uintptr_t existing,
+                                               uintptr_t completion_key, uint32_t concurrency);
+int32_t NT_MS_ABI nt_PostQueuedCompletionStatus(uintptr_t port, uint32_t bytes,
+                                                uintptr_t completion_key, struct nt_overlapped *overlap);
+int32_t NT_MS_ABI nt_GetQueuedCompletionStatus(uintptr_t port, uint32_t *bytes,
+                                               uintptr_t *completion_key, struct nt_overlapped **overlap,
+                                               uint32_t milliseconds);
 int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle);
 int32_t NT_MS_ABI nt_GetFileSizeEx(uintptr_t handle, int64_t *size);
 int32_t NT_MS_ABI nt_SetFilePointerEx(uintptr_t handle, int64_t offset, int64_t *position, uint32_t method);

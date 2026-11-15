@@ -27,6 +27,7 @@
 #include <sys/syscall.h>
 #include <sys/xattr.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -439,6 +440,18 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         used = strlen(guest_cwd);
         memcpy(output, guest_cwd, used);
         pthread_mutex_unlock(&root_lock);
+    } else {
+        /* A single slash is relative to the current drive's root. */
+        pthread_mutex_lock(&root_lock);
+        if (guest_cwd[0] >= 'D' && guest_cwd[0] <= 'Z' && guest_cwd[1] == ':') {
+            output[0] = guest_cwd[0];
+            output[1] = ':';
+            used = 2;
+        } else if (strncmp(guest_cwd, "@UNC:/", 6) == 0) {
+            used = root_boundary(guest_cwd);
+            memcpy(output, guest_cwd, used);
+        }
+        pthread_mutex_unlock(&root_lock);
     }
     while (*input != '\0') {
         while (separator(*input))
@@ -474,9 +487,10 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
                 errno = EACCES;
                 return false;
             }
-            while (used != 0 && output[used - 1] != '/')
+            const size_t boundary = root_boundary(output);
+            while (used > boundary && output[used - 1] != '/')
                 --used;
-            if (used != 0)
+            if (used > boundary)
                 --used;
             continue;
         }
@@ -1037,6 +1051,7 @@ struct guest_file {
     ino_t inode;
     bool text;
     bool overlapped_io;
+    uintptr_t completion_port, completion_key;
     char *path;
 };
 
@@ -1333,6 +1348,224 @@ static struct guest_file *find_handle(uintptr_t handle)
             return &files[i];
     }
     return NULL;
+}
+
+/* A user-mode completion port is a per-process queue, never a Linux root
+ * capability or a handle to an arbitrary host process. This initial API
+ * covers file OVERLAPPED completions and manually posted packets. */
+enum { IOCP_PORT_LIMIT = 16, IOCP_PACKETS = 256 };
+struct iocp_packet {
+    uint32_t bytes, status;
+    uintptr_t key;
+    struct nt_overlapped *overlap;
+};
+struct iocp_port {
+    bool active;
+    uintptr_t handle;
+    size_t head, count;
+    struct iocp_packet packets[IOCP_PACKETS];
+};
+static struct iocp_port iocp_ports[IOCP_PORT_LIMIT];
+static uintptr_t next_iocp_handle = UINT32_C(0x66000004);
+static pthread_mutex_t iocp_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t iocp_changed = PTHREAD_COND_INITIALIZER;
+
+/* Caller holds iocp_lock. */
+static struct iocp_port *find_iocp_port(uintptr_t handle)
+{
+    for (size_t i = 0; i < IOCP_PORT_LIMIT; ++i)
+        if (iocp_ports[i].active && iocp_ports[i].handle == handle)
+            return &iocp_ports[i];
+    return NULL;
+}
+
+static uintptr_t create_iocp_port(void)
+{
+    uintptr_t result = 0;
+    pthread_mutex_lock(&iocp_lock);
+    for (size_t i = 0; i < IOCP_PORT_LIMIT && !result; ++i)
+        if (!iocp_ports[i].active && next_iocp_handle <= UINTPTR_MAX - 16) {
+            struct iocp_port *port = &iocp_ports[i];
+            port->active = true;
+            port->handle = next_iocp_handle;
+            port->head = port->count = 0;
+            result = next_iocp_handle;
+            next_iocp_handle += 16;
+        }
+    pthread_mutex_unlock(&iocp_lock);
+    if (!result)
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+    return result;
+}
+
+static bool close_iocp_port(uintptr_t handle)
+{
+    pthread_mutex_lock(&iocp_lock);
+    struct iocp_port *port = find_iocp_port(handle);
+    const bool found = port != NULL;
+    if (found) {
+        port->active = false;
+        port->count = 0;
+        pthread_cond_broadcast(&iocp_changed);
+    }
+    pthread_mutex_unlock(&iocp_lock);
+    return found;
+}
+
+static size_t active_iocp_count(void)
+{
+    size_t result = 0;
+    pthread_mutex_lock(&iocp_lock);
+    for (size_t i = 0; i < IOCP_PORT_LIMIT; ++i)
+        if (iocp_ports[i].active)
+            ++result;
+    pthread_mutex_unlock(&iocp_lock);
+    return result;
+}
+
+static bool post_iocp_packet(uintptr_t port_handle, uint32_t bytes,
+                             uintptr_t key, struct nt_overlapped *overlap,
+                             uint32_t status)
+{
+    if (!port_handle)
+        return true;
+    pthread_mutex_lock(&iocp_lock);
+    struct iocp_port *port = find_iocp_port(port_handle);
+    bool success = port != NULL && port->count < IOCP_PACKETS;
+    if (success) {
+        const size_t index = (port->head + port->count) % IOCP_PACKETS;
+        port->packets[index] = (struct iocp_packet) {
+            .bytes = bytes, .key = key, .overlap = overlap, .status = status
+        };
+        ++port->count;
+        pthread_cond_broadcast(&iocp_changed);
+    }
+    pthread_mutex_unlock(&iocp_lock);
+    if (!success)
+        errno = port == NULL ? EBADF : ENOSPC;
+    return success;
+}
+
+uintptr_t NT_MS_ABI nt_CreateIoCompletionPort(uintptr_t file, uintptr_t existing,
+                                               uintptr_t completion_key, uint32_t concurrency)
+{
+    (void)concurrency; /* Native host scheduling, not Windows IOCP throttling. */
+    if (file == UINTPTR_MAX) {
+        if (existing) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        return create_iocp_port();
+    }
+    if (file == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    const bool created = existing == 0;
+    const uintptr_t port = created ? create_iocp_port() : existing;
+    if (!port)
+        return 0;
+
+    pthread_mutex_lock(&file_lock);
+    pthread_mutex_lock(&iocp_lock);
+    struct guest_file *entry = find_handle(file);
+    const bool port_valid = find_iocp_port(port) != NULL;
+    const bool suitable = entry && entry->overlapped_io;
+    const bool already_associated = suitable && entry->completion_port != 0;
+    if (port_valid && suitable && !already_associated) {
+        entry->completion_port = port;
+        entry->completion_key = completion_key;
+    }
+    pthread_mutex_unlock(&iocp_lock);
+    pthread_mutex_unlock(&file_lock);
+    if (!port_valid || !suitable || already_associated) {
+        if (created)
+            (void)close_iocp_port(port);
+        nt_SetLastError(!port_valid || !entry ? NT_ERROR_INVALID_HANDLE :
+                        !suitable ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return port;
+}
+
+int32_t NT_MS_ABI nt_PostQueuedCompletionStatus(uintptr_t port, uint32_t bytes,
+                                                uintptr_t completion_key,
+                                                struct nt_overlapped *overlap)
+{
+    if (port == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if (!post_iocp_packet(port, bytes, completion_key, overlap, NT_ERROR_SUCCESS)) {
+        nt_SetLastError(errno == ENOSPC ? NT_ERROR_NOT_ENOUGH_MEMORY : NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetQueuedCompletionStatus(uintptr_t port_handle, uint32_t *bytes,
+                                               uintptr_t *completion_key,
+                                               struct nt_overlapped **overlap,
+                                               uint32_t milliseconds)
+{
+    if (!bytes || !completion_key || !overlap) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *overlap = NULL;
+    struct timespec until = {0};
+    const bool timed = milliseconds != 0 && milliseconds != UINT32_MAX;
+    if (timed) {
+        if (syscall(SYS_clock_gettime, CLOCK_REALTIME, &until) != 0) {
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+        until.tv_sec += (time_t)(milliseconds / 1000);
+        until.tv_nsec += (long)(milliseconds % 1000) * 1000000L;
+        if (until.tv_nsec >= 1000000000L) {
+            until.tv_nsec -= 1000000000L;
+            ++until.tv_sec;
+        }
+    }
+    pthread_mutex_lock(&iocp_lock);
+    struct iocp_port *port = find_iocp_port(port_handle);
+    if (!port) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    int wait_error = 0;
+    while (port->active && port->handle == port_handle &&
+           port->count == 0 && milliseconds != 0) {
+        wait_error = timed ? pthread_cond_timedwait(&iocp_changed, &iocp_lock,
+                                                     &until) :
+                             pthread_cond_wait(&iocp_changed, &iocp_lock);
+        if (wait_error != 0)
+            break;
+    }
+    if (!port->active || port->handle != port_handle) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(NT_ERROR_ABANDONED_WAIT_0);
+        return 0;
+    }
+    if (port->count == 0) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(wait_error != 0 && wait_error != ETIMEDOUT ?
+                        NT_ERROR_GEN_FAILURE : NT_ERROR_WAIT_TIMEOUT);
+        return 0;
+    }
+    struct iocp_packet packet = port->packets[port->head];
+    port->head = (port->head + 1) % IOCP_PACKETS;
+    --port->count;
+    pthread_mutex_unlock(&iocp_lock);
+    *bytes = packet.bytes;
+    *completion_key = packet.key;
+    *overlap = packet.overlap;
+    if (packet.status != NT_ERROR_SUCCESS) {
+        nt_SetLastError(packet.status);
+        return 0;
+    }
+    return 1;
 }
 
 static int open_shared(struct guest_file *slot, int parent, const char *path,
@@ -2038,7 +2271,7 @@ int32_t NT_MS_ABI nt_GetProcessHandleCount(uintptr_t process, uint32_t *count)
         if (files[i].owner == WIN_HANDLE && files[i].handle != 0)
             ++handles;
     pthread_mutex_unlock(&file_lock);
-    *count = handles + nt_runtime_count_waitable_handles();
+    *count = handles + nt_runtime_count_waitable_handles() + (uint32_t)active_iocp_count();
     return 1;
 }
 
@@ -2055,6 +2288,8 @@ static int close_object(uintptr_t handle)
     }
     pthread_mutex_unlock(&file_lock);
     if (file == NULL) {
+        if (close_iocp_port(handle))
+            return 0;
         const nt_status status = nt_runtime_close_waitable_status(handle);
         if (status == NT_STATUS_SUCCESS)
             return 0;
@@ -3416,13 +3651,14 @@ static bool check_current_lock(int fd, uint32_t length, bool write_access)
     return range_unlocked(fd, (uint64_t)current, length, write_access);
 }
 
-enum { ASYNC_LIMIT = 32, ASYNC_PENDING = NT_ERROR_IO_PENDING };
+enum { ASYNC_LIMIT = 32, ASYNC_WORKERS = 4, ASYNC_PENDING = NT_ERROR_IO_PENDING };
 struct async_request {
     bool occupied, queued;
     /* Per-process ownership: different Win32 HANDLE aliases are distinct
      * cancellation targets even if they refer to the same Linux inode. */
     uintptr_t owner_handle;
     pid_t owner_pid;
+    uintptr_t completion_port, completion_key;
     int fd;
     void *buffer;
     uint32_t size;
@@ -3441,14 +3677,31 @@ static void *async_worker_loop(void *argument)
     (void)argument;
     for (;;) {
         pthread_mutex_lock(&async_lock);
-        size_t index = 0;
+        size_t index;
         for (;;) {
-            while (index < ASYNC_LIMIT && !async_tasks[index].queued)
-                ++index;
+            index = ASYNC_LIMIT;
+            for (size_t i = 0; i < ASYNC_LIMIT; ++i) {
+                if (!async_tasks[i].queued)
+                    continue;
+                /* Serialize jobs from one guest HANDLE. Other handles
+                 * may execute in parallel across native Linux workers. */
+                bool busy_handle = false;
+                for (size_t j = 0; j < ASYNC_LIMIT; ++j)
+                    if (i != j && async_tasks[j].occupied &&
+                        !async_tasks[j].queued &&
+                        async_tasks[j].owner_handle == async_tasks[i].owner_handle &&
+                        async_tasks[j].owner_pid == async_tasks[i].owner_pid) {
+                        busy_handle = true;
+                        break;
+                    }
+                if (!busy_handle) {
+                    index = i;
+                    break;
+                }
+            }
             if (index < ASYNC_LIMIT)
                 break;
             pthread_cond_wait(&async_condition, &async_lock);
-            index = 0;
         }
         struct async_request job = async_tasks[index];
         async_tasks[index].queued = false;
@@ -3477,6 +3730,10 @@ static void *async_worker_loop(void *argument)
         pthread_mutex_unlock(&async_lock);
         if (job.event)
             (void)nt_SetEvent(job.event);
+        if (job.completion_port)
+            (void)post_iocp_packet(job.completion_port,
+                                   result > 0 ? (uint32_t)result : 0,
+                                   job.completion_key, job.completion, status);
         pthread_mutex_lock(&async_lock);
         pthread_cond_broadcast(&async_condition);
         pthread_mutex_unlock(&async_lock);
@@ -3500,6 +3757,8 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     const struct guest_file *entry = find_handle(handle);
     const bool exists = entry != NULL;
     const bool enabled = exists && entry->overlapped_io;
+    const uintptr_t completion_port = enabled ? entry->completion_port : 0;
+    const uintptr_t completion_key = enabled ? entry->completion_key : 0;
     pthread_mutex_unlock(&file_lock);
     if (!enabled) {
         nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
@@ -3508,7 +3767,8 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     const int fd = duplicate_handle(handle, write_access ? FILE_WRITE : FILE_READ);
     if (fd < 0)
         return file_result(fd, false);
-    if (completion->event && !nt_ResetEvent(completion->event)) {
+    const uintptr_t event = completion->event & ~(uintptr_t)1;
+    if (event && !nt_ResetEvent(event)) {
         close(fd);
         return 0;
     }
@@ -3524,25 +3784,31 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
             slot = i;
     }
     if (slot >= 0 && !async_started) {
-        pthread_t worker;
-        if (pthread_create(&worker, NULL, async_worker_loop, NULL) == 0) {
+        size_t launched = 0;
+        for (size_t i = 0; i < ASYNC_WORKERS; ++i) {
+            pthread_t worker;
+            if (pthread_create(&worker, NULL, async_worker_loop, NULL) != 0)
+                break;
             pthread_detach(worker);
-            async_started = true;
-        } else {
-            slot = -1;
+            ++launched;
         }
+        async_started = launched != 0;
+        if (!async_started)
+            slot = -1;
     }
     if (slot >= 0) {
         async_tasks[slot] = (struct async_request) {
             .occupied = true, .queued = true,
             .owner_handle = handle, .owner_pid = getpid(),
+            .completion_port = (completion->event & 1) ? 0 : completion_port,
+            .completion_key = completion_key,
             .fd = fd, .buffer = buffer,
             .size = size, .offset = (off_t)offset, .write_access = write_access,
-            .completion = completion, .event = completion->event
+            .completion = completion, .event = event
         };
         __atomic_store_n(&completion->internal_high, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&completion->internal, ASYNC_PENDING, __ATOMIC_RELEASE);
-        pthread_cond_signal(&async_condition);
+        pthread_cond_broadcast(&async_condition);
     }
     pthread_mutex_unlock(&async_lock);
     if (slot < 0) {
@@ -3708,6 +3974,11 @@ int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *completi
         close(cancelled[i].fd);
         if (cancelled[i].event)
             (void)nt_SetEvent(cancelled[i].event);
+        if (cancelled[i].completion_port)
+            (void)post_iocp_packet(cancelled[i].completion_port, 0,
+                                   cancelled[i].completion_key,
+                                   cancelled[i].completion,
+                                   NT_ERROR_OPERATION_ABORTED);
     }
     if (count == 0) {
         nt_SetLastError(NT_ERROR_NOT_FOUND);
@@ -3753,6 +4024,77 @@ int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped 
     }
     *done = (uint32_t)bytes;
     return 1;
+}
+
+/* Timed Win32 OVERLAPPED completion. Nonalertable waits share the same
+ * condition variable as the original GetOverlappedResult, with no polling.
+ * We intentionally reject alertable=TRUE until APC delivery semantics are
+ * implemented: reporting success without honoring alertable waits would be
+ * a false Windows compatibility claim. */
+int32_t NT_MS_ABI nt_GetOverlappedResultEx(uintptr_t handle,
+                                           struct nt_overlapped *overlap,
+                                           uint32_t *done, uint32_t milliseconds,
+                                           int32_t alertable)
+{
+    if (alertable) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (nt_GetOverlappedResult(handle, overlap, done, 0))
+        return 1;
+    if (nt_GetLastError() != NT_ERROR_IO_INCOMPLETE)
+        return 0;
+    if (milliseconds == 0) {
+        /* Windows distinguishes a zero-time poll (IO_INCOMPLETE) from
+         * expiration of an actual timed wait (WAIT_TIMEOUT). */
+        nt_SetLastError(NT_ERROR_IO_INCOMPLETE);
+        return 0;
+    }
+    struct timespec deadline = {0};
+    const bool finite = milliseconds != UINT32_MAX;
+    if (finite) {
+        /* Use the host kernel clock rather than the guest Win32 clock
+         * wrapper; tests deliberately replace clock_gettime. */
+        if (syscall(SYS_clock_gettime, CLOCK_REALTIME, &deadline) != 0) {
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+        deadline.tv_sec += (time_t)(milliseconds / 1000);
+        deadline.tv_nsec += (long)(milliseconds % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_nsec -= 1000000000L;
+            ++deadline.tv_sec;
+        }
+    }
+    pthread_mutex_lock(&async_lock);
+    uintptr_t status = __atomic_load_n(&overlap->internal, __ATOMIC_ACQUIRE);
+    int waited = 0;
+    while (status == NT_ERROR_IO_PENDING) {
+        bool active = false;
+        for (size_t i = 0; i < ASYNC_LIMIT; ++i)
+            if (async_tasks[i].occupied && async_tasks[i].completion == overlap) {
+                active = true;
+                break;
+            }
+        if (!active)
+            break;
+        waited = finite ? pthread_cond_timedwait(&async_condition, &async_lock,
+                                                  &deadline) :
+                          pthread_cond_wait(&async_condition, &async_lock);
+        status = __atomic_load_n(&overlap->internal, __ATOMIC_ACQUIRE);
+        if (waited != 0)
+            break;
+    }
+    pthread_mutex_unlock(&async_lock);
+    if (waited != 0 && waited != ETIMEDOUT) {
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    if (nt_GetOverlappedResult(handle, overlap, done, 0))
+        return 1;
+    if (nt_GetLastError() == NT_ERROR_IO_INCOMPLETE)
+        nt_SetLastError(NT_ERROR_WAIT_TIMEOUT);
+    return 0;
 }
 
 static int32_t range_lock(uintptr_t handle, uint64_t offset, uint64_t length,
