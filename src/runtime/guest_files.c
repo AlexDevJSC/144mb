@@ -3747,7 +3747,7 @@ struct async_request {
     /* Per-process ownership: different Win32 HANDLE aliases are distinct
      * cancellation targets even if they refer to the same Linux inode. */
     uintptr_t owner_handle;
-    pid_t owner_pid;
+    pid_t owner_pid, owner_tid;
     uintptr_t completion_port, completion_key;
     int fd;
     void *buffer;
@@ -3889,7 +3889,7 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     if (slot >= 0) {
         async_tasks[slot] = (struct async_request) {
             .occupied = true, .queued = true,
-            .owner_handle = handle, .owner_pid = getpid(),
+            .owner_handle = handle, .owner_pid = getpid(), .owner_tid = gettid(),
             .completion_port = (completion->event & 1) ? 0 : completion_port,
             .completion_key = completion_key,
             .fd = fd, .buffer = buffer,
@@ -3912,7 +3912,8 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
 
 /* Regular handles preserve immediate offset completion. FILE_FLAG_OVERLAPPED
  * handles instead use the bounded worker queue; cancellation only handles
- * requests which have not started. IOCP/APC completion is not supported. */
+ * requests which have not started. IOCP completion is provided for file
+ * handles; NT APC completion and dispatched cancellation remain pending. */
 static int32_t file_io(uintptr_t handle, void *buffer, uint32_t size,
                       uint32_t *done, struct nt_overlapped *overlap, bool writing)
 {
@@ -4028,7 +4029,8 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
  * The file HANDLE (not the inode or guest PID) owns each request. An
  * OVERLAPPED pointer restricts the selection; NULL selects all queued
  * requests issued through this HANDLE, including other guest threads. */
-int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *completion)
+static int32_t cancel_queued_io(uintptr_t handle, struct nt_overlapped *completion,
+                                bool issuing_thread_only)
 {
     pthread_mutex_lock(&file_lock);
     const struct guest_file *entry = find_handle(handle);
@@ -4047,6 +4049,7 @@ int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *completi
         struct async_request *task = &async_tasks[i];
         if (!task->occupied || !task->queued || task->owner_handle != handle ||
             task->owner_pid != getpid() ||
+            (issuing_thread_only && task->owner_tid != gettid()) ||
             (completion != NULL && task->completion != completion))
             continue;
         cancelled[count++] = *task;
@@ -4075,6 +4078,19 @@ int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *completi
         return 0;
     }
     return 1;
+}
+
+/* CancelIo can only affect requests issued by the calling thread,
+ * whereas CancelIoEx may select requests from any guest thread. Linux
+ * requests already in progress are not interrupted or misreported. */
+int32_t NT_MS_ABI nt_CancelIo(uintptr_t handle)
+{
+    return cancel_queued_io(handle, NULL, true);
+}
+
+int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *completion)
+{
+    return cancel_queued_io(handle, completion, false);
 }
 
 int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,
