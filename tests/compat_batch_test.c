@@ -356,6 +356,7 @@ static void check_files(void)
     BOUND(KERNEL, LockFileEx);
     BOUND(KERNEL, UnlockFileEx);
     BOUND(KERNEL, GetOverlappedResult);
+    BOUND(KERNEL, GetOverlappedResultEx);
     BOUND(KERNEL, CancelIoEx);
     BOUND(KERNEL, GetTempPathA);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
@@ -722,6 +723,12 @@ static void check_files(void)
     const uintptr_t alternate = nt_CreateFileA("data/background.bin", UINT32_C(0x80000000),
         7u, NULL, 3u, 0x40000080u, 0);
     CHECK(alternate != UINTPTR_MAX);
+    CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 0, 0) &&
+          last_error() == NT_ERROR_WAIT_TIMEOUT);
+    CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 0) &&
+          last_error() == NT_ERROR_WAIT_TIMEOUT);
+    CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 1) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
     CHECK(!nt_CancelIoEx(alternate, &victim) && last_error() == NT_ERROR_NOT_FOUND);
     CHECK(nt_CancelIoEx(background, &victim));
     CHECK(!nt_GetOverlappedResult(background, &victim, &async_completed, 1) &&
@@ -747,7 +754,7 @@ static void check_files(void)
     async_hold_enabled = false;
     pthread_cond_broadcast(&async_test_changed);
     pthread_mutex_unlock(&async_test_lock);
-    CHECK(nt_GetOverlappedResult(background, &running, &async_completed, 1) &&
+    CHECK(nt_GetOverlappedResultEx(background, &running, &async_completed, 1000, 0) &&
           async_completed == 0);
     CHECK(nt_WaitForSingleObject(running_event, 1000) == 0);
     CHECK(nt_CloseHandle(alternate) && nt_CloseHandle(running_event) &&
