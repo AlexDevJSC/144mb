@@ -75,6 +75,14 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 
 - **14-11-2026, fase 4 — afinidad nativa de ProcessBasicInformation (PR en revisión): 91 % → 92 % (+1 punto estimado, sujeto a CI).** `NtQueryInformationProcess` deja de devolver una máscara CPU0 ficticia y utiliza la afinidad real del kernel Linux para el proceso actual; rechaza cpusets fuera del grupo 0 y conserva Win32 `LastError`. Test PE Win64 compara `GetProcessAffinityMask` con la consulta nativa y cubre el rechazo explícito.
 
+### Seguimiento 15-11-2026: fase 4, pendientes de integración apilada
+
+- **PR #106 fusionada: 93 % → 94 % (+1 punto porcentual estimado).** Suspensión confirmada de un hilo **ya activo** en `SleepEx(TRUE)` y esperas NT alertables, contabilización y reanudación sin interrumpir pthreads por señales; la solicitud que no alcanza un punto seguro se revierte y devuelve NOT_SUPPORTED. [CI Linux/UBSan/Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43733373217).
+- **PR #107 pendiente de revisión: 94 % → 94 % (+0 puntos estimados hasta nueva evaluación).** `NtGetContextThread`/`GetThreadContext` obtienen una instantánea **real** AMD64 del hilo propio confirmado como aparcado, sin inventar `RIP`/`RSP`. `SetThreadContext`/`NtSetContextThread` siguen sin mutar registros y devuelven NOT_SUPPORTED de forma explícita. [CI Linux/UBSan/Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43734091159). No representa captura general de cualquier instrucción PE.
+- **PR #109 pendiente de revisión: 94 % → 95 % (+1 punto porcentual estimado, condicionado a la integración).** Un hilo vivo **ya aparcado** en una espera alertable puede atender `TerminateThread`/`NtTerminateThread` ejecutando su propia salida y liberando referencias NT, sin cancelación de pthreads desde otro hilo. [CI Linux/UBSan/Fedora superada](https://github.com/AlexDevJSC/144mb/actions/runs/43734466989).
+
+Estas cifras son **estimaciones subjetivas de madurez del componente 4**, no porcentajes de API, seguridad o paridad Windows. Un incremento de 2 puntos no acredita llegar al 100 %, y no debe imputarse a los otros seis componentes. La suspensión y terminación **asíncronas de cualquier instrucción**, el cambio real de registros mediante `SetThreadContext`, los objetos NT compartidos entre procesos, broker/IPC, tokens/ACL y las pruebas diferenciales Windows/validación aislada Fedora físico **siguen funcionalmente pendientes**. Cualquier `SKIP` de Bubblewrap no es aprobación.
+
 ### Estado de la entrega acumulada del 14-11-2026
 
 - **Componente 4: 72 % → 90 % (+18 puntos porcentuales estimados)** mediante PR #85, #87 y #88, fusionadas en `main`.
