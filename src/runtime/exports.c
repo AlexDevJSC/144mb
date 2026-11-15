@@ -517,6 +517,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetQueuedCompletionStatus),
     WIN_EXPORT(GetQueuedCompletionStatusEx),
     WIN_EXPORT(PostQueuedCompletionStatus),
+    WIN_EXPORT(CancelIo),
     WIN_EXPORT(CancelIoEx),
     WIN_EXPORT(ReleaseSRWLockExclusive),
     WIN_EXPORT(RtlPcToFileHeader),
