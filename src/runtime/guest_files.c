@@ -1559,6 +1559,72 @@ static struct guest_file *find_handle(uintptr_t handle)
     return NULL;
 }
 
+/* FILE_DISPOSITION_INFORMATION (NT class 13) / FileDispositionInfo
+ * (Win32 class 4). A DELETE-rights handle marks the shared inode pending.
+ * The pathname remains visible in Linux while Windows name reopens fail;
+ * its final unlink is handled when the last OFD share record disappears. */
+static int share_set_handle_disposition(uintptr_t handle, bool marked)
+{
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    int error = 0;
+    if (file == NULL) {
+        error = EBADF;
+    } else if ((file->access & FILE_DELETE) == 0) {
+        error = EACCES;
+    } else if (file->share_lease_fd <= 0 || file->path == NULL) {
+        error = EINVAL;
+    }
+    struct stat info;
+    if (error == 0 && fstat(file->fd, &info) != 0)
+        error = errno;
+    if (error == 0 && !S_ISREG(info.st_mode))
+        error = EACCES;
+    if (error == 0 && marked && (info.st_mode & 0222u) == 0)
+        error = EACCES;
+    if (error == 0 && marked) {
+        /* Refuse a stale pathname, or an entry externally replaced after
+         * the HANDLE was opened; never delete a different Linux inode. */
+        const char *relative = file->path;
+        const int root = duplicate_root(&relative);
+        if (root < 0) {
+            error = errno;
+        } else {
+            char leaf[NAME_MAX + 1];
+            const int parent = open_parent(root, relative, leaf);
+            const int parent_error = errno;
+            close(root);
+            if (parent < 0) {
+                error = parent_error;
+            } else {
+                struct stat named;
+                if (fstatat(parent, leaf, &named, AT_SYMLINK_NOFOLLOW) != 0)
+                    error = errno;
+                else if (named.st_dev != info.st_dev || named.st_ino != info.st_ino)
+                    error = EBUSY;
+                close(parent);
+            }
+        }
+    }
+    const int gate = error == 0 ? open_share_registry(&info) : -1;
+    if (error == 0 && gate < 0)
+        error = errno;
+    if (gate >= 0) {
+        while (error == 0 && flock(gate, LOCK_EX) < 0) {
+            if (errno != EINTR)
+                error = errno;
+        }
+        if (error == 0 && share_write_pending(gate, marked ? file->path : NULL) != 0)
+            error = errno;
+        (void)flock(gate, LOCK_UN);
+        close(gate);
+    }
+    pthread_mutex_unlock(&file_lock);
+    if (error != 0)
+        errno = error;
+    return error == 0 ? 0 : -1;
+}
+
 static int open_shared(struct guest_file *slot, int parent, const char *path,
                        int flags, unsigned int access, unsigned int share, bool *created)
 {
@@ -4197,6 +4263,7 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
  * an explicit non-negative offset uses pread/pwrite. The Windows async
  * event/APC contract is not implemented and must fail explicitly. */
 enum { FILE_STANDARD_INFORMATION_CLASS = 5, FILE_POSITION_INFORMATION_CLASS = 14,
+       FILE_DISPOSITION_INFORMATION_CLASS = 13,
        FILE_END_OF_FILE_INFORMATION_CLASS = 20 };
 
 struct nt_file_standard_information {
@@ -4351,7 +4418,14 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
                 .delete_pending = file.st_nlink == 0,
                 .directory = S_ISDIR(file.st_mode) != 0
             };
-            memcpy(buffer, &info, sizeof(info));
+            struct nt_file_standard_information result = info;
+            bool pending = false;
+            if (file.st_nlink != 0 && !share_is_pending(&file, &pending)) {
+                error = errno;
+            } else {
+                result.delete_pending = file.st_nlink == 0 || pending;
+                memcpy(buffer, &result, sizeof(result));
+            }
         }
     } else {
         const off_t position = lseek(fd, 0, SEEK_CUR);
@@ -4375,12 +4449,22 @@ nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_statu
     if (io == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
     if (information_class != FILE_POSITION_INFORMATION_CLASS &&
-        information_class != FILE_END_OF_FILE_INFORMATION_CLASS)
+        information_class != FILE_END_OF_FILE_INFORMATION_CLASS &&
+        information_class != FILE_DISPOSITION_INFORMATION_CLASS)
         return nt_file_complete(io, NT_STATUS_INVALID_INFO_CLASS, 0);
     if (buffer == NULL)
         return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
-    if (length < sizeof(struct nt_file_position_information))
+    if (length < (information_class == FILE_DISPOSITION_INFORMATION_CLASS ?
+                  sizeof(uint8_t) : sizeof(struct nt_file_position_information)))
         return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
+    if (information_class == FILE_DISPOSITION_INFORMATION_CLASS) {
+        uint8_t marked;
+        memcpy(&marked, buffer, sizeof(marked));
+        const bool okay = share_set_handle_disposition(handle, marked != 0) == 0;
+        const int error = errno;
+        return nt_file_complete(io, okay ? NT_STATUS_SUCCESS :
+                                nt_file_errno_status(error), 0);
+    }
 
     struct nt_file_position_information info;
     memcpy(&info, buffer, sizeof(info));
@@ -4902,10 +4986,14 @@ int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind
                                               ticks(file_time(stat_info.st_ctim)), attr.attributes};
         memcpy(info, &basic, sizeof(basic));
     } else if (kind == 1) {
-        const struct standard_file_info standard_info = {
+        struct standard_file_info standard_info = {
             (int64_t)((uint64_t)stat_info.st_blocks * 512), stat_info.st_size,
             (uint32_t)stat_info.st_nlink, stat_info.st_nlink == 0, S_ISDIR(stat_info.st_mode) != 0
         };
+        bool pending = false;
+        if (stat_info.st_nlink != 0 && !share_is_pending(&stat_info, &pending))
+            return file_result(fd, false);
+        standard_info.pending = stat_info.st_nlink == 0 || pending;
         memcpy(info, &standard_info, sizeof(standard_info));
     } else {
         const uint32_t data[] = {attr.attributes, 0};
@@ -5011,6 +5099,18 @@ int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, 
 {
     if (info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (kind == 4) {
+        uint32_t marked;
+        if (size < sizeof(marked)) {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        memcpy(&marked, info, sizeof(marked));
+        if (share_set_handle_disposition(handle, marked != 0) == 0)
+            return 1;
+        nt_SetLastError(path_error(errno, false));
         return 0;
     }
     if (kind == 6) {
