@@ -1050,6 +1050,7 @@ struct guest_file {
     dev_t device;
     ino_t inode;
     bool text;
+    bool delete_disposition;
     bool overlapped_io;
     uintptr_t completion_port, completion_key;
     char *path;
@@ -5523,11 +5524,102 @@ int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *cr
     return file_result(fd, valid);
 }
 
+/* FILE_DISPOSITION_INFO (FileInfoByHandleClass=4) contains a single
+ * BOOLEAN in the Win32 ABI. Only a HANDLE with explicit DELETE access
+ * may request disposition. We never use a host pathname stored in the
+ * record without rechecking its inode through an authorized directory. */
+static int32_t set_file_disposition(uintptr_t handle, bool deleting)
+{
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file = find_handle(handle);
+    int error = file == NULL ? EBADF :
+                (file->access & FILE_DELETE) == 0 ? EACCES : 0;
+    if (error == 0 && (file->path == NULL ||
+                       strncmp(file->path, "C:", 2) != 0 ||
+                       file->share_lease_fd <= 0))
+        error = ENOTSUP;
+    struct stat file_info;
+    if (error == 0 && fstat(file->fd, &file_info) != 0)
+        error = errno;
+    if (error == 0 && (!S_ISREG(file_info.st_mode) ||
+                       (file_info.st_mode & 0222) == 0))
+        error = EACCES;
+    if (error == 0 && deleting && !file->delete_disposition) {
+        const char *relative = file->path;
+        int root = duplicate_root(&relative);
+        if (root < 0)
+            error = errno;
+        else {
+            char leaf[NAME_MAX + 1];
+            int parent = open_parent(root, relative, leaf);
+            const int opened_error = errno;
+            close(root);
+            if (parent < 0) {
+                error = opened_error;
+            } else {
+                struct stat current;
+                if (fstatat(parent, leaf, &current, AT_SYMLINK_NOFOLLOW) != 0)
+                    error = errno;
+                else if (current.st_dev != file_info.st_dev ||
+                         current.st_ino != file_info.st_ino)
+                    error = EBUSY;
+                close(parent);
+            }
+        }
+    }
+    if (error == 0) {
+        int gate = reopen_share_gate(file->share_lease_fd);
+        if (gate < 0) {
+            error = errno;
+        } else {
+            int locked;
+            do {
+                locked = flock(gate, LOCK_EX);
+            } while (locked < 0 && errno == EINTR);
+            if (locked < 0) {
+                error = errno;
+            } else {
+                if (deleting) {
+                    if (!file->delete_disposition &&
+                        !set_share_pending(gate, &file_info, file->path))
+                        error = errno;
+                    else if (error == 0)
+                        file->delete_disposition = true;
+                } else if (file->delete_disposition) {
+                    if (!clear_share_pending(gate))
+                        error = errno;
+                    else
+                        file->delete_disposition = false;
+                } else {
+                    struct share_pending_record current;
+                    if (!read_share_pending(gate, &current))
+                        error = errno;
+                    else if (current.pending)
+                        error = EACCES; /* Cannot undo another opener's deletion. */
+                }
+                (void)flock(gate, LOCK_UN);
+            }
+            close(gate);
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    if (error != 0)
+        nt_SetLastError(path_error(error, false));
+    return error == 0;
+}
+
 int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, const void *info, uint32_t size)
 {
     if (info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
+    }
+    if (kind == 4) {
+        if (size < 1) {
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        return set_file_disposition(handle, *(const uint8_t *)info != 0);
     }
     if (kind == 6) {
         int64_t length;
