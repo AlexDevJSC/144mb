@@ -723,6 +723,15 @@ static void check_files(void)
     const uintptr_t alternate = nt_CreateFileA("data/background.bin", UINT32_C(0x80000000),
         7u, NULL, 3u, 0x40000080u, 0);
     CHECK(alternate != UINTPTR_MAX);
+    /* While background's first read is blocked, a second HANDLE must be
+     * served by another Linux worker rather than waiting for the entire
+     * worker queue to drain. */
+    struct nt_overlapped concurrent = {.offset = 5};
+    char concurrent_buffer[6] = {0};
+    CHECK(!nt_ReadFile(alternate, concurrent_buffer, 5, NULL, &concurrent) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_GetOverlappedResultEx(alternate, &concurrent, &async_completed, 1000, 0) &&
+          async_completed == 5 && memcmp(concurrent_buffer, "async", 5) == 0);
     CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 0, 0) &&
           last_error() == NT_ERROR_IO_INCOMPLETE);
     CHECK(!nt_GetOverlappedResultEx(background, &victim, &async_completed, 2, 0) &&
