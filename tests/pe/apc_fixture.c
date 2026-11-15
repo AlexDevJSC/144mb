@@ -16,6 +16,7 @@ __declspec(dllimport) LONG NTAPI NtQueueApcThreadEx(
     HANDLE, HANDLE, void (NTAPI *)(void *, void *, void *),
     void *, void *, void *);
 __declspec(dllimport) LONG NTAPI NtAlertThread(HANDLE);
+__declspec(dllimport) LONG NTAPI NtAlertResumeThread(HANDLE, ULONG *);
 __declspec(dllimport) LONG NTAPI NtWaitForSingleObject(
     HANDLE, BOOLEAN, const LARGE_INTEGER *);
 __declspec(dllimport) LONG NTAPI NtTestAlert(void);
@@ -146,7 +147,8 @@ int import_fixture_entry(void)
         GetLastError() != ERROR_ACCESS_DENIED ||
         NtQueueApcThread(restricted, native_apc, NULL, NULL, NULL) != STATUS_ACCESS_DENIED ||
         NtQueueApcThreadEx(restricted, NULL, native_apc, NULL, NULL, NULL) != STATUS_ACCESS_DENIED ||
-        NtAlertThread(restricted) != STATUS_ACCESS_DENIED)
+        NtAlertThread(restricted) != STATUS_ACCESS_DENIED ||
+        NtAlertResumeThread(restricted, NULL) != STATUS_ACCESS_DENIED)
         return 12;
     if (!CloseHandle(restricted))
         return 13;
@@ -187,5 +189,23 @@ int import_fixture_entry(void)
     if (NtTestAlert() != STATUS_OK ||
         !CloseHandle(interrupted) || !CloseHandle(ready))
         return 45;
+
+    /* Suspend+alert are one transition. A pending alert remains on the
+     * canonical thread even when another HANDLE aliases the object. */
+    ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (ready == NULL)
+        return 46;
+    HANDLE gated = CreateThread(NULL, 0, alert_worker, ready,
+                                CREATE_SUSPENDED, NULL);
+    if (gated == NULL)
+        return 47;
+    ULONG previous = 555;
+    if (NtAlertResumeThread(gated, &previous) != STATUS_OK || previous != 1u ||
+        WaitForSingleObject(ready, 5000) != WAIT_OBJECT_0 ||
+        WaitForSingleObject(gated, 5000) != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(gated, &code) || code != 0x166u)
+        return 48;
+    if (!CloseHandle(gated) || !CloseHandle(ready))
+        return 49;
     return 0;
 }
