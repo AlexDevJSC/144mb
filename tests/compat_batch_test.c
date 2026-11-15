@@ -644,9 +644,16 @@ static void check_files(void)
     CHECK(nt_DeleteFileA("DATA/DELETE-ME.BIN") != 0);
     /* DeleteFile is now pending while a cooperating open HANDLE remains.
      * A new open is denied, even though the host inode still exists. */
-    CHECK(nt_CreateFileA("data/delete-me.bin", UINT32_C(0x80000000), 7u,
-                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
-          last_error() == NT_ERROR_ACCESS_DENIED);
+    const uintptr_t attempted_pending_open = nt_CreateFileA(
+        "data/delete-me.bin", UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    const uint32_t attempted_pending_error = last_error();
+    if (attempted_pending_open != UINTPTR_MAX ||
+        attempted_pending_error != NT_ERROR_ACCESS_DENIED)
+        fprintf(stderr, "DELETE_PENDING_DIAG handle=%llu error=%u expected=%u\n",
+                (unsigned long long)attempted_pending_open,
+                attempted_pending_error, NT_ERROR_ACCESS_DENIED);
+    CHECK(attempted_pending_open == UINTPTR_MAX &&
+          attempted_pending_error == NT_ERROR_ACCESS_DENIED);
     char still_open = 0;
     uint32_t got_delete = 0;
     CHECK(nt_ReadFile(delete_handle, &still_open, 1, &got_delete, NULL) != 0 &&
