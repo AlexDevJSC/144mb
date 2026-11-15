@@ -1039,6 +1039,7 @@ struct guest_file {
     ino_t inode;
     bool text;
     bool overlapped_io;
+    uintptr_t completion_port, completion_key;
     char *path;
 };
 
@@ -1192,6 +1193,219 @@ static struct guest_file *find_handle(uintptr_t handle)
             return &files[i];
     }
     return NULL;
+}
+
+/* A user-mode completion port is a per-process queue, never a Linux root
+ * capability or a handle to an arbitrary host process. This initial API
+ * covers file OVERLAPPED completions and manually posted packets. */
+enum { IOCP_PORT_LIMIT = 16, IOCP_PACKETS = 256 };
+struct iocp_packet {
+    uint32_t bytes, status;
+    uintptr_t key;
+    struct nt_overlapped *overlap;
+};
+struct iocp_port {
+    bool active;
+    uintptr_t handle;
+    size_t head, count;
+    struct iocp_packet packets[IOCP_PACKETS];
+};
+static struct iocp_port iocp_ports[IOCP_PORT_LIMIT];
+static uintptr_t next_iocp_handle = UINT32_C(0x66000004);
+static pthread_mutex_t iocp_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t iocp_changed = PTHREAD_COND_INITIALIZER;
+
+/* Caller holds iocp_lock. */
+static struct iocp_port *find_iocp_port(uintptr_t handle)
+{
+    for (size_t i = 0; i < IOCP_PORT_LIMIT; ++i)
+        if (iocp_ports[i].active && iocp_ports[i].handle == handle)
+            return &iocp_ports[i];
+    return NULL;
+}
+
+static uintptr_t create_iocp_port(void)
+{
+    uintptr_t result = 0;
+    pthread_mutex_lock(&iocp_lock);
+    for (size_t i = 0; i < IOCP_PORT_LIMIT && !result; ++i)
+        if (!iocp_ports[i].active && next_iocp_handle <= UINTPTR_MAX - 16) {
+            struct iocp_port *port = &iocp_ports[i];
+            port->active = true;
+            port->handle = next_iocp_handle;
+            port->head = port->count = 0;
+            result = next_iocp_handle;
+            next_iocp_handle += 16;
+        }
+    pthread_mutex_unlock(&iocp_lock);
+    if (!result)
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+    return result;
+}
+
+static bool close_iocp_port(uintptr_t handle)
+{
+    pthread_mutex_lock(&iocp_lock);
+    struct iocp_port *port = find_iocp_port(handle);
+    const bool found = port != NULL;
+    if (found) {
+        port->active = false;
+        port->count = 0;
+        pthread_cond_broadcast(&iocp_changed);
+    }
+    pthread_mutex_unlock(&iocp_lock);
+    return found;
+}
+
+static size_t active_iocp_count(void)
+{
+    size_t result = 0;
+    pthread_mutex_lock(&iocp_lock);
+    for (size_t i = 0; i < IOCP_PORT_LIMIT; ++i)
+        if (iocp_ports[i].active)
+            ++result;
+    pthread_mutex_unlock(&iocp_lock);
+    return result;
+}
+
+static bool post_iocp_packet(uintptr_t port_handle, uint32_t bytes,
+                             uintptr_t key, struct nt_overlapped *overlap,
+                             uint32_t status)
+{
+    if (!port_handle)
+        return true;
+    pthread_mutex_lock(&iocp_lock);
+    struct iocp_port *port = find_iocp_port(port_handle);
+    bool success = port != NULL && port->count < IOCP_PACKETS;
+    if (success) {
+        const size_t index = (port->head + port->count) % IOCP_PACKETS;
+        port->packets[index] = (struct iocp_packet) {
+            .bytes = bytes, .key = key, .overlap = overlap, .status = status
+        };
+        ++port->count;
+        pthread_cond_broadcast(&iocp_changed);
+    }
+    pthread_mutex_unlock(&iocp_lock);
+    if (!success)
+        errno = port == NULL ? EBADF : ENOSPC;
+    return success;
+}
+
+uintptr_t NT_MS_ABI nt_CreateIoCompletionPort(uintptr_t file, uintptr_t existing,
+                                               uintptr_t completion_key, uint32_t concurrency)
+{
+    (void)concurrency; /* Native host scheduling, not Windows IOCP throttling. */
+    if (file == UINTPTR_MAX) {
+        if (existing) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        return create_iocp_port();
+    }
+    if (file == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    const bool created = existing == 0;
+    const uintptr_t port = created ? create_iocp_port() : existing;
+    if (!port)
+        return 0;
+
+    pthread_mutex_lock(&file_lock);
+    pthread_mutex_lock(&iocp_lock);
+    struct guest_file *entry = find_handle(file);
+    const bool port_valid = find_iocp_port(port) != NULL;
+    const bool suitable = entry && entry->overlapped_io;
+    const bool already_associated = suitable && entry->completion_port != 0;
+    if (port_valid && suitable && !already_associated) {
+        entry->completion_port = port;
+        entry->completion_key = completion_key;
+    }
+    pthread_mutex_unlock(&iocp_lock);
+    pthread_mutex_unlock(&file_lock);
+    if (!port_valid || !suitable || already_associated) {
+        if (created)
+            (void)close_iocp_port(port);
+        nt_SetLastError(!port_valid || !entry ? NT_ERROR_INVALID_HANDLE :
+                        !suitable ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return port;
+}
+
+int32_t NT_MS_ABI nt_PostQueuedCompletionStatus(uintptr_t port, uint32_t bytes,
+                                                uintptr_t completion_key,
+                                                struct nt_overlapped *overlap)
+{
+    if (!post_iocp_packet(port, bytes, completion_key, overlap, NT_ERROR_SUCCESS)) {
+        nt_SetLastError(errno == ENOSPC ? NT_ERROR_NOT_ENOUGH_MEMORY : NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetQueuedCompletionStatus(uintptr_t port_handle, uint32_t *bytes,
+                                               uintptr_t *completion_key,
+                                               struct nt_overlapped **overlap,
+                                               uint32_t milliseconds)
+{
+    if (!bytes || !completion_key || !overlap) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *overlap = NULL;
+    struct timespec until = {0};
+    const bool timed = milliseconds != 0 && milliseconds != UINT32_MAX;
+    if (timed) {
+        if (syscall(SYS_clock_gettime, CLOCK_REALTIME, &until) != 0) {
+            nt_SetLastError(NT_ERROR_GEN_FAILURE);
+            return 0;
+        }
+        until.tv_sec += (time_t)(milliseconds / 1000);
+        until.tv_nsec += (long)(milliseconds % 1000) * 1000000L;
+        if (until.tv_nsec >= 1000000000L) {
+            until.tv_nsec -= 1000000000L;
+            ++until.tv_sec;
+        }
+    }
+    pthread_mutex_lock(&iocp_lock);
+    struct iocp_port *port = find_iocp_port(port_handle);
+    if (!port) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    int wait_error = 0;
+    while (port->active && port->count == 0 && milliseconds != 0) {
+        wait_error = timed ? pthread_cond_timedwait(&iocp_changed, &iocp_lock,
+                                                     &until) :
+                             pthread_cond_wait(&iocp_changed, &iocp_lock);
+        if (wait_error != 0)
+            break;
+    }
+    if (!port->active) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(NT_ERROR_ABANDONED_WAIT_0);
+        return 0;
+    }
+    if (port->count == 0) {
+        pthread_mutex_unlock(&iocp_lock);
+        nt_SetLastError(wait_error != 0 && wait_error != ETIMEDOUT ?
+                        NT_ERROR_GEN_FAILURE : NT_ERROR_WAIT_TIMEOUT);
+        return 0;
+    }
+    struct iocp_packet packet = port->packets[port->head];
+    port->head = (port->head + 1) % IOCP_PACKETS;
+    --port->count;
+    pthread_mutex_unlock(&iocp_lock);
+    *bytes = packet.bytes;
+    *completion_key = packet.key;
+    *overlap = packet.overlap;
+    if (packet.status != NT_ERROR_SUCCESS) {
+        nt_SetLastError(packet.status);
+        return 0;
+    }
+    return 1;
 }
 
 static int open_shared(struct guest_file *slot, int parent, const char *path,
@@ -1842,7 +2056,7 @@ int32_t NT_MS_ABI nt_GetProcessHandleCount(uintptr_t process, uint32_t *count)
         if (files[i].owner == WIN_HANDLE && files[i].handle != 0)
             ++handles;
     pthread_mutex_unlock(&file_lock);
-    *count = handles + nt_runtime_count_waitable_handles();
+    *count = handles + nt_runtime_count_waitable_handles() + (uint32_t)active_iocp_count();
     return 1;
 }
 
@@ -1859,6 +2073,8 @@ static int close_object(uintptr_t handle)
     }
     pthread_mutex_unlock(&file_lock);
     if (file == NULL) {
+        if (close_iocp_port(handle))
+            return 0;
         const nt_status status = nt_runtime_close_waitable_status(handle);
         if (status == NT_STATUS_SUCCESS)
             return 0;
