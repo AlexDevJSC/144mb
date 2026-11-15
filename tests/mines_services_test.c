@@ -3,6 +3,7 @@
 #include "compat.h"
 #include "user_folders.h"
 #include "winfile.h"
+#include "file_share_cleanup.h"
 #include "nt_services.h"
 
 #include <errno.h>
@@ -333,7 +334,8 @@ static void check_file_handles(void)
     check_crossprocess_read_write_sharing();
     check_crossprocess_current_directory();
     check_drive_relative_cwds();
-    CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
+    CHECK(nt_runtime_set_file_root(NULL) &&
+          nt_test_cleanup_share_registry(root) && rmdir(root) == 0);
     puts("PASS shared Win32 files and ownership from HANDLE to CRT fd to FILE");
     puts("PASS cross-process FILE_SHARE_DELETE using Linux flock leases");
     puts("PASS cross-process FILE_SHARE_READ/WRITE with crash-safe OFD leases");
@@ -435,7 +437,8 @@ static void check_user_folders(void)
     CHECK(nt_runtime_set_user_folder_root(folder, NULL));
     CHECK(nt_RemoveDirectoryA("C:/Users/guest") && nt_RemoveDirectoryA("C:/Users"));
     CHECK(nt_runtime_set_file_root(NULL) && nt_runtime_shared_user_folders() == 0);
-    CHECK(unlink(link) == 0 && rmdir(native) == 0 && rmdir(drive) == 0);
+    CHECK(unlink(link) == 0 && rmdir(native) == 0 &&
+          nt_test_cleanup_share_registry(drive) && rmdir(drive) == 0);
     puts("PASS Windows known folders and direct Linux file access with separate roots");
 }
 
@@ -512,7 +515,8 @@ static void check_explicit_drive_and_unc(void)
           unlink(native_path) == 0);
     CHECK(snprintf(native_path, sizeof(native_path), "%s/Data", droot) > 0 &&
           rmdir(native_path) == 0);
-    CHECK(rmdir(droot) == 0 && rmdir(shared) == 0 && rmdir(croot) == 0);
+    CHECK(rmdir(droot) == 0 && rmdir(shared) == 0 &&
+          nt_test_cleanup_share_registry(croot) && rmdir(croot) == 0);
     puts("PASS authorized D: and UNC roots, confinement, and symlink reparse metadata");
 }
 
@@ -1024,7 +1028,8 @@ static void check_stdio(void)
     file = nt_fopen("scores", "abn");
     CHECK(file != NULL && nt_fclose(file) == 0 && commits == 1);
     *nt_p_commode() = 0;
-    CHECK(nt_DeleteFileA("scores") && nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
+    CHECK(nt_DeleteFileA("scores") && nt_runtime_set_file_root(NULL) &&
+          nt_test_cleanup_share_registry(root) && rmdir(root) == 0);
     puts("PASS Microsoft variadic ABI, LLP64 formats, scan counts and guest stdio");
 }
 
