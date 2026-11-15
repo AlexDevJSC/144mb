@@ -377,6 +377,7 @@ static void check_files(void)
     CHECK(nt_CreateDirectoryA(cp1252_directory, NULL) != 0 &&
           (nt_GetFileAttributesA(cp1252_directory) & 0x10u) != 0 &&
           nt_RemoveDirectoryA(cp1252_directory) != 0);
+    fprintf(stderr, "DBG-INITIAL FILES\n");
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
     /* For direct A calls, try UTF-8 first and use CP1252 only when the
      * UTF-8 file is absent. A W call is UTF-16 and MUST NOT be reinterpreted
@@ -679,6 +680,7 @@ static void check_files(void)
     CHECK(nt_CloseHandle(completed) != 0 && nt_CloseHandle(second_lock) != 0 &&
           nt_CloseHandle(first_lock) != 0 && nt_DeleteFileA("data/LOCKED.bin") != 0);
 
+    fprintf(stderr, "DBG-ASYNC\n");
     /* FILE_FLAG_OVERLAPPED takes the real worker path, rather than the
      * immediate pread/pwrite completion preserved for legacy handles. */
     const uintptr_t background = nt_CreateFileA("data/background.bin",
@@ -700,6 +702,7 @@ static void check_files(void)
     CHECK(nt_GetOverlappedResult(background, &async_read, &async_completed, 1) != 0 &&
           async_completed == 5 && memcmp(background_data, "async", 5) == 0);
 
+    fprintf(stderr, "DBG-CANCEL\n");
     /* The first read is already running, while two later reads remain in
      * the queue. Cancellation must target the originating Windows HANDLE,
      * publish ERROR_OPERATION_ABORTED, signal its event, and leave the
@@ -772,6 +775,7 @@ static void check_files(void)
     CHECK(nt_CloseHandle(alternate) && nt_CloseHandle(running_event) &&
           nt_CloseHandle(cancelled_event));
 
+    fprintf(stderr, "DBG-IOCP\n");
     /* Per-process IOCP supports manual packets and associates native file
      * completion notifications by file handle/key. Windows event low bit
      * suppresses posting but does not prevent GetOverlappedResult. */
@@ -812,6 +816,7 @@ static void check_files(void)
     CHECK(!nt_GetQueuedCompletionStatus(port, &packet_bytes, &packet_key,
                                          &packet_overlapped, 0) &&
           last_error() == NT_ERROR_WAIT_TIMEOUT && packet_overlapped == NULL);
+    fprintf(stderr, "DBG-IOCP-CANCEL\n");
     /* Queue cancellation must also deliver an unsuccessful completion
      * packet with the original completion key and OVERLAPPED identity. */
     pthread_mutex_lock(&async_test_lock);
@@ -947,6 +952,7 @@ static void check_files(void)
     CHECK(nt_RemoveDirectoryA("data") == 0 && last_error() == NT_ERROR_DIR_NOT_EMPTY);
     CHECK(nt_DeleteFileA("DATA/TARGET.TXT") != 0 && nt_RemoveDirectoryA("DATA") != 0);
 
+    fprintf(stderr, "DBG-DRIVE-CWD\n");
     /* Windows remembers a separate current directory per DOS drive.
      * A drive-relative D:foo must use D:'s remembered directory even if
      * the active process directory has moved back to C:. */
@@ -1184,12 +1190,16 @@ static void check_messages(void)
 
 int main(void)
 {
+    fprintf(stderr, "DBG-START system\n");
     check_system();
     check_modules();
     check_memory();
     check_unicode_and_rects();
+    fprintf(stderr, "DBG-START crt\n");
     check_crt();
+    fprintf(stderr, "DBG-START files\n");
     check_files();
+    fprintf(stderr, "DBG-START gdi\n");
     check_gdi();
     check_menus();
     check_messages();
