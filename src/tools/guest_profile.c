@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <unistd.h>
@@ -631,12 +632,17 @@ static int read_unc_grants(int config, struct nt_guest_unc_grant grants[NT_GUEST
     if (fd < 0)
         return errno == ENOENT ? 0 : -1;
     struct stat info;
-    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
-        info.st_uid != geteuid() || (info.st_mode & 0077) != 0 ||
-        info.st_size < 0 || info.st_size > NT_SHARE_MAX_BYTES) {
-        const int saved = errno;
+    int validation_error = fstat(fd, &info) != 0 ? errno : 0;
+    if (validation_error == 0) {
+        if (info.st_size > NT_SHARE_MAX_BYTES)
+            validation_error = EFBIG;
+        else if (!S_ISREG(info.st_mode) || info.st_uid != geteuid() ||
+                 (info.st_mode & 0077) != 0 || info.st_size < 0)
+            validation_error = EACCES;
+    }
+    if (validation_error != 0) {
         close(fd);
-        errno = info.st_size > NT_SHARE_MAX_BYTES ? EFBIG : saved ? saved : EACCES;
+        errno = validation_error;
         return -1;
     }
     char buffer[NT_SHARE_MAX_BYTES + 1];
