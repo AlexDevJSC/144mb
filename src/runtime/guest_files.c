@@ -1198,9 +1198,55 @@ struct security_attributes {
 
 _Static_assert(sizeof(struct security_attributes) == 24, "SECURITY_ATTRIBUTES layout");
 
-uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t share,
-                                  const void *security, uint32_t disposition, uint32_t flags,
-                                  uintptr_t template_file)
+/* A narrow Win32 pathname may be supplied as UTF-8 by a modern guest
+ * or CP1252 by a legacy guest. Invalid UTF-8 was already converted to ACP
+ * by normalize_path(). When the bytes are valid UTF-8 *and* the requested
+ * existing file is absent, check the other CP1252 spelling before failing.
+ *
+ * Never apply this heuristic to W calls: they are unambiguously UTF-16,
+ * converted to UTF-8 by wide_path(). Never guess for CREATE_NEW or other
+ * mutating dispositions; this fallback cannot silently create a different
+ * filename. The Linux permission checks still govern the final open. */
+static void existing_ansi_path_fallback(const char *input, char path[PATH_MAX])
+{
+    bool has_nonascii = false;
+    for (const unsigned char *p = (const unsigned char *)input; *p; ++p)
+        if (*p & 0x80u) {
+            has_nonascii = true;
+            break;
+        }
+    if (!has_nonascii || nt_MultiByteToWideChar(65001, 8, input, -1, NULL, 0) == 0)
+        return;
+
+    char *encoded = nt_runtime_ansi_to_utf8(input, strlen(input));
+    if (!encoded)
+        return;
+    char alternative[PATH_MAX];
+    const bool valid = guest_path(encoded, alternative);
+    free(encoded);
+    if (!valid || strcmp(path, alternative) == 0)
+        return;
+
+    char dos_name[PATH_MAX];
+    bool exists = false;
+    const bool primary_checked =
+        nt_runtime_check_guest_file(path, dos_name, sizeof(dos_name), &exists);
+    if (primary_checked && exists)
+        return;
+    /* Never bypass an inaccessible existing object or an invalid guest
+     * path by interpreting the same bytes using a different encoding. */
+    if (!primary_checked && errno != ENOENT && errno != ENOTDIR)
+        return;
+    bool alternate_exists = false;
+    if (nt_runtime_check_guest_file(alternative, dos_name, sizeof(dos_name),
+                                    &alternate_exists) && alternate_exists)
+        memcpy(path, alternative, strlen(alternative) + 1);
+}
+
+static uintptr_t create_file_common(const char *input, uint32_t desired,
+                                    uint32_t share, const void *security,
+                                    uint32_t disposition, uint32_t flags,
+                                    uintptr_t template_file, bool from_wide)
 {
     const uint32_t generic_read = UINT32_C(0x80000000), generic_write = UINT32_C(0x40000000);
     const struct security_attributes *attributes = security;
@@ -1227,6 +1273,13 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     if (!guest_path(input, path)) {
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
+    }
+    if (!from_wide && disposition == OPEN_EXISTING) {
+        /* A successful Win32 operation must not leak GetLastError from
+         * the optional encoding probe into the calling thread. */
+        const uint32_t saved_error = nt_GetLastError();
+        existing_ansi_path_fallback(input, path);
+        nt_SetLastError(saved_error);
     }
     const char *resolved = path;
     const int root = duplicate_root(&resolved);
@@ -1287,6 +1340,14 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     else if (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
         nt_SetLastError(created ? NT_ERROR_SUCCESS : NT_ERROR_ALREADY_EXISTS);
     return result;
+}
+
+uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t share,
+                                  const void *security, uint32_t disposition, uint32_t flags,
+                                  uintptr_t template_file)
+{
+    return create_file_common(input, desired, share, security, disposition,
+                              flags, template_file, false);
 }
 
 static int close_file(struct guest_file *file)
@@ -2634,7 +2695,8 @@ uintptr_t NT_MS_ABI nt_CreateFileW(const uint16_t *path, uint32_t access, uint32
 {
     char narrow[PATH_MAX];
     return wide_path(path, narrow) ?
-           nt_CreateFileA(narrow, access, share, security, disposition, flags, template_file) : UINTPTR_MAX;
+           create_file_common(narrow, access, share, security, disposition,
+                              flags, template_file, true) : UINTPTR_MAX;
 }
 
 _Static_assert(sizeof(struct nt_io_status_block) == 16 &&
@@ -3102,6 +3164,10 @@ static bool check_current_lock(int fd, uint32_t length, bool write_access)
 enum { ASYNC_LIMIT = 32, ASYNC_PENDING = NT_ERROR_IO_PENDING };
 struct async_request {
     bool occupied, queued;
+    /* Per-process ownership: different Win32 HANDLE aliases are distinct
+     * cancellation targets even if they refer to the same Linux inode. */
+    uintptr_t owner_handle;
+    pid_t owner_pid;
     int fd;
     void *buffer;
     uint32_t size;
@@ -3177,10 +3243,11 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     }
     pthread_mutex_lock(&file_lock);
     const struct guest_file *entry = find_handle(handle);
-    const bool enabled = entry && entry->overlapped_io;
+    const bool exists = entry != NULL;
+    const bool enabled = exists && entry->overlapped_io;
     pthread_mutex_unlock(&file_lock);
     if (!enabled) {
-        nt_SetLastError(entry == NULL ? NT_ERROR_INVALID_HANDLE : NT_ERROR_NOT_SUPPORTED);
+        nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
         return 0;
     }
     const int fd = duplicate_handle(handle, write_access ? FILE_WRITE : FILE_READ);
@@ -3212,7 +3279,9 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     }
     if (slot >= 0) {
         async_tasks[slot] = (struct async_request) {
-            .occupied = true, .queued = true, .fd = fd, .buffer = buffer,
+            .occupied = true, .queued = true,
+            .owner_handle = handle, .owner_pid = getpid(),
+            .fd = fd, .buffer = buffer,
             .size = size, .offset = (off_t)offset, .write_access = write_access,
             .completion = completion, .event = completion->event
         };
@@ -3230,9 +3299,9 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     return 0;
 }
 
-/* Offset-based OVERLAPPED operations can complete synchronously, exactly
- * as Windows permits. A true pending work queue/IOCP is not implemented.
- * The explicit offset never changes the shared file pointer. */
+/* Regular handles preserve immediate offset completion. FILE_FLAG_OVERLAPPED
+ * handles instead use the bounded worker queue; cancellation only handles
+ * requests which have not started. IOCP/APC completion is not supported. */
 static int32_t file_io(uintptr_t handle, void *buffer, uint32_t size,
                       uint32_t *done, struct nt_overlapped *overlap, bool writing)
 {
@@ -3338,6 +3407,58 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
                                uint32_t *done, void *overlap)
 {
     return file_io(handle, (void *)buffer, size, done, overlap, true);
+}
+
+/* CancelIoEx is deliberately limited to work not yet handed to the Linux
+ * worker: no pthread cancellation, interruption of pwrite, or invented
+ * completion. A running request is left alone; ERROR_NOT_FOUND tells the
+ * guest that no queued request was cancelled by this call.
+ *
+ * The file HANDLE (not the inode or guest PID) owns each request. An
+ * OVERLAPPED pointer restricts the selection; NULL selects all queued
+ * requests issued through this HANDLE, including other guest threads. */
+int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *completion)
+{
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *entry = find_handle(handle);
+    const bool exists = entry != NULL;
+    const bool enabled = exists && entry->overlapped_io;
+    pthread_mutex_unlock(&file_lock);
+    if (!enabled) {
+        nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    struct async_request cancelled[ASYNC_LIMIT];
+    size_t count = 0;
+    pthread_mutex_lock(&async_lock);
+    for (size_t i = 0; i < ASYNC_LIMIT; ++i) {
+        struct async_request *task = &async_tasks[i];
+        if (!task->occupied || !task->queued || task->owner_handle != handle ||
+            task->owner_pid != getpid() ||
+            (completion != NULL && task->completion != completion))
+            continue;
+        cancelled[count++] = *task;
+        task->queued = false;
+        task->occupied = false;
+        __atomic_store_n(&task->completion->internal_high, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&task->completion->internal, NT_ERROR_OPERATION_ABORTED,
+                         __ATOMIC_RELEASE);
+    }
+    if (count)
+        pthread_cond_broadcast(&async_condition);
+    pthread_mutex_unlock(&async_lock);
+
+    for (size_t i = 0; i < count; ++i) {
+        close(cancelled[i].fd);
+        if (cancelled[i].event)
+            (void)nt_SetEvent(cancelled[i].event);
+    }
+    if (count == 0) {
+        nt_SetLastError(NT_ERROR_NOT_FOUND);
+        return 0;
+    }
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,

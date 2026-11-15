@@ -103,6 +103,7 @@ int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved, uint32_t 
                                   uint32_t length_high, struct nt_overlapped *overlap);
 int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped *overlap,
                                          uint32_t *done, int32_t wait);
+int32_t NT_MS_ABI nt_CancelIoEx(uintptr_t handle, struct nt_overlapped *overlap);
 int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle);
 int32_t NT_MS_ABI nt_GetFileSizeEx(uintptr_t handle, int64_t *size);
 int32_t NT_MS_ABI nt_SetFilePointerEx(uintptr_t handle, int64_t offset, int64_t *position, uint32_t method);

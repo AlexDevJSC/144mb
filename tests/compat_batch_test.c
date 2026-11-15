@@ -41,6 +41,27 @@ static struct timespec realtime = {0, 123456789};
 static struct timespec boottime = {10, 123400000};
 static bool clock_fails;
 
+/* Freeze one real worker pread so queued cancellation can be tested without
+ * relying on the OS scheduler or on an artificial delay. */
+static pthread_mutex_t async_test_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t async_test_changed = PTHREAD_COND_INITIALIZER;
+static bool async_hold_enabled, async_hold_entered, async_hold_release;
+
+ssize_t __real_pread(int fd, void *buffer, size_t count, off_t offset);
+
+ssize_t __wrap_pread(int fd, void *buffer, size_t count, off_t offset)
+{
+    pthread_mutex_lock(&async_test_lock);
+    if (async_hold_enabled && offset == 4096) {
+        async_hold_entered = true;
+        pthread_cond_broadcast(&async_test_changed);
+        while (!async_hold_release)
+            pthread_cond_wait(&async_test_changed, &async_test_lock);
+    }
+    pthread_mutex_unlock(&async_test_lock);
+    return __real_pread(fd, buffer, count, offset);
+}
+
 int __wrap_clock_gettime(clockid_t clock, struct timespec *value)
 {
     if (clock_fails) {
@@ -335,6 +356,7 @@ static void check_files(void)
     BOUND(KERNEL, LockFileEx);
     BOUND(KERNEL, UnlockFileEx);
     BOUND(KERNEL, GetOverlappedResult);
+    BOUND(KERNEL, CancelIoEx);
     BOUND(KERNEL, GetTempPathA);
     CRT_BOUND("stdio", "_set_fmode", nt_set_fmode);
     CRT_BOUND("stdio", "fopen", nt_fopen);
@@ -352,6 +374,35 @@ static void check_files(void)
           (nt_GetFileAttributesA(cp1252_directory) & 0x10u) != 0 &&
           nt_RemoveDirectoryA(cp1252_directory) != 0);
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
+    /* For direct A calls, try UTF-8 first and use CP1252 only when the
+     * UTF-8 file is absent. A W call is UTF-16 and MUST NOT be reinterpreted
+     * as CP1252 when the requested Unicode name is missing. */
+    char utf8_native[512], acp_native[512];
+    CHECK(snprintf(utf8_native, sizeof(utf8_native), "%s/data/caf\xc3\xa9.txt", root) > 0);
+    CHECK(snprintf(acp_native, sizeof(acp_native), "%s/data/caf\xc3\x83\xc2\xa9.txt", root) > 0);
+    int utf8_fd = open(utf8_native, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    CHECK(utf8_fd >= 0 && write(utf8_fd, "U", 1) == 1 && close(utf8_fd) == 0);
+    int acp_fd = open(acp_native, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    CHECK(acp_fd >= 0 && write(acp_fd, "A", 1) == 1 && close(acp_fd) == 0);
+    const char ambiguous_a[] = "C:\\data\\caf\xc3\xa9.txt";
+    uintptr_t ansi_handle = nt_CreateFileA(ambiguous_a, UINT32_C(0x80000000),
+                                            7u, NULL, 3u, 0x80u, 0);
+    char selected = 0;
+    uint32_t received = 0;
+    CHECK(ansi_handle != UINTPTR_MAX &&
+          nt_ReadFile(ansi_handle, &selected, 1, &received, NULL) &&
+          received == 1 && selected == 'U' && nt_CloseHandle(ansi_handle));
+    CHECK(unlink(utf8_native) == 0);
+    ansi_handle = nt_CreateFileA(ambiguous_a, UINT32_C(0x80000000),
+                                 7u, NULL, 3u, 0x80u, 0);
+    CHECK(ansi_handle != UINTPTR_MAX &&
+          nt_ReadFile(ansi_handle, &selected, 1, &received, NULL) &&
+          received == 1 && selected == 'A' && nt_CloseHandle(ansi_handle));
+    static const uint16_t unambiguous_w[] = u"C:\\data\\caf\u00e9.txt";
+    CHECK(nt_CreateFileW(unambiguous_w, UINT32_C(0x80000000), 7u,
+                         NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_FILE_NOT_FOUND);
+    CHECK(unlink(acp_native) == 0);
     CHECK(nt_CreateDirectoryA("data", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
     CHECK(nt_CreateDirectoryA("DATA", NULL) == 0 && last_error() == NT_ERROR_ALREADY_EXISTS);
     CHECK(nt_GetCurrentDirectoryA(0, NULL) == 4);
@@ -644,6 +695,64 @@ static void check_files(void)
           last_error() == NT_ERROR_IO_PENDING);
     CHECK(nt_GetOverlappedResult(background, &async_read, &async_completed, 1) != 0 &&
           async_completed == 5 && memcmp(background_data, "async", 5) == 0);
+
+    /* The first read is already running, while two later reads remain in
+     * the queue. Cancellation must target the originating Windows HANDLE,
+     * publish ERROR_OPERATION_ABORTED, signal its event, and leave the
+     * active request running until Linux completes it. */
+    pthread_mutex_lock(&async_test_lock);
+    async_hold_enabled = true;
+    async_hold_entered = false;
+    async_hold_release = false;
+    pthread_mutex_unlock(&async_test_lock);
+    const uintptr_t running_event = nt_CreateEventW(NULL, 1, 0, NULL);
+    const uintptr_t cancelled_event = nt_CreateEventW(NULL, 1, 0, NULL);
+    CHECK(running_event && cancelled_event);
+    struct nt_overlapped running = {.offset = 4096, .event = running_event};
+    struct nt_overlapped victim = {.offset = 0, .event = cancelled_event};
+    char pending_byte = 0, unused_byte = 0;
+    CHECK(!nt_ReadFile(background, &pending_byte, 1, NULL, &running) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    pthread_mutex_lock(&async_test_lock);
+    while (!async_hold_entered)
+        pthread_cond_wait(&async_test_changed, &async_test_lock);
+    pthread_mutex_unlock(&async_test_lock);
+    CHECK(!nt_ReadFile(background, &unused_byte, 1, NULL, &victim) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    const uintptr_t alternate = nt_CreateFileA("data/background.bin", UINT32_C(0x80000000),
+        7u, NULL, 3u, 0x40000080u, 0);
+    CHECK(alternate != UINTPTR_MAX);
+    CHECK(!nt_CancelIoEx(alternate, &victim) && last_error() == NT_ERROR_NOT_FOUND);
+    CHECK(nt_CancelIoEx(background, &victim));
+    CHECK(!nt_GetOverlappedResult(background, &victim, &async_completed, 1) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED);
+    CHECK(nt_WaitForSingleObject(cancelled_event, 1000) == 0);
+    /* NULL cancels all queued requests associated with the HANDLE, but
+     * leaves the already-running read to complete normally. */
+    struct nt_overlapped all_one = {.offset = 1};
+    struct nt_overlapped all_two = {.offset = 2};
+    char all_one_byte = 0, all_two_byte = 0;
+    CHECK(!nt_ReadFile(background, &all_one_byte, 1, NULL, &all_one) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(!nt_ReadFile(background, &all_two_byte, 1, NULL, &all_two) &&
+          last_error() == NT_ERROR_IO_PENDING);
+    CHECK(nt_CancelIoEx(background, NULL));
+    CHECK(!nt_GetOverlappedResult(background, &all_one, &async_completed, 1) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED);
+    CHECK(!nt_GetOverlappedResult(background, &all_two, &async_completed, 1) &&
+          last_error() == NT_ERROR_OPERATION_ABORTED);
+    CHECK(!nt_CancelIoEx(background, &running) && last_error() == NT_ERROR_NOT_FOUND);
+    pthread_mutex_lock(&async_test_lock);
+    async_hold_release = true;
+    async_hold_enabled = false;
+    pthread_cond_broadcast(&async_test_changed);
+    pthread_mutex_unlock(&async_test_lock);
+    CHECK(nt_GetOverlappedResult(background, &running, &async_completed, 1) &&
+          async_completed == 0);
+    CHECK(nt_WaitForSingleObject(running_event, 1000) == 0);
+    CHECK(nt_CloseHandle(alternate) && nt_CloseHandle(running_event) &&
+          nt_CloseHandle(cancelled_event));
+
     CHECK(nt_CloseHandle(background) && nt_CloseHandle(background_event) &&
           nt_DeleteFileA("data/background.bin"));
 
