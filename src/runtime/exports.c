@@ -515,6 +515,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetOverlappedResultEx),
     WIN_EXPORT(CreateIoCompletionPort),
     WIN_EXPORT(GetQueuedCompletionStatus),
+    WIN_EXPORT(GetQueuedCompletionStatusEx),
     WIN_EXPORT(PostQueuedCompletionStatus),
     WIN_EXPORT(CancelIoEx),
     WIN_EXPORT(ReleaseSRWLockExclusive),
