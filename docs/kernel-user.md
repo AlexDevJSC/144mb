@@ -394,3 +394,36 @@ con ptrace ni señales.
 Siguen pendientes la captura en cualquier PC PE, `SetThreadContext`
 funcional, suspensión asíncrona universal, threads externos, tokens/
 ACL, broker de objetos NT y pruebas comparativas con Windows real.
+
+## Terminación cooperativa tras suspensión verificada (15-11-2026)
+
+`TerminateThread` y `NtTerminateThread` admiten ahora un hilo
+propio que había empezado a ejecutar código **solo cuando** el
+runtime ha confirmado su suspensión en un checkpoint de espera
+alertable. El hilo destino recibe el código de salida pedido, deja
+su espera y ejecuta `ExitThread` **sobre su propia pila**, nunca
+`pthread_cancel` ni señales asíncronas. Antes de la salida,
+`NtWaitForMultipleObjects` libera las referencias adicionales
+adquiridas sobre todos los objetos que estaba esperando.
+La ruta `SleepEx` no adquiere referencias a handles y puede salir
+directamente tras liberar `wait_lock`; las rutinas habituales
+`finish_thread`, FLS/TLS, estado final y señalización del HANDLE
+siguen funcionando.
+
+Una terminación solicitada mientras todavía no se ha confirmado la
+suspensión, sobre código PE arbitrario, espera no alertable, procesos
+hijo en otro sandbox o hilos Linux externos retorna
+`STATUS_NOT_SUPPORTED`, sin afirmar que se ha terminado.
+La ruta `CREATE_SUSPENDED` previa al inicio sigue existiendo.
+Un hilo que ya está terminando rechaza segundas terminaciones.
+
+`tests/pe/suspended_thread_fixture.c` prueba con ejecutables Win64
+las rutas `SleepEx(TRUE)` y `WaitForSingleObjectEx(TRUE)`,
+`NtTerminateThread`/Win32, preservación de LastError para NT,
+código de salida DWORD pedido, cierre de HANDLE y ausencia de entrega
+de APC durante la terminación. No es una implementación de
+terminación forzada de cualquier instrucción de Windows.
+
+**Sin cerrar:** contextos AMD64 modificables, suspensión/terminación
+asíncrona total, objetos NT y tokens compartidos entre procesos,
+ACL, scheduler multicgrupo y comparación diferencial Windows.

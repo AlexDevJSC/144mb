@@ -393,6 +393,35 @@ int import_fixture_entry(void)
             !CloseHandle(parked))
             return 69;
     }
+    /* Terminating a running thread is safe only after it has already
+     * acknowledged a pause at a runtime checkpoint. The target must
+     * unwind its NT wait references and exit on its own stack, without
+     * pthread_cancel or an asynchronous host signal. */
+    for (unsigned int mode = 0; mode < 2; ++mode) {
+        if (!ResetEvent(cooperative_ready))
+            return 77;
+        cooperative_delivered = 0;
+        HANDLE parked = CreateThread(NULL, 0, cooperative_worker,
+                                     (void *)(uintptr_t)mode, 0, NULL);
+        if (parked == NULL ||
+            WaitForSingleObject(cooperative_ready, 5000) != WAIT_OBJECT_0)
+            return 78;
+        ULONG previous = 777;
+        if (NtSuspendThread(parked, &previous) != 0 || previous != 0)
+            return 79;
+        if (mode == 0) {
+            SetLastError(0x52au);
+            if (NtTerminateThread(parked, 0x9966u) != 0 ||
+                GetLastError() != 0x52au)
+                return 80;
+        } else if (!TerminateThread(parked, 0x9966u)) {
+            return 81;
+        }
+        if (WaitForSingleObject(parked, 5000) != WAIT_OBJECT_0 ||
+            !GetExitCodeThread(parked, &exit_code) || exit_code != 0x9966u ||
+            cooperative_delivered != 0 || !CloseHandle(parked))
+            return 82;
+    }
     if (!CloseHandle(cooperative_ready) || !CloseHandle(cooperative_never))
         return 70;
     return 0;

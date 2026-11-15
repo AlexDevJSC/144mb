@@ -241,11 +241,11 @@ static struct guest_apc *pop_apc_locked(void)
  * can use handles, resume the target, and queue APCs without deadlocking.
  * APCs are dispatched only after the final resume, by the original thread.
  * This is NOT an asynchronous suspension of arbitrary guest instructions. */
-static void cooperative_suspend_checkpoint_locked(void)
+static bool cooperative_suspend_checkpoint_locked(void)
 {
     struct waitable *thread = running_thread;
     if (thread == NULL || !thread->cooperative_pause_requested)
-        return;
+        return false;
     _Alignas(16) struct nt_context64 context = {0};
     nt_RtlCaptureContext(&context);
     thread->cooperative_context = context;
@@ -257,6 +257,7 @@ static void cooperative_suspend_checkpoint_locked(void)
     thread->cooperative_pause_acknowledged = false;
     thread->cooperative_context_valid = false;
     pthread_cond_broadcast(&wait_changed);
+    return thread->terminate_at_start;
 }
 
 static void invoke_apc(struct guest_apc *apc)
@@ -428,10 +429,13 @@ nt_status nt_runtime_alertable_delay(const struct nt_wait_deadline *deadline)
 {
     pthread_mutex_lock(&wait_lock);
     struct guest_apc *apc = NULL;
-    bool alerted = false;
+    bool alerted = false, terminate = false;
     int error = 0;
     for (;;) {
-        cooperative_suspend_checkpoint_locked();
+        if (cooperative_suspend_checkpoint_locked()) {
+            terminate = true;
+            break;
+        }
         apc = pop_apc_locked();
         if (apc != NULL)
             break;
@@ -450,6 +454,11 @@ nt_status nt_runtime_alertable_delay(const struct nt_wait_deadline *deadline)
             break;
     }
     pthread_mutex_unlock(&wait_lock);
+    if (terminate) {
+        /* The target exits *itself*, without terminating a foreign
+         * pthread. No waitable references are held by SleepEx here. */
+        nt_ExitThread(running_thread->requested_exit_code);
+    }
     if (apc != NULL) {
         invoke_apc(apc);
         return NT_STATUS_USER_APC;
@@ -1215,11 +1224,16 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
     pthread_mutex_lock(&wait_lock);
     nt_status result = acquire_wait_objects(objects, count, handles);
     struct guest_apc *apc = NULL;
+    bool terminate = false;
     if (result == NT_STATUS_SUCCESS) {
         int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
         for (;;) {
             if (alertable != 0) {
-                cooperative_suspend_checkpoint_locked();
+                if (cooperative_suspend_checkpoint_locked()) {
+                    terminate = true;
+                    result = NT_STATUS_THREAD_IS_TERMINATING;
+                    break;
+                }
                 apc = pop_apc_locked();
                 if (apc != NULL) {
                     result = NT_STATUS_USER_APC;
@@ -1242,6 +1256,11 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
             release_waitable(objects[i]);
     }
     pthread_mutex_unlock(&wait_lock);
+    if (terminate) {
+        /* release_waitable was called for every in-flight wait reference
+         * before leaving the mutex; ExitThread's normal cleanup is safe. */
+        nt_ExitThread(running_thread->requested_exit_code);
+    }
     if (apc != NULL)
         invoke_apc(apc);
     return result;
@@ -1928,12 +1947,18 @@ static nt_status terminate_suspended_thread(uintptr_t handle, uint32_t exit_code
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled || state->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
-        else if (state->suspend_count == 0 || state->cooperative_pause_requested)
+        else if (state->suspend_count == 0 ||
+                 (state->cooperative_pause_requested &&
+                  !state->cooperative_pause_acknowledged))
             status = NT_STATUS_NOT_SUPPORTED;
         else {
+            /* For a running thread, only an ACKNOWLEDGED safe-point
+             * suspension permits termination. The target will finish its
+             * waitable references and call ExitThread on itself. */
             state->terminate_at_start = true;
             state->requested_exit_code = exit_code;
             state->suspend_count = 0;
+            state->cooperative_pause_requested = false;
             pthread_cond_broadcast(&wait_changed);
         }
     }
@@ -1981,7 +2006,7 @@ static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
         struct waitable *state = wait_state(thread);
         if (state->owner_pid != (uint32_t)getpid() && !state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED;
-        else if (state->signaled)
+        else if (state->signaled || state->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
         else if (state->suspend_count == MAXIMUM_SUSPEND_COUNT)
             status = NT_STATUS_SUSPEND_COUNT_EXCEEDED;
@@ -2061,7 +2086,7 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool 
         struct waitable *state = wait_state(thread);
         if (state->owner_pid != (uint32_t)getpid() && !state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED;
-        else if (state->signaled)
+        else if (state->signaled || state->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
         else if (alert && state->child_guest)
             status = NT_STATUS_NOT_SUPPORTED; /* No cross-process alert broker. */
@@ -2158,7 +2183,7 @@ static nt_status get_guest_thread_context(uintptr_t handle, struct nt_context64 
         struct waitable *state = wait_state(entry);
         if (state->owner_pid != (uint32_t)getpid() || state->child_guest)
             result = NT_STATUS_NOT_SUPPORTED;
-        else if (state->signaled)
+        else if (state->signaled || state->terminate_at_start)
             result = NT_STATUS_THREAD_IS_TERMINATING;
         else if (!state->cooperative_pause_acknowledged ||
                  !state->cooperative_context_valid || state->suspend_count == 0)
