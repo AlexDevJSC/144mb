@@ -864,8 +864,9 @@ static void check_files(void)
                               absolute_path, NULL) ==
           strlen("D:\\games\\save.bin") &&
           strcmp(absolute_path, "D:\\games\\save.bin") == 0);
-    CHECK(nt_CreateFileA("D:save.bin", UINT32_C(0x40000000), 7u, NULL,
-                          2u, 0x80u, 0) != UINTPTR_MAX);
+    const uintptr_t drive_handle = nt_CreateFileA("D:save.bin",
+        UINT32_C(0x40000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(drive_handle != UINTPTR_MAX && nt_CloseHandle(drive_handle));
     /* A rooted path without a drive prefix uses the active drive. */
     CHECK(nt_GetFullPathNameA("\\root.dat", sizeof(absolute_path),
                               absolute_path, NULL) ==
