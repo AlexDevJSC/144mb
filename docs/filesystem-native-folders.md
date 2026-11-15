@@ -333,11 +333,25 @@ real del kernel Linux; no ejecuta bucles de sondeo. La variante
 `bAlertable=TRUE` se rechaza expresamente hasta disponer del comportamiento
 de APC de Windows.
 
-Siguen pendientes IOCP, APC asíncronas NT, cancelación real de operaciones
-ya despachadas, integración con IOCP, paralelismo dentro de un mismo
-HANDLE y las semánticas completas de cierre, señalización y desvinculación
-de handles/eventos. La cancelación
-de cola no implica que este bloque esté completo.
+**IOCP básico por proceso.** Ya se ofrecen `CreateIoCompletionPort`,
+`PostQueuedCompletionStatus` y `GetQueuedCompletionStatus`. Un programa
+puede crear una cola, asociar un HANDLE de archivo abierto con
+`FILE_FLAG_OVERLAPPED`, publicar paquetes manuales y recuperar resultados
+de E/S, incluyendo la clave de finalización, bytes transferidos, dirección
+de `OVERLAPPED` y errores de solicitudes canceladas. Los tiempos de espera
+y el cierre del puerto se gestionan sin privilegios del anfitrión.
+El bit menos significativo del evento de `OVERLAPPED` suprime el paquete
+en IOCP, sin suprimir la finalización propia de la operación.
+
+Esta entrega **no ofrece toda la semántica de IOCP de Windows**:
+el máximo actual son 16 puertos con 256 paquetes cada uno; no se aplica
+la limitación de hilos de `NumberOfConcurrentThreads`, ni están
+`GetQueuedCompletionStatusEx`, asociaciones con sockets y tuberías,
+propiedad de puertos con HANDLEs heredados/duplicados, notificaciones
+APC o cancelación garantizada de operaciones Linux ya despachadas.
+Las operaciones del mismo HANDLE se serializan deliberadamente.
+Las semánticas completas de cierre, señalización y desvinculación de
+handles/eventos continúan pendientes.
 
 ## Coordinación de borrados entre procesos NT (extensión incremental)
 
