@@ -103,6 +103,9 @@ static void check_crossprocess_delete_sharing(void)
         nt_SetLastError(0);
         if (permit_delete) {
             CHECK(nt_DeleteFileA("C:\\two-processes.bin"));
+            CHECK(nt_CreateFileA("C:\\two-processes.bin", read_access,
+                                 7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+                  last_error() == NT_ERROR_ACCESS_DENIED);
         } else {
             CHECK(!nt_DeleteFileA("C:\\two-processes.bin") &&
                   last_error() == NT_ERROR_SHARING_VIOLATION);
@@ -119,6 +122,8 @@ static void check_crossprocess_delete_sharing(void)
               WIFEXITED(status) && WEXITSTATUS(status) == 0);
         if (!permit_delete)
             CHECK(nt_DeleteFileA("C:\\two-processes.bin"));
+        else
+            CHECK(nt_GetFileAttributesA("C:\\two-processes.bin") == UINT32_MAX);
     }
 }
 
