@@ -1376,14 +1376,15 @@ int32_t NT_MS_ABI nt_GetQueuedCompletionStatus(uintptr_t port_handle, uint32_t *
         return 0;
     }
     int wait_error = 0;
-    while (port->active && port->count == 0 && milliseconds != 0) {
+    while (port->active && port->handle == port_handle &&
+           port->count == 0 && milliseconds != 0) {
         wait_error = timed ? pthread_cond_timedwait(&iocp_changed, &iocp_lock,
                                                      &until) :
                              pthread_cond_wait(&iocp_changed, &iocp_lock);
         if (wait_error != 0)
             break;
     }
-    if (!port->active) {
+    if (!port->active || port->handle != port_handle) {
         pthread_mutex_unlock(&iocp_lock);
         nt_SetLastError(NT_ERROR_ABANDONED_WAIT_0);
         return 0;
