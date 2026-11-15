@@ -98,9 +98,49 @@ propiedad/permisos, rutas canónicas, escritura atómica y revocación que
 `shares.conf` no dejan de leer las carpetas habituales.
 
 Solo acepta D:–Z: y cada carpeta debe existir antes de ser concedida.
-Los recursos UNC siguen necesitando `--unc` por ejecución. No añade
-SMB, unidades automáticas ni semántica NTFS de reparse. La sintaxis
+Los recursos UNC pueden persistir por separado, como se explica a continuación.
+No añade SMB, unidades automáticas ni semántica NTFS de reparse. La sintaxis
 de directorio relativo por unidad se implementa más abajo. Los accesos siguen sujetos a permisos Linux y SELinux.
+
+### Recursos UNC persistentes sobre directorios Linux autorizados
+
+Los recursos `\\\\servidor\\recurso` pueden recordarse **por usuario** para no
+repetir concesiones. Esto **no crea una conexión SMB** ni acepta nombres
+anfitrión implícitos: cada par servidor/recurso apunta a una carpeta
+Linux existente elegida expresamente.
+
+~~~sh
+pe-isolated-run --remember-unc "laboratorio/recursos=$HOME/Compartida"
+pe-isolated-run /ruta/programa.exe
+# Alternativa temporal solo durante un lanzamiento:
+pe-isolated-run --unc "laboratorio/recursos=/ruta/alternativa" -- /ruta/programa.exe
+# Revocación persistente:
+pe-isolated-run --forget-unc laboratorio/recursos
+~~~
+
+Las concesiones viven en `$XDG_CONFIG_HOME/nt-native-linux/unc.conf`
+(o `$HOME/.config/nt-native-linux/unc.conf`) y conservan rutas Linux
+**canónicas**. El directorio de configuración exige propiedad del
+usuario y permisos 0700; el archivo exige 0600. Los cambios se
+serializan entre procesos con `flock` y usan un archivo temporal,
+`fsync` y `renameat` para no publicar un fichero a medio escribir.
+La lectura rechaza symlinks, nombres malformados, duplicados sin
+distinguir mayúsculas/minúsculas, permisos incorrectos, rutas
+relativas, caracteres de control y ficheros mayores de 32 KiB.
+
+Se admiten hasta ocho pares servidor/recurso y ambos componentes
+deben contener solo letras ASCII, dígitos, puntos internos, guiones
+o subrayados (máximo 63 caracteres por componente); no se permiten
+componentes que empiecen por punto. Un `--unc` explícito sobrescribe
+la asociación recordada **para esa ejecución**; si al combinar
+concesiones se supera el límite, el lanzador rechaza el arranque
+en lugar de conceder una ruta distinta.
+
+El contenido no se copia: una modificación de un archivo UNC
+concedido modifica el propio archivo de Linux, con permisos y SELinux
+del usuario. No existen descubrimiento SMB, credenciales de red,
+sesiones, oplocks de red ni una garantía de compatibilidad NTFS
+al limitarse a este mapeo local.
 
 Si xdg-user-dir devuelve el propio $HOME (carpeta XDG deshabilitada), el programa rechaza la autorización: no se permite compartir todo el directorio personal por accidente. Las carpetas deben existir y las rutas del host deben ser absolutas.
 
@@ -271,8 +311,9 @@ pe-isolated-run --drive D=/ruta/linux/autorizada \
 
 Los directorios de origen se abren con FD y se montan bajo
 `/guest-drives/D` y `/guest-unc/lab/assets`, no como
-accesos globales al anfitrión. La persistencia de las concesiones UNC y
-la administración avanzada de unidades siguen pendientes. Se conservan
+accesos globales al anfitrión. Las concesiones UNC locales pueden
+recordarse en `unc.conf`, pero las sesiones SMB reales y la
+administración avanzada de unidades siguen pendientes. Se conservan
 ahora **directorios de trabajo independientes por unidad** dentro del
 proceso: después de visitar `D:\\datos`, una ruta `D:archivo.txt`
 usa ese directorio incluso si el directorio activo pasó a `C:`. Del
@@ -515,7 +556,7 @@ por completo la semántica NT de `delete-pending` entre procesos o sobre
 archivos reabiertos por nombre.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
-points, UNC de red y concesiones persistentes UNC, compartición
+points, UNC de red auténtica, compartición
 y borrado NT entre procesos, E/S asíncrona NT/APC/IOCP completa, ACL y
 otras funciones de ficheros. La lectura de metadatos de un symlink y la
 asignación explícita de una carpeta host a un nombre UNC no equivalen a

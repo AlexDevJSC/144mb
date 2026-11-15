@@ -654,7 +654,10 @@ static void usage(const char *command)
             command, command, command);
     fputs("       --remember-drive D=/absolute/linux/path (one-time grant)\n"
           "       --forget-drive D (revoke remembered drive)\n"
-          "Drive mappings D:-Z: persist in private drives.conf; --drive overrides them per launch.\n",
+          "Drive mappings D:-Z: persist in private drives.conf; --drive overrides them per launch.\n"
+          "       --remember-unc server/share=/absolute/linux/path (one-time grant)\n"
+          "       --forget-unc server/share (revoke remembered UNC root)\n"
+          "UNC mappings persist in private unc.conf; --unc overrides them per launch.\n",
           stderr);
 }
 
@@ -762,6 +765,41 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (argc >= 2 && (strcmp(argv[1], "--remember-unc") == 0 ||
+                      strcmp(argv[1], "--forget-unc") == 0)) {
+        const bool remember = strcmp(argv[1], "--remember-unc") == 0;
+        if (argc != 3) {
+            usage(argv[0]);
+            return 2;
+        }
+        const char *slash = strchr(argv[2], '/');
+        const char *equals = strchr(argv[2], '=');
+        char server[64], share[64];
+        const size_t server_length = slash ? (size_t)(slash - argv[2]) : 0;
+        const size_t share_length = slash && (remember ? equals && equals > slash : true) ?
+            (size_t)((remember ? equals : argv[2] + strlen(argv[2])) - slash - 1) : 0;
+        if (!slash || server_length == 0 || server_length >= sizeof(server) ||
+            share_length == 0 || share_length >= sizeof(share) ||
+            (remember && (!equals || equals[1] != '/')) ||
+            (!remember && equals != NULL) ||
+            memchr(slash + 1, '/', share_length) != NULL) {
+            usage(argv[0]);
+            return 2;
+        }
+        memcpy(server, argv[2], server_length);
+        server[server_length] = '\0';
+        memcpy(share, slash + 1, share_length);
+        share[share_length] = '\0';
+        if (nt_guest_unc_update(config_home, home, server, share,
+                                remember ? equals + 1 : NULL) != 0) {
+            fprintf(stderr, "Cannot update UNC grant: %s\n", strerror(errno));
+            return 2;
+        }
+        fprintf(stderr, "%s UNC grant: %s/%s\n",
+                remember ? "Remembered" : "Removed", server, share);
+        return 0;
+    }
+
     const char *folders[NT_USER_FOLDER_COUNT] = {0};
     int arg = 1;
     while (arg + 1 < argc) {
@@ -858,8 +896,43 @@ int main(int argc, char **argv)
         if (requested_drives[i + ('D' - 'A')] == NULL)
             requested_drives[i + ('D' - 'A')] = remembered_drives[i];
     }
+
+    struct nt_guest_unc_grant remembered_unc[NT_GUEST_UNC_LIMIT] = {0};
+    size_t remembered_unc_count = 0;
+    if (nt_guest_unc_load(config_home, home, remembered_unc,
+                          &remembered_unc_count) != 0) {
+        fprintf(stderr, "Cannot load persistent UNC grants: %s\n", strerror(errno));
+        nt_guest_share_free(remembered, NT_USER_FOLDER_COUNT);
+        nt_guest_share_free(remembered_drives, NT_GUEST_EXTRA_DRIVES);
+        return 2;
+    }
+    for (size_t i = 0; i < remembered_unc_count; ++i) {
+        const struct nt_guest_unc_grant *grant = &remembered_unc[i];
+        bool overridden = false;
+        for (size_t j = 0; j < requested_unc_count; ++j)
+            if (strcasecmp(requested_unc[j].server, grant->server) == 0 &&
+                strcasecmp(requested_unc[j].share, grant->share) == 0) {
+                overridden = true;
+                break;
+            }
+        if (overridden)
+            continue;
+        if (requested_unc_count == EXTRA_UNC_LIMIT) {
+            fputs("Too many UNC grants after applying remembered mappings\n", stderr);
+            nt_guest_share_free(remembered, NT_USER_FOLDER_COUNT);
+            nt_guest_share_free(remembered_drives, NT_GUEST_EXTRA_DRIVES);
+            nt_guest_unc_free(remembered_unc);
+            return 2;
+        }
+        snprintf(requested_unc[requested_unc_count].server,
+                 sizeof(requested_unc[requested_unc_count].server), "%.63s", grant->server);
+        snprintf(requested_unc[requested_unc_count].share,
+                 sizeof(requested_unc[requested_unc_count].share), "%.63s", grant->share);
+        requested_unc[requested_unc_count++].directory = grant->directory;
+    }
     const int result = run_isolated(argv[arg], folders, argc - arg - 1, argv + arg + 1);
     nt_guest_share_free(remembered, NT_USER_FOLDER_COUNT);
     nt_guest_share_free(remembered_drives, NT_GUEST_EXTRA_DRIVES);
+    nt_guest_unc_free(remembered_unc);
     return result;
 }

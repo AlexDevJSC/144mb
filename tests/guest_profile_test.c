@@ -264,6 +264,79 @@ int main(void)
     CHECK(nt_guest_drive_load(NULL, root, saved_drives) < 0 && errno == EACCES);
     CHECK(chmod(drives_config, 0600) == 0);
 
+    /* Persistently remembered UNC paths are explicit local directory
+     * grants, never a network/SMB discovery mechanism. */
+    struct nt_guest_unc_grant unc[NT_GUEST_UNC_LIMIT] = {0};
+    size_t unc_count = 0;
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 && unc_count == 0);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "assets", other) == 0);
+    CHECK(nt_guest_unc_update(NULL, root, "LAB", "ASSETS", alias) < 0);
+    /* The previous alias was removed; an invalid path cannot replace
+     * a valid, remembered mapping. */
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 &&
+          unc_count == 1 && strcmp(unc[0].directory, other) == 0);
+    nt_guest_unc_free(unc);
+
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "icons", alternate) == 0);
+    CHECK(nt_guest_unc_update(NULL, root, "LAB", "ASSETS", alternate) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 && unc_count == 2);
+    CHECK(strcmp(unc[0].server, "LAB") == 0 &&
+          strcmp(unc[0].share, "ASSETS") == 0 &&
+          strcmp(unc[0].directory, alternate) == 0);
+    nt_guest_unc_free(unc);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "assets", root) < 0 &&
+          errno == EACCES);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "assets", "relative") < 0 &&
+          errno == EINVAL);
+    CHECK(nt_guest_unc_update(NULL, root, "../bad", "assets", other) < 0 &&
+          errno == EINVAL);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "bad/name", other) < 0 &&
+          errno == EINVAL);
+
+    for (size_t i = 0; i < 2; ++i) {
+        children[i] = fork();
+        CHECK(children[i] >= 0);
+        if (children[i] == 0)
+            _exit(nt_guest_unc_update(NULL, root,
+                      i == 0 ? "testa" : "testb", "one", other) == 0 ? 0 : 1);
+    }
+    for (size_t i = 0; i < 2; ++i) {
+        int status;
+        CHECK(waitpid(children[i], &status, 0) == children[i] &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 && unc_count == 4);
+    nt_guest_unc_free(unc);
+
+    for (size_t i = 0; i < NT_GUEST_UNC_LIMIT - 4; ++i) {
+        char share[32];
+        snprintf(share, sizeof(share), "extra%zu", i);
+        CHECK(nt_guest_unc_update(NULL, root, "lab", share, other) == 0);
+    }
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "ninth", other) < 0 &&
+          errno == ENOSPC);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 &&
+          unc_count == NT_GUEST_UNC_LIMIT);
+    nt_guest_unc_free(unc);
+    CHECK(nt_guest_unc_update(NULL, root, "testa", "one", NULL) == 0);
+    CHECK(nt_guest_unc_update(NULL, root, "lab", "ninth", other) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) == 0 &&
+          unc_count == NT_GUEST_UNC_LIMIT);
+    nt_guest_unc_free(unc);
+
+    char unc_config[512];
+    CHECK(snprintf(unc_config, sizeof(unc_config),
+                   "%s/.config/nt-native-linux/unc.conf", root) > 0);
+    CHECK(stat(unc_config, &info) == 0 && S_ISREG(info.st_mode) &&
+          (info.st_mode & 0077) == 0 && info.st_uid == geteuid());
+    CHECK(chmod(unc_config, 0644) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) < 0 &&
+          errno == EACCES);
+    CHECK(chmod(unc_config, 0600) == 0);
+    CHECK(unlink(unc_config) == 0 && symlink(native_path, unc_config) == 0);
+    CHECK(nt_guest_unc_load(NULL, root, unc, &unc_count) < 0);
+    CHECK(unlink(unc_config) == 0);
+
     char config_path[512];
     CHECK(snprintf(config_path, sizeof(config_path),
                    "%s/.config/nt-native-linux/shares.conf", root) > 0);

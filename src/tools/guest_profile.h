@@ -5,6 +5,11 @@
 #include <stddef.h>
 
 #define NT_GUEST_EXTRA_DRIVES 23 /* D: through Z:; C: is the private profile */
+#define NT_GUEST_UNC_LIMIT 8 /* Explicitly granted UNC roots per launch */
+struct nt_guest_unc_grant {
+    char server[64], share[64];
+    char *directory;
+};
 
 /* Open the ordinary Linux directory named "C:" beneath the user's state
  * directory. On first use, migrate an existing private "drive-c" directory
@@ -40,5 +45,16 @@ void nt_guest_share_free(char **paths, size_t count);
 int nt_guest_drive_load(const char *config_home, const char *home, char **paths);
 int nt_guest_drive_update(const char *config_home, const char *home,
                           char letter, const char *directory);
+
+/* Persist explicit \\server\share -> canonical Linux directory mappings.
+ * No network/SMB discovery; no host HOME exposure without an explicit grant.
+ * Results own directory pointers, released with nt_guest_unc_free(). */
+int nt_guest_unc_load(const char *config_home, const char *home,
+                      struct nt_guest_unc_grant grants[NT_GUEST_UNC_LIMIT],
+                      size_t *count);
+int nt_guest_unc_update(const char *config_home, const char *home,
+                        const char *server, const char *share,
+                        const char *directory);
+void nt_guest_unc_free(struct nt_guest_unc_grant grants[NT_GUEST_UNC_LIMIT]);
 
 #endif
