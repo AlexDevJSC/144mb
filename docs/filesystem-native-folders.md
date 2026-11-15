@@ -316,9 +316,11 @@ se señaliza el evento opcional de Windows. Para los handles antiguos
 sin ese flag se mantiene la finalización inmediata que ya utilizaban
 los fixtures. `NtReadFile/NtWriteFile` todavía admiten solo finalización
 inmediata, aunque pueden señalar un evento.
-Se añade `CancelIoEx` sobre las operaciones de `FILE_FLAG_OVERLAPPED`
-**que todavía están en cola**, con identidad del HANDLE y del proceso
-emisor. Admite cancelar una solicitud concreta por dirección de
+Se añaden `CancelIoEx` y `CancelIo` sobre las operaciones de
+`FILE_FLAG_OVERLAPPED` **que todavía están en cola**. `CancelIoEx`
+utiliza la identidad del HANDLE y del proceso emisor; `CancelIo` además
+selecciona únicamente las solicitudes emitidas por el **hilo que llama**,
+sin cancelar solicitudes de otros hilos que comparten el mismo HANDLE. Admite cancelar una solicitud concreta por dirección de
 `OVERLAPPED`, o todas las encoladas de ese handle al pasar NULL.
 Notifica `ERROR_OPERATION_ABORTED` y señaliza el evento; un handle
 distinto del mismo archivo no puede cancelar la operación ajena. Una
