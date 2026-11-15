@@ -124,6 +124,74 @@ static void check_crossprocess_delete_sharing(void)
 /* A Windows current directory is active in *another* NT worker. The
  * original local-only guest_cwd string cannot protect it: the kernel-held
  * shared flock does, without requiring a privileged process supervisor. */
+static void check_crossprocess_read_write_sharing(void)
+{
+    const uint32_t read = UINT32_C(0x80000000), write = UINT32_C(0x40000000);
+    struct {
+        uint32_t child_access, child_share, parent_access, parent_share;
+        bool allowed;
+    } cases[] = {
+        {read, 1u, write, 7u, false},   /* Earlier reader denies writing. */
+        {read, 1u, read, 7u, true},     /* Concurrent readers allowed. */
+        {write, 2u, read, 7u, false},  /* Earlier writer denies reading. */
+        {write, 2u, write, 7u, true},  /* Concurrent writers allowed. */
+        {read, 7u, read, 2u, false},   /* New opener denies existing READ. */
+        {write, 7u, write, 1u, false}, /* New opener denies existing WRITE. */
+        {read, 7u, write, 7u, true},   /* Fully shared open. */
+    };
+    uintptr_t file = nt_CreateFileA("C:\\sharing-across-workers.bin",
+                                    write, 7u, NULL, 2u, 0x80u, 0);
+    CHECK(file != UINTPTR_MAX && nt_CloseHandle(file));
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        int ready[2], gate[2];
+        CHECK(pipe(ready) == 0 && pipe(gate) == 0);
+        const pid_t child = fork();
+        CHECK(child >= 0);
+        if (child == 0) {
+            close(ready[0]);
+            close(gate[1]);
+            const uintptr_t held = nt_CreateFileA("c:\\SHARING-ACROSS-WORKERS.BIN",
+                cases[i].child_access, cases[i].child_share,
+                NULL, 3u, 0x80u, 0);
+            if (held == UINTPTR_MAX)
+                _exit(81);
+            char ready_token = 'R';
+            if (write(ready[1], &ready_token, 1) != 1)
+                _exit(82);
+            if (read(gate[0], &ready_token, 1) != 1)
+                _exit(83);
+            if (!nt_CloseHandle(held))
+                _exit(84);
+            _exit(0);
+        }
+        close(ready[1]);
+        close(gate[0]);
+        char ready_token = 0;
+        CHECK(read(ready[0], &ready_token, 1) == 1 && ready_token == 'R');
+        close(ready[0]);
+        uintptr_t opened = nt_CreateFileA("C:\\sharing-across-workers.bin",
+            cases[i].parent_access, cases[i].parent_share,
+            NULL, 3u, 0x80u, 0);
+        if (cases[i].allowed) {
+            CHECK(opened != UINTPTR_MAX && nt_CloseHandle(opened));
+        } else {
+            CHECK(opened == UINTPTR_MAX && last_error() == NT_ERROR_SHARING_VIOLATION);
+        }
+        ready_token = 'G';
+        CHECK(write(gate[1], &ready_token, 1) == 1);
+        close(gate[1]);
+        int status = 0;
+        CHECK(waitpid(child, &status, 0) == child &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        /* The lease is kernel-lifetime, not a stale row indexed by PID. */
+        opened = nt_CreateFileA("C:\\sharing-across-workers.bin",
+            cases[i].parent_access, cases[i].parent_share, NULL, 3u, 0x80u, 0);
+        CHECK(opened != UINTPTR_MAX && nt_CloseHandle(opened));
+    }
+    CHECK(nt_DeleteFileA("C:\\sharing-across-workers.bin"));
+}
+
+/* An active directory used by another NT process must remain stable. */
 static void check_crossprocess_current_directory(void)
 {
     static const uint16_t occupied[] = {
@@ -262,11 +330,13 @@ static void check_file_handles(void)
     CHECK(stream != NULL && nt_fread(bytes, 1, 1, stream) == 0 && nt_fclose(stream) == 0);
     CHECK(nt_DeleteFileA("scores"));
     check_crossprocess_delete_sharing();
+    check_crossprocess_read_write_sharing();
     check_crossprocess_current_directory();
     check_drive_relative_cwds();
     CHECK(nt_runtime_set_file_root(NULL) && rmdir(root) == 0);
     puts("PASS shared Win32 files and ownership from HANDLE to CRT fd to FILE");
     puts("PASS cross-process FILE_SHARE_DELETE using Linux flock leases");
+    puts("PASS cross-process FILE_SHARE_READ/WRITE with crash-safe OFD leases");
     puts("PASS cross-process active guest CWD blocks remove and rename");
     puts("PASS independent C:/D: drive-relative working directory semantics");
 }
