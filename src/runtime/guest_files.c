@@ -1371,6 +1371,18 @@ static int acquire_share_registry_lease(const struct stat *info,
         error = errno;
         break;
     }
+    struct share_pending_record pending;
+    if (error == 0 && !read_share_pending(gate, &pending))
+        error = errno;
+    if (error == 0 && pending.pending) {
+        /* A crashed final holder may leave a durable disposition.
+         * Reap it only after proving that every OFD lease is gone.
+         * The current open attempt never receives a stale inode. */
+        if (!reap_share_pending_locked(gate))
+            error = errno;
+        else
+            error = EACCES;
+    }
     int free_slot = -1;
     for (int i = 0; error == 0 && i < SHARE_LEASE_LIMIT; ++i) {
         struct flock query = {
@@ -1900,7 +1912,16 @@ static int open_shared(struct guest_file *slot, int parent, const char *path,
         if (share_lease < 0)
             error = errno;
     }
+    /* The host may unlink/replace an entry between open() and the
+     * registry admission. Never hand an unlinked or replaced inode
+     * back to the guest as a successful new CreateFile. */
+    struct stat current;
+    if (error == 0 && (fstatat(parent, path, &current, AT_SYMLINK_NOFOLLOW) != 0 ||
+                       current.st_dev != info.st_dev || current.st_ino != info.st_ino))
+        error = errno ? errno : EBUSY;
     if (error != 0) {
+        if (share_lease >= 0)
+            release_share_lease(&share_lease);
         close(fd);
         errno = error;
         return -1;
@@ -1977,7 +1998,7 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return UINTPTR_MAX;
     }
-    if ((desired & ~(generic_read | generic_write)) != 0 ||
+    if ((desired & ~(generic_read | generic_write | UINT32_C(0x00010000))) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
         (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED)) != 0 ||
@@ -2028,7 +2049,9 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         options |= O_CREAT;
     if (disposition == CREATE_NEW)
         options |= O_EXCL;
-    const unsigned int access = (read_access ? FILE_READ : 0) | (write_access ? FILE_WRITE : 0);
+    const unsigned int access = (read_access ? FILE_READ : 0) |
+                                (write_access ? FILE_WRITE : 0) |
+                                ((desired & UINT32_C(0x00010000)) ? FILE_DELETE : 0);
     pthread_mutex_lock(&file_lock);
     struct guest_file *slot = new_file();
     bool created = false;
@@ -2041,9 +2064,7 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
             if (truncate && !created && ftruncate(fd, 0) != 0) {
                 error = errno;
                 close(fd);
-                if (slot->share_lease_fd > 0)
-                    close(slot->share_lease_fd);
-                slot->share_lease_fd = 0;
+                release_share_lease(&slot->share_lease_fd);
             } else {
                 result = next_handle;
                 next_handle += 16;
@@ -2077,9 +2098,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
 static int close_file(struct guest_file *file)
 {
     const int result = close(file->fd);
-    if (file->share_lease_fd > 0)
-        close(file->share_lease_fd);
-    file->share_lease_fd = 0;
+    release_share_lease(&file->share_lease_fd);
     free(file->path);
     file->path = NULL;
     file->owner = FREE_FILE;
