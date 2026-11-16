@@ -98,6 +98,8 @@ uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer);
 int32_t NT_MS_ABI nt_SetCurrentDirectoryW(const uint16_t *path);
 uint32_t NT_MS_ABI nt_GetFullPathNameW(const uint16_t *path, uint32_t size, uint16_t *buffer,
                                       uint16_t **leaf);
+uint32_t NT_MS_ABI nt_GetLongPathNameW(const uint16_t *input, uint16_t *buffer, uint32_t size);
+uint32_t NT_MS_ABI nt_GetLongPathNameA(const char *input, char *buffer, uint32_t size);
 uint32_t NT_MS_ABI nt_GetFileAttributesW(const uint16_t *path);
 int32_t NT_MS_ABI nt_SetFileAttributesW(const uint16_t *path, uint32_t attributes);
 int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
