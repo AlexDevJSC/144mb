@@ -642,6 +642,23 @@ redirección de rutas del invitado. Los enlaces a destinos absolutos de Linux
 se pueden identificar pero no leer como REPARSE_DATA_BUFFER para evitar
 filtrar las rutas del host. No se afirma equivalencia con NTFS.
 
+## Filesystem2 P1.6 — nombre largo canónico (parcial)
+
+Se incorporan `GetLongPathNameA/W` con recuperación de la escritura real de
+cada componente dentro de la raíz Linux expresamente autorizada. Se apoya
+en la misma búsqueda Unicode simple, prioriza una coincidencia exacta y
+rechaza un caso ambiguo en lugar de elegir otro archivo. La búsqueda abre
+solo descriptores de directorio confinados, sin seguir enlaces simbólicos
+intermedios, y confirma que el objeto final exista con `AT_SYMLINK_NOFOLLOW`.
+La versión W recibe UTF-16 y devuelve UTF-16, y la versión A mantiene la
+política actual de rutas ANSI/UTF-8 del runtime (no es aún ACP estricto).
+
+La resolución de alias 8.3 generados, `GetShortPathNameA/W`, persistencia
+de nombres cortos, conversión ANSI uniforme entre todas las API A,
+normalización Unicode avanzada y sincronización NTFS case-insensitive
+entre procesos Linux externos **siguen pendientes**. Esta ampliación no
+genera alias que pudieran colisionar o resolver un inodo equivocado.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
