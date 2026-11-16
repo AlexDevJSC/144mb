@@ -987,6 +987,22 @@ static void check_files(void)
     uint32_t junction_data_size = test_mount_reparse(junction_input,
                                                      u"C:\\data\\junction-target");
     uint32_t junction_returned = 999;
+    /* An externally renamed entry must not make an old reparse HANDLE
+     * mutate a replacement symlink or a different physical directory. */
+    char entry_native[512], parked_native[512];
+    CHECK(snprintf(entry_native, sizeof(entry_native),
+                   "%s/data/junction-entry", root) > 0 &&
+          snprintf(parked_native, sizeof(parked_native),
+                   "%s/data/junction-parked", root) > 0);
+    CHECK(rename(entry_native, parked_native) == 0 &&
+          symlink("junction-target", entry_native) == 0);
+    CHECK(!nt_DeviceIoControl(junction, 0x000900a4u,
+                              junction_input, junction_data_size,
+                              NULL, 0, &junction_returned, NULL) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(unlink(entry_native) == 0 &&
+          rename(parked_native, entry_native) == 0);
+
     const int32_t set_junction_ok = nt_DeviceIoControl(junction, 0x000900a4u,
                                      junction_input, junction_data_size,
                                      NULL, 0, &junction_returned, NULL);
@@ -1068,6 +1084,30 @@ static void check_files(void)
               errno == ENOTSUP);
         fprintf(stderr, "SKIP legacy large junction xattr (filesystem limit)\n");
     }
+    /* Malformed xattrs must never redirect into a guessed directory.
+     * DELETE must still be able to clear the bad marker for recovery. */
+    struct {
+        uint32_t magic, version;
+        uint64_t root_dev, root_inode;
+        char target[1024];
+    } corrupt_mount = {
+        .magic = UINT32_C(0x4a554e43), .version = 1,
+        .root_dev = (uint64_t)legacy_grant.st_dev,
+        .root_inode = (uint64_t)legacy_grant.st_ino
+    };
+    memset(corrupt_mount.target, 'X', sizeof(corrupt_mount.target));
+    CHECK(setxattr(legacy_directory, "user.ntnative.junction.v1",
+                   &corrupt_mount, sizeof(corrupt_mount), 0) == 0);
+    CHECK(!nt_DeviceIoControl(junction, 0x000900a8u, NULL, 0,
+                              junction_output, sizeof(junction_output),
+                              &junction_returned, NULL) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
+    CHECK(nt_CreateFileW(u"C:\\data\\junction-entry\\payload.bin",
+                         UINT32_C(0x80000000), 7u, NULL, 3u,
+                         0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
+                             sizeof(remove_mount), NULL, 0,
+                             &junction_returned, NULL));
     CHECK(nt_CloseHandle(junction) &&
           (nt_GetFileAttributesW(u"C:\\data\\junction-entry") & 0x400u) == 0);
     CHECK(nt_CreateFileW(u"C:\\data\\junction-entry\\payload.bin",
