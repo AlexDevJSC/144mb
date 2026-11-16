@@ -4106,6 +4106,28 @@ int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information
     struct stat st;
     const int status = fstat(fd, &st);
     const int stat_error = errno;
+    if (status == 0 && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))) {
+        /* POSIX extended ACLs are not representable by the three mode
+         * ACEs below. Detect them through the already-authorized FD and
+         * fail closed rather than fabricate an incomplete NT DACL. */
+        char proc_fd[64];
+        const int name_len = snprintf(proc_fd, sizeof(proc_fd),
+                                      "/proc/self/fd/%d", fd);
+        uint8_t probe;
+        ssize_t acl = -1;
+        int acl_error = ENAMETOOLONG;
+        if (name_len > 0 && (size_t)name_len < sizeof(proc_fd)) {
+            acl = getxattr(proc_fd, "system.posix_acl_access", &probe, 1);
+            acl_error = errno;
+        }
+        if (acl >= 0 || acl_error == ERANGE ||
+            (acl_error != ENODATA && acl_error != ENOTSUP &&
+             acl_error != EOPNOTSUPP)) {
+            close(fd);
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+    }
     close(fd);
     if (status < 0 || (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
         nt_SetLastError(status < 0 ? path_error(stat_error, false) :
