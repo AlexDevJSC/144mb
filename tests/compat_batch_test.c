@@ -998,8 +998,11 @@ static void check_files(void)
           symlink("junction-target", entry_native) == 0);
     CHECK(!nt_DeviceIoControl(junction, 0x000900a4u,
                               junction_input, junction_data_size,
-                              NULL, 0, &junction_returned, NULL) &&
-          last_error() == NT_ERROR_ACCESS_DENIED);
+                              NULL, 0, &junction_returned, NULL));
+    /* openat2 may report ENOTDIR for O_DIRECTORY|O_NOFOLLOW on a symlink,
+     * or ELOOP on another kernel. Both must reject the replacement. */
+    CHECK(last_error() == NT_ERROR_ACCESS_DENIED ||
+          last_error() == NT_ERROR_PATH_NOT_FOUND);
     CHECK(unlink(entry_native) == 0 &&
           rename(parked_native, entry_native) == 0);
 
