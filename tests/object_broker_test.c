@@ -29,7 +29,7 @@ static const uint16_t *semaphore_name = u"broker_sem";
 
 static int child_client(void)
 {
-    uintptr_t map = nt_OpenFileMappingW(4, 0, section_name);
+    uintptr_t map = nt_OpenFileMappingW(2, 0, section_name);
     uintptr_t event = nt_OpenEventW(ALL_ACCESS, 0, event_name);
     uintptr_t sem = nt_OpenSemaphoreW(ALL_ACCESS, 0, semaphore_name);
     CHECK(map && event && sem);
@@ -45,7 +45,7 @@ static int child_client(void)
 }
 static int race_client(unsigned index)
 {
-    uintptr_t mapping = nt_OpenFileMappingW(4, 0, section_name);
+    uintptr_t mapping = nt_OpenFileMappingW(2, 0, section_name);
     CHECK(mapping);
     unsigned char *data = nt_MapViewOfFile(mapping, 2, 0, 0, 4096);
     CHECK(data);
@@ -141,7 +141,7 @@ int main(int argc, char **argv)
                              nt_GetCurrentProcess(), &alias, 0, 0, 2));
     CHECK(alias && alias != mapping);
     CHECK(nt_CloseHandle(mapping_again) && nt_CloseHandle(mapping));
-    CHECK(data[0] == 93 && nt_OpenFileMappingW(4, 0, section_name));
+    CHECK(data[0] == 93);
     uintptr_t opened = nt_OpenFileMappingW(4, 0, section_name);
     CHECK(opened && nt_CloseHandle(opened));
 
