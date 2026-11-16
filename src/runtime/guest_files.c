@@ -669,8 +669,12 @@ static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1]
     return matches;
 }
 
+#include "junctions.inc"
+
 /* Walk under verified directory FDs; intermediates must exist and cannot
- * escape the allowed root through symlinks, mounts or textual traversal. */
+ * escape the allowed root through symlinks, mounts or textual traversal.
+ * A marked directory junction is resolved to a separate pinned directory
+ * under the same granted root, never via a host symlink. */
 static int open_parent(int root, const char *path, char leaf[NAME_MAX + 1])
 {
     if (!path || !*path || strcmp(path, ".") == 0) {
@@ -716,7 +720,9 @@ static int open_parent(int root, const char *path, char leaf[NAME_MAX + 1])
             errno = error;
             return -1;
         }
-        parent = child;
+        parent = nt_junction_follow(root, child);
+        if (parent < 0)
+            return -1;
         cursor = slash + 1;
     }
 }
@@ -729,7 +735,33 @@ static int confined_open(int root, const char *path, int flags, unsigned int mod
     const int parent = open_parent(root, path, leaf);
     if (parent < 0)
         return -1;
-    const int fd = confined_open_raw(parent, leaf, flags, mode);
+    int fd;
+    if ((flags & O_DIRECTORY) != 0 && (flags & O_CREAT) == 0) {
+        /* A directory opened by FindFirstFile/CWD may itself be a
+         * junction leaf. Reopen only its pinned FD for data operations:
+         * there is no text-based host path or symlink traversal. */
+        const int physical = confined_open_raw(parent, leaf,
+                                               O_PATH | O_DIRECTORY, 0);
+        if (physical < 0) {
+            fd = -1;
+        } else {
+            const int selected = nt_junction_follow(root, physical);
+            if (selected < 0) {
+                fd = -1;
+            } else if ((flags & O_PATH) != 0) {
+                fd = selected;
+            } else {
+                char pinned_path[64];
+                snprintf(pinned_path, sizeof(pinned_path), "/proc/self/fd/%d", selected);
+                fd = open(pinned_path, flags | O_CLOEXEC);
+                const int open_error = errno;
+                close(selected);
+                errno = open_error;
+            }
+        }
+    } else {
+        fd = confined_open_raw(parent, leaf, flags, mode);
+    }
     const int error = errno;
     close(parent);
     errno = error;
