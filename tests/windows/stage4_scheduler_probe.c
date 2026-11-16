@@ -70,6 +70,8 @@ int main(void)
         }
     }
     printf("PROCESS_BOOST_TOGGLE=%s\n", process_boost_ok ? "PASS" : "FAIL");
+    printf("PROCESS_PRIORITY_CLASS=%lu\n",
+           (unsigned long)GetPriorityClass(GetCurrentProcess()));
 
     DWORD tid = 0;
     HANDLE thread = CreateThread(NULL, 0, probe_worker, NULL, CREATE_SUSPENDED, &tid);
