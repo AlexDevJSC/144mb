@@ -650,6 +650,10 @@ static void release_waitable(struct waitable *object)
         struct waitable *canonical = object->shared;
         --canonical->links;
         if (canonical->refs == 0 && canonical->links == 0) {
+            if (canonical->brokered) {
+                nt_broker_release(&canonical->broker);
+                canonical->brokered = false;
+            }
             free(canonical->thread_description);
             canonical->thread_description = NULL;
         }
