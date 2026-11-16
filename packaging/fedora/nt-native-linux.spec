@@ -24,6 +24,8 @@ BuildRequires:  pkgconfig(libvkd3d-utils)
 BuildRequires:  pkgconfig(vulkan)
 BuildRequires:  fluidsynth-libs
 BuildRequires:  dejavu-sans-fonts
+BuildRequires:  mingw64-gcc
+BuildRequires:  mingw64-binutils
 
 %description
 Experimental NT/Win32 compatibility runtime with a timing probe and a
@@ -41,7 +43,7 @@ incomplete and must not be represented as general Windows compatibility.
 %make_install PREFIX=%{_prefix} BINDIR=%{_bindir}
 
 %check
-%make_build check check-pe-image check-audio-required
+%make_build check check-pe-image check-audio-required check-pe-preflight
 
 %files
 %license LICENSE
