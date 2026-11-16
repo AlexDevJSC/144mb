@@ -125,6 +125,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | [E/S de archivos NT](docs/kernel-user.md#es-síncrona-nativa-del-mismo-handle-continuación-de-pr-61) | Lectura, escritura, metadatos y sincronización sobre handles compartidos |
 | [Núcleo NT: estado y criterios](docs/nt-core-readiness.md) | Siete componentes críticos, pruebas y límites pendientes |
 | [Base transversal del prototipo NT/Win32](docs/nt-core-prototype-foundations.md) | Estado de las siete bases y nueva capa de secciones compartidas NT/Win32 |
+| [Broker NT entre procesos](docs/nt-object-broker.md) | IPC Unix con nombres compartidos, memfd, eventos, semáforos, referencias y pruebas con procesos independientes |
 | [Prueba del componente 4 en Fedora físico](scripts/fedora-check-stage4.sh) | Puerta de aceptación que rechaza los tests aislados omitidos y conserva los límites de compatibilidad |
 | [Mediación de alias DOS 8.3](docs/dos83-mediation.md) | Renombrados cooperantes, reconciliación Linux/inotify, comandos y límites |
 | [P2.3: FUSE3 + Landlock](docs/dos83-p2-3-fuse.md) | Vista POSIX mediada antes de renombrados, aislamiento de escritura por proceso, [aceptación Fedora](scripts/fedora-p2-3-acceptance.sh) y límites de seguridad |

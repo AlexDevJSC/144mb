@@ -550,6 +550,25 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
     ADD("--bind"); ADD(profile_source); ADD("/game");
     ADD("--ro-bind"); ADD(absolute); ADD(inside);
     ADD("--ro-bind"); ADD(runner); ADD("/runner");
+    /* The guest receives only the private Unix socket, never the host
+     * broker directory or an arbitrary NT_NATIVE_BROKER_SOCKET path.
+     * When opted in, an unavailable socket aborts launch rather than
+     * downgrading named objects to process-local state. */
+    const char *broker_socket = getenv("NT_NATIVE_BROKER_SOCKET");
+    if (broker_socket && *broker_socket) {
+        struct stat broker_info;
+        if (broker_socket[0] != '/' ||
+            lstat(broker_socket, &broker_info) != 0 ||
+            !S_ISSOCK(broker_info.st_mode) ||
+            broker_info.st_uid != geteuid()) {
+            fputs("Invalid or unavailable NT object broker socket\n", stderr);
+            return 2;
+        }
+        ADD("--dir"); ADD("/run/ntnative-broker");
+        ADD("--ro-bind"); ADD(broker_socket); ADD("/run/ntnative-broker/socket");
+        ADD("--setenv"); ADD("NT_NATIVE_BROKER_SOCKET");
+        ADD("/run/ntnative-broker/socket");
+    }
     char dxc_directory[PATH_MAX];
     struct stat dxc_info;
     if (nt_dxc_install_path(runner, dxc_directory, sizeof(dxc_directory)) &&

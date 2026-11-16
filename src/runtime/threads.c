@@ -4,6 +4,7 @@
 #include "child_process.h"
 #include "nt_services.h"
 #include "nt_core_information.h"
+#include "object_broker.h"
 #include "winbase.h"
 #include "ntnative/guest_thread.h"
 
@@ -14,6 +15,7 @@
 #include <signal.h>
 #include <sched.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <setjmp.h>
 #include <stdlib.h>
@@ -67,6 +69,8 @@ struct waitable {
     bool manual, signaled, started, alerted;
     bool termination_requested, child_guest, terminate_at_start, self_process;
     int32_t semaphore_count, semaphore_maximum;
+    bool brokered;
+    struct nt_broker_resource broker;
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
     uint32_t suspend_count;
@@ -647,10 +651,18 @@ static void release_waitable(struct waitable *object)
         struct waitable *canonical = object->shared;
         --canonical->links;
         if (canonical->refs == 0 && canonical->links == 0) {
+            if (canonical->brokered) {
+                nt_broker_release(&canonical->broker);
+                canonical->brokered = false;
+            }
             free(canonical->thread_description);
             canonical->thread_description = NULL;
         }
     } else if (object->links == 0) {
+        if (object->brokered) {
+            nt_broker_release(&object->broker);
+            object->brokered = false;
+        }
         free(object->thread_description);
         object->thread_description = NULL;
     }
@@ -857,6 +869,53 @@ nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
     return status;
 }
 
+/* Shared named objects use one broker lease per opened HANDLE. The
+ * canonical in-process entry still owns refcounting and DuplicateHandle,
+ * but signaling state and atomic consumption live in a shared memfd. */
+static nt_status broker_named_waitable(uintptr_t *handle, const char *name,
+    enum waitable_kind kind, uint32_t rights, bool inherit, bool insensitive,
+    bool create, int32_t initial, int32_t maximum, bool manual)
+{
+    struct nt_broker_request request = {
+        .magic = NT_BROKER_MAGIC, .version = NT_BROKER_VERSION,
+        .action = create ? NT_BROKER_CREATE : NT_BROKER_OPEN,
+        .kind = kind == EVENT ? NT_BROKER_EVENT : NT_BROKER_SEMAPHORE,
+        .rights = rights, .flags = (insensitive ? 2u : 0u) |
+                                 (create && manual ? 1u : 0u),
+        .initial = create ? (uint32_t)initial : 0,
+        .maximum = create ? (uint32_t)maximum : 0
+    };
+    memcpy(request.name, name, strlen(name) + 1);
+    struct nt_broker_resource broker;
+    const int result = nt_broker_acquire(&request, &broker);
+    switch (result) {
+    case NT_BROKER_CREATED: case NT_BROKER_EXISTS: break;
+    case NT_BROKER_MISSING: return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    case NT_BROKER_TYPE_MISMATCH: return NT_STATUS_OBJECT_TYPE_MISMATCH;
+    case NT_BROKER_ACCESS_DENIED: return NT_STATUS_ACCESS_DENIED;
+    case NT_BROKER_RESOURCE_ERROR: return NT_STATUS_NO_MEMORY;
+    case NT_BROKER_INVALID: return NT_STATUS_INVALID_PARAMETER;
+    default: return NT_STATUS_UNSUCCESSFUL;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = new_waitable(kind);
+    if (object) {
+        object->access = rights;
+        object->handle_flags = inherit ? 1u : 0u;
+        object->brokered = true;
+        object->broker = broker;
+        memcpy(object->object_name, name, strlen(name) + 1);
+        *handle = object->handle;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (!object) {
+        nt_broker_release(&broker);
+        return NT_STATUS_NO_MEMORY;
+    }
+    return result == NT_BROKER_EXISTS ?
+           NT_STATUS_OBJECT_NAME_EXISTS : NT_STATUS_SUCCESS;
+}
+
 nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
                                    const struct nt_object_attributes *attributes,
                                    uint32_t type, uint8_t initial_state)
@@ -875,6 +934,11 @@ nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
+    if (normalized[0] && nt_runtime_broker_enabled())
+        return broker_named_waitable(handle, normalized, EVENT, rights,
+                                    attributes && (attributes->attributes & 2u),
+                                    attributes && (attributes->attributes & 0x40u),
+                                    true, initial_state != 0, 1, type == 0);
     pthread_mutex_lock(&wait_lock);
     nt_status status = NT_STATUS_SUCCESS;
     struct waitable *event = normalized[0] ?
@@ -925,6 +989,11 @@ nt_status NT_MS_ABI nt_NtOpenEvent(uintptr_t *handle, uint32_t access,
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
+    if (nt_runtime_broker_enabled())
+        return broker_named_waitable(handle, normalized, EVENT, rights,
+                                    (attributes->attributes & 2u) != 0,
+                                    (attributes->attributes & 0x40u) != 0,
+                                    false, 0, 0, false);
     pthread_mutex_lock(&wait_lock);
     struct waitable *state = find_named_object(normalized, (attributes->attributes & 0x40u) != 0);
     nt_status status = NT_STATUS_SUCCESS;
@@ -987,6 +1056,11 @@ nt_status NT_MS_ABI nt_NtCreateSemaphore(uintptr_t *handle, uint32_t access,
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
+    if (normalized[0] && nt_runtime_broker_enabled())
+        return broker_named_waitable(handle, normalized, SEMAPHORE, rights,
+                                    attributes && (attributes->attributes & 2u),
+                                    attributes && (attributes->attributes & 0x40u),
+                                    true, initial, maximum, false);
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = normalized[0] ?
         find_named_object(normalized, attributes && (attributes->attributes & 0x40u)) : NULL;
@@ -1037,6 +1111,11 @@ nt_status NT_MS_ABI nt_NtOpenSemaphore(uintptr_t *handle, uint32_t access,
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
+    if (nt_runtime_broker_enabled())
+        return broker_named_waitable(handle, normalized, SEMAPHORE, rights,
+                                    (attributes->attributes & 2u) != 0,
+                                    (attributes->attributes & 0x40u) != 0,
+                                    false, 0, 0, false);
     pthread_mutex_lock(&wait_lock);
     struct waitable *state = find_named_object(normalized, (attributes->attributes & 0x40u) != 0);
     nt_status status = NT_STATUS_SUCCESS;
@@ -1084,10 +1163,19 @@ nt_status NT_MS_ABI nt_NtQuerySemaphore(uintptr_t handle, uint32_t information_c
         status = NT_STATUS_ACCESS_DENIED;
     else {
         const struct waitable *state = wait_state(entry);
-        const struct nt_semaphore_basic_information info = {
-            state->semaphore_count, state->semaphore_maximum
-        };
-        memcpy(buffer, &info, sizeof(info));
+        if (state->brokered && !nt_broker_lock(&state->broker)) {
+            status = NT_STATUS_UNSUCCESSFUL;
+        } else {
+            const struct nt_broker_sync_state *shared =
+                state->brokered ? state->broker.state : NULL;
+            const struct nt_semaphore_basic_information info = {
+                shared ? shared->count : state->semaphore_count,
+                shared ? shared->maximum : state->semaphore_maximum
+            };
+            memcpy(buffer, &info, sizeof(info));
+            if (state->brokered)
+                nt_broker_unlock(&state->broker);
+        }
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
@@ -1108,14 +1196,28 @@ nt_status NT_MS_ABI nt_NtReleaseSemaphore(uintptr_t handle, int32_t count, int32
         status = NT_STATUS_ACCESS_DENIED;
     else {
         struct waitable *state = wait_state(entry);
-        if (count > state->semaphore_maximum - state->semaphore_count) {
-            status = NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+        if (state->brokered && !nt_broker_lock(&state->broker)) {
+            status = NT_STATUS_UNSUCCESSFUL;
         } else {
-            if (previous != NULL)
-                *previous = state->semaphore_count;
-            state->semaphore_count += count;
-            state->signaled = true;
-            pthread_cond_broadcast(&wait_changed);
+            struct nt_broker_sync_state *shared =
+                state->brokered ? state->broker.state : NULL;
+            int32_t current = shared ? shared->count : state->semaphore_count;
+            int32_t limit = shared ? shared->maximum : state->semaphore_maximum;
+            if (count > limit - current)
+                status = NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+            else {
+                if (previous)
+                    *previous = current;
+                if (shared)
+                    shared->count += count;
+                else {
+                    state->semaphore_count += count;
+                    state->signaled = true;
+                }
+                pthread_cond_broadcast(&wait_changed);
+            }
+            if (state->brokered)
+                nt_broker_unlock(&state->broker);
         }
     }
     pthread_mutex_unlock(&wait_lock);
@@ -1237,9 +1339,19 @@ nt_status NT_MS_ABI nt_NtQueryEvent(uintptr_t handle, uint32_t information_class
         status = NT_STATUS_ACCESS_DENIED;
     else {
         struct waitable *state = wait_state(entry);
-        const struct nt_event_basic_information information =
-            {(uint32_t)(state->manual ? 0 : 1), state->signaled ? 1 : 0};
-        memcpy(buffer, &information, sizeof(information));
+        if (state->brokered && !nt_broker_lock(&state->broker)) {
+            status = NT_STATUS_UNSUCCESSFUL;
+        } else {
+            const struct nt_broker_sync_state *shared =
+                state->brokered ? state->broker.state : NULL;
+            const struct nt_event_basic_information information = {
+                shared ? (shared->manual ? 0u : 1u) : (state->manual ? 0u : 1u),
+                shared ? (shared->count != 0) : (state->signaled ? 1 : 0)
+            };
+            memcpy(buffer, &information, sizeof(information));
+            if (state->brokered)
+                nt_broker_unlock(&state->broker);
+        }
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
@@ -1258,11 +1370,22 @@ static nt_status change_event(uintptr_t handle, bool signaled, int32_t *previous
         status = NT_STATUS_ACCESS_DENIED;
     } else {
         struct waitable *state = wait_state(event);
-        if (previous)
-            *previous = state->signaled;
-        state->signaled = signaled;
-        if (signaled)
-            pthread_cond_broadcast(&wait_changed);
+        if (state->brokered && !nt_broker_lock(&state->broker))
+            status = NT_STATUS_UNSUCCESSFUL;
+        else {
+            struct nt_broker_sync_state *shared =
+                state->brokered ? state->broker.state : NULL;
+            if (previous)
+                *previous = shared ? (shared->count != 0) : (state->signaled ? 1 : 0);
+            if (shared)
+                shared->count = signaled ? 1 : 0;
+            else
+                state->signaled = signaled;
+            if (state->brokered)
+                nt_broker_unlock(&state->broker);
+            if (signaled)
+                pthread_cond_broadcast(&wait_changed);
+        }
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
@@ -1292,8 +1415,18 @@ static nt_status acquire_wait_objects(struct waitable **objects, uint32_t count,
         if (!(object->access & SYNCHRONIZE))
             return NT_STATUS_ACCESS_DENIED;
         for (uint32_t j = 0; j < i; ++j) {
-            if (wait_state(objects[j]) == wait_state(object))
+            const struct waitable *a = wait_state(objects[j]);
+            const struct waitable *b = wait_state(object);
+            if (a == b)
                 return NT_STATUS_INVALID_PARAMETER;
+            if (a->brokered && b->brokered) {
+                struct stat sa, sb;
+                if (fstat(a->broker.fd, &sa) != 0 ||
+                    fstat(b->broker.fd, &sb) != 0)
+                    return NT_STATUS_UNSUCCESSFUL;
+                if (sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino)
+                    return NT_STATUS_INVALID_PARAMETER;
+            }
         }
         objects[i] = object;
     }
@@ -1304,30 +1437,62 @@ static nt_status acquire_wait_objects(struct waitable **objects, uint32_t count,
 
 static nt_status check_wait_objects(struct waitable *const *objects, uint32_t count, bool all)
 {
-    uint32_t first = count, signaled = 0;
+    /* The global broker gate is shared by ALL event/semaphore memfds from
+     * one broker. Taking it while holding wait_lock also makes WaitAll
+     * consume multiple named semaphores as a single transaction against
+     * other clients of the same broker. */
+    const struct nt_broker_resource *gate = NULL;
     for (uint32_t i = 0; i < count; ++i) {
-        if (!objects[i]->handle)
-            return NT_STATUS_INVALID_HANDLE;
-        if (wait_state(objects[i])->signaled) {
+        struct waitable *state = wait_state(objects[i]);
+        if (state->brokered) {
+            gate = &state->broker;
+            break;
+        }
+    }
+    if (gate && !nt_broker_lock(gate))
+        return NT_STATUS_UNSUCCESSFUL;
+    uint32_t first = count, signaled = 0;
+    nt_status result = NT_STATUS_TIMEOUT;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!objects[i]->handle) {
+            result = NT_STATUS_INVALID_HANDLE;
+            goto finish;
+        }
+        struct waitable *state = wait_state(objects[i]);
+        bool ready = state->brokered ?
+            ((struct nt_broker_sync_state *)state->broker.state)->count > 0 :
+            state->signaled;
+        if (ready) {
             if (!signaled)
                 first = i;
             ++signaled;
         }
     }
     if (all ? signaled != count : signaled == 0)
-        return NT_STATUS_TIMEOUT;
+        goto finish;
     const uint32_t start = all ? 0 : first;
     const uint32_t end = all ? count : first + 1;
     for (uint32_t i = start; i < end; ++i) {
         struct waitable *state = wait_state(objects[i]);
-        if (objects[i]->kind == EVENT && !state->manual)
-            state->signaled = false;
-        if (objects[i]->kind == SEMAPHORE) {
-            --state->semaphore_count;
-            state->signaled = state->semaphore_count > 0;
+        if (state->brokered) {
+            struct nt_broker_sync_state *shared = state->broker.state;
+            if (objects[i]->kind == SEMAPHORE ||
+                (objects[i]->kind == EVENT && !shared->manual))
+                --shared->count;
+        } else {
+            if (objects[i]->kind == EVENT && !state->manual)
+                state->signaled = false;
+            if (objects[i]->kind == SEMAPHORE) {
+                --state->semaphore_count;
+                state->signaled = state->semaphore_count > 0;
+            }
         }
     }
-    return all ? NT_STATUS_SUCCESS : (nt_status)first;
+    result = all ? NT_STATUS_SUCCESS : (nt_status)first;
+finish:
+    if (gate)
+        nt_broker_unlock(gate);
+    return result;
 }
 
 nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t *handles,
@@ -1349,6 +1514,10 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
     struct guest_apc *apc = NULL;
     bool really_waited = false;
     if (result == NT_STATUS_SUCCESS) {
+        bool has_broker = false;
+        for (uint32_t i = 0; i < count; ++i)
+            if (wait_state(objects[i])->brokered)
+                has_broker = true;
         int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
         for (;;) {
             if (alertable != 0) {
@@ -1367,8 +1536,47 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
             if (result != NT_STATUS_TIMEOUT || error)
                 break;
             really_waited = true;
-            error = timeout ? pthread_cond_clockwait(&wait_changed, &wait_lock, deadline.clock, &deadline.time) :
-                              pthread_cond_wait(&wait_changed, &wait_lock);
+            if (!has_broker) {
+                error = timeout ?
+                    pthread_cond_clockwait(&wait_changed, &wait_lock, deadline.clock, &deadline.time) :
+                    pthread_cond_wait(&wait_changed, &wait_lock);
+            } else {
+                /* Linux clients cannot signal another process's local
+                 * pthread condition. Poll the shared memory after bounded
+                 * 10ms slices while retaining full alertable-wait support.
+                 * This is real cross-process synchronization; the tradeoff
+                 * is wakeup latency, not a fake success result. */
+                clockid_t clock = timeout ? deadline.clock : CLOCK_MONOTONIC;
+                struct timespec slice;
+                if (clock_gettime(clock, &slice) != 0) {
+                    error = EINVAL;
+                    break;
+                }
+                slice.tv_nsec += 10000000;
+                if (slice.tv_nsec >= 1000000000L) {
+                    slice.tv_sec += 1;
+                    slice.tv_nsec -= 1000000000L;
+                }
+                if (timeout &&
+                    (deadline.time.tv_sec < slice.tv_sec ||
+                     (deadline.time.tv_sec == slice.tv_sec &&
+                      deadline.time.tv_nsec < slice.tv_nsec)))
+                    slice = deadline.time;
+                error = pthread_cond_clockwait(&wait_changed, &wait_lock,
+                                                clock, &slice);
+                if (error == ETIMEDOUT) {
+                    if (!timeout) {
+                        error = 0;
+                    } else {
+                        struct timespec now;
+                        if (clock_gettime(clock, &now) == 0 &&
+                            (now.tv_sec < deadline.time.tv_sec ||
+                             (now.tv_sec == deadline.time.tv_sec &&
+                              now.tv_nsec < deadline.time.tv_nsec)))
+                            error = 0;
+                    }
+                }
+            }
         }
         if (result == NT_STATUS_TIMEOUT && error != ETIMEDOUT)
             result = NT_STATUS_UNSUCCESSFUL;

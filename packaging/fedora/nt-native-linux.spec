@@ -53,6 +53,7 @@ incomplete and must not be represented as general Windows compatibility.
 %{_bindir}/nt-dos83-mediator
 %{_bindir}/nt-dos83-fuse
 %{_bindir}/nt-dos83-landlock
+%{_bindir}/nt-object-broker
 
 %changelog
 * Mon Nov 09 2026 nt-native-linux contributors - 0.1.0-1

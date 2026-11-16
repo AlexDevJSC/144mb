@@ -14,7 +14,7 @@ PROYECTO 1.44 / BONES.
 | --- | --- | --- |
 | 1. PE / DLL | Cargador PE32+ x64, importaciones, relocaciones, DLL locales, DllMain y TLS inicial | Registro dinámico de TLS en todos los hilos, búsqueda Win32 y descarga concurrente |
 | 2. PEB / TEB | PEB/TEB parciales, TLS/FLS, listas de módulos locales | Incorporar secciones y módulos cargados tardíamente al estado del proceso |
-| 3. Objetos NT | Handles de eventos y semáforos locales; secciones anónimas/nominadas locales con referencias | Broker general entre procesos, mutexes y namespace con derechos |
+| 3. Objetos NT | Handles locales y **broker IPC opt-in entre procesos** para secciones, eventos y semáforos con nombre, memfd, referencias y esperas | Mutexes remotos, ACL completas, namespace Windows global/sesiones y duplicación de HANDLE directamente entre procesos |
 | 4. Procesos / hilos | Creación de hilos/hijos acotada, espera, APC normales, prioridades/afinidad representables | Contextos y suspensión de hilos arbitrarios, herencia interproceso de objetos NT |
 | 5. Memoria | Reservas privadas, protecciones y consultas; **secciones memfd** con vistas compartidas/COW, MEM_MAPPED y puente NtMapViewOfSection | Mapeos basados en archivos Windows, mapeos en procesos externos, PAGE_GUARD |
 | 6. Excepciones | Desenrollado x64 parcial, RaiseException y VEH software | SIGSEGV/SIGILL/SIGFPE a excepciones invitadas y continuación segura |
@@ -49,7 +49,10 @@ como `MEM_MAPPED`. No hay páginas ejecutables ni rutas host ajenas al sandbox.
   impuestas ni políticas avanzadas. El LASTERROR Win32 se preserva.
 - Los nombres no cruzan procesos, aunque Linux sí comparte físicamente las
   páginas entre vistas de un mismo `memfd` y descendientes que las hereden.
-  Un broker de objetos y el paso autenticado de FDs siguen pendientes.
+  El [broker NT básico](nt-object-broker.md) implementa nombres compartidos,
+  autenticación por UID y paso de FDs para procesos independientes cuando está
+  configurado explícitamente. Siguen pendientes sesiones/ACL Windows y duplicación
+  de handles NT ajenos mediante NtDuplicateObject.
 - `VirtualProtect` sobre estas vistas, `MapViewOfFileEx`, nombres con
   rutas de namespace NT y el mapeo de archivos ordinarios no están en esta
   entrega. La simulación de `CreateFileMappingW` no significa NTFS completa.
@@ -75,8 +78,8 @@ de humo.
 
 1. Extender esta misma base a secciones de **archivo** y mapeos coherentes
    con los handles del sistema de archivos.
-2. Añadir un **broker de objetos y recursos** entre procesos creados por el
-   runtime (secciones/eventos/semáforos), con protocolo y derechos comunes.
+2. Extender el **broker de objetos ya existente** a mutexes remotos,
+   descriptor de seguridad, políticas de namespace Windows e integración automática de sesión.
 3. Usar esas estructuras para la carga dinámica de DLL y estado PEB/TEB
    mientras ya existen hilos.
 4. Completar el puente de señales/excepciones y el manejo de páginas
