@@ -2221,6 +2221,157 @@ int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context6
     return status == NT_STATUS_SUCCESS;
 }
 
+/* Problem 6: explicit x64 processor-group affinity. Linux CPU indices
+ * [group * 64, group * 64 + 63] map to Windows group-local bits. Unlike
+ * the legacy group-0 KAFFINITY calls, this API never truncates CPUs >=64.
+ * The 1024-CPU cpu_set_t bound is explicit: this is not a general NT
+ * multi-group scheduler or a claim of arbitrary Windows group topology. */
+_Static_assert(sizeof(struct nt_group_affinity) == 16,
+               "Windows AMD64 GROUP_AFFINITY layout");
+_Static_assert(offsetof(struct nt_group_affinity, group) == 8,
+               "GROUP_AFFINITY Group field offset");
+
+static nt_status group_from_host_affinity(const cpu_set_t *cpus,
+                                           struct nt_group_affinity *group)
+{
+    bool found = false;
+    uint16_t index = 0;
+    uintptr_t mask = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, cpus))
+            continue;
+        const uint16_t cpu_group = (uint16_t)(cpu / 64);
+        if (found && cpu_group != index)
+            return NT_STATUS_NOT_SUPPORTED; /* No invented single group. */
+        index = cpu_group;
+        found = true;
+        mask |= (uintptr_t)UINT64_C(1) << (cpu % 64);
+    }
+    if (!found)
+        return NT_STATUS_NOT_SUPPORTED;
+    *group = (struct nt_group_affinity){.mask = mask, .group = index};
+    return NT_STATUS_SUCCESS;
+}
+
+static nt_status group_affinity_handle(uintptr_t handle, uint32_t access,
+                                        pthread_t *host)
+{
+    /* Caller holds wait_lock. Handles never become arbitrary Linux PIDs. */
+    if (handle == nt_GetCurrentThread()) {
+        *host = pthread_self();
+        return NT_STATUS_SUCCESS;
+    }
+    struct waitable *object = find_waitable(handle);
+    if (object == NULL)
+        return NT_STATUS_INVALID_HANDLE;
+    if (object->kind != THREAD)
+        return NT_STATUS_OBJECT_TYPE_MISMATCH;
+    if (!(object->access & access))
+        return NT_STATUS_ACCESS_DENIED;
+    struct waitable *state = wait_state(object);
+    if (state->owner_pid != (uint32_t)getpid() || state->child_guest)
+        return NT_STATUS_NOT_SUPPORTED;
+    if (state->signaled || state->terminate_at_start)
+        return NT_STATUS_THREAD_IS_TERMINATING;
+    *host = state->host;
+    return NT_STATUS_SUCCESS;
+}
+
+int32_t NT_MS_ABI nt_GetThreadGroupAffinity(uintptr_t handle,
+                                            struct nt_group_affinity *result)
+{
+    if (result == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    pthread_t host;
+    nt_status status = group_affinity_handle(handle,
+        THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, &host);
+    struct nt_group_affinity observed = {0};
+    if (status == NT_STATUS_SUCCESS) {
+        cpu_set_t current;
+        const int error = pthread_getaffinity_np(host, sizeof(current), &current);
+        if (error != 0)
+            status = error == ESRCH ? NT_STATUS_THREAD_IS_TERMINATING :
+                     error == EINVAL ? NT_STATUS_NOT_SUPPORTED : NT_STATUS_UNSUCCESSFUL;
+        else
+            status = group_from_host_affinity(&current, &observed);
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    *result = observed;
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
+                                            const struct nt_group_affinity *desired,
+                                            struct nt_group_affinity *previous)
+{
+    if (desired == NULL || desired->mask == 0 ||
+        desired->reserved[0] != 0 || desired->reserved[1] != 0 ||
+        desired->reserved[2] != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if ((size_t)desired->group >= CPU_SETSIZE / 64) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    cpu_set_t target;
+    CPU_ZERO(&target);
+    for (unsigned int bit = 0; bit < 64; ++bit)
+        if (desired->mask & ((uintptr_t)UINT64_C(1) << bit))
+            CPU_SET((int)desired->group * 64 + (int)bit, &target);
+
+    pthread_mutex_lock(&wait_lock);
+    pthread_t host;
+    nt_status status = group_affinity_handle(handle, THREAD_SET_INFORMATION, &host);
+    struct nt_group_affinity old_group = {0};
+    if (status == NT_STATUS_SUCCESS) {
+        cpu_set_t before, after;
+        int error = pthread_getaffinity_np(host, sizeof(before), &before);
+        if (error != 0) {
+            status = error == ESRCH ? NT_STATUS_THREAD_IS_TERMINATING :
+                     error == EINVAL ? NT_STATUS_NOT_SUPPORTED : NT_STATUS_UNSUCCESSFUL;
+        } else if (previous != NULL &&
+                   (status = group_from_host_affinity(&before, &old_group)) !=
+                       NT_STATUS_SUCCESS) {
+            /* A host thread may initially be allowed on >1 Linux group.
+             * There is no truthful single GROUP_AFFINITY to return,
+             * so fail without ever modifying its host affinity. */
+        } else {
+            error = pthread_setaffinity_np(host, sizeof(target), &target);
+            if (error == EPERM || error == EACCES)
+                status = NT_STATUS_ACCESS_DENIED;
+            else if (error == ESRCH)
+                status = NT_STATUS_THREAD_IS_TERMINATING;
+            else if (error == EINVAL)
+                status = NT_STATUS_INVALID_PARAMETER;
+            else if (error != 0)
+                status = NT_STATUS_UNSUCCESSFUL;
+            else if (pthread_getaffinity_np(host, sizeof(after), &after) != 0 ||
+                     !CPU_EQUAL(&target, &after)) {
+                /* Linux cpusets can silently intersect a requested mask.
+                 * Never report success on partial application. */
+                (void)pthread_setaffinity_np(host, sizeof(before), &before);
+                status = NT_STATUS_UNSUCCESSFUL;
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    if (previous != NULL)
+        *previous = old_group;
+    return 1;
+}
+
 /* A Win64 SetThreadAffinityMask operates on one 64-bit processor group.
  * Do not silently truncate a Linux cpuset that has CPU IDs outside group 0.
  * We intentionally do not invent a Windows processor-group scheduler.
