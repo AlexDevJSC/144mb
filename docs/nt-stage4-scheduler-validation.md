@@ -202,6 +202,61 @@ gestiona hotplug, CPU Sets, NUMA ni numeración exacta de Windows sobre
 sistemas con distinta topología. No cambia por sí sola el avance de
 prioridades dinámicas, quantum o broker de hilos externos.
 
+## Boost dinámico Linux medible, condicionado (experimento 16-11-2026)
+
+El backend opcional `NT_NATIVE_EXPERIMENTAL_BOOST=1` activa el
+mecanismo de incremento **real**, en un paso de `nice` Linux, al
+despertar de una espera Win32/NT que efectivamente bloqueó el hilo
+invitado y terminó satisfactoriamente. Un hilo auxiliar del mismo
+runtime, con acceso exclusivo a la tabla de hilos invitados bajo
+`wait_lock`, devuelve automáticamente la prioridad base tras
+20 ms de tiempo monotónico, incluso cuando el invitado queda
+ejecutando código CPU-bound. El monitor nunca acepta un PID/TID
+del invitado para `setpriority`. No emite señales, no habilita
+`SCHED_FIFO/SCHED_RR`, no se ejecuta con permisos adicionales ni
+interfiere intencionadamente con hilos externos al runtime.
+
+El backend solo se considera disponible cuando Linux permite
+restaurar el valor de `nice` (CAP_SYS_NICE o `RLIMIT_NICE` adecuado),
+se verifica el valor realmente aplicado y se ha solicitado mediante
+la variable de entorno. De otro modo los controles Win32
+`Get/SetThreadPriorityBoost` y `Get/SetProcessPriorityBoost`
+continúan devolviendo `ERROR_NOT_SUPPORTED`, sin salidas inventadas.
+La desactivación restaura los boosts en curso y comprueba sus efectos.
+Las consultas de prioridad de base no muestran el boost transitorio.
+Cambiar la clase o base mientras exista un boost en ejecución falla
+expresamente para no sobrescribir una prioridad que debe restaurarse.
+Cualquier error de rollback interrumpe nuevas activaciones.
+
+`tests/dynamic_priority_boost_test.c` mide la transición real
+`nice_base → nice_base-1 → nice_base` del mismo TID del hilo
+invitado después de una espera de evento NT. El job Linux de CI
+exige la ruta **positiva** bajo `sudo prlimit --nice=40:40`;
+las ejecuciones ordinarias no privilegiadas pueden registrar `SKIP`
+y no cuentan como aceptación positiva.
+
+Esto es una **aproximación limitada del scheduler de Windows**,
+no el algoritmo de boost/decay escalonado NT, no cubre todas
+las fuentes de boost (entrada UI, I/O prioritario, MMCSS, etc.)
+y **no equivale a quantum NT**. El experimento no está habilitado
+por defecto y no justifica por sí solo paridad del sistema.
+
+## Medición diferencial de competición sobre una CPU
+
+`tests/bench/scheduler_quantum_observation.c` es la misma fuente C
+compilada con MSVC en Windows nativo y GCC en Linux. Ejecuta dos
+hilos CPU-bound con afinidad real a una única CPU accesible y registra
+tiempo de CPU de cada hilo, tiempo de pared, razón de equidad y
+latencia desde la liberación de una barrera hasta la primera ejecución.
+`scripts/compare-stage4-quantum.py` valida ambos informes, rechaza
+mediciones nulas o esquemas inconsistentes y genera un JSON cruzado
+(`scheduler-quantum-differential` en CI). Ambos artefactos preservan
+`NT_QUANTUM_VERIFIED=NO`. Una ejecución de éxito es únicamente
+evidencia de medición: el intervalo de quantum, reglas NT, escalado
+por prioridad y comparabilidad entre CPU y entornos **no** están
+demostrados. No se altera el scheduler del anfitrión ni se pide
+`CAP_SYS_NICE` para este benchmark.
+
 ## Referencias técnicas, no evidencia de hardware
 
 - [Microsoft: Processor Groups](https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups)
