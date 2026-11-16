@@ -228,6 +228,24 @@ int32_t NT_MS_ABI nt_CompareStringW(uint32_t locale, uint32_t flags, const uint1
     return l < left_size ? 3 : r < right_size ? 1 : 2;
 }
 
+/* Windows lstrcmpW returns an ordering SIGN, not CompareStringW's
+ * CSTR_LESS_THAN/CSTR_EQUAL/CSTR_GREATER_THAN values (1/2/3).
+ * The current CompareStringW case-sensitive profile is ordinal Unicode
+ * scalar comparison, not complete NLS linguistic collation. It does not
+ * use Linux wchar_t (32-bit) or mutate GetLastError on valid input. */
+int32_t NT_MS_ABI nt_lstrcmpW(const uint16_t *left, const uint16_t *right)
+{
+    const int32_t order = nt_CompareStringW(EN_US, 0, left, -1, right, -1);
+    if (order == 1)
+        return -1;
+    if (order == 3)
+        return 1;
+    /* 0 is a CompareStringW error (LastError was set), 2 is equality.
+     * We cannot invent a sign for failure; exposed contract requires valid
+     * NUL-terminated LPCWSTR inputs. */
+    return 0;
+}
+
 int32_t NT_MS_ABI nt_LCMapStringW(uint32_t locale, uint32_t flags, const uint16_t *source, int32_t count,
                                   uint16_t *target, int32_t capacity)
 {
