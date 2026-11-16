@@ -6127,6 +6127,8 @@ int32_t NT_MS_ABI nt_CreateSymbolicLinkA(const char *link_name,
            nt_CreateSymbolicLinkW(link, target, flags);
 }
 
+#include "junction_control.inc"
+
 /* FSCTL_GET_REPARSE_POINT, supported only for a final Linux symlink opened
  * explicitly with FILE_FLAG_OPEN_REPARSE_POINT. Windows relative symlink
  * buffer (tag 0xA000000C), not an NTFS junction or an emulated mount.
@@ -6140,21 +6142,42 @@ int32_t NT_MS_ABI nt_DeviceIoControl(uintptr_t handle, uint32_t control,
     const uint32_t symlink_tag = UINT32_C(0xa000000c);
     if (returned)
         *returned = 0;
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    const bool junction = file != NULL && file->reparse_handle &&
+                          file->junction_handle;
+    const unsigned int rights = junction ? file->access : 0;
+    const int pinned = file && file->reparse_handle ?
+                       fcntl(file->fd, F_DUPFD_CLOEXEC, 3) : -1;
+    const char *path = junction && file->path ? file->path : NULL;
+    char *saved_path = path ? strdup(path) : NULL;
+    pthread_mutex_unlock(&file_lock);
+    if (pinned < 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if (junction) {
+        if (!saved_path) {
+            close(pinned);
+            nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
+        const int32_t result = nt_junction_control(pinned, rights, saved_path,
+                                 control, input, input_size, output,
+                                 output_size, returned, overlapped);
+        close(pinned);
+        free(saved_path);
+        return result;
+    }
+    free(saved_path);
     if (control != get_reparse_point || input || input_size || overlapped) {
+        close(pinned);
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
     if (!returned || !output) {
+        close(pinned);
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
-        return 0;
-    }
-    pthread_mutex_lock(&file_lock);
-    const struct guest_file *file = find_handle(handle);
-    const int pinned = file && file->reparse_handle ?
-                       fcntl(file->fd, F_DUPFD_CLOEXEC, 3) : -1;
-    pthread_mutex_unlock(&file_lock);
-    if (pinned < 0) {
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
         return 0;
     }
     char target[PATH_MAX];
