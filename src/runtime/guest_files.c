@@ -4,6 +4,7 @@
 #include "nt_services.h"
 #include "winbase.h"
 #include "winfile.h"
+#include "section_memory.h"
 #include "sync.h"
 #include "user_folders.h"
 
@@ -2769,6 +2770,8 @@ int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
     pthread_mutex_unlock(&file_lock);
     if (!file && nt_runtime_get_waitable_flags(handle, flags))
         return 1;
+    if (!file && nt_runtime_section_get_flags(handle, flags))
+        return 1;
     if (!file)
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
     return file != NULL;
@@ -2865,6 +2868,8 @@ int32_t NT_MS_ABI nt_SetHandleInformation(uintptr_t handle, uint32_t mask, uint3
         return 1;
     if (nt_runtime_set_waitable_flags(handle, mask, flags))
         return 1;
+    if (nt_runtime_section_set_flags(handle, mask, flags))
+        return 1;
     nt_SetLastError(NT_ERROR_INVALID_HANDLE);
     return 0;
 }
@@ -2886,7 +2891,8 @@ int32_t NT_MS_ABI nt_GetProcessHandleCount(uintptr_t process, uint32_t *count)
         if (files[i].owner == WIN_HANDLE && files[i].handle != 0)
             ++handles;
     pthread_mutex_unlock(&file_lock);
-    *count = handles + nt_runtime_count_waitable_handles() + (uint32_t)active_iocp_count();
+    *count = handles + nt_runtime_count_waitable_handles() +
+             (uint32_t)nt_runtime_section_handle_count() + (uint32_t)active_iocp_count();
     return 1;
 }
 
@@ -2910,6 +2916,7 @@ static int close_object(uintptr_t handle)
             return 0;
         if (status == NT_STATUS_ACCESS_DENIED)
             return EACCES;
+        return nt_runtime_section_close(handle);
     }
     return error;
 }
@@ -2939,6 +2946,8 @@ nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t sou
          * fail: CLOSE_SOURCE is not permitted to bypass handle protection. */
         uint32_t flags = 0;
         bool found = nt_runtime_get_waitable_flags(source, &flags);
+        if (!found)
+            found = nt_runtime_section_get_flags(source, &flags);
         if (!found) {
             pthread_mutex_lock(&file_lock);
             const struct guest_file *file = find_handle(source);
@@ -2952,6 +2961,8 @@ nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t sou
             return NT_STATUS_ACCESS_DENIED;
     }
     status = nt_runtime_duplicate_waitable(source, access, attributes, options, target);
+    if (status == NT_STATUS_INVALID_HANDLE)
+        status = nt_runtime_section_duplicate(source, access, attributes, options, target);
     if (status == NT_STATUS_INVALID_HANDLE)
         status = duplicate_file_handle(source, attributes, options, target);
     if (status == NT_STATUS_SUCCESS && (options & 1u)) {
