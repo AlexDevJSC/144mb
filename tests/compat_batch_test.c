@@ -2,6 +2,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "compat.h"
 #include "winfile.h"
+#include "nt_services.h"
+#include "ntnative/guest_thread.h"
 #include "file_share_cleanup.h"
 #include "sync.h"
 
@@ -1256,6 +1258,64 @@ static void check_files(void)
     puts("PASS scoped files, text and binary I/O, and denied paths");
 }
 
+
+/* Native NT device paths must use the exact same confined Linux roots and
+ * DELETE rights as their Win32 counterparts. No implicit mount discovery. */
+static void check_native_file_namespaces(void)
+{
+    char root[] = "/tmp/nt-native-namespaces.XXXXXX";
+    CHECK(mkdtemp(root) != NULL && nt_runtime_set_file_root(root) &&
+          nt_runtime_set_drive_root('D', root) &&
+          nt_runtime_set_unc_root("lab", "share", root));
+
+    uint16_t dos[] = u"\\??\\D:\\native-file.bin";
+    struct nt_guest_unicode_string name = {
+        .length = sizeof(dos) - sizeof(dos[0]),
+        .maximum_length = sizeof(dos), .buffer = dos
+    };
+    struct nt_object_attributes attrs = {
+        .size = sizeof(attrs), .name = &name, .attributes = 0x40u
+    };
+    struct nt_io_status_block io = {0};
+    uintptr_t handle = 0;
+    CHECK(nt_NtCreateFile(&handle, UINT32_C(0xc0000003), &attrs, &io,
+                          NULL, 0x80u, 7u, 2u, 0u, NULL, 0) == NT_STATUS_SUCCESS &&
+          handle != UINTPTR_MAX && io.information == 2u &&
+          nt_CloseHandle(handle));
+
+    uint16_t unc[] = u"\\??\\UNC\\lab\\share\\native-file.bin";
+    name = (struct nt_guest_unicode_string){
+        .length = sizeof(unc) - sizeof(unc[0]),
+        .maximum_length = sizeof(unc), .buffer = unc
+    };
+    CHECK(nt_NtOpenFile(&handle, UINT32_C(0x80000001), &attrs, &io,
+                        7u, 0u) == NT_STATUS_SUCCESS &&
+          handle != UINTPTR_MAX && nt_CloseHandle(handle));
+    CHECK(nt_DeleteFileA("D:\\native-file.bin"));
+
+    uint16_t c_file[] = u"\\??\\C:\\native-delete.bin";
+    name = (struct nt_guest_unicode_string){
+        .length = sizeof(c_file) - sizeof(c_file[0]),
+        .maximum_length = sizeof(c_file), .buffer = c_file
+    };
+    CHECK(nt_NtCreateFile(&handle, UINT32_C(0xc0000003), &attrs, &io,
+                          NULL, 0x80u, 7u, 2u, 0x1000u, NULL, 0) ==
+          NT_STATUS_ACCESS_DENIED);
+    CHECK(nt_NtCreateFile(&handle, UINT32_C(0xc0010003), &attrs, &io,
+                          NULL, 0x80u, 7u, 2u, 0x1000u, NULL, 0) == NT_STATUS_SUCCESS);
+    CHECK(nt_CreateFileA("C:\\native-delete.bin", UINT32_C(0x80000000),
+                         7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_CloseHandle(handle) &&
+          nt_GetFileAttributesA("C:\\native-delete.bin") == UINT32_MAX);
+
+    CHECK(nt_runtime_set_unc_root("lab", "share", NULL) &&
+          nt_runtime_set_drive_root('D', NULL) &&
+          nt_runtime_set_file_root(NULL) &&
+          nt_test_cleanup_share_registry(root) && rmdir(root) == 0);
+    puts("PASS native NtCreateFile DOS/UNC namespaces and DELETE_ON_CLOSE");
+}
+
 static void *make_thread_context(void *output)
 {
     *(uintptr_t *)output = nt_CreateCompatibleDC(0);
@@ -1455,6 +1515,7 @@ int main(void)
     check_unicode_and_rects();
     check_crt();
     check_files();
+    check_native_file_namespaces();
     check_gdi();
     check_menus();
     check_messages();
