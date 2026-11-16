@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -845,6 +846,56 @@ static void check_files(void)
     CHECK(remaining_hardlink != UINTPTR_MAX && nt_CloseHandle(remaining_hardlink) &&
           nt_DeleteFileA("C:\\data\\sub83\\longfilename.txt") &&
           nt_RemoveDirectoryA("C:\\data\\sub83"));
+    /* A native Linux rename does not atomically carry the entry-specific
+     * xattr key. It must invalidate the former DOS alias instead of
+     * resolving an unrelated inode or resurrecting a stale name. */
+    void *externally_moved = nt_fopen("data/externalOriginalName.txt", "wb");
+    CHECK(externally_moved && nt_fwrite("x", 1, 1, externally_moved) == 1 &&
+          nt_fclose(externally_moved) == 0);
+    char stale_alias[256], fresh_alias[256];
+    CHECK(nt_GetShortPathNameA("C:\\data\\externalOriginalName.txt",
+                                stale_alias, sizeof(stale_alias)) > 0);
+    char external_old[512], external_new[512];
+    CHECK(snprintf(external_old, sizeof(external_old),
+                   "%s/data/externalOriginalName.txt", root) > 0 &&
+          snprintf(external_new, sizeof(external_new),
+                   "%s/data/hostRenamedFile.txt", root) > 0 &&
+          rename(external_old, external_new) == 0);
+    CHECK(nt_CreateFileA(stale_alias, UINT32_C(0x80000000), 7u, NULL,
+                         3u, 0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_GetShortPathNameA("C:\\data\\hostRenamedFile.txt",
+                                fresh_alias, sizeof(fresh_alias)) > 0 &&
+          strcmp(stale_alias, fresh_alias) != 0);
+    uintptr_t host_moved = nt_CreateFileA(fresh_alias, UINT32_C(0x80000000),
+                                           7u, NULL, 3u, 0x80u, 0);
+    CHECK(host_moved != UINTPTR_MAX && nt_CloseHandle(host_moved) &&
+          nt_DeleteFileA("C:\\data\\hostRenamedFile.txt"));
+
+    /* Concurrent aliases from separate NT processes coordinate through
+     * the per-directory flock registry, even with the same DOS stem. */
+    void *fork_a = nt_fopen("data/concurrentAlphaLong.txt", "wb");
+    CHECK(fork_a && nt_fclose(fork_a) == 0);
+    void *fork_b = nt_fopen("data/concurrentBetaLong.txt", "wb");
+    CHECK(fork_b && nt_fclose(fork_b) == 0);
+    pid_t alias_child = fork();
+    CHECK(alias_child >= 0);
+    if (alias_child == 0) {
+        char child_short[256];
+        _exit(nt_GetShortPathNameA("C:\\data\\concurrentAlphaLong.txt",
+                                    child_short, sizeof(child_short)) > 0 ? 0 : 1);
+    }
+    char parent_short[256], child_short[256];
+    CHECK(nt_GetShortPathNameA("C:\\data\\concurrentBetaLong.txt",
+                                parent_short, sizeof(parent_short)) > 0);
+    int child_exit = 0;
+    CHECK(waitpid(alias_child, &child_exit, 0) == alias_child &&
+          WIFEXITED(child_exit) && WEXITSTATUS(child_exit) == 0);
+    CHECK(nt_GetShortPathNameA("C:\\data\\concurrentAlphaLong.txt",
+                                child_short, sizeof(child_short)) > 0 &&
+          strcmp(child_short, parent_short) != 0);
+    CHECK(nt_DeleteFileA("C:\\data\\concurrentAlphaLong.txt") &&
+          nt_DeleteFileA("C:\\data\\concurrentBetaLong.txt"));
+
     /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
      * unlike older mixed-mode A entrypoints, no UTF-8-first guess. */
     uintptr_t cp_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9long.txt",
