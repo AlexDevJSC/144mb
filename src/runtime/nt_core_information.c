@@ -80,10 +80,10 @@ nt_status NT_MS_ABI nt_NtQueryInformationProcess(uintptr_t process, uint32_t inf
                                             sizeof(struct nt_process_basic_information), returned_length);
     if (status != NT_STATUS_SUCCESS)
         return status;
-    /* ProcessBasicInformation must never expose an invented CPU0 mask.
-     * Reuse the native Linux-backed group-0 affinity bridge, preserving
-     * LastError as required for Nt* calls. If CPUs >=64 are present,
-     * report unsupported instead of truncating the scheduler mask. */
+    /* ProcessBasicInformation must never invent CPU0. Reuse the bounded
+     * Win32 affinity bridge for the calling thread's primary group,
+     * preserving LastError as required for Nt* calls. The complete
+     * multigroup policy remains outside this legacy KAFFINITY field. */
     uintptr_t affinity = 0, system_affinity = 0;
     const uint32_t preserved_error = nt_GetLastError();
     const bool supported = nt_GetProcessAffinityMask(process, &affinity, &system_affinity) != 0;
