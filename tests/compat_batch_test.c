@@ -678,6 +678,34 @@ static void check_files(void)
           nt_DeleteFileW(u"c:\\étage\\RÉSUMÉ.TXT") != 0 &&
           nt_RemoveDirectoryW(u"C:\\ÉTAGE") != 0);
 
+    /* Follow-up PR #119: ACP must roundtrip through independent Win32 A
+     * Create/Copy/Move/path/attribute APIs; none may double-interpret
+     * CP1252 0xE9 bytes as UTF-8 on the host. */
+    {
+        const char cp_source[] = "C:\\data\\caf\xe9-source.txt";
+        const char cp_copy[] = "C:\\data\\caf\xe9-copy.txt";
+        const char cp_moved[] = "C:\\data\\caf\xe9-moved.txt";
+        uintptr_t cp_abi = nt_CreateFileA(cp_source, UINT32_C(0x40000000),
+                                           7u, NULL, 2u, 0x80u, 0);
+        CHECK(cp_abi != UINTPTR_MAX && nt_CloseHandle(cp_abi));
+        CHECK(nt_GetFileAttributesA(cp_source) != UINT32_MAX &&
+              nt_GetFileAttributesW(u"C:\\data\\caf\u00e9-source.txt") != UINT32_MAX);
+        CHECK(nt_CopyFileA(cp_source, cp_copy, 1) &&
+              nt_MoveFileA(cp_copy, cp_moved));
+        char returned[512] = {0};
+        char *leaf = NULL;
+        CHECK(nt_GetFullPathNameA(cp_moved, sizeof(returned),
+                                   returned, &leaf) == strlen(cp_moved) &&
+              strcmp(returned, cp_moved) == 0 &&
+              leaf != NULL && strcmp(leaf, "caf\xe9-moved.txt") == 0);
+        CHECK(nt_GetLongPathNameA(cp_moved, returned, sizeof(returned)) ==
+              strlen(cp_moved) && strcmp(returned, cp_moved) == 0);
+        CHECK(nt_SetFileAttributesA(cp_moved, 2u) &&
+              (nt_GetFileAttributesA(cp_moved) & 2u) != 0 &&
+              nt_SetFileAttributesA(cp_moved, 0x80u) &&
+              nt_DeleteFileA(cp_source) && nt_DeleteFileA(cp_moved));
+    }
+
     void *text = nt_fopen("C:\\data\\scores.txt", "w");
     CHECK(text != NULL && nt_fwrite("a\nb\n", 2, 2, text) == 2);
     nt_cexit();
@@ -800,7 +828,16 @@ static void check_files(void)
     CHECK(nt_GetShortPathNameA("C:\\data\\LONGFILENAME.TXT",
                                 short_again, sizeof(short_again)) ==
           strlen(short1) && strcmp(short_again, short1) == 0);
-    CHECK(nt_DeleteFileA("C:\\data\\LongFilename.TXT") &&
+    /* Removing one hardlink must not invalidate the other directory
+     * entry's persistent 8.3 name (both point to the same host inode). */
+    CHECK(nt_DeleteFileA("C:\\data\\LongFilename.TXT"));
+    CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\longfilename.txt",
+                               alias_hardlink, sizeof(alias_hardlink)) ==
+          strlen("C:\\DATA\\SUB83\\LONGFI~1.TXT") &&
+          strcmp(alias_hardlink, "C:\\DATA\\SUB83\\LONGFI~1.TXT") == 0);
+    uintptr_t remaining_hardlink = nt_CreateFileA(alias_hardlink, UINT32_C(0x80000000),
+                                                  7u, NULL, 3u, 0x80u, 0);
+    CHECK(remaining_hardlink != UINTPTR_MAX && nt_CloseHandle(remaining_hardlink) &&
           nt_DeleteFileA("C:\\data\\sub83\\longfilename.txt") &&
           nt_RemoveDirectoryA("C:\\data\\sub83"));
     /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
@@ -894,11 +931,13 @@ static void check_files(void)
     uint32_t junction_data_size = test_mount_reparse(junction_input,
                                                      u"C:\\data\\junction-target");
     uint32_t junction_returned = 999;
-    CHECK(junction_data_size != 0 &&
-          nt_DeviceIoControl(junction, 0x000900a4u, junction_input,
-                             junction_data_size, NULL, 0,
-                             &junction_returned, NULL) &&
-          junction_returned == 0);
+    const int32_t set_junction_ok = nt_DeviceIoControl(junction, 0x000900a4u,
+                                     junction_input, junction_data_size,
+                                     NULL, 0, &junction_returned, NULL);
+    if (!set_junction_ok)
+        fprintf(stderr, "junction SET failure: Win32=%u errno=%d size=%u\\n",
+                nt_GetLastError(), errno, junction_data_size);
+    CHECK(junction_data_size != 0 && set_junction_ok && junction_returned == 0);
     CHECK((nt_GetFileAttributesW(u"C:\\data\\junction-entry") &
            (0x10u | 0x400u)) == (0x10u | 0x400u));
     uintptr_t junction_read = nt_CreateFileW(

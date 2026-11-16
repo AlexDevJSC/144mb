@@ -316,7 +316,15 @@ static int32_t nt_junction_control(int pinned, uint32_t rights,
         nt_SetLastError(path_error(error, false));
         return 0;
     }
-    memcpy(meta.target, canonical, strlen(canonical) + 1);
+    /* An overlong Windows target is unsupported, never an unchecked
+     * memcpy into the compact on-disk Linux xattr record. */
+    const size_t target_bytes = strlen(canonical) + 1;
+    if (target_bytes > sizeof(meta.target)) {
+        close(root);
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    memcpy(meta.target, canonical, target_bytes);
     const int written = write_guest_xattr(pinned, NT_JUNCTION_XATTR,
                                           &meta, sizeof(meta));
     const int error = errno;
