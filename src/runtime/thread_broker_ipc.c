@@ -116,6 +116,14 @@ void nt_broker_server_loop(int fd,
     if (peer == NULL || !fd_seqpacket(fd))
         return;
     for (;;) {
+        if (!live_child(peer))
+            break;
+        struct pollfd active = {.fd = fd, .events = POLLIN};
+        const int available = poll(&active, 1, 250);
+        if (available == 0 || (available < 0 && errno == EINTR))
+            continue; /* Idle channels stay usable across arbitrary waits. */
+        if (available < 0 || !(active.revents & POLLIN))
+            break;
         struct nt_broker_rpc request = {0};
         if (!receive_authenticated_rpc(fd, peer, &request))
             break; /* Fail closed on disconnect, bad protocol or impersonation. */
