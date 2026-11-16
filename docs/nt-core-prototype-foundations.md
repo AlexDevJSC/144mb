@@ -26,7 +26,7 @@ El módulo `section_memory.c` utiliza `memfd_create` + `mmap` para secciones
 de memoria sin fichero, lo que permite compartir bytes entre dos vistas y
 un proceso nacido por `fork`. Aporta dos caminos hacia el mismo objeto:
 
-- KERNEL32: `CreateFileMappingW`, `OpenFileMappingW`, `MapViewOfFile`,
+- KERNEL32: `CreateFileMappingA/W`, `OpenFileMappingA/W`, `MapViewOfFile`,
   `FlushViewOfFile`, `UnmapViewOfFile`.
 - NTDLL: `NtCreateSection`, `NtMapViewOfSection`,
   `NtUnmapViewOfSection`; también nombres `Zw*` mediante el registro común.
