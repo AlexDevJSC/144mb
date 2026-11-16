@@ -339,6 +339,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(CreateFileA),
     WIN_EXPORT(CopyFileA),
     WIN_EXPORT(CopyFileExA),
+    WIN_EXPORT(DeviceIoControl),
     WIN_EXPORT(MoveFileA),
     WIN_EXPORT(SetCurrentDirectoryA),
     WIN_EXPORT(DeleteFileA),
