@@ -68,8 +68,8 @@ static bool finish_child(pid_t pid, int release)
 static bool send_identity_query(int fd, const uint8_t key[16])
 {
     struct nt_thread_broker_request request = {
-        .magic = NT_BROKER_MAGIC,
-        .version = NT_BROKER_VERSION,
+        .magic = NT_THREAD_BROKER_MAGIC,
+        .version = NT_THREAD_BROKER_VERSION,
         .operation = NT_BROKER_QUERY_IDENTITY,
         .requested_access = NT_BROKER_QUERY_LIMITED_INFORMATION
     };
