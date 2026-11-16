@@ -3805,9 +3805,17 @@ int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle)
     const int actual = getpriority(PRIO_PROCESS, (id_t)tid);
     const int failure = errno;
     const int nice_base = process_priority_nice_base;
+    const struct guest_dynamic_boost *boost = dynamic_boost_for_thread_locked(handle);
+    int stable = actual;
+    bool boost_consistent = true;
+    if (boost != NULL && boost->active) {
+        boost_consistent = failure == 0 && actual == boost->base_nice - 1;
+        if (boost_consistent)
+            stable = boost->base_nice;
+    }
     int32_t relative = 0;
-    const bool representable = failure == 0 &&
-                              host_nice_priority(actual - nice_base, &relative);
+    const bool representable = failure == 0 && boost_consistent &&
+                              host_nice_priority(stable - nice_base, &relative);
     pthread_mutex_unlock(&wait_lock);
     if (failure != 0) {
         nt_SetLastError(failure == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
