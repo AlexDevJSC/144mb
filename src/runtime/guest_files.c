@@ -3079,17 +3079,20 @@ int32_t NT_MS_ABI nt_CreateDirectoryA(const char *path, const void *security)
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    return change_path(path, MAKE_DIRECTORY);
+    char utf8[PATH_MAX];
+    return acp_path_to_utf8(path, utf8) && change_path(utf8, MAKE_DIRECTORY);
 }
 
 int32_t NT_MS_ABI nt_DeleteFileA(const char *path)
 {
-    return change_path(path, REMOVE_FILE);
+    char utf8[PATH_MAX];
+    return acp_path_to_utf8(path, utf8) && change_path(utf8, REMOVE_FILE);
 }
 
 int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path)
 {
-    return change_path(path, REMOVE_DIRECTORY);
+    char utf8[PATH_MAX];
+    return acp_path_to_utf8(path, utf8) && change_path(utf8, REMOVE_DIRECTORY);
 }
 
 /* Check that cross-root copy+delete will be permitted before a new
@@ -3150,12 +3153,17 @@ static bool path_breaks_guest_root(const char *source)
     return blocked;
 }
 
+static int32_t copy_file_common(const char *source, const char *destination,
+                                int32_t fail_if_exists,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel);
+
 int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
 {
     return nt_MoveFileExA(from, to, 0);
 }
 
-int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags)
+static int32_t move_file_common(const char *from, const char *to, uint32_t flags)
 {
     char source[PATH_MAX], destination[PATH_MAX];
     /* MOVEFILE_REPLACE_EXISTING and MOVEFILE_COPY_ALLOWED are the
@@ -3190,15 +3198,15 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
                 nt_SetLastError(path_error(errno, false));
                 return 0;
             }
-            if (!nt_CopyFileA(from, to, (flags & 1u) == 0))
+            if (!copy_file_common(from, to, (flags & 1u) == 0, NULL, NULL, NULL))
                 return 0;
-            if (nt_DeleteFileA(from))
+            if (change_path(from, REMOVE_FILE))
                 return 1;
             const uint32_t saved = nt_GetLastError();
             /* Without replacement, the newly copied file is ours to
              * remove if the source could not be deleted. */
             if ((flags & 1u) == 0)
-                (void)nt_DeleteFileA(to);
+                (void)change_path(to, REMOVE_FILE);
             nt_SetLastError(saved);
             return 0;
         }
@@ -3303,6 +3311,14 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
     if (status != 0)
         nt_SetLastError(path_error(error, false));
     return status == 0;
+}
+
+int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags)
+{
+    char source[PATH_MAX], target[PATH_MAX];
+    return acp_path_to_utf8(from, source) &&
+           acp_path_to_utf8(to, target) &&
+           move_file_common(source, target, flags);
 }
 
 enum { CRT_APPEND = 0x0008, CRT_TEXT = 0x4000, CRT_BINARY = 0x8000 };
@@ -3915,26 +3931,31 @@ uintptr_t NT_MS_ABI nt_CreateFile2(const uint16_t *path, uint32_t access, uint32
 
 int32_t NT_MS_ABI nt_CreateDirectoryW(const uint16_t *path, const void *security)
 {
+    if (security != NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
     char narrow[PATH_MAX];
-    return wide_path(path, narrow) && nt_CreateDirectoryA(narrow, security);
+    return wide_path(path, narrow) && change_path(narrow, MAKE_DIRECTORY);
 }
 
 int32_t NT_MS_ABI nt_RemoveDirectoryW(const uint16_t *path)
 {
     char narrow[PATH_MAX];
-    return wide_path(path, narrow) && nt_RemoveDirectoryA(narrow);
+    return wide_path(path, narrow) && change_path(narrow, REMOVE_DIRECTORY);
 }
 
 int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path)
 {
     char narrow[PATH_MAX];
-    return wide_path(path, narrow) && nt_DeleteFileA(narrow);
+    return wide_path(path, narrow) && change_path(narrow, REMOVE_FILE);
 }
 
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags)
 {
     char from[PATH_MAX], to[PATH_MAX];
-    return wide_path(source, from) && wide_path(destination, to) && nt_MoveFileExA(from, to, flags);
+    return wide_path(source, from) && wide_path(destination, to) &&
+           move_file_common(from, to, flags);
 }
 
 int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination)
@@ -3947,7 +3968,7 @@ int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destinati
 {
     char from[PATH_MAX], to[PATH_MAX];
     return wide_path(source, from) && wide_path(destination, to) &&
-           nt_CopyFileA(from, to, fail_if_exists);
+           copy_file_common(from, to, fail_if_exists, NULL, NULL, NULL);
 }
 
 uint32_t NT_MS_ABI nt_GetLogicalDrives(void)
@@ -5324,8 +5345,8 @@ static int32_t copy_file_common(const char *source, const char *destination,
 {
     const uint32_t generic_read = UINT32_C(0x80000000);
     const uint32_t generic_write = UINT32_C(0x40000000);
-    const uintptr_t from = nt_CreateFileA(source, generic_read, FILE_READ, NULL,
-                                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    const uintptr_t from = create_file_common(source, generic_read, FILE_READ, NULL,
+                                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0, true);
     if (from == UINTPTR_MAX)
         return 0;
     /* Capture source metadata before reading: a copy must not lose the
@@ -5342,9 +5363,9 @@ static int32_t copy_file_common(const char *source, const char *destination,
         return 0;
     }
 
-    const uintptr_t to = nt_CreateFileA(destination, generic_write, 0, NULL,
-                                       fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
-                                       FILE_ATTRIBUTE_NORMAL, 0);
+    const uintptr_t to = create_file_common(destination, generic_write, 0, NULL,
+                                              fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
+                                              FILE_ATTRIBUTE_NORMAL, 0, true);
     if (to == UINTPTR_MAX) {
         const uint32_t error = nt_GetLastError();
         nt_CloseHandle(from);
@@ -5455,7 +5476,7 @@ static int32_t copy_file_common(const char *source, const char *destination,
     if (!success) {
         /* A newly created partial destination is not a valid copy. */
         if (created && !leave_partial)
-            nt_DeleteFileA(destination);
+            change_path(destination, REMOVE_FILE);
         nt_SetLastError(error);
     }
     return success;
@@ -5464,8 +5485,10 @@ static int32_t copy_file_common(const char *source, const char *destination,
 int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
                                int32_t fail_if_exists)
 {
-    return copy_file_common(source, destination, fail_if_exists,
-                            NULL, NULL, NULL);
+    char from[PATH_MAX], to[PATH_MAX];
+    return acp_path_to_utf8(source, from) &&
+           acp_path_to_utf8(destination, to) &&
+           copy_file_common(from, to, fail_if_exists, NULL, NULL, NULL);
 }
 
 int32_t NT_MS_ABI nt_CopyFileExA(const char *source, const char *destination,
@@ -5482,7 +5505,10 @@ int32_t NT_MS_ABI nt_CopyFileExA(const char *source, const char *destination,
         nt_SetLastError(NT_ERROR_REQUEST_ABORTED);
         return 0;
     }
-    return copy_file_common(source, destination, (flags & 1u) != 0,
+    char from[PATH_MAX], to[PATH_MAX];
+    return acp_path_to_utf8(source, from) &&
+           acp_path_to_utf8(destination, to) &&
+           copy_file_common(from, to, (flags & 1u) != 0,
                             progress, context, cancel);
 }
 
@@ -5491,8 +5517,17 @@ int32_t NT_MS_ABI nt_CopyFileExW(const uint16_t *source, const uint16_t *destina
                                 const int32_t *cancel, uint32_t flags)
 {
     char from[PATH_MAX], to[PATH_MAX];
+    if ((flags & ~1u) != 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (cancel && *cancel) {
+        nt_SetLastError(NT_ERROR_REQUEST_ABORTED);
+        return 0;
+    }
     return wide_path(source, from) && wide_path(destination, to) &&
-           nt_CopyFileExA(from, to, progress, context, cancel, flags);
+           copy_file_common(from, to, (flags & 1u) != 0,
+                            progress, context, cancel);
 }
 
 /* Native NTDLL file operations use the same guest HANDLE table and the
