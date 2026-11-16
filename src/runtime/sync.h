@@ -75,6 +75,8 @@ int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context6
 /* x64 GROUP_AFFINITY layout: KAFFINITY, USHORT Group, USHORT Reserved[3].
  * This bridge reports actual Linux kernel affinity. It does not invent
  * CPU groups for unsupported host schedulers or foreign Windows threads. */
+uint16_t NT_MS_ABI nt_GetActiveProcessorGroupCount(void);
+uint32_t NT_MS_ABI nt_GetActiveProcessorCount(uint16_t group);
 struct nt_group_affinity {
     uintptr_t mask;
     uint16_t group;
