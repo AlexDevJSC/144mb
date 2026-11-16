@@ -341,6 +341,46 @@ dispone de dicho grupo; CI con un solo grupo no demuestra ese caso.
 **No se atribuye equivalencia completa a la política de grupos de
 Windows ni se cierra todavía el problema 6.**
 
+### Subtarea 6.6 — Grupo principal por hilo (16-11-2026)
+
+Se separa la **identidad del grupo principal de Windows** del cpuset
+Linux completo, que puede contener CPUs de más de un bloque de 64.
+`struct waitable` conserva el grupo principal de cada hilo invitado;
+el hilo inicial usa un valor TLS separado porque no tiene waitable
+canónico. En `CreateThread`, el nuevo hilo hereda el grupo principal
+de su creador cuando ese grupo está representado en su afinidad Linux.
+Un valor todavía no inicializado se deriva únicamente de los CPU IDs
+efectivamente permitidos al hilo bajo `wait_lock`.
+
+`GetThreadGroupAffinity` informa de la máscara del **grupo principal**,
+aunque el mismo hilo tenga CPUs permitidas fuera del grupo. La escritura
+`SetThreadGroupAffinity` puede cambiar de grupo y actualiza su
+identidad **solo después** de que Linux confirme una transición exacta;
+`PreviousGroupAffinity` devuelve únicamente la máscara y el grupo
+principal anteriores. `SetThreadAffinityMask` y la clase nativa 4
+interpretan sus 64 bits en el grupo principal del hilo de destino,
+no en el grupo 0 ni como máscara de todo el host.
+
+**Límites:** sigue siendo una asignación de grupos `linux_cpu_id/64`
+de hasta `CPU_SETSIZE`, no una virtualización completa de la
+topología Windows 11 ni una implementación de máscaras de proceso
+entre grupos. `GetProcessAffinityMask` continúa retornando
+`NOT_SUPPORTED` cuando la política inicial es multigrupo. Si otro
+componente modifica externamente el cpuset Linux y excluye el grupo
+principal ya elegido, las consultas retornan `NOT_SUPPORTED` en vez
+de recolocar silenciosamente el hilo. No se admiten cambios de grupo
+externos, hotplug ni un broker de procesos externos.
+
+**Pruebas:** `tests/thread_group_affinity_test.c` verifica la lectura
+del grupo principal con cpuset originalmente multigrupo, herencia
+relativa, la máscara previa de la API heredada, aplicación real de
+kernel y restauración. El fixture PE AMD64 verifica un grupo principal
+no vacío y las llamadas Win32. Una CI con un solo grupo no constituye
+evidencia positiva del caso >64 CPU; sigue pendiente la aceptación
+Fedora KDE y Windows físicos según
+[nt-stage4-scheduler-validation.md](nt-stage4-scheduler-validation.md).
+No se ha comenzado el problema 5 de APC avanzadas.
+
 ### Subtarea 6.2 — Clases de prioridad de proceso verificadas por Linux (16-11-2026)
 
 **Nota de evolución:** la restricción original «un único hilo» de esta
