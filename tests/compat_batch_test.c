@@ -733,7 +733,7 @@ static void check_files(void)
     char hardlink_native[512];
     CHECK(snprintf(hardlink_native, sizeof(hardlink_native),
                    "%s/data/sub83/longfilename.txt", root) > 0 &&
-          link(host_real, hardlink_native) == 0);
+          linkat(AT_FDCWD, host_real, AT_FDCWD, hardlink_native, 0) == 0);
     char alias_hardlink[256] = {0};
     CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\longfilename.txt",
                                 alias_hardlink, sizeof(alias_hardlink)) ==
