@@ -3004,8 +3004,27 @@ static int32_t change_path(const char *input, enum path_operation operation)
         struct stat info;
         status = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW);
         if (status == 0 && S_ISLNK(info.st_mode)) {
-            errno = EACCES;
-            status = -1;
+            /* DeleteFile on a final reparse symlink removes the link,
+             * never its target. A live metadata HANDLE pins the link and
+             * must be closed first; no unsupported file lease is assumed. */
+            bool opened = false;
+            for (size_t i = 0; i < FILE_TABLE_SIZE; ++i)
+                if (files[i].owner != FREE_FILE && files[i].reparse_handle &&
+                    files[i].device == info.st_dev && files[i].inode == info.st_ino)
+                    opened = true;
+            if (operation != REMOVE_FILE || opened) {
+                errno = opened ? EBUSY : EACCES;
+                status = -1;
+            } else {
+                status = unlinkat(parent, leaf, 0);
+                if (status == 0) {
+                    const int saved_error = errno;
+                    pthread_mutex_unlock(&file_lock);
+                    close(parent);
+                    errno = saved_error;
+                    return 1;
+                }
+            }
         } else if (status == 0 && operation == REMOVE_FILE &&
                    S_ISREG(info.st_mode) && (info.st_mode & 0222) == 0) {
             /* Linux allows unlinking readonly files through the parent
