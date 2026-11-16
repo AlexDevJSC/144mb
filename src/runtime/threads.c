@@ -2602,6 +2602,77 @@ nt_status NT_MS_ABI nt_NtSetInformationThread(uintptr_t thread, uint32_t info_cl
     return set_guest_thread_affinity(thread, mask, NULL);
 }
 
+/* GetProcessGroupAffinity reports the groups in which runtime-owned
+ * guest threads (including the process leader) can actually execute.
+ * This is not the global Linux CPU topology and does not grant access
+ * to an arbitrary host PID. Canonical threads and their scheduling
+ * identity are protected by wait_lock. */
+int32_t NT_MS_ABI nt_GetProcessGroupAffinity(uintptr_t process,
+                                              uint16_t *count,
+                                              uint16_t *groups)
+{
+    if (count == NULL || groups == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const nt_status access = nt_runtime_check_self_process(process, 0x1400u);
+    if (access != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(access));
+        return 0;
+    }
+    ensure_processor_groups();
+    bool present[CPU_SETSIZE / 64] = {0};
+    pthread_mutex_lock(&wait_lock);
+    bool valid = true;
+    cpu_set_t mask;
+    if (sched_getaffinity((pid_t)getpid(), sizeof(mask), &mask) != 0)
+        valid = false;
+    else {
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+            if (CPU_ISSET(cpu, &mask))
+                present[cpu / 64] = true;
+    }
+    for (size_t i = 0; i < WAITABLE_COUNT && valid; ++i) {
+        const struct waitable *item = &waitables[i];
+        if (item->kind != THREAD || item->shared != NULL ||
+            (item->refs == 0 && item->links == 0) ||
+            item->owner_pid != (uint32_t)getpid() || item->signaled ||
+            !item->started)
+            continue;
+        if (sched_getaffinity((pid_t)item->thread_id, sizeof(mask), &mask) != 0) {
+            valid = false;
+            break;
+        }
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+            if (CPU_ISSET(cpu, &mask))
+                present[cpu / 64] = true;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (!valid) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    uint16_t needed = 0;
+    for (size_t i = 0; i < CPU_SETSIZE / 64; ++i)
+        if (present[i])
+            ++needed;
+    if (needed == 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (*count < needed) {
+        *count = needed;
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    uint16_t written = 0;
+    for (uint16_t i = 0; i < CPU_SETSIZE / 64; ++i)
+        if (present[i])
+            groups[written++] = i;
+    *count = needed;
+    return 1;
+}
+
 int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *process_mask,
                                             uintptr_t *system_mask)
 {
