@@ -153,12 +153,14 @@ static int32_t nt_junction_control(int pinned, uint32_t rights,
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return 0;
     }
-    char source_normal[PATH_MAX];
-    if (!normalize_path(guest_name, source_normal, true)) {
-        nt_SetLastError(path_error(errno, true));
+    /* file->path is already the internal canonical path captured when the
+     * HANDLE was opened; normalizing it again would make relative names
+     * depend on the process CWD after the handle was created. */
+    const char *source_relative = guest_name[0] ? guest_name : ".";
+    if (strnlen(source_relative, PATH_MAX) >= PATH_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    const char *source_relative = source_normal[0] ? source_normal : ".";
     int root = duplicate_root(&source_relative);
     if (root < 0) {
         nt_SetLastError(path_error(errno, true));
