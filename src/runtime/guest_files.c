@@ -769,15 +769,44 @@ static int confined_open(int root, const char *path, int flags, unsigned int mod
 {
     if (strcmp(path, ".") == 0)
         return confined_open_raw(root, ".", flags, mode);
-    char leaf[NAME_MAX + 1];
-    const int parent = open_parent(root, path, leaf);
-    if (parent < 0)
+    if (!path || strnlen(path, PATH_MAX) >= PATH_MAX) {
+        errno = ENAMETOOLONG;
         return -1;
-    const int fd = confined_open_raw(parent, leaf, flags, mode);
-    const int error = errno;
-    close(parent);
-    errno = error;
-    return fd;
+    }
+    char rewritten[PATH_MAX];
+    strcpy(rewritten, path);
+    for (unsigned int hops = 0; hops <= WIN_JUNCTION_MAX_HOPS; ++hops) {
+        char leaf[NAME_MAX + 1];
+        const int parent = open_parent(root, rewritten, leaf);
+        if (parent < 0)
+            return -1;
+        const int fd = confined_open_raw(parent, leaf, flags, mode);
+        const int opened_error = errno;
+        close(parent);
+        if (fd < 0) {
+            errno = opened_error;
+            return -1;
+        }
+        /* A directory enumeration / CWD open follows a marked junction
+         * as an NT namespace operation, not a Linux symlink. Metadata
+         * O_PATH opens intentionally inspect the original directory. */
+        if ((flags & O_DIRECTORY) == 0 || (flags & O_PATH) != 0)
+            return fd;
+        struct nt_junction_record record;
+        const int junction = junction_read(fd, root, &record);
+        const int error = errno;
+        if (junction < 0) {
+            close(fd);
+            errno = error;
+            return -1;
+        }
+        if (junction == 0)
+            return fd;
+        close(fd);
+        strcpy(rewritten, record.target_relative);
+    }
+    errno = ELOOP;
+    return -1;
 }
 
 static int open_regular(int root, const char *path, int flags, bool *created)
