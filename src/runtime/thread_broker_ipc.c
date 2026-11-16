@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 _Static_assert(sizeof(struct nt_broker_rpc) == 48, "private RPC layout");
-_Static_assert(sizeof(struct nt_broker_reply) == 32, "private reply layout");
+_Static_assert(sizeof(struct nt_thread_broker_reply) == 32, "private reply layout");
 _Static_assert(sizeof(struct nt_broker_hello) == 24, "private hello layout");
 
 static pthread_mutex_t client_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -108,7 +108,7 @@ bool nt_broker_server_handshake(int fd, const uint8_t secret[16])
     if (secret == NULL)
         return false;
     const struct nt_broker_hello hello = {
-        .magic = NT_BROKER_MAGIC, .version = NT_BROKER_RPC_VERSION,
+        .magic = NT_THREAD_BROKER_MAGIC, .version = NT_BROKER_RPC_VERSION,
         .secret = {0}
     };
     struct nt_broker_hello message = hello;
@@ -159,7 +159,7 @@ static bool receive_authenticated_rpc(int fd,
     if (credential_count != 1 || sender.pid != peer->child_pid ||
         sender.uid != peer->uid || sender.gid != peer->gid ||
         mismatch != 0 || !live_child(peer) ||
-        request.magic != NT_BROKER_MAGIC ||
+        request.magic != NT_THREAD_BROKER_MAGIC ||
         request.version != NT_BROKER_RPC_VERSION || request.reserved != 0)
         return false;
     *out = request;
@@ -183,8 +183,8 @@ void nt_broker_server_loop(int fd,
         struct nt_broker_rpc request = {0};
         if (!receive_authenticated_rpc(fd, peer, &request))
             break; /* Fail closed on disconnect, bad protocol or impersonation. */
-        struct nt_broker_reply response = {
-            .magic = NT_BROKER_MAGIC, .status = 1
+        struct nt_thread_broker_reply response = {
+            .magic = NT_THREAD_BROKER_MAGIC, .status = 1
         };
         const pid_t requester = peer->child_pid;
         struct nt_broker_thread_info info = {0};
@@ -266,7 +266,7 @@ bool nt_broker_client_attach(int fd)
     struct nt_broker_hello hello = {0};
     if (recv(fd, &hello, sizeof(hello), MSG_DONTWAIT) !=
             (ssize_t)sizeof(hello) ||
-        hello.magic != NT_BROKER_MAGIC ||
+        hello.magic != NT_THREAD_BROKER_MAGIC ||
         hello.version != NT_BROKER_RPC_VERSION)
         return false;
     pthread_mutex_lock(&client_lock);
@@ -291,13 +291,13 @@ void nt_broker_client_detach(void)
 }
 
 static bool client_rpc(uint32_t operation, uint32_t tid, uint32_t access,
-                       uint64_t capability, struct nt_broker_reply *answer)
+                       uint64_t capability, struct nt_thread_broker_reply *answer)
 {
     pthread_mutex_lock(&client_lock);
     bool okay = client_socket >= 0;
     if (okay) {
         struct nt_broker_rpc request = {
-            .magic = NT_BROKER_MAGIC, .version = NT_BROKER_RPC_VERSION,
+            .magic = NT_THREAD_BROKER_MAGIC, .version = NT_BROKER_RPC_VERSION,
             .operation = operation, .access = access,
             .thread_id = tid, .capability = capability
         };
@@ -305,10 +305,10 @@ static bool client_rpc(uint32_t operation, uint32_t tid, uint32_t access,
         okay = send_packet(client_socket, &request, sizeof(request)) &&
                read_ready(client_socket, POLLIN);
         if (okay) {
-            struct nt_broker_reply response = {0};
+            struct nt_thread_broker_reply response = {0};
             okay = recv(client_socket, &response, sizeof(response), MSG_DONTWAIT) ==
                        (ssize_t)sizeof(response) &&
-                   response.magic == NT_BROKER_MAGIC && response.status == 0;
+                   response.magic == NT_THREAD_BROKER_MAGIC && response.status == 0;
             if (okay && answer != NULL)
                 *answer = response;
         }
@@ -332,7 +332,7 @@ bool nt_broker_client_open(uint32_t tid, uint32_t access,
     if (tid == 0 || access == 0 || (access & ~read_rights) != 0 ||
         info == NULL || capability == NULL)
         return false;
-    struct nt_broker_reply response = {0};
+    struct nt_thread_broker_reply response = {0};
     if (!client_rpc(NT_BROKER_RPC_OPEN, tid, access, 0, &response) ||
         response.thread_id != tid || response.capability == 0)
         return false;
@@ -349,7 +349,7 @@ bool nt_broker_client_query(uint64_t capability, uint32_t access,
 {
     if (capability == 0 || info == NULL)
         return false;
-    struct nt_broker_reply response = {0};
+    struct nt_thread_broker_reply response = {0};
     if (!client_rpc(NT_BROKER_RPC_QUERY, 0, access, capability, &response))
         return false;
     *info = (struct nt_broker_thread_info){
