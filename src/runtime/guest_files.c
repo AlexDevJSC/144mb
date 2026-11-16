@@ -5735,6 +5735,112 @@ static struct nt_file_attribute_data reparse_attributes(const struct stat *info)
     };
 }
 
+/* A deliberately confined CreateSymbolicLink subset. Windows reparse
+ * redirects are never allowed to expand the filesystem grant. Only a
+ * relative, already-existing regular-file target in the same granted
+ * directory tree can be linked. Directory links/junctions require a
+ * separate broker with mount and share invariants; reject rather than
+ * silently follow a Linux directory symlink as if it were a junction. */
+static bool nt_relative_link_target(const char *target)
+{
+    if (!target || !target[0] || target[0] == '/' || target[0] == '\\' ||
+        strnlen(target, PATH_MAX) >= PATH_MAX)
+        return false;
+    for (const char *cursor = target; *cursor;) {
+        const char *end = strpbrk(cursor, "/\\");
+        const size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (!length || (length == 1 && cursor[0] == '.') ||
+            (length == 2 && cursor[0] == '.' && cursor[1] == '.') ||
+            length > NAME_MAX || memchr(cursor, ':', length))
+            return false;
+        for (size_t i = 0; i < length; ++i) {
+            const unsigned char ch = (unsigned char)cursor[i];
+            if (ch < 0x20 || ch == 0x7f || strchr("<>\"|?*", ch))
+                return false;
+        }
+        if (!end)
+            break;
+        cursor = end + 1;
+        if (!*cursor)
+            return false;
+    }
+    return true;
+}
+
+int32_t NT_MS_ABI nt_CreateSymbolicLinkW(const uint16_t *link_name,
+                                          const uint16_t *target_name,
+                                          uint32_t flags)
+{
+    if ((flags & ~3u) || (flags & 1u)) { /* directory junctions not modeled */
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    char link[PATH_MAX], target[PATH_MAX], normalized[PATH_MAX];
+    if (!wide_path(link_name, link) || !wide_path(target_name, target))
+        return 0;
+    if (!nt_relative_link_target(target) || !guest_path(link, normalized)) {
+        nt_SetLastError(NT_ERROR_INVALID_NAME);
+        return 0;
+    }
+    const char *relative = normalized;
+    int root = duplicate_root(&relative);
+    if (root < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, relative, leaf);
+    const int parent_error = errno;
+    close(root);
+    if (parent < 0) {
+        nt_SetLastError(path_error(parent_error, true));
+        return 0;
+    }
+    /* Link targets must already be regular files, pinned through the
+     * non-following, same-mount resolver. No Linux absolute symlink
+     * target or cross-volume permission can be introduced. */
+    const int target_fd = confined_open(parent, target, O_PATH, 0);
+    const int target_error = errno;
+    struct stat target_stat;
+    const bool regular = target_fd >= 0 &&
+                         fstat(target_fd, &target_stat) == 0 &&
+                         S_ISREG(target_stat.st_mode);
+    if (target_fd >= 0)
+        close(target_fd);
+    if (!regular) {
+        close(parent);
+        nt_SetLastError(path_error(target_fd < 0 ? target_error : EACCES, false));
+        return 0;
+    }
+    char existing[NAME_MAX + 1];
+    const int found = resolve_name(parent, leaf, existing);
+    if (found != 0) {
+        const int error = found < 0 ? errno : EEXIST;
+        close(parent);
+        nt_SetLastError(path_error(error, false));
+        return 0;
+    }
+    for (char *p = target; *p; ++p)
+        if (*p == '\\')
+            *p = '/';
+    const int result = symlinkat(target, parent, leaf);
+    const int error = errno;
+    close(parent);
+    if (result != 0)
+        nt_SetLastError(path_error(error, false));
+    return result == 0;
+}
+
+int32_t NT_MS_ABI nt_CreateSymbolicLinkA(const char *link_name,
+                                          const char *target_name,
+                                          uint32_t flags)
+{
+    uint16_t link[PATH_MAX], target[PATH_MAX];
+    return utf8_guest_to_wide(link_name, link) &&
+           utf8_guest_to_wide(target_name, target) &&
+           nt_CreateSymbolicLinkW(link, target, flags);
+}
+
 /* FSCTL_GET_REPARSE_POINT, supported only for a final Linux symlink opened
  * explicitly with FILE_FLAG_OPEN_REPARSE_POINT. Windows relative symlink
  * buffer (tag 0xA000000C), not an NTFS junction or an emulated mount.
