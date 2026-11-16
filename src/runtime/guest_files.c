@@ -13,6 +13,7 @@
 #include <unicode/utf8.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <sys/mman.h>
@@ -1192,15 +1193,36 @@ static bool set_share_pending(int gate, const struct stat *file, const char *pat
         errno = EACCES;
         return false;
     }
-    if (!private_c_path(path) || strlen(path) >= sizeof(record.path)) {
+    if (!path || strlen(path) >= sizeof(record.path)) {
         errno = EINVAL;
+        return false;
+    }
+    /* Persist an authorized root's physical identity, not the DOS letter
+     * or UNC alias. An unrelated process may map D: to another directory.
+     * A pending file can only be unlinked using an equal (dev,ino) root. */
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0)
+        return false;
+    struct stat root_info;
+    const int stat_result = fstat(root, &root_info);
+    const int stat_error = errno;
+    close(root);
+    if (stat_result < 0) {
+        errno = stat_error;
         return false;
     }
     memset(&record, 0, sizeof(record));
     record.magic = SHARE_PENDING_MAGIC;
     record.dev = (uint64_t)file->st_dev;
     record.ino = (uint64_t)file->st_ino;
-    memcpy(record.path, path, strlen(path) + 1);
+    const int written_path = snprintf(record.path, sizeof(record.path),
+        "@ROOT:%jx:%jx|%s", (uintmax_t)root_info.st_dev,
+        (uintmax_t)root_info.st_ino, path);
+    if (written_path < 0 || (size_t)written_path >= sizeof(record.path)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
     /* Commit the fully written name and inode *before* marking pending.
      * A crash prior to the last four-byte write cannot expose an
      * incomplete path as an active disposition. */
@@ -1269,14 +1291,51 @@ static bool finalize_share_pending_locked(int gate,
 {
     if (!pending->pending)
         return true;
-    if (!private_c_path(pending->path)) {
+    const char *relative = pending->path;
+    uintmax_t root_device = 0, root_inode = 0;
+    bool volume_bound = false;
+    if (strncmp(relative, "@ROOT:", 6) == 0) {
+        /* Preserve old C: records while requiring all new records to bind
+         * to a stable host root identity before any unlink is attempted. */
+        const char *cursor = relative + 6;
+        char *end;
+        errno = 0;
+        root_device = strtoumax(cursor, &end, 16);
+        if (errno != 0 || end == cursor || *end != ':') {
+            errno = EIO;
+            return false;
+        }
+        cursor = end + 1;
+        errno = 0;
+        root_inode = strtoumax(cursor, &end, 16);
+        if (errno != 0 || end == cursor || *end != '|' || end[1] == '\0') {
+            errno = EIO;
+            return false;
+        }
+        relative = end + 1;
+        volume_bound = true;
+    } else if (!private_c_path(relative)) {
+        /* Legacy records may only contain old-style C: relative names. */
         errno = EIO;
         return false;
     }
-    const char *relative = pending->path;
     const int root = duplicate_root(&relative);
     if (root < 0)
         return false;
+    if (volume_bound) {
+        struct stat actual_root;
+        const int valid = fstat(root, &actual_root) == 0 &&
+            (uintmax_t)actual_root.st_dev == root_device &&
+            (uintmax_t)actual_root.st_ino == root_inode;
+        if (!valid) {
+            const int failure = errno;
+            close(root);
+            /* Alias changed or grant revoked: fail closed. Never delete a
+             * similarly named file through a different granted root. */
+            errno = failure == 0 ? EACCES : failure;
+            return false;
+        }
+    }
     char leaf[NAME_MAX + 1];
     int parent = open_parent(root, relative, leaf);
     const int opened_error = errno;
@@ -2762,7 +2821,7 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
  * writers, which remain outside the NT guest's namespace protocol. */
 static int check_inode_not_pending(const struct stat *info, const char *path)
 {
-    if (!private_c_path(path) || !S_ISREG(info->st_mode))
+    if (!S_ISREG(info->st_mode))
         return 0;
     const int gate = open_share_registry(info);
     if (gate < 0)
@@ -2791,7 +2850,7 @@ static int check_inode_not_pending(const struct stat *info, const char *path)
 static int remove_file_or_defer(int parent, const char *leaf, const char *dos_path,
                                 const struct stat *target)
 {
-    if (!private_c_path(dos_path) || !S_ISREG(target->st_mode))
+    if (!S_ISREG(target->st_mode))
         return unlinkat(parent, leaf, 0);
     int gate = open_share_registry(target);
     if (gate < 0)
@@ -5776,8 +5835,7 @@ static int32_t set_file_disposition(uintptr_t handle, bool deleting)
     struct guest_file *file = find_handle(handle);
     int error = file == NULL ? EBADF :
                 (file->access & FILE_DELETE) == 0 ? EACCES : 0;
-    if (error == 0 && (!private_c_path(file->path) ||
-                       file->share_lease_fd <= 0))
+    if (error == 0 && (file->path == NULL || file->share_lease_fd <= 0))
         error = ENOTSUP;
     struct stat file_info;
     if (error == 0 && fstat(file->fd, &file_info) != 0)
