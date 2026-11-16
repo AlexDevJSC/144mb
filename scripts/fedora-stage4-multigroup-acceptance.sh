@@ -83,6 +83,9 @@ fi
 if ! grep -Eq '^PASS group affinity: .*cross-group=yes' "$log"; then
     fail "no successful cross-group kernel transition observed, even though topology is adequate"
 fi
+if ! grep -q '^PASS multigroup process policy: inherited secondary group denied, restored and committed' "$log"; then
+    fail "no verified inherited secondary-group rejection and subsequent process-policy commit"
+fi
 if grep -q 'SKIP external-PE sandbox test' "$log"; then
     fail "Bubblewrap isolation was skipped"
 fi
@@ -91,6 +94,7 @@ if ! grep -q '^PASS: all currently implemented stage-4 acceptance suites' "$log"
 fi
 {
     echo "MULTIGROUP=PASS"
+    echo "PROCESS_GROUP_POLICY=PASS"
     echo "THREAD_GROUP=PASS"
     echo "LEGACY_MASK_PRIMARY_GROUP=PASS"
     echo "ISOLATED_PE=PASS"
