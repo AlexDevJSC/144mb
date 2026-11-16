@@ -626,10 +626,10 @@ static void check_files(void)
     CHECK(nt_SetFileAttributesW(u"C:\\éTAGE", 1u | 2u) != 0 &&
           (nt_GetFileAttributesW(u"C:\\Étage") & (1u | 2u | 0x10u)) ==
           (1u | 2u | 0x10u));
-    void *international = nt_fopen("C:\\\xc9tage\\Résumé.TXT", "wb");
+    void *international = nt_fopen("C:\\\xC9tage\\R\xE9sum\xE9.TXT", "wb");
     CHECK(international != NULL && nt_fwrite("ok", 1, 2, international) == 2 &&
           nt_fclose(international) == 0);
-    international = nt_fopen("c:\\\xe9tage\\résumé.txt", "rb");
+    international = nt_fopen("c:\\\xE9tage\\r\xE9sum\xE9.txt", "rb");
     char international_bytes[2];
     CHECK(international != NULL &&
           nt_fread(international_bytes, 1, 2, international) == 2 &&
