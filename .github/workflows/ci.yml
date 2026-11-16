@@ -32,6 +32,9 @@ jobs:
           x86_64-w64-mingw32-gcc --version
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 all check check-pe check-pe-import check-pe-image
+      - name: Require native FluidSynth library and ABI
+        run: make check-audio-required
+
       - name: Compile FUSE mediation backend and verify fail-closed static tests
         run: make check-dos83-fuse
 
