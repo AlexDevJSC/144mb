@@ -46,6 +46,16 @@ anotar el bloqueo, y NO tratar el problema como resuelto por omisión.
 No inferir que «95 %» equivale a cinco puntos de esfuerzo pendientes
 ni usar una build verde como sinónimo de paridad Windows.
 
+**Actualización 16-11-2026:** trabajo de grupo principal individual
+en la rama `feature/core6-primary-group-model-20261116` apilada
+sobre la PR de validación Windows/Fedora. Se habilitan semánticas
+`GROUP_AFFINITY` para cpusets del hilo que abarcan grupos distintos
+con estado principal verificable; no es una afirmación de política
+multigrupo de proceso ni de aceptación física. Las prioridades
+dinámicas, quantum y broker entre procesos siguen abiertos. Madurez
+componente 4: 95 % → 95 % (+0 puntos) antes de pruebas multigrupo
+realmente positivas.
+
 ### Orden técnico de las siete subtareas pendientes DENTRO del problema 6
 
 Instrucción del responsable del 16-11-2026: atacar las siete tareas
