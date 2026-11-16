@@ -4,6 +4,7 @@
 #include "child_process.h"
 #include "nt_services.h"
 #include "nt_core_information.h"
+#include "object_broker.h"
 #include "winbase.h"
 #include "ntnative/guest_thread.h"
 
