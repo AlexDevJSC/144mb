@@ -1377,7 +1377,28 @@ static void check_native_file_namespaces(void)
           sd[52] == 2u && sd[54] == 76u && sd[56] == 3u);
     CHECK(!nt_GetFileSecurityW(u"C:\\security-mode.bin", 8u, sd,
                                 sizeof(sd), &required) &&
-          last_error() == NT_ERROR_ACCESS_DENIED &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+
+    CHECK(nt_runtime_resolve("ntdll.dll", "NtQuerySecurityObject") ==
+          (nt_guest_proc)nt_NtQuerySecurityObject);
+    CHECK(nt_runtime_resolve("ntdll.dll", "ZwQuerySecurityObject") ==
+          (nt_guest_proc)nt_NtQuerySecurityObject);
+    uintptr_t secure_handle = nt_CreateFileA("C:\\security-mode.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(secure_handle != UINTPTR_MAX);
+    const uint32_t preserved = last_error();
+    required = 0;
+    CHECK(nt_NtQuerySecurityObject(secure_handle, 7u, NULL, 0u, &required) ==
+          (nt_status)UINT32_C(0xc0000023) && required == sizeof(sd) &&
+          last_error() == preserved);
+    memset(sd, 0, sizeof(sd));
+    CHECK(nt_NtQuerySecurityObject(secure_handle, 7u, sd, sizeof(sd), &required) ==
+          NT_STATUS_SUCCESS && required == sizeof(sd) &&
+          sd[0] == 1u && sd[4] == 20u && sd[16] == 52u &&
+          last_error() == preserved);
+    CHECK(nt_NtQuerySecurityObject(secure_handle, 8u, sd, sizeof(sd), &required) ==
+          NT_STATUS_ACCESS_DENIED && last_error() == preserved);
+    CHECK(nt_CloseHandle(secure_handle) &&
           nt_DeleteFileA("C:\\security-mode.bin"));
 
     CHECK(nt_runtime_set_unc_root("lab", "share", NULL) &&
