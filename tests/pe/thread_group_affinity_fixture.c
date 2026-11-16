@@ -28,6 +28,13 @@ int import_fixture_entry(void)
         sum += GetActiveProcessorCount(group);
     if (sum != total || GetActiveProcessorCount(active_groups) != 0)
         return 26;
+    /* A Windows 11 thread may have a full allowed set spanning groups.
+     * Its primary group affinity must still be a valid, nonempty mask. */
+    GROUP_AFFINITY own_primary = {0};
+    if (!GetThreadGroupAffinity(GetCurrentThread(), &own_primary) ||
+        own_primary.Group >= active_groups || own_primary.Mask == 0 ||
+        own_primary.Reserved[0] || own_primary.Reserved[1] || own_primary.Reserved[2])
+        return 28;
     HANDLE thread = CreateThread(NULL, 0, test_worker, NULL, CREATE_SUSPENDED, NULL);
     if (thread == NULL)
         return 10;
