@@ -21,8 +21,10 @@ $vcvars = Join-Path $install "VC/Auxiliary/Build/vcvars64.bat"
 if (-not (Test-Path $vcvars)) { throw "Missing vcvars64.bat" }
 $source = Join-Path $root "tests/windows/stage4_scheduler_probe.c"
 $fixture = Join-Path $root "tests/pe/thread_group_affinity_fixture.c"
+$quantumSource = Join-Path $root "tests/bench/scheduler_quantum_observation.c"
 $exe = Join-Path $build "stage4-scheduler-native.exe"
 $fixtureExe = Join-Path $build "stage4-group-fixture-native.exe"
+$quantumExe = Join-Path $build "stage4-quantum-native.exe"
 $compileCmd = Join-Path $build "compile-stage4-windows.cmd"
 @"
 @echo off
@@ -32,6 +34,8 @@ if errorlevel 1 exit /b 1
 rem The EXACT same PE fixture used by the Linux guest runtime is now
 rem compiled and run natively. A behavior divergence is preserved, never hidden.
 cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Dimport_fixture_entry=main /Fe:"$fixtureExe" "$fixture" /link kernel32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Fe:"$quantumExe" "$quantumSource" /link kernel32.lib
 exit /b %errorlevel%
 "@ | Set-Content -Encoding ASCII $compileCmd
 & cmd.exe /d /c "`"$compileCmd`""
@@ -61,6 +65,67 @@ $fixtureReport = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-linu
     "NOTE=This is the same tests/pe/thread_group_affinity_fixture.c used by Linux guest CI"
 ) | Set-Content -Encoding ASCII $fixtureReport
 Get-Content $fixtureReport
+# Same-source Windows/Linux scheduler contention observation. Its output
+# deliberately contains NT_QUANTUM_VERIFIED=NO; wall times are NOT comparable.
+$quantumReport = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-quantum.txt"
+& $quantumExe | Set-Content -Encoding ASCII $quantumReport
+$quantumExit = $LASTEXITCODE
+Get-Content $quantumReport
+if ($quantumExit -ne 0 -or
+    -not (Select-String -Path $quantumReport -Pattern '^RESULT=PASS
+foreach ($line in (Get-Content $OutputPath)) {
+    if ($line -match '^([A-Z_]+)=(.*)$') { $entries[$matches[1]] = $matches[2] }
+}
+if ($entries["SCHEMA"] -ne "ntnative.stage4.scheduler.v1" -or
+    $entries["PLATFORM"] -ne "WINDOWS_NATIVE" -or $entries["THREAD_GROUP"] -ne "PASS") {
+    throw "Missing or failed contract evidence in $OutputPath."
+}
+if ($RequireMultiGroup -and ($entries["GROUPS"] -lt 2 -or
+                            $entries["ACTIVE_CPUS"] -lt 65 -or
+                            $entries["CROSS_GROUP"] -ne "PASS")) {
+    throw "INCOMPLETE: native Windows host did not verify a real >64 CPU group transition."
+}
+$meta = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-meta.txt"
+@(
+    "OS=$($os.Caption)"
+    "BUILD=$($os.BuildNumber)"
+    "ARCH=$($os.OSArchitecture)"
+    "MODEL=$($machine.Model)"
+    "PHYSICAL_HARDWARE_VERIFIED=NO"
+    "REQUIRES_INDEPENDENT_PHYSICAL_ATTESTATION=YES"
+    "GIT_COMMIT=$(git rev-parse HEAD)"
+) | Set-Content -Encoding UTF8 $meta
+Write-Host "Native Windows evidence saved to $OutputPath; metadata $meta."
+Write-Host "NOTE: a hosted Windows VM is a real Windows kernel, NOT a physical hardware acceptance."
+ -Quiet) -or
+    -not (Select-String -Path $quantumReport -Pattern '^NT_QUANTUM_VERIFIED=NO
+foreach ($line in (Get-Content $OutputPath)) {
+    if ($line -match '^([A-Z_]+)=(.*)$') { $entries[$matches[1]] = $matches[2] }
+}
+if ($entries["SCHEMA"] -ne "ntnative.stage4.scheduler.v1" -or
+    $entries["PLATFORM"] -ne "WINDOWS_NATIVE" -or $entries["THREAD_GROUP"] -ne "PASS") {
+    throw "Missing or failed contract evidence in $OutputPath."
+}
+if ($RequireMultiGroup -and ($entries["GROUPS"] -lt 2 -or
+                            $entries["ACTIVE_CPUS"] -lt 65 -or
+                            $entries["CROSS_GROUP"] -ne "PASS")) {
+    throw "INCOMPLETE: native Windows host did not verify a real >64 CPU group transition."
+}
+$meta = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-meta.txt"
+@(
+    "OS=$($os.Caption)"
+    "BUILD=$($os.BuildNumber)"
+    "ARCH=$($os.OSArchitecture)"
+    "MODEL=$($machine.Model)"
+    "PHYSICAL_HARDWARE_VERIFIED=NO"
+    "REQUIRES_INDEPENDENT_PHYSICAL_ATTESTATION=YES"
+    "GIT_COMMIT=$(git rev-parse HEAD)"
+) | Set-Content -Encoding UTF8 $meta
+Write-Host "Native Windows evidence saved to $OutputPath; metadata $meta."
+Write-Host "NOTE: a hosted Windows VM is a real Windows kernel, NOT a physical hardware acceptance."
+ -Quiet)) {
+    throw "Native Windows pinned CPU scheduler benchmark failed. See $quantumReport."
+}
 $entries = @{}
 foreach ($line in (Get-Content $OutputPath)) {
     if ($line -match '^([A-Z_]+)=(.*)$') { $entries[$matches[1]] = $matches[2] }
