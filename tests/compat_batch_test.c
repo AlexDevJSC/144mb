@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <pthread.h>
@@ -975,6 +976,43 @@ static void check_files(void)
     CHECK(nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
                              sizeof(remove_mount), NULL, 0,
                              &junction_returned, NULL));
+
+    /* Legacy main stored a PATH_MAX+16 target in the same v1 xattr key.
+     * New compact writes must not strand persisted records. Some filesystems
+     * reject >4 KiB xattrs; only skip this legacy compatibility case there. */
+    struct stat legacy_grant;
+    CHECK(stat(root, &legacy_grant) == 0);
+    struct {
+        uint32_t magic, version;
+        uint64_t root_dev, root_inode;
+        char target[PATH_MAX + 16];
+    } legacy_record = {
+        .magic = UINT32_C(0x4a554e43), .version = 1u,
+        .root_dev = (uint64_t)legacy_grant.st_dev,
+        .root_inode = (uint64_t)legacy_grant.st_ino
+    };
+    strcpy(legacy_record.target, "C:\\data\\junction-target");
+    char legacy_directory[512];
+    CHECK(snprintf(legacy_directory, sizeof(legacy_directory),
+                   "%s/data/junction-entry", root) > 0);
+    if (setxattr(legacy_directory, "user.ntnative.junction.v1",
+                 &legacy_record, sizeof(legacy_record), 0) == 0) {
+        CHECK(nt_DeviceIoControl(junction, 0x000900a8u, NULL, 0,
+                                 junction_output, sizeof(junction_output),
+                                 &junction_returned, NULL) &&
+              junction_returned > 16u);
+        uintptr_t old_target = nt_CreateFileW(
+            u"C:\\data\\junction-entry\\payload.bin", UINT32_C(0x80000000),
+            7u, NULL, 3u, 0x80u, 0);
+        CHECK(old_target != UINTPTR_MAX && nt_CloseHandle(old_target));
+        CHECK(nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
+                                 sizeof(remove_mount), NULL, 0,
+                                 &junction_returned, NULL));
+    } else {
+        CHECK(errno == ENOSPC || errno == E2BIG || errno == ERANGE ||
+              errno == ENOTSUP);
+        fprintf(stderr, "SKIP legacy large junction xattr (filesystem limit)\n");
+    }
     CHECK(nt_CloseHandle(junction) &&
           (nt_GetFileAttributesW(u"C:\\data\\junction-entry") & 0x400u) == 0);
     CHECK(nt_CreateFileW(u"C:\\data\\junction-entry\\payload.bin",
