@@ -78,6 +78,10 @@ struct waitable {
     struct nt_broker_resource broker;
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
+    /* Special APCs have a distinct queue. Initial support is limited to
+     * CREATE_SUSPENDED guest threads, delivered on their first user-mode
+     * boundary after ResumeThread, never from a Linux signal. */
+    struct guest_apc_queue start_special_apcs;
     uint32_t suspend_count;
     /* Running guest threads can only be paused at an explicit runtime
      * alertable checkpoint, never through an asynchronous Linux signal. */
@@ -476,6 +480,89 @@ nt_status nt_runtime_queue_apc(uintptr_t handle, guest_user_apc user,
     return status;
 }
 
+/* First positive advanced-APC contract (problem 5): special APCs may
+ * target a guest thread that is provably parked before its initial entry.
+ * This does not pretend to preempt arbitrary running Windows instructions.
+ * The APC executes on its own target thread at first safe user boundary,
+ * outside alertable waits and with no runtime locks held. */
+static nt_status queue_suspended_special_apc(uintptr_t handle,
+    guest_user_apc user, guest_native_apc native,
+    uintptr_t first, uintptr_t second, uintptr_t third)
+{
+    if ((user == NULL) == (native == NULL))
+        return NT_STATUS_INVALID_PARAMETER;
+    if (handle == UINTPTR_MAX - 1)
+        return NT_STATUS_NOT_SUPPORTED; /* current thread not parked */
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    nt_status status = NT_STATUS_SUCCESS;
+    struct guest_apc_queue *queue = NULL;
+    if (object == NULL)
+        status = NT_STATUS_INVALID_HANDLE;
+    else if (object->kind != THREAD)
+        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (wait_state(object)->owner_pid != (uint32_t)getpid())
+        status = NT_STATUS_NOT_SUPPORTED;
+    else if (!(object->access & THREAD_SET_CONTEXT))
+        status = NT_STATUS_ACCESS_DENIED;
+    else {
+        struct waitable *state = wait_state(object);
+        if (state->signaled || state->terminate_at_start)
+            status = NT_STATUS_THREAD_IS_TERMINATING;
+        else if (!state->started || state->suspend_count == 0)
+            status = NT_STATUS_NOT_SUPPORTED;
+        else
+            queue = &state->start_special_apcs;
+    }
+    if (queue != NULL) {
+        if (queue->count >= MAX_PENDING_APC)
+            status = NT_STATUS_NO_MEMORY;
+        else {
+            struct guest_apc *apc = calloc(1, sizeof(*apc));
+            if (apc == NULL)
+                status = NT_STATUS_NO_MEMORY;
+            else {
+                *apc = (struct guest_apc){
+                    .user = user, .native = native,
+                    .first = first, .second = second, .third = third
+                };
+                if (queue->tail != NULL)
+                    queue->tail->next = apc;
+                else
+                    queue->head = apc;
+                queue->tail = apc;
+                ++queue->count;
+                pthread_cond_broadcast(&wait_changed);
+            }
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
+}
+
+/* Called only on the target host pthread, after the create gate opens,
+ * after guest TLS/DLL attach, and before its guest entrypoint. APCs are
+ * popped under the mutex but INVOKED after unlocking it. Any new APC
+ * after ResumeThread is rejected, so FIFO order and single delivery hold. */
+static void dispatch_start_special_apcs(void)
+{
+    for (;;) {
+        pthread_mutex_lock(&wait_lock);
+        struct guest_apc_queue *queue = &running_thread->start_special_apcs;
+        struct guest_apc *apc = queue->head;
+        if (apc != NULL) {
+            queue->head = apc->next;
+            if (queue->head == NULL)
+                queue->tail = NULL;
+            --queue->count;
+        }
+        pthread_mutex_unlock(&wait_lock);
+        if (apc == NULL)
+            break;
+        invoke_apc(apc);
+    }
+}
+
 uint32_t NT_MS_ABI nt_QueueUserAPC(guest_user_apc callback, uintptr_t handle, uintptr_t data)
 {
     const nt_status status = nt_runtime_queue_apc(handle, callback, NULL, data, 0, 0);
@@ -491,29 +578,36 @@ nt_status NT_MS_ABI nt_NtQueueApcThread(uintptr_t thread, guest_native_apc routi
                                 (uintptr_t)first, (uintptr_t)second);
 }
 
-/* A NULL reserve behaves exactly as NtQueueApcThread. A special APC
- * (reserve=1) requires interrupting a thread even outside alertable waits;
- * no safe mechanism exists here, so refuse it instead of faking delivery. */
+/* Native special APCs use a genuinely distinct queue. This profile
+ * supports only threads suspended at their initial safe startup gate.
+ * An already-running CPU-bound thread still fails closed. */
 nt_status NT_MS_ABI nt_NtQueueApcThreadEx(uintptr_t thread, uintptr_t reserve,
                                          guest_native_apc routine,
                                          void *context, void *first, void *second)
 {
-    if (reserve != 0)
+    if (reserve == 0)
+        return nt_NtQueueApcThread(thread, routine, context, first, second);
+    if (reserve != 1)
         return NT_STATUS_NOT_SUPPORTED;
-    return nt_NtQueueApcThread(thread, routine, context, first, second);
+    return queue_suspended_special_apc(thread, NULL, routine,
+                                      (uintptr_t)context, (uintptr_t)first,
+                                      (uintptr_t)second);
 }
 
 uint32_t NT_MS_ABI nt_QueueUserAPC2(guest_user_apc callback, uintptr_t handle,
                                    uintptr_t data, uint32_t flags)
 {
-    /* QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC cannot run safely while the
-     * target holds internal pthread locks. Do not silently queue a normal
-     * APC in its place. */
-    if (flags != 0) {
-        nt_SetLastError(flags == 1 ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+    if (flags == 0)
+        return nt_QueueUserAPC(callback, handle, data);
+    if (flags != 1) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    return nt_QueueUserAPC(callback, handle, data);
+    const nt_status status = queue_suspended_special_apc(
+        handle, callback, NULL, data, 0, 0);
+    if (status != NT_STATUS_SUCCESS)
+        nt_SetLastError(nt_runtime_nt_error(status));
+    return status == NT_STATUS_SUCCESS;
 }
 
 nt_status NT_MS_ABI nt_NtAlertThread(uintptr_t handle)
@@ -2283,6 +2377,7 @@ static void finish_thread(struct nt_guest_thread *guest, bool attached)
     running_thread->exit_code = thread_result;
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     clear_apcs_locked(&running_thread->apcs);
+    clear_apcs_locked(&running_thread->start_special_apcs);
     running_thread->signaled = true;
     release_waitable(running_thread);
     pthread_cond_broadcast(&wait_changed);
@@ -2320,6 +2415,8 @@ static void *thread_main(void *context)
             attached = true;
             nt_runtime_notify_tls(2); /* DLL_THREAD_ATTACH */
         }
+        if (ready)
+            dispatch_start_special_apcs();
         thread_result = ready ? running_thread->start(running_thread->parameter) : NT_ERROR_GEN_FAILURE;
     }
     finish_thread(&guest, attached);
