@@ -816,18 +816,70 @@ static void check_files(void)
     uintptr_t hardlink_handle = nt_CreateFileA(alias_hardlink, UINT32_C(0x80000000),
                                                  7u, NULL, 3u, 0x80u, 0);
     CHECK(hardlink_handle != UINTPTR_MAX && nt_CloseHandle(hardlink_handle));
-    /* The former longfileextra alias is scoped to data/. Moving the
-     * entry to sub83/ must not make that stale short name a valid alias
-     * of the moved inode in the new directory. */
+    /* The alias moves with a mediated rename, but the old directory
+     * must never continue resolving it as though the entry remained. */
     CHECK(nt_MoveFileA("C:\\data\\longfileextra.txt",
                        "C:\\data\\sub83\\anotherlongfile.txt"));
-    CHECK(nt_CreateFileA("C:\\data\\sub83\\LONGFI~2.TXT",
+    CHECK(nt_CreateFileA("C:\\data\\LONGFI~2.TXT",
                           UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0) ==
           UINTPTR_MAX);
     char alias_moved[256] = {0};
+    /* A mediated rename preserves the previous short identity when it
+     * remains unambiguous at the destination, rather than allocating a
+     * new short name solely because the long spelling changed. */
     CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\anotherlongfile.txt",
                                 alias_moved, sizeof(alias_moved)) > 0 &&
-          strstr(alias_moved, "ANOTHE~1.TXT") != NULL);
+          strcmp(alias_moved, "C:\\DATA\\SUB83\\LONGFI~2.TXT") == 0);
+    uintptr_t renamed_alias_handle = nt_CreateFileA(alias_moved,
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(renamed_alias_handle != UINTPTR_MAX &&
+          nt_CloseHandle(renamed_alias_handle));
+    /* If a preserved short alias collides with a real DOS filename in
+     * the destination directory, allocate a fresh, unambiguous alias. */
+    void *collision_src = nt_fopen("C:\\data\\collisionSourceLong.txt", "wb");
+    CHECK(collision_src && nt_fwrite("z", 1, 1, collision_src) == 1 &&
+          nt_fclose(collision_src) == 0);
+    char collision_old[256], collision_new[256];
+    CHECK(nt_GetShortPathNameA("C:\\data\\collisionSourceLong.txt",
+                                collision_old, sizeof(collision_old)) > 0);
+    const char *collision_leaf = strrchr(collision_old, '\\');
+    CHECK(collision_leaf != NULL);
+    char occupied_host[512];
+    CHECK(snprintf(occupied_host, sizeof(occupied_host),
+                   "%s/data/sub83/%s", root, collision_leaf + 1) > 0);
+    int occupied_fd = open(occupied_host, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    CHECK(occupied_fd >= 0 && close(occupied_fd) == 0);
+    CHECK(nt_MoveFileA("C:\\data\\collisionSourceLong.txt",
+                       "C:\\data\\sub83\\destinationLong.txt"));
+    CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\destinationLong.txt",
+                                collision_new, sizeof(collision_new)) > 0 &&
+          strcmp(strrchr(collision_new, '\\') + 1, collision_leaf + 1) != 0);
+    uintptr_t resolved_collision = nt_CreateFileA(collision_new,
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(resolved_collision != UINTPTR_MAX &&
+          nt_CloseHandle(resolved_collision));
+    CHECK(nt_DeleteFileA("C:\\data\\sub83\\destinationLong.txt") &&
+          unlink(occupied_host) == 0);
+
+    /* Failed RENAME_NOREPLACE must roll back the pre-staged destination
+     * xattr, leaving the original short name and file untouched. */
+    void *rollback_src = nt_fopen("C:\\data\\rollbackSourceLong.txt", "wb");
+    CHECK(rollback_src && nt_fwrite("r", 1, 1, rollback_src) == 1 &&
+          nt_fclose(rollback_src) == 0);
+    void *rollback_dst = nt_fopen("C:\\data\\sub83\\rollbackTargetLong.txt", "wb");
+    CHECK(rollback_dst && nt_fclose(rollback_dst) == 0);
+    char rollback_alias[256];
+    CHECK(nt_GetShortPathNameA("C:\\data\\rollbackSourceLong.txt",
+                                rollback_alias, sizeof(rollback_alias)) > 0);
+    CHECK(!nt_MoveFileA("C:\\data\\rollbackSourceLong.txt",
+                        "C:\\data\\sub83\\rollbackTargetLong.txt"));
+    uintptr_t rollback_handle = nt_CreateFileA(rollback_alias,
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(rollback_handle != UINTPTR_MAX &&
+          nt_CloseHandle(rollback_handle) &&
+          nt_DeleteFileA("C:\\data\\rollbackSourceLong.txt") &&
+          nt_DeleteFileA("C:\\data\\sub83\\rollbackTargetLong.txt"));
+
     CHECK(nt_DeleteFileA("C:\\data\\sub83\\anotherlongfile.txt"));
     CHECK(nt_MoveFileA("C:\\data\\longfilename.txt",
                        "C:\\data\\LongFilename.TXT"));
@@ -863,9 +915,16 @@ static void check_files(void)
           rename(external_old, external_new) == 0);
     CHECK(nt_CreateFileA(stale_alias, UINT32_C(0x80000000), 7u, NULL,
                          3u, 0x80u, 0) == UINTPTR_MAX);
+    /* A paired inotify rename event can reconcile the old entry key on
+     * the moved inode after the fact, preserving its unique short name.
+     * This explicit call makes the monitor protocol deterministic in CI. */
+    CHECK(nt_runtime_reconcile_host_rename(
+              "C:\\data\\externalOriginalName.txt",
+              "C:\\data\\hostRenamedFile.txt"));
     CHECK(nt_GetShortPathNameA("C:\\data\\hostRenamedFile.txt",
                                 fresh_alias, sizeof(fresh_alias)) > 0 &&
-          strcmp(stale_alias, fresh_alias) != 0);
+          strcmp(stale_alias, fresh_alias) == 0);
+    CHECK(nt_runtime_refresh_dos83_path("C:\\data\\hostRenamedFile.txt"));
     uintptr_t host_moved = nt_CreateFileA(fresh_alias, UINT32_C(0x80000000),
                                            7u, NULL, 3u, 0x80u, 0);
     CHECK(host_moved != UINTPTR_MAX && nt_CloseHandle(host_moved) &&
