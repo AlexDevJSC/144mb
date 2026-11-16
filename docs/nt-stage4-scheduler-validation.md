@@ -106,6 +106,18 @@ job Windows nativo (4 CPU, un grupo). Una coincidencia posterior
 del fixture no constituirá equivalencia de todos los códigos
 `LastError` ni comportamiento multigrupo.
 
+## Implementación incremental del grupo principal
+
+Se ha añadido al runtime una identidad `primary_group` separada del
+cpuset Linux completo para hilos invitados propios. Esta evolución
+permite que las llamadas de afinidad **de hilo** trabajen sobre el
+grupo principal incluso cuando el cpuset permite ejecutar en varios
+grupos. No se ha implementado la política inicial multigrupo del
+**proceso**, ni un mapa virtual compacto de grupos para subconjuntos
+Linux con CPUs no contiguas. Tampoco se ha probado el cambio entre
+grupos físicamente distintos en CI. La diferencia con Windows 11 es
+ahora más acotada, pero sigue sin cerrarse.
+
 ## Diferencias detectadas por revisión contractual
 
 1. **Windows 11 / Windows Server 2022 y posteriores:** procesos e

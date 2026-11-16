@@ -62,6 +62,41 @@ int main(void)
     check(nt_GetActiveProcessorCount(expected_groups) == 0,
           "group outside the startup topology reports no processors", &failures);
 
+    uint16_t wanted_count = 0;
+    uint16_t reported_groups[CPU_SETSIZE / 64];
+    for (size_t i = 0; i < CPU_SETSIZE / 64; ++i)
+        reported_groups[i] = 0x7777u;
+    uint16_t active_nonempty = 0;
+    for (uint16_t group = 0; group < expected_groups; ++group)
+        if (expected_per_group[group] != 0)
+            ++active_nonempty;
+    nt_SetLastError(0);
+    check(!nt_GetProcessGroupAffinity(UINTPTR_MAX, &wanted_count, reported_groups) &&
+          wanted_count == active_nonempty &&
+          nt_GetLastError() == NT_ERROR_INSUFFICIENT_BUFFER &&
+          reported_groups[0] == 0x7777u,
+          "group query reports required capacity without partial output", &failures);
+    wanted_count = CPU_SETSIZE / 64;
+    nt_SetLastError(0x3434u);
+    check(nt_GetProcessGroupAffinity(UINTPTR_MAX, &wanted_count, reported_groups) &&
+          wanted_count == active_nonempty && nt_GetLastError() == 0x3434u,
+          "process group query returns permitted guest group list", &failures);
+    uint16_t index = 0;
+    for (uint16_t group = 0; group < expected_groups; ++group)
+        if (expected_per_group[group] != 0)
+            check(index < wanted_count && reported_groups[index++] == group,
+                  "process group list is sorted and includes active groups",
+                  &failures);
+    uintptr_t process_set_only = nt_OpenProcess(0x200u, 0, (uint32_t)getpid());
+    nt_SetLastError(0);
+    check(process_set_only && !nt_GetProcessGroupAffinity(process_set_only,
+             &wanted_count, reported_groups) &&
+          nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
+          "process handle without query rights cannot inspect group membership",
+          &failures);
+    check(nt_runtime_close_waitable(process_set_only),
+          "close set-only group-query handle", &failures);
+
     int first = -1, different = -1;
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &original))
@@ -80,29 +115,41 @@ int main(void)
     };
     struct nt_group_affinity observed = {.mask = 0x55u, .group = 0x777u};
     const bool multiple_groups = different >= 0;
-    nt_SetLastError(0);
+    uintptr_t initial_primary_mask = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        if (CPU_ISSET(cpu, &original) && cpu / 64 == wanted.group)
+            initial_primary_mask |= (uintptr_t)UINT64_C(1) << (cpu % 64);
+    nt_SetLastError(0x3434u);
+    check(nt_GetThreadGroupAffinity(nt_GetCurrentThread(), &observed) &&
+          observed.group == wanted.group &&
+          observed.mask == initial_primary_mask &&
+          nt_GetLastError() == 0x3434u,
+          "primary affinity reports its group even with multigroup host cpuset",
+          &failures);
     if (multiple_groups) {
-        check(!nt_GetThreadGroupAffinity(nt_GetCurrentThread(), &observed) &&
-              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED &&
-              observed.mask == 0x55u && observed.group == 0x777u,
-              "cannot pretend a multigroup Linux cpuset has one Windows group",
+        /* With a multi-group initial host cpuset, an old-style 64-bit mask
+         * applies only to the primary group, not to a truncated full cpuset. */
+        nt_SetLastError(0x4545u);
+        check(nt_SetThreadAffinityMask(nt_GetCurrentThread(), wanted.mask) ==
+              initial_primary_mask && nt_GetLastError() == 0x4545u,
+              "legacy affinity returns primary-group mask from multi-group host",
               &failures);
-        struct nt_group_affinity previous = {.mask = 0x55u, .group = 0x777u};
-        check(!nt_SetThreadGroupAffinity(nt_GetCurrentThread(), &wanted, &previous) &&
-              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED &&
-              previous.mask == 0x55u && previous.group == 0x777u,
-              "do not mutate a multigroup cpuset when caller requests unrepresentable previous",
+        cpu_set_t narrowed;
+        check(sched_getaffinity(0, sizeof(narrowed), &narrowed) == 0 &&
+              CPU_COUNT(&narrowed) == 1 && CPU_ISSET(first, &narrowed),
+              "legacy affinity confined actual Linux cpuset to primary group",
               &failures);
-        cpu_set_t check_original;
-        check(sched_getaffinity(0, sizeof(check_original), &check_original) == 0 &&
-              CPU_EQUAL(&check_original, &original),
-              "failure leaves the complete host cpuset unchanged", &failures);
-    } else {
-        check(nt_GetThreadGroupAffinity(nt_GetCurrentThread(), &observed) &&
-              observed.group == wanted.group,
-              "read real single-group current thread", &failures);
+        check(sched_setaffinity(0, sizeof(original), &original) == 0,
+              "restore original multi-group test cpuset", &failures);
     }
-
+    struct nt_group_affinity original_group = {0};
+    nt_SetLastError(0x4141u);
+    check(nt_SetThreadGroupAffinity(nt_GetCurrentThread(), &wanted, &original_group) &&
+          original_group.group == wanted.group &&
+          original_group.mask == initial_primary_mask &&
+          nt_GetLastError() == 0x4141u,
+          "SetThreadGroupAffinity reports prior primary group even if multi-group",
+          &failures);
     nt_SetLastError(0x5151u);
     check(nt_SetThreadGroupAffinity(nt_GetCurrentThread(), &wanted, NULL) &&
           nt_GetLastError() == 0x5151u,

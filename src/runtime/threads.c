@@ -82,6 +82,9 @@ struct waitable {
     uint16_t *thread_description;
     uint64_t create_filetime, exit_filetime, user_cpu_100ns, kernel_cpu_100ns;
     uintptr_t final_group0_affinity;
+    /* Primary Windows group survives a multigroup host cpuset. */
+    uint16_t primary_group;
+    bool primary_group_initialized;
     int final_nice;
     bool final_nice_valid;
 };
@@ -102,6 +105,12 @@ static _Thread_local sigjmp_buf thread_exit;
 static _Thread_local struct guest_apc_queue primary_apcs;
 static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
+static _Thread_local uint16_t primary_thread_group;
+static _Thread_local bool primary_thread_group_initialized;
+/* Needed by CreateThread before the group-affinity API definitions below. */
+static nt_status thread_primary_affinity_locked(uintptr_t handle,
+                                                 const cpu_set_t *cpus,
+                                                 struct nt_group_affinity *result);
 /* At runtime startup, capture the Linux cpuset visible to this sandbox.
  * Thread-specific pinning must not silently change the system-wide
  * processor-group topology reported to Win32 callers. Only CPUs the
@@ -1863,6 +1872,19 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
     struct waitable *thread = error == 0 ? new_waitable(THREAD) : NULL;
     uintptr_t handle = 0;
     if (thread != NULL) {
+        /* CREATE_THREAD inherits its creator's primary group if this
+         * group is allowed in the caller's actual host cpuset. */
+        cpu_set_t creator_affinity;
+        if (pthread_getaffinity_np(pthread_self(), sizeof(creator_affinity),
+                                   &creator_affinity) == 0) {
+            struct nt_group_affinity inherited = {0};
+            if (thread_primary_affinity_locked(nt_GetCurrentThread(),
+                                               &creator_affinity, &inherited) ==
+                NT_STATUS_SUCCESS) {
+                thread->primary_group = inherited.group;
+                thread->primary_group_initialized = true;
+            }
+        }
         thread->start = start;
         thread->create_filetime = filetime_now();
         thread->parameter = parameter;
@@ -2279,36 +2301,70 @@ int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context6
     return status == NT_STATUS_SUCCESS;
 }
 
-/* Problem 6: explicit x64 processor-group affinity. Linux CPU indices
- * [group * 64, group * 64 + 63] map to Windows group-local bits. Unlike
- * the legacy group-0 KAFFINITY calls, this API never truncates CPUs >=64.
- * The 1024-CPU cpu_set_t bound is explicit: this is not a general NT
- * multi-group scheduler or a claim of arbitrary Windows group topology. */
+/* Problem 6: a guest's primary Windows group is an explicit identity,
+ * distinct from the thread's full Linux cpuset. Windows 11 can schedule
+ * a thread across multiple processor groups, while the group-local
+ * GROUP_AFFINITY/legacy APIs report and update its primary group. This
+ * bounded backend still maps Linux CPU IDs to group cpu / 64; it does
+ * not claim an arbitrary Windows NUMA/processor group topology. */
 _Static_assert(sizeof(struct nt_group_affinity) == 16,
                "Windows AMD64 GROUP_AFFINITY layout");
 _Static_assert(offsetof(struct nt_group_affinity, group) == 8,
                "GROUP_AFFINITY Group field offset");
 
-static nt_status group_from_host_affinity(const cpu_set_t *cpus,
-                                           struct nt_group_affinity *group)
+static uintptr_t affinity_mask_in_group(const cpu_set_t *cpus, uint16_t group)
 {
-    bool found = false;
-    uint16_t index = 0;
+    if ((size_t)group >= CPU_SETSIZE / 64)
+        return 0;
     uintptr_t mask = 0;
-    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
-        if (!CPU_ISSET(cpu, cpus))
-            continue;
-        const uint16_t cpu_group = (uint16_t)(cpu / 64);
-        if (found && cpu_group != index)
-            return NT_STATUS_NOT_SUPPORTED; /* No invented single group. */
-        index = cpu_group;
-        found = true;
-        mask |= (uintptr_t)UINT64_C(1) << (cpu % 64);
+    for (int bit = 0; bit < 64; ++bit)
+        if (CPU_ISSET((int)group * 64 + bit, cpus))
+            mask |= (uintptr_t)UINT64_C(1) << bit;
+    return mask;
+}
+
+/* Caller owns wait_lock, and the HANDLE was validated for the desired
+ * rights. Out-of-band affinity changes may invalidate the primary group;
+ * never silently invent a replacement group in that situation. */
+static nt_status thread_primary_affinity_locked(uintptr_t handle,
+                                                 const cpu_set_t *cpus,
+                                                 struct nt_group_affinity *result)
+{
+    struct waitable *state = handle == nt_GetCurrentThread() ?
+                             running_thread : wait_state(find_waitable(handle));
+    uint16_t *group = state != NULL ? &state->primary_group : &primary_thread_group;
+    bool *valid = state != NULL ? &state->primary_group_initialized :
+                                  &primary_thread_group_initialized;
+    if (!*valid) {
+        uint16_t first = UINT16_MAX;
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+            if (CPU_ISSET(cpu, cpus)) {
+                first = (uint16_t)(cpu / 64);
+                break;
+            }
+        if (first == UINT16_MAX)
+            return NT_STATUS_NOT_SUPPORTED;
+        *group = first;
+        *valid = true;
     }
-    if (!found)
+    const uintptr_t mask = affinity_mask_in_group(cpus, *group);
+    if (mask == 0)
         return NT_STATUS_NOT_SUPPORTED;
-    *group = (struct nt_group_affinity){.mask = mask, .group = index};
+    *result = (struct nt_group_affinity){.mask = mask, .group = *group};
     return NT_STATUS_SUCCESS;
+}
+
+static void update_thread_primary_group_locked(uintptr_t handle, uint16_t group)
+{
+    struct waitable *state = handle == nt_GetCurrentThread() ?
+                             running_thread : wait_state(find_waitable(handle));
+    if (state != NULL) {
+        state->primary_group = group;
+        state->primary_group_initialized = true;
+    } else {
+        primary_thread_group = group;
+        primary_thread_group_initialized = true;
+    }
 }
 
 static nt_status group_affinity_handle(uintptr_t handle, uint32_t access,
@@ -2355,7 +2411,7 @@ int32_t NT_MS_ABI nt_GetThreadGroupAffinity(uintptr_t handle,
             status = error == ESRCH ? NT_STATUS_THREAD_IS_TERMINATING :
                      error == EINVAL ? NT_STATUS_NOT_SUPPORTED : NT_STATUS_UNSUCCESSFUL;
         else
-            status = group_from_host_affinity(&current, &observed);
+            status = thread_primary_affinity_locked(handle, &current, &observed);
     }
     pthread_mutex_unlock(&wait_lock);
     if (status != NT_STATUS_SUCCESS) {
@@ -2406,11 +2462,10 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
             status = error == ESRCH ? NT_STATUS_THREAD_IS_TERMINATING :
                      error == EINVAL ? NT_STATUS_NOT_SUPPORTED : NT_STATUS_UNSUCCESSFUL;
         } else if (previous != NULL &&
-                   (status = group_from_host_affinity(&before, &old_group)) !=
+                   (status = thread_primary_affinity_locked(handle, &before, &old_group)) !=
                        NT_STATUS_SUCCESS) {
-            /* A host thread may initially be allowed on >1 Linux group.
-             * There is no truthful single GROUP_AFFINITY to return,
-             * so fail without ever modifying its host affinity. */
+            /* An externally modified cpuset may not overlap the stored
+             * primary group. Never return an invented previous affinity. */
         } else {
             error = pthread_setaffinity_np(host, sizeof(target), &target);
             if (error == EPERM || error == EACCES)
@@ -2425,11 +2480,18 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
                      !CPU_EQUAL(&target, &after)) {
                 /* Linux cpusets can silently intersect a requested mask.
                  * Never report success on partial application. */
-                (void)pthread_setaffinity_np(host, sizeof(before), &before);
-                status = NT_STATUS_UNSUCCESSFUL;
+                cpu_set_t restored;
+                if (pthread_setaffinity_np(host, sizeof(before), &before) != 0 ||
+                    pthread_getaffinity_np(host, sizeof(restored), &restored) != 0 ||
+                    !CPU_EQUAL(&before, &restored))
+                    status = NT_STATUS_UNSUCCESSFUL;
+                else
+                    status = NT_STATUS_INVALID_PARAMETER;
             }
         }
     }
+    if (status == NT_STATUS_SUCCESS)
+        update_thread_primary_group_locked(handle, desired->group);
     pthread_mutex_unlock(&wait_lock);
     if (status != NT_STATUS_SUCCESS) {
         nt_SetLastError(nt_runtime_nt_error(status));
@@ -2440,12 +2502,9 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
     return 1;
 }
 
-/* Legacy SetThreadAffinityMask is relative to the current processor group
- * of the target thread, not unconditionally to Linux CPUs 0..63. Once a
- * thread has an unambiguous group affinity (typically after an explicit
- * SetThreadGroupAffinity), this preserves its group and changes only the
- * group-local 64-bit KAFFINITY. A host cpuset spanning multiple groups
- * cannot yield an honest previous KAFFINITY: reject it without mutation. */
+/* SetThreadAffinityMask is relative to the explicit primary group.
+ * With a multigroup host cpuset, it returns only the previous primary
+ * group's mask, then confines the Linux thread to that group's bits. */
 static nt_status set_guest_thread_affinity(uintptr_t handle, uintptr_t requested,
                                             uintptr_t *previous)
 {
@@ -2475,7 +2534,7 @@ static nt_status set_guest_thread_affinity(uintptr_t handle, uintptr_t requested
             result = err == ESRCH ? NT_STATUS_THREAD_IS_TERMINATING : NT_STATUS_UNSUCCESSFUL;
         else {
             struct nt_group_affinity old_group = {0};
-            result = group_from_host_affinity(&before, &old_group);
+            result = thread_primary_affinity_locked(handle, &before, &old_group);
             if (result == NT_STATUS_SUCCESS) {
                 const uint16_t group = old_group.group;
                 /* Validate against the sandbox's startup CPU entitlement.
@@ -2541,6 +2600,77 @@ nt_status NT_MS_ABI nt_NtSetInformationThread(uintptr_t thread, uint32_t info_cl
     uintptr_t mask = 0;
     memcpy(&mask, data, sizeof(mask));
     return set_guest_thread_affinity(thread, mask, NULL);
+}
+
+/* GetProcessGroupAffinity reports the groups in which runtime-owned
+ * guest threads (including the process leader) can actually execute.
+ * This is not the global Linux CPU topology and does not grant access
+ * to an arbitrary host PID. Canonical threads and their scheduling
+ * identity are protected by wait_lock. */
+int32_t NT_MS_ABI nt_GetProcessGroupAffinity(uintptr_t process,
+                                              uint16_t *count,
+                                              uint16_t *groups)
+{
+    if (count == NULL || groups == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const nt_status access = nt_runtime_check_self_process(process, 0x1400u);
+    if (access != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(access));
+        return 0;
+    }
+    ensure_processor_groups();
+    bool present[CPU_SETSIZE / 64] = {0};
+    pthread_mutex_lock(&wait_lock);
+    bool valid = true;
+    cpu_set_t mask;
+    if (sched_getaffinity((pid_t)getpid(), sizeof(mask), &mask) != 0)
+        valid = false;
+    else {
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+            if (CPU_ISSET(cpu, &mask))
+                present[cpu / 64] = true;
+    }
+    for (size_t i = 0; i < WAITABLE_COUNT && valid; ++i) {
+        const struct waitable *item = &waitables[i];
+        if (item->kind != THREAD || item->shared != NULL ||
+            (item->refs == 0 && item->links == 0) ||
+            item->owner_pid != (uint32_t)getpid() || item->signaled ||
+            !item->started)
+            continue;
+        if (sched_getaffinity((pid_t)item->thread_id, sizeof(mask), &mask) != 0) {
+            valid = false;
+            break;
+        }
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+            if (CPU_ISSET(cpu, &mask))
+                present[cpu / 64] = true;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (!valid) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    uint16_t needed = 0;
+    for (size_t i = 0; i < CPU_SETSIZE / 64; ++i)
+        if (present[i])
+            ++needed;
+    if (needed == 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (*count < needed) {
+        *count = needed;
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    uint16_t written = 0;
+    for (uint16_t i = 0; i < CPU_SETSIZE / 64; ++i)
+        if (present[i])
+            groups[written++] = i;
+    *count = needed;
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *process_mask,
