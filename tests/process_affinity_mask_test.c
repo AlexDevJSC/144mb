@@ -133,13 +133,31 @@ int main(void)
     uintptr_t worker = nt_CreateThread(NULL, 0, affinity_worker, NULL, 4u, NULL);
     check(worker != 0, "create a suspended runtime-owned thread");
     if (worker) {
-        nt_SetLastError(0);
-        check(!nt_SetProcessAffinityMask(set_only, baseline_mask) &&
-              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED,
-              "reject process-wide mutation while another pthread exists");
+        nt_SetLastError(0x7272u);
+        check(nt_SetProcessAffinityMask(set_only, baseline_mask) &&
+              nt_GetLastError() == 0x7272u,
+              "change affinity of ALL tracked Windows threads, including suspended");
+        uint32_t worker_id = nt_GetThreadId(worker);
+        cpu_set_t worker_observed;
+        check(worker_id != 0 &&
+              sched_getaffinity((pid_t)worker_id, sizeof(worker_observed),
+                                &worker_observed) == 0 &&
+              CPU_EQUAL(&worker_observed, &baseline),
+              "worker TID actually received process-wide mask");
         check(sched_getaffinity(0, sizeof(observed), &observed) == 0 &&
-              CPU_EQUAL(&observed, &expected),
-              "failed multithread request did not partially change current TID");
+              CPU_EQUAL(&observed, &baseline),
+              "current Linux TID also received process-wide mask");
+        check(nt_GetProcessAffinityMask(UINTPTR_MAX, &process_mask, &system_mask) &&
+              process_mask == baseline_mask && system_mask == baseline_mask,
+              "Win32 query reports updated process policy independently of thread");
+        check(nt_SetProcessAffinityMask(set_only, first_mask),
+              "process-wide transition back to single CPU");
+        check(sched_getaffinity(0, sizeof(observed), &observed) == 0 &&
+              CPU_EQUAL(&observed, &expected) &&
+              sched_getaffinity((pid_t)worker_id, sizeof(worker_observed),
+                                &worker_observed) == 0 &&
+              CPU_EQUAL(&worker_observed, &expected),
+              "all tracked TIDs restored to single permitted CPU");
         check(nt_ResumeThread(worker) == 1 &&
               nt_WaitForSingleObject(worker, 5000) == 0,
               "resume and join the unchanged worker");
@@ -154,6 +172,6 @@ int main(void)
     check(sched_setaffinity(0, sizeof(original), &original) == 0,
           "restore original host cpuset");
     if (!failures)
-        puts("PASS SetProcessAffinityMask: real Linux affinity, stable system mask, rights, multithread rejection and restoration");
+        puts("PASS SetProcessAffinityMask: real multithread Linux affinity, stable system mask, rights and restoration");
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
