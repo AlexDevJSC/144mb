@@ -68,6 +68,8 @@ struct waitable {
     bool manual, signaled, started, alerted;
     bool termination_requested, child_guest, terminate_at_start, self_process;
     int32_t semaphore_count, semaphore_maximum;
+    bool brokered;
+    struct nt_broker_resource broker;
     uintptr_t teb_base;
     struct guest_apc_queue apcs;
     uint32_t suspend_count;
