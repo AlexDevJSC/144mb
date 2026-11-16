@@ -1348,6 +1348,30 @@ static void check_native_file_namespaces(void)
     CHECK(nt_CloseHandle(handle) &&
           nt_GetFileAttributesA("C:\\native-delete.bin") == UINT32_MAX);
 
+
+    /* A self-relative security descriptor exposes Linux owner/group/mode
+     * without claiming support for NTFS ACL writes or SACL privileges. */
+    BOUND("ADVAPI32.dll", GetFileSecurityA);
+    BOUND("ADVAPI32.dll", GetFileSecurityW);
+    uintptr_t secure_file = nt_CreateFileA("C:\\security-mode.bin",
+        UINT32_C(0xc0000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(secure_file != UINTPTR_MAX && nt_CloseHandle(secure_file));
+    uint8_t sd[128] = {0};
+    uint32_t required = 0;
+    CHECK(!nt_GetFileSecurityW(u"C:\\security-mode.bin", 7u,
+                                NULL, 0u, &required) &&
+          last_error() == NT_ERROR_INSUFFICIENT_BUFFER && required == 128u);
+    CHECK(nt_GetFileSecurityA("C:\\security-mode.bin", 7u, sd, sizeof(sd),
+                               &required) && required == sizeof(sd) &&
+          sd[0] == 1u && sd[2] == 4u && sd[3] == 0x80u &&
+          sd[4] == 20u && sd[8] == 36u && sd[16] == 52u &&
+          sd[20] == 1u && sd[21] == 2u && sd[27] == 22u &&
+          sd[52] == 2u && sd[54] == 76u && sd[56] == 3u);
+    CHECK(!nt_GetFileSecurityW(u"C:\\security-mode.bin", 8u, sd,
+                                sizeof(sd), &required) &&
+          last_error() == NT_ERROR_ACCESS_DENIED &&
+          nt_DeleteFileA("C:\\security-mode.bin"));
+
     CHECK(nt_runtime_set_unc_root("lab", "share", NULL) &&
           nt_runtime_set_drive_root('D', NULL) &&
           nt_runtime_set_file_root(NULL) &&
