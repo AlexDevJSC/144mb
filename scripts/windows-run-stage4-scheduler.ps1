@@ -20,12 +20,18 @@ if (-not $install) { throw "No MSVC x64 toolset found." }
 $vcvars = Join-Path $install "VC/Auxiliary/Build/vcvars64.bat"
 if (-not (Test-Path $vcvars)) { throw "Missing vcvars64.bat" }
 $source = Join-Path $root "tests/windows/stage4_scheduler_probe.c"
+$fixture = Join-Path $root "tests/pe/thread_group_affinity_fixture.c"
 $exe = Join-Path $build "stage4-scheduler-native.exe"
+$fixtureExe = Join-Path $build "stage4-group-fixture-native.exe"
 $compileCmd = Join-Path $build "compile-stage4-windows.cmd"
 @"
 @echo off
 call "$vcvars" >nul || exit /b 1
 cl /nologo /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Fe:"$exe" "$source" /link kernel32.lib
+if errorlevel 1 exit /b 1
+rem The EXACT same PE fixture used by the Linux guest runtime is now
+rem compiled and run natively. A behavior divergence is preserved, never hidden.
+cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Dimport_fixture_entry=main /Fe:"$fixtureExe" "$fixture" /link kernel32.lib
 exit /b %errorlevel%
 "@ | Set-Content -Encoding ASCII $compileCmd
 & cmd.exe /d /c "`"$compileCmd`""
@@ -41,6 +47,20 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath) | Out
 $exit = $LASTEXITCODE
 Get-Content $OutputPath
 if ($exit -ne 0) { throw "Native Windows scheduler probe failed (exit $exit). Evidence: $OutputPath" }
+# Diagnostic comparison, not an assertion of full Windows parity:
+# the fixture may encode an overly narrow Linux contract. Preserve the
+# native Windows exit code as evidence rather than treating it as a PASS.
+& $fixtureExe | Out-Null
+$fixtureExit = $LASTEXITCODE
+$fixtureReport = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-linux-fixture.txt"
+@(
+    "SCHEMA=ntnative.stage4.fixture.crossos.v1"
+    "PLATFORM=WINDOWS_NATIVE"
+    "PE_GROUP_FIXTURE_EXIT=$fixtureExit"
+    "PE_GROUP_FIXTURE_RESULT=$(if ($fixtureExit -eq 0) { 'MATCHED' } else { 'DIVERGED' })"
+    "NOTE=This is the same tests/pe/thread_group_affinity_fixture.c used by Linux guest CI"
+) | Set-Content -Encoding ASCII $fixtureReport
+Get-Content $fixtureReport
 $entries = @{}
 foreach ($line in (Get-Content $OutputPath)) {
     if ($line -match '^([A-Z_]+)=(.*)$') { $entries[$matches[1]] = $matches[2] }
