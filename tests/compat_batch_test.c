@@ -648,6 +648,23 @@ static void check_files(void)
           memcmp(buffer, "a\nb\n", 4) == 0 && nt_fclose(text) == 0);
     CHECK(nt_fclose(NULL) == EOF && errno == EINVAL);
 
+    char real_case_path[256] = {0};
+    static const uint16_t real_case_w[] = u"C:\\data\\scores.txt";
+    uint16_t real_case_out[128] = {0};
+    CHECK(nt_GetLongPathNameA("C:\\DATA\\SCORES.TXT", real_case_path,
+                              sizeof(real_case_path)) ==
+          strlen("C:\\data\\scores.txt") &&
+          strcmp(real_case_path, "C:\\data\\scores.txt") == 0);
+    CHECK(nt_GetLongPathNameW(u"C:\\DATA\\SCORES.TXT", real_case_out, 128) ==
+          sizeof(real_case_w) / sizeof(real_case_w[0]) - 1 &&
+          memcmp(real_case_out, real_case_w, sizeof(real_case_w)) == 0);
+    CHECK(nt_GetLongPathNameA("C:\\DATA\\SCORES.TXT", real_case_path, 1) ==
+          strlen("C:\\data\\scores.txt") + 1);
+    CHECK(nt_GetLongPathNameW(u"C:\\DATA\\NOT-THERE.DAT",
+                              real_case_out, 128) == 0 &&
+          last_error() == NT_ERROR_FILE_NOT_FOUND);
+
+
     raw = nt_fopen("data/target.txt", "wb");
     CHECK(raw != NULL && nt_fclose(raw) == 0);
     /* A symlink leaf is inspectable only through an explicit no-follow
