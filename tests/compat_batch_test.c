@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -685,6 +686,12 @@ static void check_files(void)
                                 sizeof(short1)) ==
           strlen("C:\\DATA\\LONGFI~1.TXT") &&
           strcmp(short1, "C:\\DATA\\LONGFI~1.TXT") == 0);
+    char host_real[512], stored_alias[14] = {0};
+    CHECK(snprintf(host_real, sizeof(host_real),
+                   "%s/data/longfilename.txt", root) > 0);
+    CHECK(getxattr(host_real, "user.ntnative.dos83", stored_alias,
+                   sizeof(stored_alias)) == (ssize_t)strlen("LONGFI~1.TXT") + 1 &&
+          strcmp(stored_alias, "LONGFI~1.TXT") == 0);
     CHECK(nt_GetShortPathNameA("C:\\DATA\\longfileextra.txt", short2,
                                 sizeof(short2)) ==
           strlen("C:\\DATA\\LONGFI~2.TXT") &&
