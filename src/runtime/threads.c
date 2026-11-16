@@ -47,6 +47,14 @@ struct guest_apc_queue {
     struct guest_apc *head, *tail;
     uint32_t count;
 };
+/* The bounded Linux backend can boost a guest by one Linux nice step
+ * and automatically restore its original base after a monotonic deadline.
+ * This is NOT Windows NT's full dynamic priority decay formula. */
+struct guest_dynamic_boost {
+    bool disabled, active;
+    int base_nice;
+    struct timespec expires;
+};
 struct waitable {
     uintptr_t handle;
     unsigned int refs;
@@ -88,6 +96,7 @@ struct waitable {
     bool explicit_group_outside_process;
     int final_nice;
     bool final_nice_valid;
+    struct guest_dynamic_boost dynamic_boost;
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
@@ -108,6 +117,16 @@ static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
 static _Thread_local uint16_t primary_thread_group;
 static _Thread_local bool primary_thread_group_initialized;
+/* Only the main thread has a pseudo-handle that the decay worker can
+ * identify cross-thread. All other guest threads use canonical waitables. */
+static struct guest_dynamic_boost leader_dynamic_boost;
+static bool process_dynamic_boost_disabled;
+static bool boost_rollback_failed;
+static int boost_monitor_state; /* 0: unstarted, 1: running, -1: unavailable */
+static pid_t boost_monitor_tid;
+static bool scheduler_can_restore_nice(int requested_nice);
+static void scheduler_guest_wait_woke_locked(void);
+static bool scheduler_has_active_boosts_locked(void);
 /* Needed by CreateThread before the group-affinity API definitions below. */
 static nt_status thread_primary_affinity_locked(uintptr_t handle,
                                                  const cpu_set_t *cpus,
@@ -1328,6 +1347,7 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
     pthread_mutex_lock(&wait_lock);
     nt_status result = acquire_wait_objects(objects, count, handles);
     struct guest_apc *apc = NULL;
+    bool really_waited = false;
     if (result == NT_STATUS_SUCCESS) {
         int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
         for (;;) {
@@ -1346,6 +1366,7 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
             result = check_wait_objects(objects, count, type == 0);
             if (result != NT_STATUS_TIMEOUT || error)
                 break;
+            really_waited = true;
             error = timeout ? pthread_cond_clockwait(&wait_changed, &wait_lock, deadline.clock, &deadline.time) :
                               pthread_cond_wait(&wait_changed, &wait_lock);
         }
@@ -1354,6 +1375,12 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
         for (uint32_t i = 0; i < count; ++i)
             release_waitable(objects[i]);
     }
+    /* A signal must satisfy a REAL blocked guest wait, not timeout/poll.
+     * The monitor restores nice on a monotonic deadline independently
+     * of subsequent guest calls, even if the guest becomes CPU-bound. */
+    if (really_waited && result >= NT_STATUS_SUCCESS &&
+        result < (nt_status)MAXIMUM_WAIT_OBJECTS)
+        scheduler_guest_wait_woke_locked();
     pthread_mutex_unlock(&wait_lock);
     if (apc != NULL)
         invoke_apc(apc);
@@ -1855,6 +1882,10 @@ static void finish_thread(struct nt_guest_thread *guest, bool attached)
     errno = 0;
     running_thread->final_nice = getpriority(PRIO_PROCESS, (id_t)gettid());
     running_thread->final_nice_valid = errno == 0;
+    if (running_thread->dynamic_boost.active) {
+        running_thread->final_nice = running_thread->dynamic_boost.base_nice;
+        running_thread->dynamic_boost.active = false;
+    }
     running_thread->exit_code = thread_result;
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     clear_apcs_locked(&running_thread->apcs);
@@ -2846,7 +2877,8 @@ struct scheduler_thread_set {
 
 static bool tracked_scheduler_tid_locked(pid_t tid)
 {
-    if (tid == getpid())
+    if (tid == getpid() || (boost_monitor_state == 1 &&
+                             tid == boost_monitor_tid && tid > 0))
         return true;
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         const struct waitable *item = &waitables[i];
@@ -3214,6 +3246,11 @@ int32_t NT_MS_ABI nt_SetPriorityClass(uintptr_t process, uint32_t klass)
         return 0;
     }
     pthread_mutex_lock(&wait_lock);
+    if (scheduler_has_active_boosts_locked()) {
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0; /* do not overwrite a base while decay still owns it */
+    }
     const int old_base = process_priority_nice_base;
     if (klass == process_priority_class) {
         pthread_mutex_unlock(&wait_lock);
@@ -3327,12 +3364,207 @@ static nt_status priority_thread_tid_locked(uintptr_t handle, uint32_t rights, p
     return NT_STATUS_SUCCESS;
 }
 
-/* Priority boost is an actual NT dynamic scheduler policy, not a flag on
- * Linux nice values. Until a verified boost/decay mechanism is integrated,
- * deliberately refuse to claim Get/Set*PriorityBoost succeeded. Rights and
- * ownership are still checked before reporting the unsupported contract.
- * Output parameters are never written on failure. No host TIDs are accepted
- * from guest handles, and these APIs do not alter host scheduling. */
+/* Bounded, opt-in dynamic boost. A private Linux pthread restores an owned
+ * guest TID after a monotonic deadline. No asynchronous signals, ptrace,
+ * realtime scheduling, raw guest PIDs or access to foreign Linux threads.
+ * Every mutation is verified with getpriority; the monitor only uses guest
+ * objects protected by wait_lock so TID reuse cannot race termination.
+ *
+ * One nice step for up to 20 ms is a measurable Linux approximation,
+ * NOT an asserted equivalent of NT quantum or event-dependent boost curves.
+ * This path is enabled only with NT_NATIVE_EXPERIMENTAL_BOOST=1 and enough
+ * Linux privilege to both adjust and restore scheduling. */
+enum { EXPERIMENTAL_BOOST_NS = 20000000L };
+static bool boost_time_reached(const struct timespec *now,
+                               const struct timespec *until)
+{
+    return now->tv_sec > until->tv_sec ||
+           (now->tv_sec == until->tv_sec &&
+            now->tv_nsec >= until->tv_nsec);
+}
+
+static bool restore_dynamic_boost_locked(pid_t tid,
+                                         struct guest_dynamic_boost *boost)
+{
+    if (!boost->active)
+        return true;
+    errno = 0;
+    const int observed = getpriority(PRIO_PROCESS, (id_t)tid);
+    if (errno != 0 || observed != boost->base_nice - 1) {
+        if (errno == 0 && observed == boost->base_nice) {
+            boost->active = false;
+            return true;
+        }
+        boost_rollback_failed = true;
+        return false;
+    }
+    if (setpriority(PRIO_PROCESS, (id_t)tid, boost->base_nice) != 0) {
+        boost_rollback_failed = true;
+        return false;
+    }
+    errno = 0;
+    if (getpriority(PRIO_PROCESS, (id_t)tid) != boost->base_nice ||
+        errno != 0) {
+        boost_rollback_failed = true;
+        return false;
+    }
+    boost->active = false;
+    return true;
+}
+
+static void *dynamic_boost_decay_worker(void *ignored)
+{
+    (void)ignored;
+    pthread_mutex_lock(&wait_lock);
+    boost_monitor_tid = gettid();
+    pthread_cond_broadcast(&wait_changed);
+    for (;;) {
+        struct timespec now, earliest = {0};
+        const bool clock_ok = clock_gettime(CLOCK_MONOTONIC, &now) == 0;
+        bool pending = false;
+        struct guest_dynamic_boost *leader = &leader_dynamic_boost;
+        if (leader->active) {
+            if (clock_ok && boost_time_reached(&now, &leader->expires))
+                (void)restore_dynamic_boost_locked(getpid(), leader);
+            if (leader->active) {
+                if (clock_ok && boost_time_reached(&now, &leader->expires))
+                    leader->expires = (struct timespec){.tv_sec = now.tv_sec,
+                        .tv_nsec = now.tv_nsec + EXPERIMENTAL_BOOST_NS};
+                if (leader->expires.tv_nsec >= 1000000000L) {
+                    ++leader->expires.tv_sec;
+                    leader->expires.tv_nsec -= 1000000000L;
+                }
+                earliest = leader->expires;
+                pending = true;
+            }
+        }
+        for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+            struct waitable *item = &waitables[i];
+            if (item->kind != THREAD || item->shared != NULL ||
+                item->owner_pid != (uint32_t)getpid() ||
+                !item->started || item->signaled || !item->dynamic_boost.active)
+                continue;
+            struct guest_dynamic_boost *boost = &item->dynamic_boost;
+            if (clock_ok && boost_time_reached(&now, &boost->expires))
+                (void)restore_dynamic_boost_locked((pid_t)item->thread_id, boost);
+            if (!boost->active)
+                continue;
+            if (clock_ok && boost_time_reached(&now, &boost->expires)) {
+                boost->expires = now;
+                boost->expires.tv_nsec += EXPERIMENTAL_BOOST_NS;
+                if (boost->expires.tv_nsec >= 1000000000L) {
+                    ++boost->expires.tv_sec;
+                    boost->expires.tv_nsec -= 1000000000L;
+                }
+            }
+            if (!pending || boost_time_reached(&earliest, &boost->expires))
+                earliest = boost->expires;
+            pending = true;
+        }
+        if (!pending || !clock_ok)
+            (void)pthread_cond_wait(&wait_changed, &wait_lock);
+        else
+            (void)pthread_cond_clockwait(&wait_changed, &wait_lock,
+                                        CLOCK_MONOTONIC, &earliest);
+    }
+    /* No detached worker shutdown is required: process teardown ends it. */
+    return NULL;
+}
+
+static bool ensure_dynamic_boost_monitor_locked(void)
+{
+    if (boost_monitor_state != 0)
+        return boost_monitor_state == 1 && !boost_rollback_failed;
+    const char *opt_in = getenv("NT_NATIVE_EXPERIMENTAL_BOOST");
+    if (opt_in == NULL || strcmp(opt_in, "1") != 0)
+        return false;
+    errno = 0;
+    const int nice = getpriority(PRIO_PROCESS, (id_t)gettid());
+    if (errno != 0 || nice <= -20 || !scheduler_can_restore_nice(nice - 1))
+        return false;
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0)
+        return false;
+    const int detach_error = pthread_attr_setdetachstate(&attr,
+                                                         PTHREAD_CREATE_DETACHED);
+    pthread_t monitor;
+    const int error = detach_error == 0 ?
+        pthread_create(&monitor, &attr, dynamic_boost_decay_worker, NULL) :
+        detach_error;
+    pthread_attr_destroy(&attr);
+    if (error != 0) {
+        boost_monitor_state = -1;
+        return false;
+    }
+    boost_monitor_state = 1;
+    return true;
+}
+
+static struct guest_dynamic_boost *dynamic_boost_for_thread_locked(
+    uintptr_t handle)
+{
+    if (handle == nt_GetCurrentThread()) {
+        if (running_thread != NULL)
+            return &running_thread->dynamic_boost;
+        return gettid() == getpid() ? &leader_dynamic_boost : NULL;
+    }
+    struct waitable *entry = find_waitable(handle);
+    return entry != NULL && entry->kind == THREAD ?
+           &wait_state(entry)->dynamic_boost : NULL;
+}
+
+static bool scheduler_has_active_boosts_locked(void)
+{
+    if (leader_dynamic_boost.active)
+        return true;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i)
+        if (waitables[i].kind == THREAD && waitables[i].shared == NULL &&
+            waitables[i].dynamic_boost.active)
+            return true;
+    return false;
+}
+
+/* Invoked only after a guest NT object wait actually blocked and then
+ * completed successfully; no boost for timeout, polling, or failed waits. */
+static void scheduler_guest_wait_woke_locked(void)
+{
+    if (!ensure_dynamic_boost_monitor_locked() ||
+        process_dynamic_boost_disabled || boost_rollback_failed)
+        return;
+    struct guest_dynamic_boost *boost =
+        dynamic_boost_for_thread_locked(nt_GetCurrentThread());
+    if (boost == NULL || boost->disabled || boost->active)
+        return;
+    const pid_t tid = gettid();
+    errno = 0;
+    const int base = getpriority(PRIO_PROCESS, (id_t)tid);
+    if (errno != 0 || base <= -20 || !scheduler_can_restore_nice(base - 1))
+        return;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return;
+    if (setpriority(PRIO_PROCESS, (id_t)tid, base - 1) != 0)
+        return;
+    errno = 0;
+    if (getpriority(PRIO_PROCESS, (id_t)tid) != base - 1 || errno != 0) {
+        (void)setpriority(PRIO_PROCESS, (id_t)tid, base);
+        boost_rollback_failed = true;
+        return;
+    }
+    boost->base_nice = base;
+    boost->expires = now;
+    boost->expires.tv_nsec += EXPERIMENTAL_BOOST_NS;
+    if (boost->expires.tv_nsec >= 1000000000L) {
+        ++boost->expires.tv_sec;
+        boost->expires.tv_nsec -= 1000000000L;
+    }
+    boost->active = true;
+    pthread_cond_broadcast(&wait_changed);
+}
+
+/* Boost control APIs report success ONLY for a live, privileged and
+ * explicitly opted-in dynamic scheduler backend. Normal unprivileged
+ * launches continue to fail closed; never fake Windows policy state. */
 int32_t NT_MS_ABI nt_GetThreadPriorityBoost(uintptr_t handle, int32_t *disabled)
 {
     if (disabled == NULL) {
@@ -3343,23 +3575,43 @@ int32_t NT_MS_ABI nt_GetThreadPriorityBoost(uintptr_t handle, int32_t *disabled)
     pid_t tid = 0;
     const nt_status status = priority_thread_tid_locked(handle,
         THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, &tid);
+    struct guest_dynamic_boost *boost = status == NT_STATUS_SUCCESS ?
+        dynamic_boost_for_thread_locked(handle) : NULL;
+    const bool available = boost != NULL &&
+        ensure_dynamic_boost_monitor_locked();
+    if (available)
+        *disabled = boost->disabled ? 1 : 0;
     pthread_mutex_unlock(&wait_lock);
-    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
-                    nt_runtime_nt_error(status));
-    return 0;
+    if (status != NT_STATUS_SUCCESS || !available) {
+        nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
+                        nt_runtime_nt_error(status));
+        return 0;
+    }
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_SetThreadPriorityBoost(uintptr_t handle, int32_t disabled)
 {
-    (void)disabled;
     pthread_mutex_lock(&wait_lock);
     pid_t tid = 0;
     const nt_status status = priority_thread_tid_locked(handle,
         THREAD_SET_INFORMATION, &tid);
+    struct guest_dynamic_boost *boost = status == NT_STATUS_SUCCESS ?
+        dynamic_boost_for_thread_locked(handle) : NULL;
+    const bool available = boost != NULL &&
+        ensure_dynamic_boost_monitor_locked();
+    bool restored = true;
+    if (available && disabled && boost->active)
+        restored = restore_dynamic_boost_locked(tid, boost);
+    if (available && restored)
+        boost->disabled = disabled != 0;
     pthread_mutex_unlock(&wait_lock);
-    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
-                    nt_runtime_nt_error(status));
-    return 0;
+    if (status != NT_STATUS_SUCCESS || !available || !restored) {
+        nt_SetLastError(status != NT_STATUS_SUCCESS ? nt_runtime_nt_error(status) :
+                        !available ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_GetProcessPriorityBoost(uintptr_t handle, int32_t *disabled)
@@ -3369,18 +3621,49 @@ int32_t NT_MS_ABI nt_GetProcessPriorityBoost(uintptr_t handle, int32_t *disabled
         return 0;
     }
     const nt_status status = nt_runtime_check_self_process(handle, 0x1400u);
-    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
-                    nt_runtime_nt_error(status));
-    return 0;
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    const bool available = ensure_dynamic_boost_monitor_locked();
+    if (available)
+        *disabled = process_dynamic_boost_disabled ? 1 : 0;
+    pthread_mutex_unlock(&wait_lock);
+    if (!available)
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    return available ? 1 : 0;
 }
 
 int32_t NT_MS_ABI nt_SetProcessPriorityBoost(uintptr_t handle, int32_t disabled)
 {
-    (void)disabled;
     const nt_status status = nt_runtime_check_self_process(handle, 0x200u);
-    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
-                    nt_runtime_nt_error(status));
-    return 0;
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    const bool available = ensure_dynamic_boost_monitor_locked();
+    bool restored = true;
+    if (available && disabled) {
+        restored = restore_dynamic_boost_locked(getpid(), &leader_dynamic_boost);
+        for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+            struct waitable *item = &waitables[i];
+            if (item->kind == THREAD && item->shared == NULL &&
+                !item->signaled && item->dynamic_boost.active &&
+                item->owner_pid == (uint32_t)getpid() &&
+                !restore_dynamic_boost_locked((pid_t)item->thread_id,
+                                             &item->dynamic_boost))
+                restored = false;
+        }
+    }
+    if (available && restored)
+        process_dynamic_boost_disabled = disabled != 0;
+    pthread_mutex_unlock(&wait_lock);
+    if (!available || !restored)
+        nt_SetLastError(!available ? NT_ERROR_NOT_SUPPORTED :
+                        NT_ERROR_GEN_FAILURE);
+    return available && restored ? 1 : 0;
 }
 
 /* Native KPRIORITY values for the subset of Windows relative priorities
@@ -3420,6 +3703,18 @@ nt_status nt_runtime_query_thread_scheduling(uintptr_t handle, uintptr_t *affini
             errno = 0;
             nice = getpriority(PRIO_PROCESS, (id_t)tid);
             valid = errno == 0;
+            if (valid && state != NULL && state->dynamic_boost.active) {
+                if (nice != state->dynamic_boost.base_nice - 1)
+                    valid = false;
+                else
+                    nice = state->dynamic_boost.base_nice;
+            } else if (valid && state == NULL && gettid() == getpid() &&
+                       leader_dynamic_boost.active) {
+                if (nice != leader_dynamic_boost.base_nice - 1)
+                    valid = false;
+                else
+                    nice = leader_dynamic_boost.base_nice;
+            }
         }
         int32_t relative = 0;
         if (!valid || mask == 0 || !host_nice_priority(nice - process_priority_nice_base, &relative))
@@ -3452,6 +3747,12 @@ int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority)
     if (status != NT_STATUS_SUCCESS) {
         pthread_mutex_unlock(&wait_lock);
         nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    struct guest_dynamic_boost *boost = dynamic_boost_for_thread_locked(handle);
+    if (boost != NULL && boost->active) {
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
     errno = 0;
@@ -3504,9 +3805,17 @@ int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle)
     const int actual = getpriority(PRIO_PROCESS, (id_t)tid);
     const int failure = errno;
     const int nice_base = process_priority_nice_base;
+    const struct guest_dynamic_boost *boost = dynamic_boost_for_thread_locked(handle);
+    int stable = actual;
+    bool boost_consistent = true;
+    if (boost != NULL && boost->active) {
+        boost_consistent = failure == 0 && actual == boost->base_nice - 1;
+        if (boost_consistent)
+            stable = boost->base_nice;
+    }
     int32_t relative = 0;
-    const bool representable = failure == 0 &&
-                              host_nice_priority(actual - nice_base, &relative);
+    const bool representable = failure == 0 && boost_consistent &&
+                              host_nice_priority(stable - nice_base, &relative);
     pthread_mutex_unlock(&wait_lock);
     if (failure != 0) {
         nt_SetLastError(failure == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);

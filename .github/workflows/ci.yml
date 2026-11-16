@@ -38,6 +38,11 @@ jobs:
           command -v prlimit
           sudo prlimit --nice=40:40 -- env NT_REQUIRE_POSITIVE_MULTITHREAD_PRIORITY=1 \
             ./build/process-priority-multithread-test
+      - name: Real bounded wake boost and automatic decay with reversible nice
+        run: |
+          # Permission only for this disposable guest process; no host TIDs.
+          sudo prlimit --nice=40:40 -- env NT_NATIVE_EXPERIMENTAL_BOOST=1 \
+            NT_REQUIRE_POSITIVE_BOOST=1 ./build/dynamic-priority-boost-test
       - name: Diagnose native Vulkan without claiming D3D12 compatibility
         run: build/nt-vulkan-probe
       - name: Paint and close a PE fixture under Wayland
