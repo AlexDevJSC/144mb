@@ -243,6 +243,28 @@ uintptr_t NT_MS_ABI nt_OpenFileMappingW(uint32_t access, int32_t inherit,
     return result;
 }
 
+/* The A API always uses the declared process ACP, not a heuristic
+ * UTF-8/CP1252 fallback. Names are converted once at the Win32 boundary. */
+uintptr_t NT_MS_ABI nt_CreateFileMappingA(uintptr_t file, const void *security,
+    uint32_t protect, uint32_t high, uint32_t low, const char *name)
+{
+    uint16_t wide[SECTION_NAME_LIMIT + 1];
+    if (name && !nt_MultiByteToWideChar(nt_GetACP(), 0, name, -1,
+                                         wide, SECTION_NAME_LIMIT + 1))
+        return 0;
+    return nt_CreateFileMappingW(file, security, protect, high, low,
+                                 name ? wide : NULL);
+}
+uintptr_t NT_MS_ABI nt_OpenFileMappingA(uint32_t access, int32_t inherit,
+                                        const char *name)
+{
+    uint16_t wide[SECTION_NAME_LIMIT + 1];
+    if (name && !nt_MultiByteToWideChar(nt_GetACP(), 0, name, -1,
+                                         wide, SECTION_NAME_LIMIT + 1))
+        return 0;
+    return nt_OpenFileMappingW(access, inherit, name ? wide : NULL);
+}
+
 void *NT_MS_ABI nt_MapViewOfFile(uintptr_t mapping, uint32_t access,
                                 uint32_t offset_high, uint32_t offset_low,
                                 size_t length)
