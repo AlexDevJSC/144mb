@@ -88,7 +88,20 @@ static void dos83_make(const char *name, unsigned int ordinal, char alias[14])
             if (dos83_char(c))
                 ext[e++] = (char)c;
         }
-    snprintf(alias, 14, "%s~%u%s%s", stem, ordinal, e ? "." : "", ext);
+    /* The 8.3 field is at most 8+1+3 bytes; assemble with the
+     * already bounded stem/digit/extension lengths (no truncation). */
+    size_t result = 0;
+    memcpy(alias + result, stem, p);
+    result += p;
+    alias[result++] = '~';
+    memcpy(alias + result, digit, digit_len);
+    result += digit_len;
+    if (e) {
+        alias[result++] = '.';
+        memcpy(alias + result, ext, e);
+        result += e;
+    }
+    alias[result] = 0;
 }
 
 static int dos83_collision(int parent, const char *owner, const char *alias)
