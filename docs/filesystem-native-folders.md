@@ -585,6 +585,30 @@ completa de vínculos duros ni coordinación con procesos Linux que ignoren
 los bloqueos advisory. No se debe declarar esto equivalente a NTFS ni
 aprobar en Fedora físico sin pruebas de cambio de raíz, caída y recuperación.
 
+## Seguridad: lectura limitada de descriptores NT a partir de permisos Linux
+
+`GetFileSecurityA/W` se exporta desde ADVAPI32 con un contrato
+**solo de lectura** para OWNER_SECURITY_INFORMATION (1),
+GROUP_SECURITY_INFORMATION (2) y DACL_SECURITY_INFORMATION (4). Se forma
+un SECURITY_DESCRIPTOR_RELATIVE v1 de endian little, con SIDs sintéticos
+`S-1-22-1-UID` (usuario Linux) y `S-1-22-2-GID` (grupo Linux).
+La DACL básica incluye ACE de permitido para propietario, grupo y
+Everyone, con máscaras derivadas únicamente de los bits rwx del modo.
+`GetFileSecurity` comprueba acceso a la ruta mediante descriptores
+confinados por openat2; no usa rutas Linux arbitrarias ni omite SELinux.
+Solicitar SACL falla con ACCESS_DENIED. Si se detecta una ACL POSIX
+extendida, se informa NOT_SUPPORTED en lugar de inventar una DACL
+incompleta.
+
+**No equivale a una ACL NTFS:** todavía no se implementan cambios
+SetFileSecurity, READ_CONTROL, WRITE_DAC/WRITE_OWNER, ACE de denegación,
+herencia, auditoría, privilegios NT, seguridad del registro ni traducción
+bidireccional de identidades y pertenencia a grupos. El permiso efectivo
+continúa siendo el de Linux/SELinux. Los SIDs son identificadores
+sintéticos documentados, no identidades Windows reales. La seguridad
+avanzada requiere un contrato propio, pruebas con descriptores hostiles
+y aceptación en Fedora antes de ampliarse.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
