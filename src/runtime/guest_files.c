@@ -4200,6 +4200,112 @@ uint32_t NT_MS_ABI nt_GetLongPathNameA(const char *input, char *buffer,
     return (uint32_t)required - 1;
 }
 
+/* Resolve each component to a native inode before allocating its
+ * persistent 8.3 alias. The xattr is attached to the original Linux file,
+ * never a copy or user-visible shortcut. Supported aliases are immediately
+ * available to the normal no-follow directory resolver. */
+static bool short_existing_guest_path(const char *input,
+                                      char output[PATH_MAX + 16])
+{
+    char dos[PATH_MAX + 16], canonical[PATH_MAX];
+    if (!canonical_existing_guest_path(input, dos) ||
+        !normalize_path(dos, canonical, true))
+        return false;
+    const char *relative = canonical[0] ? canonical : ".";
+    int directory = duplicate_root(&relative);
+    if (directory < 0)
+        return false;
+    if (strcmp(relative, ".") == 0) {
+        const bool result = copy_dos_path(canonical, output, PATH_MAX + 16);
+        close(directory);
+        return result;
+    }
+    const size_t count = strlen(canonical), suffix = strlen(relative);
+    if (suffix > count) {
+        close(directory);
+        errno = EINVAL;
+        return false;
+    }
+    char shortname[PATH_MAX];
+    size_t used = count - suffix;
+    memcpy(shortname, canonical, used);
+    const char *cursor = relative;
+    for (;;) {
+        const char *slash = strchr(cursor, '/');
+        const size_t length = slash ? (size_t)(slash - cursor) : strlen(cursor);
+        if (!length || length > NAME_MAX) {
+            close(directory);
+            errno = EINVAL;
+            return false;
+        }
+        char name[NAME_MAX + 1], alias[14] = {0};
+        memcpy(name, cursor, length);
+        name[length] = 0;
+        if (!dos83_assign_at(directory, name, alias)) {
+            const int error = errno;
+            close(directory);
+            errno = error;
+            return false;
+        }
+        const size_t alias_length = strlen(alias);
+        if (used + alias_length + 2 >= sizeof(shortname)) {
+            close(directory);
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        memcpy(shortname + used, alias, alias_length);
+        used += alias_length;
+        if (!slash) {
+            close(directory);
+            break;
+        }
+        shortname[used++] = '/';
+        int next = confined_open_raw(directory, name, O_PATH | O_DIRECTORY, 0);
+        const int error = errno;
+        close(directory);
+        if (next < 0) {
+            errno = error;
+            return false;
+        }
+        directory = next;
+        cursor = slash + 1;
+    }
+    shortname[used] = 0;
+    return copy_dos_path(shortname, output, PATH_MAX + 16);
+}
+
+uint32_t NT_MS_ABI nt_GetShortPathNameW(const uint16_t *input, uint16_t *buffer,
+                                        uint32_t size)
+{
+    char narrow[PATH_MAX], dos[PATH_MAX + 16];
+    if (!wide_path(input, narrow))
+        return 0;
+    if (!short_existing_guest_path(narrow, dos)) {
+        nt_SetLastError(path_error(errno, false));
+        return 0;
+    }
+    return path_result(dos, size, buffer);
+}
+
+uint32_t NT_MS_ABI nt_GetShortPathNameA(const char *input, char *buffer,
+                                        uint32_t size)
+{
+    char dos[PATH_MAX + 16];
+    if (!input || !short_existing_guest_path(input, dos)) {
+        nt_SetLastError(path_error(input ? errno : EINVAL, false));
+        return 0;
+    }
+    const size_t required = strlen(dos) + 1;
+    if (size < required)
+        return (uint32_t)required;
+    if (!buffer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    memcpy(buffer, dos, required);
+    return (uint32_t)required - 1;
+}
+
 /* Forward declaration: HANDLE duplication is implemented below. */
 static int duplicate_handle(uintptr_t handle, unsigned int access);
 
