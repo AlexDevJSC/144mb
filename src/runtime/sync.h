@@ -75,6 +75,8 @@ int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context6
 /* x64 GROUP_AFFINITY layout: KAFFINITY, USHORT Group, USHORT Reserved[3].
  * This bridge reports actual Linux kernel affinity. It does not invent
  * CPU groups for unsupported host schedulers or foreign Windows threads. */
+uint16_t NT_MS_ABI nt_GetActiveProcessorGroupCount(void);
+uint32_t NT_MS_ABI nt_GetActiveProcessorCount(uint16_t group);
 struct nt_group_affinity {
     uintptr_t mask;
     uint16_t group;
@@ -88,6 +90,9 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
 uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask);
 int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority);
 int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle);
+uint32_t NT_MS_ABI nt_GetPriorityClass(uintptr_t process);
+int32_t NT_MS_ABI nt_SetPriorityClass(uintptr_t process, uint32_t priority_class);
+int32_t nt_runtime_current_process_base_priority(void);
 int32_t NT_MS_ABI nt_GetThreadTimes(uintptr_t handle, struct nt_file_time *created,
     struct nt_file_time *exited, struct nt_file_time *kernel, struct nt_file_time *user);
 int32_t NT_MS_ABI nt_GetProcessTimes(uintptr_t handle, struct nt_file_time *created,

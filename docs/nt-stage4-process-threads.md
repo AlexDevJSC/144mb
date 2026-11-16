@@ -310,3 +310,90 @@ prioridades dinámicas y quantum, acceso autenticado a hilos externos
 sin violar aislamiento, política de processor groups Windows, tests
 con un host real que disponga de CPUs en más de un grupo y comparativa
 de semántica en Windows. No se pasa todavía al problema 5.
+
+### Subtarea 6.2 — Clases de prioridad de proceso verificadas por Linux (16-11-2026)
+
+Se añaden `GetPriorityClass` y `SetPriorityClass` a KERNEL32/KERNELBASE.
+Se admiten los valores Win32 `IDLE`, `BELOW_NORMAL`, `NORMAL`,
+`ABOVE_NORMAL` y `HIGH` como clases estáticas, **solo cuando**
+`setpriority(PRIO_PROCESS, gettid())` realmente consigue aplicar
+el cambio y `getpriority` confirma el valor exacto del nuevo `nice`.
+El sistema Linux es el único planificador: no se presenta una clase
+Windows como éxito si el anfitrión rechaza el cambio. La clase
+`REALTIME` retorna explícitamente `ERROR_NOT_SUPPORTED`, sin
+confundir el planificador `SCHED_FIFO` con el planificador Windows.
+
+**Condición de seguridad y concurrencia:** Linux trata `nice` por TID.
+La clase solo se puede modificar cuando el proceso anfitrión tiene un
+**único hilo real en `/proc/self/task`**. Si hay más, se rechaza la
+modificación *antes de tocar ninguno*, evitando estados parcialmente
+actualizados imposibles de revertir sin `CAP_SYS_NICE`. Esta versión
+no promete modificación atómica de una clase en un proceso vivo con
+varios hilos. Los incrementos de `nice` que bajan prioridad pueden
+impedir volver al valor antiguo sin privilegios de Linux; las pruebas
+se ejecutan en procesos de prueba descartables.
+
+`GetPriorityClass` comprueba permisos de consulta y observabilidad
+del `nice` subyacente; `SetPriorityClass` requiere
+`PROCESS_SET_INFORMATION`. Se rechazan los procesos externos. La
+prioridad relativa `GetThreadPriority`/`SetThreadPriority` se
+interpreta contra la clase actual, manteniendo los siete niveles
+soportados y verificando cambios por TID. La consulta nativa
+`ProcessBasicInformation.BasePriority` reporta la clase procesal
+efectiva (por ejemplo NORMAL=8, BELOW_NORMAL=6, IDLE=4), y
+`ThreadBasicInformation` incorpora el desplazamiento de clase
+al informe de base de prioridad. No se asegura paridad de prioridades
+dinámicas, hilos con `nice` alterado externamente ni clases de
+prioridad de procesos hijo Windows en otro sandbox.
+
+Pruebas: `tests/process_priority_class_test.c` comprueba
+`nice` real en Linux 0 → 4 → 10, permisos independientes,
+rechazo de clase no soportada, negativa a cambio multihilo,
+herencia y prioridades relativas del hilo nuevo. El fixture
+`tests/pe/priority_class_fixture.c` comprueba ABI Win64,
+`LastError` y prioridad base NT. Ambos se ejecutan desde Makefile
+y la CI Linux/UBSan/Fedora. Los casos no ejecutados en un host
+con `nice` inicial distinto de 0 se deben informar como SKIP.
+
+**El problema 6 sigue ABIERTO:** cambios de clase de proceso mientras
+existen varios hilos, boosts de prioridad dinámica y quantum,
+política Windows multicgrupo completa, acceso autorizado a hilos
+externos y pruebas de comparación con Windows y hardware multigrupo
+real. No avanzar al problema 5 por una CI verde.
+
+### Subtarea 6.3 — Descubrimiento de grupos visibles (16-11-2026)
+
+Se conectan `GetActiveProcessorGroupCount` y
+`GetActiveProcessorCount` (incluido `ALL_PROCESSOR_GROUPS=0xffff`)
+a una **fotografía del cpuset Linux que el sandbox puede utilizar** al
+primer acceso al runtime de hilos. La captura se hace antes de
+`CreateThread`, `SetThreadAffinityMask` o
+`SetThreadGroupAffinity`, de manera que fijar posteriormente un hilo
+a un único procesador **no** reduzca el número de procesadores del
+sistema que el invitado percibe. Una consulta de grupo inexistente
+devuelve cero. Los grupos se enumeran según `cpu_id / 64`, sin
+crear una numeración que deje de corresponder a las máscaras reales.
+
+**Límite explícito:** esta topología es la asignación de CPUs
+**permitidas al sandbox al primer acceso**, no una lectura general de
+los procesadores del anfitrión, ni un sustituto completo de los
+processor groups, NUMA o hotplug Windows. La vista no se actualiza si
+el administrador cambia el cpuset Linux después de la captura; la
+consulta a un grupo alto con CPUs no permitidas indica cero, aunque
+el host físico disponga de esos procesadores. No se exponen funciones
+de máximo potencial que requerirían topología distinta de la activa.
+
+Las pruebas Linux verifican los conteos exactos por grupo y el total
+contra el cpuset original, y su estabilidad tras fijar un hilo. El
+fixture Win64 importa ambas funciones y compara la suma por grupos
+con el total antes y después de alterar la afinidad. La transición
+física entre dos grupos sigue sin haber pasado en CI: el runner solo
+proporciona un grupo permitido.
+
+**Estado del problema 6:** siguen pendientes clases modificables de
+procesos multihilo, prioridades dinámicas de Windows, quantum,
+política plena multicgrupo, acceso autorizado a hilos fuera del
+runtime y comparación diferencial Windows/Fedora físico. El acceso
+a procesos ajenos necesita un broker con autenticación del entorno
+aislado, vinculado al futuro problema 3: no se debe sustituir ese
+broker por syscalls sobre un TID/PID aportado por el invitado.

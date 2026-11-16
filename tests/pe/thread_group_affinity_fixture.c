@@ -19,6 +19,15 @@ static DWORD WINAPI test_worker(void *unused)
 
 int import_fixture_entry(void)
 {
+    const WORD active_groups = GetActiveProcessorGroupCount();
+    const DWORD total = GetActiveProcessorCount((WORD)0xffffu);
+    if (active_groups == 0 || total == 0)
+        return 25;
+    DWORD sum = 0;
+    for (WORD group = 0; group < active_groups; ++group)
+        sum += GetActiveProcessorCount(group);
+    if (sum != total || GetActiveProcessorCount(active_groups) != 0)
+        return 26;
     HANDLE thread = CreateThread(NULL, 0, test_worker, NULL, CREATE_SUSPENDED, NULL);
     if (thread == NULL)
         return 10;
@@ -95,6 +104,9 @@ int import_fixture_entry(void)
             return 22; /* Legacy group-0 API must not truncate. */
     }
 
+    if (GetActiveProcessorGroupCount() != active_groups ||
+        GetActiveProcessorCount((WORD)0xffffu) != total)
+        return 27; /* Pinning a thread must not reduce the topology. */
     if (ResumeThread(thread) != 1 ||
         WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0)
         return 23;

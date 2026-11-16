@@ -38,6 +38,30 @@ int main(void)
     cpu_set_t original;
     if (sched_getaffinity(0, sizeof(original), &original) != 0)
         return 1;
+    /* Process-visible group topology is a startup cpuset snapshot, not
+     * recomputed from whichever thread happened to be pinned last. */
+    uint32_t expected_per_group[CPU_SETSIZE / 64] = {0};
+    uint16_t expected_groups = 0;
+    uint32_t expected_total = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &original))
+            continue;
+        const uint16_t group = (uint16_t)(cpu / 64);
+        ++expected_per_group[group];
+        ++expected_total;
+        if (expected_groups <= group)
+            expected_groups = group + 1;
+    }
+    check(nt_GetActiveProcessorGroupCount() == expected_groups,
+          "actual initial Linux cpuset defines processor group count", &failures);
+    check(nt_GetActiveProcessorCount(UINT16_MAX) == expected_total,
+          "ALL_PROCESSOR_GROUPS returns all permitted sandbox CPUs", &failures);
+    for (uint16_t group = 0; group < expected_groups; ++group)
+        check(nt_GetActiveProcessorCount(group) == expected_per_group[group],
+              "processor group count is exact for initial Linux CPU set", &failures);
+    check(nt_GetActiveProcessorCount(expected_groups) == 0,
+          "group outside the startup topology reports no processors", &failures);
+
     int first = -1, different = -1;
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &original))
@@ -84,6 +108,9 @@ int main(void)
           nt_GetLastError() == 0x5151u,
           "pin current thread to a real CPU in the specified processor group",
           &failures);
+    check(nt_GetActiveProcessorGroupCount() == expected_groups &&
+          nt_GetActiveProcessorCount(UINT16_MAX) == expected_total,
+          "pinning a thread does not rewrite global processor topology", &failures);
     observed = (struct nt_group_affinity){0};
     check(nt_GetThreadGroupAffinity(nt_GetCurrentThread(), &observed) &&
           observed.mask == wanted.mask && observed.group == wanted.group &&
