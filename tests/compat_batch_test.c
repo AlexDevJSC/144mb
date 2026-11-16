@@ -894,10 +894,13 @@ static void check_files(void)
     uint32_t junction_data_size = test_mount_reparse(junction_input,
                                                      u"C:\\data\\junction-target");
     uint32_t junction_returned = 999;
-    CHECK(junction_data_size != 0 &&
-          nt_DeviceIoControl(junction, 0x000900a4u, junction_input,
-                             junction_data_size, NULL, 0,
-                             &junction_returned, NULL) &&
+    const int32_t junction_set = nt_DeviceIoControl(
+        junction, 0x000900a4u, junction_input, junction_data_size,
+        NULL, 0, &junction_returned, NULL);
+    if (!junction_set)
+        fprintf(stderr, "junction SET failed: GetLastError=%u errno=%d size=%u\\n",
+                nt_GetLastError(), errno, junction_data_size);
+    CHECK(junction_data_size != 0 && junction_set &&
           junction_returned == 0);
     CHECK((nt_GetFileAttributesW(u"C:\\data\\junction-entry") &
            (0x10u | 0x400u)) == (0x10u | 0x400u));
