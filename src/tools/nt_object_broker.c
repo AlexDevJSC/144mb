@@ -99,7 +99,7 @@ static bool valid_request(const struct nt_broker_request *req)
         (req->action != NT_BROKER_CREATE && req->action != NT_BROKER_OPEN) ||
         req->kind < NT_BROKER_SECTION || req->kind > NT_BROKER_SEMAPHORE ||
         !n || n >= NT_BROKER_NAME_BYTES ||
-        (req->flags & ~2u) != 0)
+        (req->flags & ~3u) != 0)
         return false;
     for (size_t i = 0; i < n; ++i)
         if ((unsigned char)req->name[i] < 0x20 ||
