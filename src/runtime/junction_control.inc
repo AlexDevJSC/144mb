@@ -304,7 +304,9 @@ static int32_t nt_junction_control(int pinned, uint32_t rights,
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return 0;
     }
-    struct nt_junction_metadata meta = {
+    /* Retain the v1 xattr name and header, but store the compact layout.
+     * The reader accepts both compact and historical PATH_MAX layouts. */
+    struct nt_junction_compact_metadata meta = {
         .magic = NT_JUNCTION_MAGIC, .version = 1,
         .root_dev = (uint64_t)root_info.st_dev,
         .root_inode = (uint64_t)root_info.st_ino
