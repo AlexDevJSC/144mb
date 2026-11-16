@@ -22,6 +22,10 @@ int32_t NT_MS_ABI nt_EnumSystemLocalesW(nt_locale_callback callback, uint32_t fl
 int32_t NT_MS_ABI nt_GetLocaleInfoA(uint32_t locale, uint32_t type, char *out, int32_t capacity);
 int32_t NT_MS_ABI nt_GetLocaleInfoW(uint32_t locale, uint32_t type, uint16_t *out, int32_t capacity);
 int32_t NT_MS_ABI nt_GetLocaleInfoEx(const uint16_t *locale, uint32_t type, uint16_t *out, int32_t capacity);
+/* NUL-terminated Win32 collation wrappers (signed three-way result). */
+int32_t NT_MS_ABI nt_lstrcmpW(const uint16_t *left, const uint16_t *right);
+int32_t NT_MS_ABI nt_lstrcmpA(const char *left, const char *right);
+
 int32_t NT_MS_ABI nt_CompareStringW(uint32_t locale, uint32_t flags, const uint16_t *left, int32_t left_size,
                                     const uint16_t *right, int32_t right_size);
 int32_t NT_MS_ABI nt_LCMapStringW(uint32_t locale, uint32_t flags, const uint16_t *source, int32_t count,
