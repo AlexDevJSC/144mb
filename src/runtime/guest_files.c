@@ -1009,19 +1009,16 @@ static int write_guest_xattr(int fd, const char *name, const void *value, size_t
 
 static int clear_guest_xattr(int fd, const char *name)
 {
-    unsigned char previous[sizeof(uint64_t)];
-    if (read_guest_xattr(fd, name, previous, sizeof(previous)) < 0) {
-        if (errno == ENODATA || errno == ENOTSUP)
-            return 0;
-        return -1;
-    }
+    /* Remove by name directly. Probing the value in a fixed 8-byte buffer
+     * fails with ERANGE for larger xattrs such as junction reparse records,
+     * even when removal is otherwise permitted. */
     int result = fremovexattr(fd, name);
     if (result < 0 && errno == EBADF) {
         char path[64];
         descriptor_path(fd, path);
         result = removexattr(path, name);
     }
-    return result == 0 || errno == ENODATA ? 0 : -1;
+    return result == 0 || errno == ENODATA || errno == ENOTSUP ? 0 : -1;
 }
 
 static bool copy_guest_xattr(int source, int destination, const char *name,
