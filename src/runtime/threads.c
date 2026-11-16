@@ -933,6 +933,11 @@ nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
+    if (normalized[0] && nt_runtime_broker_enabled())
+        return broker_named_waitable(handle, normalized, EVENT, rights,
+                                    attributes && (attributes->attributes & 2u),
+                                    attributes && (attributes->attributes & 0x40u),
+                                    true, initial_state != 0, 1, type == 0);
     pthread_mutex_lock(&wait_lock);
     nt_status status = NT_STATUS_SUCCESS;
     struct waitable *event = normalized[0] ?
@@ -983,6 +988,11 @@ nt_status NT_MS_ABI nt_NtOpenEvent(uintptr_t *handle, uint32_t access,
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
+    if (nt_runtime_broker_enabled())
+        return broker_named_waitable(handle, normalized, EVENT, rights,
+                                    (attributes->attributes & 2u) != 0,
+                                    (attributes->attributes & 0x40u) != 0,
+                                    false, 0, 0, false);
     pthread_mutex_lock(&wait_lock);
     struct waitable *state = find_named_object(normalized, (attributes->attributes & 0x40u) != 0);
     nt_status status = NT_STATUS_SUCCESS;
@@ -1045,6 +1055,11 @@ nt_status NT_MS_ABI nt_NtCreateSemaphore(uintptr_t *handle, uint32_t access,
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
+    if (normalized[0] && nt_runtime_broker_enabled())
+        return broker_named_waitable(handle, normalized, SEMAPHORE, rights,
+                                    attributes && (attributes->attributes & 2u),
+                                    attributes && (attributes->attributes & 0x40u),
+                                    true, initial, maximum, false);
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = normalized[0] ?
         find_named_object(normalized, attributes && (attributes->attributes & 0x40u)) : NULL;
@@ -1095,6 +1110,11 @@ nt_status NT_MS_ABI nt_NtOpenSemaphore(uintptr_t *handle, uint32_t access,
     const uint32_t rights = event_access(access);
     if (rights & ~EVENT_ALL_ACCESS)
         return NT_STATUS_ACCESS_DENIED;
+    if (nt_runtime_broker_enabled())
+        return broker_named_waitable(handle, normalized, SEMAPHORE, rights,
+                                    (attributes->attributes & 2u) != 0,
+                                    (attributes->attributes & 0x40u) != 0,
+                                    false, 0, 0, false);
     pthread_mutex_lock(&wait_lock);
     struct waitable *state = find_named_object(normalized, (attributes->attributes & 0x40u) != 0);
     nt_status status = NT_STATUS_SUCCESS;
