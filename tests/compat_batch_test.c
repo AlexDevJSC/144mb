@@ -650,6 +650,42 @@ static void check_files(void)
 
     raw = nt_fopen("data/target.txt", "wb");
     CHECK(raw != NULL && nt_fclose(raw) == 0);
+    /* A symlink leaf is inspectable only through an explicit no-follow
+     * handle. Never resolve an absolute Linux target as a Windows path. */
+    char safe_link[512], forbidden_link[512];
+    CHECK(snprintf(safe_link, sizeof(safe_link), "%s/data/reparse-link", root) > 0 &&
+          snprintf(forbidden_link, sizeof(forbidden_link), "%s/data/host-link", root) > 0);
+    CHECK(symlink("scores.txt", safe_link) == 0);
+    CHECK(symlink("/etc/passwd", forbidden_link) == 0);
+    CHECK((nt_GetFileAttributesW(u"C:\\data\\reparse-link") & 0x400u) != 0);
+    CHECK(nt_CreateFileW(u"C:\\data\\reparse-link", 0, 7, NULL, 3, 0x80u, 0)
+          == UINTPTR_MAX);
+    uintptr_t link_handle = nt_CreateFileW(u"C:\\data\\reparse-link", 0, 7,
+                                            NULL, 3, 0x00200000u, 0);
+    CHECK(link_handle != UINTPTR_MAX);
+    unsigned char reparse_data[96] = {0};
+    uint32_t reparse_bytes = UINT32_MAX;
+    CHECK(!nt_DeviceIoControl(link_handle, 0x000900a8u, NULL, 0,
+                              reparse_data, 4, &reparse_bytes, NULL) &&
+          last_error() == NT_ERROR_INSUFFICIENT_BUFFER && reparse_bytes == 0);
+    CHECK(nt_DeviceIoControl(link_handle, 0x000900a8u, NULL, 0,
+                             reparse_data, sizeof(reparse_data),
+                             &reparse_bytes, NULL) &&
+          reparse_bytes == 20u + 2u * 10u * 2u &&
+          reparse_data[0] == 0x0cu && reparse_data[3] == 0xa0u &&
+          reparse_data[16] == 1u &&
+          reparse_data[20] == 's' && reparse_data[21] == 0 &&
+          nt_CloseHandle(link_handle));
+    link_handle = nt_CreateFileW(u"C:\\data\\host-link", 0, 7,
+                                 NULL, 3, 0x00200000u, 0);
+    CHECK(link_handle != UINTPTR_MAX);
+    CHECK(!nt_DeviceIoControl(link_handle, 0x000900a8u, NULL, 0,
+                              reparse_data, sizeof(reparse_data),
+                              &reparse_bytes, NULL) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED &&
+          nt_CloseHandle(link_handle));
+    CHECK(unlink(safe_link) == 0 && unlink(forbidden_link) == 0);
+
     /* CopyFileEx reuses the regular native copy and preserves its xattrs.
      * Verify Microsoft x64 callback arguments and Windows abort semantics. */
     struct copy_progress_test progress = {.expected = 6};
