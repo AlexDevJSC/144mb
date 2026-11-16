@@ -629,6 +629,17 @@ check-pe-import: $(BUILD_DIR)/pe-import-host $(BUILD_DIR)/pe-win32-import-host $
 $(BUILD_DIR)/counter-bench: tests/bench/counter_bench.c $(BUILD_DIR)/counter.o | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o "$@"
 
+$(BUILD_DIR)/stage4-quantum-host: tests/bench/scheduler_quantum_observation.c | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(WARN_CFLAGS) $(CFLAGS) -std=c11 -pthread -o "$@" "$<"
+
+.PHONY: check-stage4-quantum
+check-stage4-quantum: $(BUILD_DIR)/stage4-quantum-host
+	timeout 20s $(BUILD_DIR)/stage4-quantum-host > $(BUILD_DIR)/stage4-linux-quantum.txt
+	grep -Fx 'SCHEMA=ntnative.stage4.quantum-observation.v1' $(BUILD_DIR)/stage4-linux-quantum.txt
+	grep -Fx 'RESULT=PASS' $(BUILD_DIR)/stage4-linux-quantum.txt
+	grep -Fx 'NT_QUANTUM_VERIFIED=NO' $(BUILD_DIR)/stage4-linux-quantum.txt
+	cat $(BUILD_DIR)/stage4-linux-quantum.txt
+
 benchmark: $(BUILD_DIR)/counter-bench
 	$(BUILD_DIR)/counter-bench
 
