@@ -23,7 +23,7 @@ jobs:
       - name: Check stage-4 Fedora acceptance script syntax
         run: |
           bash -n scripts/fedora-check-stage4.sh scripts/fedora-stage4-multigroup-acceptance.sh
-          python3 -m py_compile scripts/compare-stage4-scheduler.py scripts/compare-stage4-quantum.py
+          python3 -m py_compile scripts/compare-stage4-scheduler.py scripts/compare-stage4-quantum.py scripts/stage4_scheduler_trials.py scripts/assess-stage4-scheduler-trials.py
           python3 -m unittest discover -s tests -p 'test_compare_stage4_quantum.py'
       - name: Install Linux build and desktop test dependencies
         run: |
@@ -46,11 +46,18 @@ jobs:
             NT_REQUIRE_POSITIVE_BOOST=1 ./build/dynamic-priority-boost-test
       - name: Observe one-CPU scheduler fairness and first-run latency on Linux
         run: make check-stage4-quantum
+      - name: Run 150 independent Linux contention trials and seeded bootstrap
+        run: |
+          python3 scripts/stage4_scheduler_trials.py \
+            --executable build/stage4-quantum-host --platform LINUX_HOST \
+            --output build/stage4-linux-trials.json
       - name: Preserve Linux quantum observation (not NT parity)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: scheduler-linux-host-${{ github.sha }}
-          path: build/stage4-linux-quantum.txt
+          path: |
+            build/stage4-linux-quantum.txt
+            build/stage4-linux-trials.json
           if-no-files-found: error
           retention-days: 14
       - name: Diagnose native Vulkan without claiming D3D12 compatibility
@@ -149,6 +156,12 @@ jobs:
       - name: Compile and run native Win32 scheduler probe with MSVC
         shell: pwsh
         run: ./scripts/windows-run-stage4-scheduler.ps1 -OutputPath build/stage4-windows-native.txt
+      - name: Run 150 independent Windows contention trials and seeded bootstrap
+        shell: pwsh
+        run: |
+          python scripts/stage4_scheduler_trials.py `
+            --executable build/stage4-quantum-native.exe --platform WINDOWS_NATIVE `
+            --output build/stage4-windows-trials.json
       - name: Preserve real Windows observations (virtual runner, not physical)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -158,6 +171,7 @@ jobs:
             build/stage4-windows-meta.txt
             build/stage4-windows-linux-fixture.txt
             build/stage4-windows-quantum.txt
+            build/stage4-windows-trials.json
           if-no-files-found: error
           retention-days: 14
 
@@ -189,10 +203,17 @@ jobs:
             --linux build/stage4-linux-quantum.txt \
             --output build/stage4-quantum-differential.json
           grep -F 'NOT_DEMONSTRATED' build/stage4-quantum-differential.json
+          python3 scripts/assess-stage4-scheduler-trials.py \
+            --windows build/stage4-windows-trials.json \
+            --linux build/stage4-linux-trials.json \
+            --output build/stage4-trials-assessment.json
+          grep -F 'NOT_DEMONSTRATED' build/stage4-trials-assessment.json
       - name: Preserve quantum comparison report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: scheduler-quantum-differential-${{ github.sha }}
-          path: build/stage4-quantum-differential.json
+          path: |
+            build/stage4-quantum-differential.json
+            build/stage4-trials-assessment.json
           if-no-files-found: error
           retention-days: 14
