@@ -118,8 +118,13 @@ static nt_status thread_primary_affinity_locked(uintptr_t handle,
  * sandbox is permitted to use are advertised. CPU hotplug and cpuset
  * reconfiguration after first use are outside this bounded profile. */
 static pthread_once_t processor_groups_once = PTHREAD_ONCE_INIT;
+/* Guest CPU indices are dense in the startup-allowed Linux cpuset.
+ * Linux CPU IDs (e.g. 24, 64, 97) are not Windows group/bit positions.
+ * Mapping remains immutable after startup. -1 means not advertised. */
 static uint32_t processor_group_counts[CPU_SETSIZE / 64];
 static uintptr_t processor_group_masks[CPU_SETSIZE / 64];
+static int linux_cpu_by_guest_slot[CPU_SETSIZE];
+static int guest_slot_by_linux_cpu[CPU_SETSIZE];
 /* Process policy is distinct from the affinity of an individual host
  * pthread. An explicit SetThreadAffinityMask may narrow one thread
  * without changing the process-wide Win32 policy. Protected by wait_lock. */
@@ -132,21 +137,25 @@ static uint16_t processor_group_count;
 static uint32_t processor_group_total;
 static void capture_processor_groups(void)
 {
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        guest_slot_by_linux_cpu[cpu] = -1;
     cpu_set_t initial;
     if (sched_getaffinity(0, sizeof(initial), &initial) != 0)
         return;
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &initial))
             continue;
-        const uint16_t group = (uint16_t)(cpu / 64);
-        if (processor_group_total == 0)
-            process_primary_group = group;
+        const int slot = (int)processor_group_total++;
+        guest_slot_by_linux_cpu[cpu] = slot;
+        linux_cpu_by_guest_slot[slot] = cpu;
+        const uint16_t group = (uint16_t)(slot / 64);
         ++processor_group_counts[group];
-        processor_group_masks[group] |= (uintptr_t)UINT64_C(1) << (cpu % 64);
-        ++processor_group_total;
-        if (processor_group_count <= group)
-            processor_group_count = group + 1;
+        processor_group_masks[group] |= (uintptr_t)UINT64_C(1) << (slot % 64);
+        processor_group_count = group + 1;
     }
+    /* Windows 11 primary process group is the first advertised group.
+     * Processor numbering is a virtual guest policy, not Linux CPU IDs. */
+    process_primary_group = 0;
 }
 static void ensure_processor_groups(void)
 {
@@ -176,20 +185,26 @@ _Static_assert(sizeof(struct nt_processor_number) == 4,
 
 uint32_t NT_MS_ABI nt_GetCurrentProcessorNumber(void)
 {
+    ensure_processor_groups();
     const int cpu = sched_getcpu();
-    return cpu >= 0 ? (uint32_t)(cpu % 64) : 0;
+    return cpu >= 0 && cpu < CPU_SETSIZE &&
+           guest_slot_by_linux_cpu[cpu] >= 0 ?
+           (uint32_t)(guest_slot_by_linux_cpu[cpu] % 64) : 0;
 }
 
 void NT_MS_ABI nt_GetCurrentProcessorNumberEx(struct nt_processor_number *result)
 {
     if (result == NULL)
         return;
+    ensure_processor_groups();
     const int cpu = sched_getcpu();
-    if (cpu < 0)
+    if (cpu < 0 || cpu >= CPU_SETSIZE ||
+        guest_slot_by_linux_cpu[cpu] < 0)
         return;
+    const int slot = guest_slot_by_linux_cpu[cpu];
     *result = (struct nt_processor_number){
-        .group = (uint16_t)(cpu / 64),
-        .number = (uint8_t)(cpu % 64),
+        .group = (uint16_t)(slot / 64),
+        .number = (uint8_t)(slot % 64),
         .reserved = 0
     };
 }
@@ -284,17 +299,17 @@ static void write_filetime(struct nt_file_time *output, uint64_t value)
     output->high = (uint32_t)(value >> 32);
 }
 
-/* Windows THREAD_BASIC_INFORMATION has one KAFFINITY group mask. Only
- * group zero (Linux CPUs 0..63) is representable in this runtime. */
+/* THREAD_BASIC_INFORMATION exposes a group-local KAFFINITY. */
 static uintptr_t linux_group0_affinity(pthread_t host)
 {
+    ensure_processor_groups();
     cpu_set_t allowed;
     if (pthread_getaffinity_np(host, sizeof(allowed), &allowed) != 0)
         return 0;
     uintptr_t mask = 0;
-    for (int cpu = 0; cpu < 64; ++cpu)
-        if (CPU_ISSET(cpu, &allowed))
-            mask |= (uintptr_t)UINT64_C(1) << cpu;
+    for (int slot = 0; slot < 64 && slot < (int)processor_group_total; ++slot)
+        if (CPU_ISSET(linux_cpu_by_guest_slot[slot], &allowed))
+            mask |= (uintptr_t)UINT64_C(1) << slot;
     return mask;
 }
 
@@ -2339,8 +2354,8 @@ int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context6
  * distinct from the thread's full Linux cpuset. Windows 11 can schedule
  * a thread across multiple processor groups, while the group-local
  * GROUP_AFFINITY/legacy APIs report and update its primary group. This
- * bounded backend still maps Linux CPU IDs to group cpu / 64; it does
- * not claim an arbitrary Windows NUMA/processor group topology. */
+ * bounded backend maps a startup-allowed Linux CPU ordinal into a compact
+ * guest slot. This is not a claim of exact Windows NUMA/CPU Sets topology. */
 _Static_assert(sizeof(struct nt_group_affinity) == 16,
                "Windows AMD64 GROUP_AFFINITY layout");
 _Static_assert(offsetof(struct nt_group_affinity, group) == 8,
@@ -2348,13 +2363,37 @@ _Static_assert(offsetof(struct nt_group_affinity, group) == 8,
 
 static uintptr_t affinity_mask_in_group(const cpu_set_t *cpus, uint16_t group)
 {
-    if ((size_t)group >= CPU_SETSIZE / 64)
+    if (group >= processor_group_count)
         return 0;
     uintptr_t mask = 0;
-    for (int bit = 0; bit < 64; ++bit)
-        if (CPU_ISSET((int)group * 64 + bit, cpus))
+    for (int bit = 0; bit < 64; ++bit) {
+        const int slot = (int)group * 64 + bit;
+        if (slot < (int)processor_group_total &&
+            CPU_ISSET(linux_cpu_by_guest_slot[slot], cpus))
             mask |= (uintptr_t)UINT64_C(1) << bit;
+    }
     return mask;
+}
+
+static bool cpuset_advertised(const cpu_set_t *cpus)
+{
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        if (CPU_ISSET(cpu, cpus) && guest_slot_by_linux_cpu[cpu] < 0)
+            return false;
+    return true;
+}
+
+/* Convert a Windows group-local mask back to exact Linux CPU IDs. */
+static void cpu_set_from_guest_mask(cpu_set_t *cpus, uint16_t group,
+                                    uintptr_t mask)
+{
+    CPU_ZERO(cpus);
+    for (int bit = 0; bit < 64; ++bit) {
+        const int slot = (int)group * 64 + bit;
+        if (slot < (int)processor_group_total &&
+            (mask & ((uintptr_t)UINT64_C(1) << bit)))
+            CPU_SET(linux_cpu_by_guest_slot[slot], cpus);
+    }
 }
 
 /* Caller owns wait_lock, and the HANDLE was validated for the desired
@@ -2371,9 +2410,9 @@ static nt_status thread_primary_affinity_locked(uintptr_t handle,
                                   &primary_thread_group_initialized;
     if (!*valid) {
         uint16_t first = UINT16_MAX;
-        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
-            if (CPU_ISSET(cpu, cpus)) {
-                first = (uint16_t)(cpu / 64);
+        for (int slot = 0; slot < (int)processor_group_total; ++slot)
+            if (CPU_ISSET(linux_cpu_by_guest_slot[slot], cpus)) {
+                first = (uint16_t)(slot / 64);
                 break;
             }
         if (first == UINT16_MAX)
@@ -2381,6 +2420,8 @@ static nt_status thread_primary_affinity_locked(uintptr_t handle,
         *group = first;
         *valid = true;
     }
+    if (!cpuset_advertised(cpus))
+        return NT_STATUS_NOT_SUPPORTED;
     const uintptr_t mask = affinity_mask_in_group(cpus, *group);
     if (mask == 0)
         return NT_STATUS_NOT_SUPPORTED;
@@ -2483,10 +2524,7 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
         return 0;
     }
     cpu_set_t target;
-    CPU_ZERO(&target);
-    for (unsigned int bit = 0; bit < 64; ++bit)
-        if (desired->mask & ((uintptr_t)UINT64_C(1) << bit))
-            CPU_SET((int)desired->group * 64 + (int)bit, &target);
+    cpu_set_from_guest_mask(&target, desired->group, desired->mask);
 
     pthread_mutex_lock(&wait_lock);
     pthread_t host;
@@ -2581,10 +2619,7 @@ static nt_status set_guest_thread_affinity(uintptr_t handle, uintptr_t requested
                     (requested & ~processor_group_masks[group]) != 0)
                     result = NT_STATUS_INVALID_PARAMETER;
                 else {
-                    CPU_ZERO(&wanted);
-                    for (int bit = 0; bit < 64; ++bit)
-                        if (requested & ((uintptr_t)UINT64_C(1) << bit))
-                            CPU_SET((int)group * 64 + bit, &wanted);
+                    cpu_set_from_guest_mask(&wanted, group, requested);
                     err = pthread_setaffinity_np(host, sizeof(wanted), &wanted);
                     if (err == EPERM || err == EACCES)
                         result = NT_STATUS_ACCESS_DENIED;
@@ -2665,9 +2700,11 @@ int32_t NT_MS_ABI nt_GetProcessGroupAffinity(uintptr_t process,
     if (sched_getaffinity((pid_t)getpid(), sizeof(mask), &mask) != 0)
         valid = false;
     else {
-        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        if (!cpuset_advertised(&mask))
+            valid = false;
+        for (int cpu = 0; cpu < CPU_SETSIZE && valid; ++cpu)
             if (CPU_ISSET(cpu, &mask))
-                present[cpu / 64] = true;
+                present[guest_slot_by_linux_cpu[cpu] / 64] = true;
     }
     for (size_t i = 0; i < WAITABLE_COUNT && valid; ++i) {
         const struct waitable *item = &waitables[i];
@@ -2680,9 +2717,13 @@ int32_t NT_MS_ABI nt_GetProcessGroupAffinity(uintptr_t process,
             valid = false;
             break;
         }
+        if (!cpuset_advertised(&mask)) {
+            valid = false;
+            break;
+        }
         for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
             if (CPU_ISSET(cpu, &mask))
-                present[cpu / 64] = true;
+                present[guest_slot_by_linux_cpu[cpu] / 64] = true;
     }
     pthread_mutex_unlock(&wait_lock);
     if (!valid) {
@@ -2956,10 +2997,7 @@ static uint32_t set_process_affinity_locked(uintptr_t requested)
         return NT_ERROR_NOT_ENOUGH_MEMORY;
 
     cpu_set_t wanted;
-    CPU_ZERO(&wanted);
-    for (int cpu = 0; cpu < 64; ++cpu)
-        if ((requested & ((uintptr_t)UINT64_C(1) << cpu)) != 0)
-            CPU_SET((int)process_primary_group * 64 + cpu, &wanted);
+    cpu_set_from_guest_mask(&wanted, process_primary_group, requested);
 
     uint32_t error = NT_ERROR_SUCCESS;
     for (size_t i = 0; i < threads.count; ++i) {
@@ -2969,13 +3007,8 @@ static uint32_t set_process_affinity_locked(uintptr_t requested)
             error = NT_ERROR_NOT_SUPPORTED;
             break;
         }
-        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
-            if (CPU_ISSET(cpu, &items[i].before) &&
-                (processor_group_masks[cpu / 64] &
-                 ((uintptr_t)UINT64_C(1) << (cpu % 64))) == 0) {
-                error = NT_ERROR_NOT_SUPPORTED;
-                break; /* host entitlement changed outside captured topology */
-            }
+        if (!cpuset_advertised(&items[i].before))
+            error = NT_ERROR_NOT_SUPPORTED; /* changed host entitlement */
         if (error != NT_ERROR_SUCCESS)
             break;
     }
