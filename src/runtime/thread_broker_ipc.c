@@ -68,6 +68,11 @@ bool nt_broker_server_start(int fd,
 {
     if (peer == NULL || !fd_seqpacket(fd) || !live_child(peer))
         return false;
+    /* Must be installed BEFORE any client message can be queued, not
+     * lazily by the detached recvmsg worker after a poll wakeup. */
+    const int on = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) != 0)
+        return false;
     struct server_context *owner = calloc(1, sizeof(*owner));
     if (owner == NULL)
         return false;
