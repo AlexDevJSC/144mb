@@ -1109,7 +1109,8 @@ struct guest_file {
     bool text;
     bool delete_disposition;
     bool overlapped_io;
-    bool reparse_handle; /* O_PATH handle of final symlink; never follows its target. */
+    bool reparse_handle; /* Final symlink or directory junction metadata handle. */
+    bool junction_handle; /* O_PATH directory FD, never redirected by CreateFile. */
     uintptr_t completion_port, completion_key;
     char *path;
 };
@@ -2246,6 +2247,60 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
             }
             return link_handle;
         }
+    }
+
+    if ((flags & (FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)) ==
+        (FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)) {
+        if (disposition != OPEN_EXISTING || read_access ||
+            (flags & (FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OVERLAPPED)) != 0) {
+            close(parent);
+            free(saved_path);
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return UINTPTR_MAX;
+        }
+        /* Physical directory metadata HANDLE, not a handle to the redirected
+         * junction target. Writes are limited to the xattr owned by Linux. */
+        const int dirfd = confined_open_raw(parent, leaf,
+                                            O_PATH | O_NOFOLLOW | O_DIRECTORY, 0);
+        const int open_error = errno;
+        close(parent);
+        if (dirfd < 0) {
+            free(saved_path);
+            nt_SetLastError(path_error(open_error, false));
+            return UINTPTR_MAX;
+        }
+        struct stat pinned;
+        if (fstat(dirfd, &pinned) != 0 || !S_ISDIR(pinned.st_mode)) {
+            close(dirfd);
+            free(saved_path);
+            nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+            return UINTPTR_MAX;
+        }
+        uintptr_t meta_handle = UINTPTR_MAX;
+        pthread_mutex_lock(&file_lock);
+        struct guest_file *slot = new_file();
+        if (slot != NULL && next_handle <= UINTPTR_MAX - 16) {
+            meta_handle = next_handle;
+            next_handle += 16;
+            *slot = (struct guest_file){
+                .owner = WIN_HANDLE, .handle = meta_handle,
+                .fd = dirfd, .share_lease_fd = -1, .share = share,
+                .access = write_access ? FILE_WRITE : 0,
+                .device = pinned.st_dev, .inode = pinned.st_ino,
+                .handle_flags = attributes && attributes->inherit ?
+                                HANDLE_FLAG_INHERIT : 0,
+                .reparse_handle = true, .junction_handle = true,
+                .path = saved_path
+            };
+            saved_path = NULL;
+        }
+        pthread_mutex_unlock(&file_lock);
+        free(saved_path);
+        if (meta_handle == UINTPTR_MAX) {
+            close(dirfd);
+            nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        }
+        return meta_handle;
     }
 
     int options = write_access ? (read_access ? O_RDWR : O_WRONLY) : O_RDONLY;
@@ -5926,6 +5981,13 @@ static struct nt_file_attribute_data file_attributes(int fd, const struct stat *
         stored = 0;
     uint32_t attributes = (S_ISDIR(stat_info->st_mode) ? WIN_DIRECTORY : 0) |
                           (stored & WIN_EXTENDED);
+    if (S_ISDIR(stat_info->st_mode)) {
+        struct nt_junction_metadata junction;
+        const ssize_t count = read_guest_xattr(fd, NT_JUNCTION_XATTR,
+                                                &junction, sizeof(junction));
+        if (nt_junction_metadata_valid(&junction, count))
+            attributes |= UINT32_C(0x400); /* FILE_ATTRIBUTE_REPARSE_POINT */
+    }
     if (((stat_info->st_mode & 0222) == 0) ||
         (S_ISDIR(stat_info->st_mode) && (stored & WIN_READONLY) != 0))
         attributes |= WIN_READONLY;
