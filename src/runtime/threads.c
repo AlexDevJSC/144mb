@@ -3549,12 +3549,9 @@ static void scheduler_guest_wait_woke_locked(void)
     pthread_cond_broadcast(&wait_changed);
 }
 
-/* Priority boost is an actual NT dynamic scheduler policy, not a flag on
- * Linux nice values. Until a verified boost/decay mechanism is integrated,
- * deliberately refuse to claim Get/Set*PriorityBoost succeeded. Rights and
- * ownership are still checked before reporting the unsupported contract.
- * Output parameters are never written on failure. No host TIDs are accepted
- * from guest handles, and these APIs do not alter host scheduling. */
+/* Boost control APIs report success ONLY for a live, privileged and
+ * explicitly opted-in dynamic scheduler backend. Normal unprivileged
+ * launches continue to fail closed; never fake Windows policy state. */
 int32_t NT_MS_ABI nt_GetThreadPriorityBoost(uintptr_t handle, int32_t *disabled)
 {
     if (disabled == NULL) {
@@ -3565,23 +3562,43 @@ int32_t NT_MS_ABI nt_GetThreadPriorityBoost(uintptr_t handle, int32_t *disabled)
     pid_t tid = 0;
     const nt_status status = priority_thread_tid_locked(handle,
         THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, &tid);
+    struct guest_dynamic_boost *boost = status == NT_STATUS_SUCCESS ?
+        dynamic_boost_for_thread_locked(handle) : NULL;
+    const bool available = boost != NULL &&
+        ensure_dynamic_boost_monitor_locked();
+    if (available)
+        *disabled = boost->disabled ? 1 : 0;
     pthread_mutex_unlock(&wait_lock);
-    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
-                    nt_runtime_nt_error(status));
-    return 0;
+    if (status != NT_STATUS_SUCCESS || !available) {
+        nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
+                        nt_runtime_nt_error(status));
+        return 0;
+    }
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_SetThreadPriorityBoost(uintptr_t handle, int32_t disabled)
 {
-    (void)disabled;
     pthread_mutex_lock(&wait_lock);
     pid_t tid = 0;
     const nt_status status = priority_thread_tid_locked(handle,
         THREAD_SET_INFORMATION, &tid);
+    struct guest_dynamic_boost *boost = status == NT_STATUS_SUCCESS ?
+        dynamic_boost_for_thread_locked(handle) : NULL;
+    const bool available = boost != NULL &&
+        ensure_dynamic_boost_monitor_locked();
+    bool restored = true;
+    if (available && disabled && boost->active)
+        restored = restore_dynamic_boost_locked(tid, boost);
+    if (available && restored)
+        boost->disabled = disabled != 0;
     pthread_mutex_unlock(&wait_lock);
-    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
-                    nt_runtime_nt_error(status));
-    return 0;
+    if (status != NT_STATUS_SUCCESS || !available || !restored) {
+        nt_SetLastError(status != NT_STATUS_SUCCESS ? nt_runtime_nt_error(status) :
+                        !available ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_GetProcessPriorityBoost(uintptr_t handle, int32_t *disabled)
@@ -3591,18 +3608,49 @@ int32_t NT_MS_ABI nt_GetProcessPriorityBoost(uintptr_t handle, int32_t *disabled
         return 0;
     }
     const nt_status status = nt_runtime_check_self_process(handle, 0x1400u);
-    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
-                    nt_runtime_nt_error(status));
-    return 0;
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    const bool available = ensure_dynamic_boost_monitor_locked();
+    if (available)
+        *disabled = process_dynamic_boost_disabled ? 1 : 0;
+    pthread_mutex_unlock(&wait_lock);
+    if (!available)
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    return available ? 1 : 0;
 }
 
 int32_t NT_MS_ABI nt_SetProcessPriorityBoost(uintptr_t handle, int32_t disabled)
 {
-    (void)disabled;
     const nt_status status = nt_runtime_check_self_process(handle, 0x200u);
-    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
-                    nt_runtime_nt_error(status));
-    return 0;
+    if (status != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    const bool available = ensure_dynamic_boost_monitor_locked();
+    bool restored = true;
+    if (available && disabled) {
+        restored = restore_dynamic_boost_locked(getpid(), &leader_dynamic_boost);
+        for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+            struct waitable *item = &waitables[i];
+            if (item->kind == THREAD && item->shared == NULL &&
+                !item->signaled && item->dynamic_boost.active &&
+                item->owner_pid == (uint32_t)getpid() &&
+                !restore_dynamic_boost_locked((pid_t)item->thread_id,
+                                             &item->dynamic_boost))
+                restored = false;
+        }
+    }
+    if (available && restored)
+        process_dynamic_boost_disabled = disabled != 0;
+    pthread_mutex_unlock(&wait_lock);
+    if (!available || !restored)
+        nt_SetLastError(!available ? NT_ERROR_NOT_SUPPORTED :
+                        NT_ERROR_GEN_FAILURE);
+    return available && restored ? 1 : 0;
 }
 
 /* Native KPRIORITY values for the subset of Windows relative priorities
