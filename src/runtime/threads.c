@@ -3294,6 +3294,62 @@ static nt_status priority_thread_tid_locked(uintptr_t handle, uint32_t rights, p
     return NT_STATUS_SUCCESS;
 }
 
+/* Priority boost is an actual NT dynamic scheduler policy, not a flag on
+ * Linux nice values. Until a verified boost/decay mechanism is integrated,
+ * deliberately refuse to claim Get/Set*PriorityBoost succeeded. Rights and
+ * ownership are still checked before reporting the unsupported contract.
+ * Output parameters are never written on failure. No host TIDs are accepted
+ * from guest handles, and these APIs do not alter host scheduling. */
+int32_t NT_MS_ABI nt_GetThreadPriorityBoost(uintptr_t handle, int32_t *disabled)
+{
+    if (disabled == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    pid_t tid = 0;
+    const nt_status status = priority_thread_tid_locked(handle,
+        THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, &tid);
+    pthread_mutex_unlock(&wait_lock);
+    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
+                    nt_runtime_nt_error(status));
+    return 0;
+}
+
+int32_t NT_MS_ABI nt_SetThreadPriorityBoost(uintptr_t handle, int32_t disabled)
+{
+    (void)disabled;
+    pthread_mutex_lock(&wait_lock);
+    pid_t tid = 0;
+    const nt_status status = priority_thread_tid_locked(handle,
+        THREAD_SET_INFORMATION, &tid);
+    pthread_mutex_unlock(&wait_lock);
+    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
+                    nt_runtime_nt_error(status));
+    return 0;
+}
+
+int32_t NT_MS_ABI nt_GetProcessPriorityBoost(uintptr_t handle, int32_t *disabled)
+{
+    if (disabled == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const nt_status status = nt_runtime_check_self_process(handle, 0x1400u);
+    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
+                    nt_runtime_nt_error(status));
+    return 0;
+}
+
+int32_t NT_MS_ABI nt_SetProcessPriorityBoost(uintptr_t handle, int32_t disabled)
+{
+    (void)disabled;
+    const nt_status status = nt_runtime_check_self_process(handle, 0x200u);
+    nt_SetLastError(status == NT_STATUS_SUCCESS ? NT_ERROR_NOT_SUPPORTED :
+                    nt_runtime_nt_error(status));
+    return 0;
+}
+
 /* Native KPRIORITY values for the subset of Windows relative priorities
  * actually mapped onto the Linux nice scheduler. Dynamic boosts and
  * realtime scheduling are not implemented. */
