@@ -35,6 +35,24 @@ int import_fixture_entry(void)
         own_primary.Group >= active_groups || own_primary.Mask == 0 ||
         own_primary.Reserved[0] || own_primary.Reserved[1] || own_primary.Reserved[2])
         return 28;
+    USHORT group_capacity = 0;
+    USHORT process_groups[16] = {0};
+    SetLastError(0);
+    if (GetProcessGroupAffinity(GetCurrentProcess(), &group_capacity, process_groups) ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER ||
+        group_capacity == 0 || group_capacity > 16)
+        return 29;
+    USHORT group_count = group_capacity;
+    SetLastError(0x2828u);
+    if (!GetProcessGroupAffinity(GetCurrentProcess(), &group_capacity, process_groups) ||
+        GetLastError() != 0x2828u || group_capacity != group_count)
+        return 30;
+    BOOL primary_present = FALSE;
+    for (USHORT i = 0; i < group_count; ++i)
+        if (process_groups[i] == own_primary.Group)
+            primary_present = TRUE;
+    if (!primary_present)
+        return 31;
     HANDLE thread = CreateThread(NULL, 0, test_worker, NULL, CREATE_SUSPENDED, NULL);
     if (thread == NULL)
         return 10;
