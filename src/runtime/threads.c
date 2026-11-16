@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <sched.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <setjmp.h>
 #include <stdlib.h>
@@ -1414,8 +1415,18 @@ static nt_status acquire_wait_objects(struct waitable **objects, uint32_t count,
         if (!(object->access & SYNCHRONIZE))
             return NT_STATUS_ACCESS_DENIED;
         for (uint32_t j = 0; j < i; ++j) {
-            if (wait_state(objects[j]) == wait_state(object))
+            const struct waitable *a = wait_state(objects[j]);
+            const struct waitable *b = wait_state(object);
+            if (a == b)
                 return NT_STATUS_INVALID_PARAMETER;
+            if (a->brokered && b->brokered) {
+                struct stat sa, sb;
+                if (fstat(a->broker.fd, &sa) != 0 ||
+                    fstat(b->broker.fd, &sb) != 0)
+                    return NT_STATUS_UNSUCCESSFUL;
+                if (sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino)
+                    return NT_STATUS_INVALID_PARAMETER;
+            }
         }
         objects[i] = object;
     }
@@ -1426,30 +1437,62 @@ static nt_status acquire_wait_objects(struct waitable **objects, uint32_t count,
 
 static nt_status check_wait_objects(struct waitable *const *objects, uint32_t count, bool all)
 {
-    uint32_t first = count, signaled = 0;
+    /* The global broker gate is shared by ALL event/semaphore memfds from
+     * one broker. Taking it while holding wait_lock also makes WaitAll
+     * consume multiple named semaphores as a single transaction against
+     * other clients of the same broker. */
+    const struct nt_broker_resource *gate = NULL;
     for (uint32_t i = 0; i < count; ++i) {
-        if (!objects[i]->handle)
-            return NT_STATUS_INVALID_HANDLE;
-        if (wait_state(objects[i])->signaled) {
+        struct waitable *state = wait_state(objects[i]);
+        if (state->brokered) {
+            gate = &state->broker;
+            break;
+        }
+    }
+    if (gate && !nt_broker_lock(gate))
+        return NT_STATUS_UNSUCCESSFUL;
+    uint32_t first = count, signaled = 0;
+    nt_status result = NT_STATUS_TIMEOUT;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!objects[i]->handle) {
+            result = NT_STATUS_INVALID_HANDLE;
+            goto finish;
+        }
+        struct waitable *state = wait_state(objects[i]);
+        bool ready = state->brokered ?
+            ((struct nt_broker_sync_state *)state->broker.state)->count > 0 :
+            state->signaled;
+        if (ready) {
             if (!signaled)
                 first = i;
             ++signaled;
         }
     }
     if (all ? signaled != count : signaled == 0)
-        return NT_STATUS_TIMEOUT;
+        goto finish;
     const uint32_t start = all ? 0 : first;
     const uint32_t end = all ? count : first + 1;
     for (uint32_t i = start; i < end; ++i) {
         struct waitable *state = wait_state(objects[i]);
-        if (objects[i]->kind == EVENT && !state->manual)
-            state->signaled = false;
-        if (objects[i]->kind == SEMAPHORE) {
-            --state->semaphore_count;
-            state->signaled = state->semaphore_count > 0;
+        if (state->brokered) {
+            struct nt_broker_sync_state *shared = state->broker.state;
+            if (objects[i]->kind == SEMAPHORE ||
+                (objects[i]->kind == EVENT && !shared->manual))
+                --shared->count;
+        } else {
+            if (objects[i]->kind == EVENT && !state->manual)
+                state->signaled = false;
+            if (objects[i]->kind == SEMAPHORE) {
+                --state->semaphore_count;
+                state->signaled = state->semaphore_count > 0;
+            }
         }
     }
-    return all ? NT_STATUS_SUCCESS : (nt_status)first;
+    result = all ? NT_STATUS_SUCCESS : (nt_status)first;
+finish:
+    if (gate)
+        nt_broker_unlock(gate);
+    return result;
 }
 
 nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t *handles,
