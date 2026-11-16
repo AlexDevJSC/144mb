@@ -99,6 +99,7 @@ int32_t NT_MS_ABI nt_GetProcessTimes(uintptr_t handle, struct nt_file_time *crea
     struct nt_file_time *exited, struct nt_file_time *kernel, struct nt_file_time *user);
 int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *process_mask,
                                             uintptr_t *system_mask);
+int32_t NT_MS_ABI nt_SetProcessAffinityMask(uintptr_t process, uintptr_t mask);
 void NT_MS_ABI nt_ExitThread(uint32_t code);
 int32_t NT_MS_ABI nt_TerminateThread(uintptr_t thread, uint32_t code);
 void NT_MS_ABI nt_FreeLibraryAndExitThread(uintptr_t module, uint32_t code);
