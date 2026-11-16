@@ -131,6 +131,19 @@ int main(void)
     printf("THREAD_GROUP=%s\n", selected.Mask && legacy_ok ? "PASS" : "FAIL");
     printf("LEGACY_MASK_PRIMARY_GROUP=%s\n", legacy_ok ? "PASS" : "FAIL");
     printf("CROSS_GROUP=%s\n", groups <= 1 ? "SKIP" : cross_ok ? "PASS" : "FAIL");
+    /* The same PE fixture historically demanded ERROR_INVALID_PARAMETER
+     * for NULL GROUP_AFFINITY. Win32 docs do not promise that particular
+     * LastError for a bad pointer. Record the observed native result. */
+    SetLastError(0);
+    const BOOL null_set_result = SetThreadGroupAffinity(thread, NULL, NULL);
+    const DWORD null_set_error = GetLastError();
+    printf("NULL_SET_GROUP_SUCCESS=%s\n", null_set_result ? "YES" : "NO");
+    printf("NULL_SET_GROUP_ERROR=%lu\n", (unsigned long)null_set_error);
+    SetLastError(0);
+    const BOOL null_get_result = GetThreadGroupAffinity(thread, NULL);
+    const DWORD null_get_error = GetLastError();
+    printf("NULL_GET_GROUP_SUCCESS=%s\n", null_get_result ? "YES" : "NO");
+    printf("NULL_GET_GROUP_ERROR=%lu\n", (unsigned long)null_get_error);
 
     DWORD_PTR foreign_tid_as_handle = (DWORD_PTR)tid;
     /* This is NOT a broker test and deliberately makes no Win32 operation
