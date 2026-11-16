@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sched.h>
@@ -101,6 +102,11 @@ static _Thread_local sigjmp_buf thread_exit;
 static _Thread_local struct guest_apc_queue primary_apcs;
 static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
+/* Scheduler-class state is process-local and protected by wait_lock.
+ * It is never a permission to change Linux threads in another process. */
+static uint32_t process_priority_class = 0x20u; /* NORMAL_PRIORITY_CLASS */
+static int process_priority_nice_base;
+static int32_t process_priority_nt_base = 8;
 /* Windows FILETIME counts 100 ns intervals since 1601-01-01 UTC. */
 static uint64_t windows_ticks(struct timespec clock)
 {
@@ -2509,6 +2515,147 @@ int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *proces
     return 1;
 }
 
+/* Windows process priority classes are represented only when Linux
+ * confirms an exact scheduler transition. Linux nice belongs to individual
+ * TIDs, not to a Windows process object. Changing a class while multiple
+ * threads execute cannot be made atomic without a cooperative scheduler;
+ * fail before modifying any thread in that case.
+ *
+ * These are deliberately discrete, *static* classes. Dynamic priority
+ * boosts, MMCSS and REALTIME_PRIORITY_CLASS cannot be represented by nice
+ * and must not report success. */
+enum { NT_PRIORITY_IDLE_CLASS = 0x40u, NT_PRIORITY_NORMAL_CLASS = 0x20u,
+       NT_PRIORITY_HIGH_CLASS = 0x80u, NT_PRIORITY_REALTIME_CLASS = 0x100u,
+       NT_PRIORITY_BELOW_NORMAL_CLASS = 0x4000u,
+       NT_PRIORITY_ABOVE_NORMAL_CLASS = 0x8000u };
+
+static bool host_nice_priority(int nice, int32_t *guest);
+
+static bool priority_class_map(uint32_t klass, int *nice_base, int32_t *nt_base)
+{
+    switch (klass) {
+    case NT_PRIORITY_IDLE_CLASS: *nice_base = 10; *nt_base = 4; return true;
+    case NT_PRIORITY_BELOW_NORMAL_CLASS: *nice_base = 4; *nt_base = 6; return true;
+    case NT_PRIORITY_NORMAL_CLASS: *nice_base = 0; *nt_base = 8; return true;
+    case NT_PRIORITY_ABOVE_NORMAL_CLASS: *nice_base = -4; *nt_base = 10; return true;
+    case NT_PRIORITY_HIGH_CLASS: *nice_base = -10; *nt_base = 13; return true;
+    default: return false;
+    }
+}
+
+/* Check the whole host process before a per-TID class transition.
+ * Readdir uses the kernel's own /proc/self/task namespace; this test
+ * never interprets guest HANDLEs as Linux TIDs. */
+static bool priority_class_is_exclusive(void)
+{
+    DIR *dir = opendir("/proc/self/task");
+    if (dir == NULL)
+        return false;
+    unsigned int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] >= '0' && entry->d_name[0] <= '9' && ++count > 1)
+            break;
+    }
+    const int close_error = closedir(dir);
+    return count == 1 && close_error == 0;
+}
+
+int32_t nt_runtime_current_process_base_priority(void)
+{
+    pthread_mutex_lock(&wait_lock);
+    const int32_t result = process_priority_nt_base;
+    pthread_mutex_unlock(&wait_lock);
+    return result;
+}
+
+uint32_t NT_MS_ABI nt_GetPriorityClass(uintptr_t process)
+{
+    const nt_status access = nt_runtime_check_self_process(process, 0x1400u);
+    if (access != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(access));
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    const uint32_t klass = process_priority_class;
+    const int base = process_priority_nice_base;
+    errno = 0;
+    const int actual = getpriority(PRIO_PROCESS, (id_t)gettid());
+    const int error = errno;
+    pthread_mutex_unlock(&wait_lock);
+    int32_t relative = 0;
+    if (error != 0 || !host_nice_priority(actual - base, &relative)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    return klass;
+}
+
+int32_t NT_MS_ABI nt_SetPriorityClass(uintptr_t process, uint32_t klass)
+{
+    const nt_status access = nt_runtime_check_self_process(process, 0x200u);
+    if (access != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(access));
+        return 0;
+    }
+    int new_base = 0;
+    int32_t new_nt_base = 0;
+    if (klass == NT_PRIORITY_REALTIME_CLASS || !priority_class_map(klass, &new_base, &new_nt_base)) {
+        nt_SetLastError(klass == NT_PRIORITY_REALTIME_CLASS ? NT_ERROR_NOT_SUPPORTED :
+                        NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&wait_lock);
+    const int old_base = process_priority_nice_base;
+    if (klass == process_priority_class) {
+        pthread_mutex_unlock(&wait_lock);
+        return 1; /* No mutation, not a simulated scheduling change. */
+    }
+    if (!priority_class_is_exclusive()) {
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    errno = 0;
+    const int old = getpriority(PRIO_PROCESS, (id_t)gettid());
+    const int get_error = errno;
+    int32_t old_relative = 0;
+    if (get_error != 0 || !host_nice_priority(old - old_base, &old_relative)) {
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    const int requested = new_base + (old - old_base);
+    if (requested < -20 || requested > 19) {
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (setpriority(PRIO_PROCESS, (id_t)gettid(), requested) != 0) {
+        const int error = errno;
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(error == EPERM || error == EACCES ? NT_ERROR_ACCESS_DENIED :
+                        error == EINVAL ? NT_ERROR_INVALID_PARAMETER :
+                        NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    errno = 0;
+    const int observed = getpriority(PRIO_PROCESS, (id_t)gettid());
+    if (errno != 0 || observed != requested) {
+        /* Refuse unverified success. A best-effort rollback can itself
+         * fail when Linux denies raising a degraded nice value. */
+        (void)setpriority(PRIO_PROCESS, (id_t)gettid(), old);
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    process_priority_class = klass;
+    process_priority_nice_base = new_base;
+    process_priority_nt_base = new_nt_base;
+    pthread_mutex_unlock(&wait_lock);
+    return 1;
+}
+
 /* Bounded native-backed Windows priority classes. Linux nice is per-TID
  * on current Fedora/Ubuntu kernels; a change to another thread requires
  * proper THREAD_SET_INFORMATION and host scheduler permission.
@@ -2612,11 +2759,11 @@ nt_status nt_runtime_query_thread_scheduling(uintptr_t handle, uintptr_t *affini
             valid = errno == 0;
         }
         int32_t relative = 0;
-        if (!valid || mask == 0 || !host_nice_priority(nice, &relative))
+        if (!valid || mask == 0 || !host_nice_priority(nice - process_priority_nice_base, &relative))
             status = NT_STATUS_NOT_SUPPORTED;
         else {
             *affinity = mask;
-            *priority = relative == -15 ? 1 : relative == 15 ? 15 : 8 + relative;
+            *priority = relative == -15 ? 1 : relative == 15 ? 15 : process_priority_nt_base + relative;
         }
     }
     pthread_mutex_unlock(&wait_lock);
@@ -2630,6 +2777,14 @@ int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority)
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
+    pthread_mutex_lock(&wait_lock);
+    const int priority_base = process_priority_nice_base;
+    pthread_mutex_unlock(&wait_lock);
+    if (requested + priority_base < -20 || requested + priority_base > 19) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    requested += priority_base;
     pid_t tid = 0;
     const nt_status status = priority_thread_tid(handle, THREAD_SET_INFORMATION, &tid);
     if (status != NT_STATUS_SUCCESS) {
@@ -2670,7 +2825,10 @@ int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle)
         return INT32_MAX;
     }
     int32_t priority = 0;
-    if (!host_nice_priority(value, &priority)) {
+    pthread_mutex_lock(&wait_lock);
+    const int base = process_priority_nice_base;
+    pthread_mutex_unlock(&wait_lock);
+    if (!host_nice_priority(value - base, &priority)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return INT32_MAX;
     }
