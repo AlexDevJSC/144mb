@@ -672,7 +672,7 @@ static void check_files(void)
           last_error() == NT_ERROR_FILE_NOT_FOUND);
 
 
-    /* Long names acquire stable per-inode DOS aliases only on demand.
+    /* Long names acquire aliases persistent in the original native metadata.
      * The short alias must resolve to the real data, and collisions must
      * produce distinct aliases without creating a second host file. */
     void *alias_stream = nt_fopen("data/longfilename.txt", "wb");
@@ -686,12 +686,14 @@ static void check_files(void)
                                 sizeof(short1)) ==
           strlen("C:\\DATA\\LONGFI~1.TXT") &&
           strcmp(short1, "C:\\DATA\\LONGFI~1.TXT") == 0);
-    char host_real[512], stored_alias[14] = {0};
+    char host_real[512], stored_record[512] = {0};
     CHECK(snprintf(host_real, sizeof(host_real),
                    "%s/data/longfilename.txt", root) > 0);
-    CHECK(getxattr(host_real, "user.ntnative.dos83", stored_alias,
-                   sizeof(stored_alias)) == (ssize_t)strlen("LONGFI~1.TXT") + 1 &&
-          strcmp(stored_alias, "LONGFI~1.TXT") == 0);
+    CHECK(getxattr(host_real, "user.ntnative.dos83", stored_record,
+                   sizeof(stored_record)) > 270 &&
+          memcmp(stored_record, "D832", 4) == 0 &&
+          strcmp(stored_record + 4, "longfilename.txt") == 0 &&
+          strcmp(stored_record + 4 + 256, "LONGFI~1.TXT") == 0);
     CHECK(nt_GetShortPathNameA("C:\\DATA\\longfileextra.txt", short2,
                                 sizeof(short2)) ==
           strlen("C:\\DATA\\LONGFI~2.TXT") &&
