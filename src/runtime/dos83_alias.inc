@@ -10,6 +10,7 @@ static ssize_t read_guest_xattr(int fd, const char *name, void *value, size_t si
 static int write_guest_xattr(int fd, const char *name, const void *value, size_t size);
 static int open_share_registry(const struct stat *info);
 static pthread_mutex_t dos83_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool dos83_char(unsigned char c);
 
 /* New inode format: a single xattr update commits both alias and original
  * basename. Existing raw NUL-terminated aliases are read for compatibility
@@ -84,6 +85,7 @@ static bool dos83_read_at(int parent, const char *leaf, char alias[14])
     const int fd = confined_open_raw(parent, leaf, O_PATH | O_NOFOLLOW, 0);
     if (fd < 0)
         return false;
+    alias[0] = '\0';
     struct stat st;
     bool valid = fstat(fd, &st) == 0 &&
                  (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode));
