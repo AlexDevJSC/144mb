@@ -478,7 +478,7 @@ liberación tras el cierre y una prueba entre procesos reales.
 permisos de lectura/escritura sobre él; los programas Linux externos
 que ignoran este protocolo siguen siendo libres de actuar sobre
 sus propios archivos. No es un servicio del kernel, ni un gestor
-de ACL NTFS. **Delete-pending cooperativo en C:.** Se añade un registro de estado
+de ACL NTFS. **Delete-pending cooperativo en raíces autorizadas C:, D:–Z: y UNC.** Se añade un registro de estado
 por inodo que se serializa con el mismo bloqueo `flock` y los mismos
 leases OFD de `FILE_SHARE_*`. Cuando `DeleteFileA/W` encuentra al
 menos un HANDLE activo que permite compartir borrado, marca el nombre
@@ -505,11 +505,13 @@ la disposición pendiente al abrir el archivo y la finaliza al último cierre.
 una marca pendiente, y un acceso posterior del puente intenta
 finalizarla tras verificar que no queden leases.
 
-**Límites conocidos:** la política diferida de esta vuelta se aplica
-solamente al perfil `C:` compartido entre procesos NT: las letras
-D:–Z: y los alias UNC pueden identificar distintas carpetas Linux en
-procesos diferentes y no se pueden reconstruir de forma segura desde
-un alias ajeno. En ellos sigue vigente el borrado inmediato previo.
+**Límites conocidos:** la política de borrado diferido se extiende
+a archivos regulares bajo C:, D:–Z: y alias UNC locales concedidos.
+Cada marca nueva registra la identidad física de la raíz autorizada
+para evitar que una asignación distinta de la letra o del recurso UNC
+pueda borrar un archivo sustituto. Si la raíz original deja de estar
+concedida, la marca puede quedar pendiente hasta restablecerla;
+no hay resolución global independiente de las concesiones.
 Tampoco existe atomicidad con editores Linux que no utilizan este
 protocolo, ni cobertura completa para todos los tipos de objeto,
 enlaces múltiples o modificaciones externas de las concesiones.
@@ -641,11 +643,12 @@ concedida (o sus ancestros) se rechaza con un error de compartición,
 igual que su cambio de nombre, para no dejar una ruta DOS inválida;
 existe una regresión que comprueba el directorio de trabajo vacío.
 La comprobación del nombre y el borrado siguen sin ser atómicos frente
-a modificaciones concurrentes de otro proceso Linux. La marca `delete-pending` ya impide reaperturas en el perfil C:
-entre procesos NT cooperantes y difiere la eliminación hasta el último
-cierre. Los demás volúmenes, los programas externos Linux y las
-transiciones NT más avanzadas siguen limitados por lo documentado
-en el apartado del registro de compartición.
+a modificaciones concurrentes de otro proceso Linux. La marca `delete-pending` impide reaperturas entre procesos NT
+cooperantes en C:, D:–Z: y UNC local autorizado, y difiere la
+eliminación hasta el último cierre cuando la identidad de la raíz
+original puede verificarse. Las modificaciones por programas Linux
+externos y las transiciones NT más avanzadas siguen limitadas por lo
+documentado en el apartado del registro de compartición.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
 points, conexiones UNC/SMB de red reales, coordinación de `FILE_SHARE_*`
