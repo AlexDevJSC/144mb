@@ -730,6 +730,58 @@ static void check_files(void)
           nt_FindClose(alias_search));
     CHECK(nt_DeleteFileA("data/longfilename.txt") &&
           nt_DeleteFileA("data/longfileextra.txt"));
+
+    /* Rename/move invalidates an old per-inode alias rather than silently
+     * resolving it to the same file under an unrelated Windows name. */
+    alias_stream = nt_fopen("data/previous-document-name.txt", "wb");
+    CHECK(alias_stream && nt_fwrite("r", 1, 1, alias_stream) == 1 &&
+          nt_fclose(alias_stream) == 0);
+    char old_short[256] = {0}, new_short[256] = {0};
+    CHECK(nt_GetShortPathNameA("data/previous-document-name.txt", old_short,
+                                sizeof(old_short)) > 0);
+    CHECK(nt_CreateDirectoryA("data/moved-name-folder", NULL));
+    CHECK(nt_MoveFileA("data/previous-document-name.txt",
+                       "data/moved-name-folder/brand-new-name.txt"));
+    CHECK(nt_CreateFileA(old_short, UINT32_C(0x80000000), 7, NULL, 3,
+                          0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_GetShortPathNameA("data/moved-name-folder/brand-new-name.txt",
+                                new_short, sizeof(new_short)) > 0 &&
+          strcmp(old_short, new_short) != 0);
+    alias_handle = nt_CreateFileA(new_short, UINT32_C(0x80000000),
+                                   7u, NULL, 3u, 0x80u, 0);
+    CHECK(alias_handle != UINTPTR_MAX && nt_CloseHandle(alias_handle));
+    CHECK(nt_DeleteFileA("data/moved-name-folder/brand-new-name.txt") &&
+          nt_RemoveDirectoryA("data/moved-name-folder"));
+
+    /* Hardlinks: each directory entry gets its own persistent short alias,
+     * while both aliases continue to reference the same original inode. */
+    alias_stream = nt_fopen("data/hardlinked-alpha-long.txt", "wb");
+    CHECK(alias_stream && nt_fwrite("H", 1, 1, alias_stream) == 1 &&
+          nt_fclose(alias_stream) == 0);
+    char hardlink_a[512], hardlink_b[512];
+    CHECK(snprintf(hardlink_a, sizeof(hardlink_a),
+                   "%s/data/hardlinked-alpha-long.txt", root) > 0 &&
+          snprintf(hardlink_b, sizeof(hardlink_b),
+                   "%s/data/hardlinked-beta-long.txt", root) > 0);
+    CHECK(link(hardlink_a, hardlink_b) == 0);
+    char short_a[256], short_b[256];
+    CHECK(nt_GetShortPathNameA("data/hardlinked-alpha-long.txt",
+                                short_a, sizeof(short_a)) > 0 &&
+          nt_GetShortPathNameA("data/hardlinked-beta-long.txt",
+                                short_b, sizeof(short_b)) > 0 &&
+          strcmp(short_a, short_b) != 0);
+    alias_handle = nt_CreateFileA(short_a, UINT32_C(0x80000000),
+                                   7u, NULL, 3u, 0x80u, 0);
+    CHECK(alias_handle != UINTPTR_MAX && nt_CloseHandle(alias_handle));
+    alias_handle = nt_CreateFileA(short_b, UINT32_C(0x80000000),
+                                   7u, NULL, 3u, 0x80u, 0);
+    CHECK(alias_handle != UINTPTR_MAX && nt_CloseHandle(alias_handle));
+    CHECK(nt_DeleteFileA("data/hardlinked-alpha-long.txt"));
+    CHECK(nt_GetShortPathNameA("data/hardlinked-beta-long.txt",
+                                short_again, sizeof(short_again)) > 0 &&
+          strcmp(short_again, short_b) == 0);
+    CHECK(nt_DeleteFileA("data/hardlinked-beta-long.txt"));
+
     /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
      * unlike older mixed-mode A entrypoints, no UTF-8-first guess. */
     uintptr_t cp_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9long.txt",
