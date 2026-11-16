@@ -46,6 +46,38 @@ anotar el bloqueo, y NO tratar el problema como resuelto por omisión.
 No inferir que «95 %» equivale a cinco puntos de esfuerzo pendientes
 ni usar una build verde como sinónimo de paridad Windows.
 
+### Orden técnico de las siete subtareas pendientes DENTRO del problema 6
+
+Instrucción del responsable del 16-11-2026: atacar las siete tareas
+en el orden más conveniente para su dependencia técnica, sin
+empezar todas superficialmente. Este orden **no altera**
+la sucesión principal `6 → 5 → 3 → 2 → 1 → 4 → 7` de problemas.
+
+1. **Prioridad multihilo:** transacciones `SetPriorityClass` de
+   TIDs guest autenticados; control de permisos para rollback.
+2. **Afinidad multihilo:** aplicación de `SetProcessAffinityMask`
+   a todos los TIDs guest, verificación y rollback.
+3. **Grupos múltiples:** topología visible, selección de grupo,
+   máscaras y pruebas de grupos reales >64 CPUs.
+4. **Prioridades dinámicas:** comparar boosts Win32 y evaluar
+   un mecanismo real sobre el scheduler Linux, sin simularlo con
+   etiquetas ni asumir que `nice` ofrece la misma semántica.
+5. **Quantum:** investigar la semántica NT y equivalencia efectiva
+   del reparto de CPU, rechazando un contrato falso.
+6. **Hilos externos:** identidad, permisos y broker entre procesos
+   Windows; no permitir syscalls sobre PID/TID aportados por invitados.
+7. **Validación diferencial:** medición reproducible en Windows real,
+   Fedora físico, condiciones multicgrupo y Bubblewrap *sin SKIP*.
+
+**Estado de ejecución:** subtareas 1 y 2 en la PR #116. El cambio
+de clase de prioridad multihilo está condicionado a poder demostrar
+que Linux permite restaurar todos los `nice` originales;
+en entornos no privilegiados se rechazan degradaciones irreversibles.
+La afinidad multihilo sí tiene ruta positiva verificable para hilos
+guest controlados. Las otras cinco no se declaran implementadas.
+Un bloqueo puede anotarse como dependencia pero nunca como cierre
+implícito. La aceptación positiva de hardware/Windows sigue abierta.
+
 **Estado inicial de esta orden:** problema 6 activo. Subtarea
 seleccionada: `GROUP_AFFINITY` x64 para hilos propios, con acceso
 verificado al planificador Linux y regresiones PE; faltan aún clases

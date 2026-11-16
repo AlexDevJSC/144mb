@@ -313,6 +313,11 @@ de semántica en Windows. No se pasa todavía al problema 5.
 
 ### Subtarea 6.2 — Clases de prioridad de proceso verificadas por Linux (16-11-2026)
 
+**Nota de evolución:** la restricción original «un único hilo» de esta
+subtarea fue ampliada en la **6.5**; el perfil multihilo actual solo
+se autoriza si la restauración de todos los TIDs es verificablemente
+posible. El texto original se mantiene como antecedente histórico.
+
 Se añaden `GetPriorityClass` y `SetPriorityClass` a KERNEL32/KERNELBASE.
 Se admiten los valores Win32 `IDLE`, `BELOW_NORMAL`, `NORMAL`,
 `ABOVE_NORMAL` y `HIGH` como clases estáticas, **solo cuando**
@@ -400,6 +405,10 @@ broker por syscalls sobre un TID/PID aportado por el invitado.
 
 ### Subtarea 6.4 — SetProcessAffinityMask real y distinción de máscaras (16-11-2026)
 
+**Nota de evolución:** el contrato de un solo hilo descrito a continuación
+ha sido sustituido por la transacción de todos los TIDs *guest* de
+la **6.5**. No se permite aún modificar pthreads anfitriones ajenos.
+
 Se añade `SetProcessAffinityMask` a la exportación Win32 de
 KERNEL32/KERNELBASE. No equivale a `SetThreadAffinityMask`: el
 contrato exige cambiar **todos** los hilos del proceso invitado.
@@ -447,3 +456,60 @@ operaciones auténticas autorizadas sobre hilos de otro proceso
 y pruebas entre varios grupos reales. Las funcionalidades
 transversales al broker NT son una dependencia arquitectónica del
 problema 3 y **no se implementan ad hoc**. No pasar al 5.
+
+### Subtarea 6.5 — Transacciones de planificación multihilo (16-11-2026)
+
+Se introduce un inventario acotado de TIDs anfitriones desde
+`/proc/self/task`, aceptando únicamente el líder de proceso y los
+TIDs de hilos guest cuyo objeto canónico esté vivo y registrado.
+Un hilo Linux ajeno a esta tabla (p. ej. una librería auxiliar que
+crea su propio pthread) hace **fallar la operación sin cambios**.
+Se mantiene `wait_lock` durante la captura, los cambios y su
+verificación; `CreateThread` y la finalización de un hilo controlado
+se serializan en ese mismo mutex. Se comprueba de nuevo el conjunto
+de TIDs antes de aceptar el resultado. Esto no es una parada
+asíncrona de todos los CPUs ni hace atómica una syscall Linux
+que no lo es. No se usa el HANDLE Windows como TID Linux.
+
+**SetProcessAffinityMask multihilo:** admite varios hilos guest
+controlados, incluidas las creaciones suspendidas, y modifica cada
+TID con `sched_setaffinity`, previa lectura de sus afinidades
+reales y posterior comprobación exacta. Cualquier error o intersección
+parcial inicia un rollback de todos los TIDs ya modificados.
+Los hilos extraños, grupos no representables, cambios inesperados
+de tareas o permisos insuficientes se rechazan. `GetProcessAffinityMask`
+informa ahora de la **política de afinidad del proceso** guardada
+separadamente, no de la afinidad del pthread llamador: una afinidad
+individual más estrecha no cambia la máscara del proceso.
+`SystemAffinityMask` sigue limitado a la instantánea del cpuset
+permitido al sandbox. Las modificaciones al cpuset realizadas desde
+fuera del runtime no pueden reflejarse automáticamente.
+
+**SetPriorityClass multihilo:** puede aplicar cambios de `nice`
+verificados a todos los TIDs guest controlados únicamente si los
+permisos efectivos del kernel y `RLIMIT_NICE` permiten tanto el
+avance como la eventual restauración. En particular, bajar
+prioridad (`nice` mayor) en un proceso Linux no privilegiado puede
+ser irreversible: la operación **se rechaza antes de cambiar ningún
+TID**, preservando la garantía de no dejar una clase intermedia.
+Los cambios aprobados guardan cada `nice` anterior, verifican los
+valores pedidos y aplican rollback si falla un hilo. La consulta de
+clase y los niveles relativos de hilos conservan su mapeo estático.
+Esto no representa cambios Windows dinámicos, MMCSS, quantum,
+REALTIME ni atomicidad exacta del instante de cada TID; la semántica
+positiva multihilo requiere privilegios Linux realmente disponibles.
+
+**Validación:** se añade `tests/process_priority_multithread_test.c` para comprobar ambos TID antes/después, conservar prioridades relativas y diferenciar explícitamente éxito condicionado por permisos de Linux frente a `SKIP` de la ruta positiva con rechazo sin efectos. Se amplían
+`tests/process_affinity_mask_test.c` y
+`tests/pe/process_affinity_mask_fixture.c` para demostrar cambios
+reales del conjunto de CPUs en un hilo guest adicional suspendido,
+verificación del TID, reversión a la política inicial y lectura
+de ambas máscaras Win32. Los tests originales de clases de prioridad
+siguen demostrando que la solicitud multihilo se niega sin privilegios
+de rollback. No se declara soporte general de procesos/hilos externos.
+
+**Pendiente en el punto 6:** comprobar éxito de clases multihilo
+en anfitrión con `CAP_SYS_NICE`/RLIMIT apropiado, manejar cambios
+del cpuset en caliente y políticas de grupos Windows más completas,
+boosts/quantum, broker autenticado entre procesos y comparación
+diferencial en Windows/Fedora físico. No se avanza al punto 5.

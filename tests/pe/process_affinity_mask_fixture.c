@@ -63,10 +63,22 @@ int import_fixture_entry(void)
     HANDLE thread = CreateThread(NULL, 0, worker, NULL, CREATE_SUSPENDED, NULL);
     if (!thread)
         return 20;
-    SetLastError(0);
-    if (SetProcessAffinityMask(GetCurrentProcess(), before) ||
-        GetLastError() != ERROR_NOT_SUPPORTED)
+    SetLastError(0x6161u);
+    if (!SetProcessAffinityMask(GetCurrentProcess(), before) ||
+        GetLastError() != 0x6161u)
         return 21;
+    DWORD_PTR policy = 0, system_after = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &policy, &system_after) ||
+        policy != before || system_after != available)
+        return 25;
+    GROUP_AFFINITY worker_group = {0};
+    if (!GetThreadGroupAffinity(thread, &worker_group) ||
+        worker_group.Group != 0 || worker_group.Mask != before)
+        return 26;
+    if (!SetProcessAffinityMask(GetCurrentProcess(), target) ||
+        !GetThreadGroupAffinity(thread, &worker_group) ||
+        worker_group.Mask != target)
+        return 27;
     if (ResumeThread(thread) != 1 ||
         WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0)
         return 22;
