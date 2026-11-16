@@ -19,6 +19,44 @@ Este archivo fija el orden de prioridad para **los siete componentes críticos d
 
 La expresión «por completo» es una meta de desarrollo, no una declaración de que pueda alcanzarse una paridad universal con Windows en un único cambio. Antes de cambiar de prioridad, desarrollar el componente activo hasta el máximo viable y medible. Si un requisito de un componente anterior depende de otro componente todavía no priorizado, implementar **únicamente la interfaz mínima transversal necesaria**, sin trasladar silenciosamente la prioridad principal. Documentar los bloqueos irresolubles, los riesgos de seguridad y los casos sin prueba antes de avanzar. Nunca declarar un componente «100 %» por contar importaciones, superar CI o pasar un fixture controlado.
 
+## Perímetro de crítica específico: 16 de noviembre de 2026
+
+**Instrucción del responsable para los siete problemas pendientes de la
+fase 4 (procesos e hilos): 6 → 5 → 3 → 2 → 1 → 4 → 7.**
+
+Los números aquí designan exclusivamente **los siete problemas del
+diagnóstico del 16-11-2026** y NO los siete componentes arquitectónicos
+de esta guía (p. ej., el problema 6 NO es el componente 6 SEH/VEH).
+
+| Orden | Problema pendiente en fase 4 | Condición de cierre |
+| --- | --- | --- |
+| 1 | **6. Planificación y compatibilidad avanzada** | grupos de procesadores múltiples, prioridades/afinidad y acceso a hilos externos: semántica verificable y limitaciones evaluadas |
+| 2 | 5. APC avanzadas | rutas especiales y entrega segura fuera de esperas alertables con pruebas |
+| 3 | 3. Objetos NT entre procesos | identidad de handles, objetos compartidos y broker/IPC seguro |
+| 4 | 2. Contextos AMD64 | escritura real y lectura de contextos, suspensión y restauración seguras |
+| 5 | 1. Suspensión asíncrona general | detener cualquier instrucción PE sin congelar locks del host |
+| 6 | 4. Seguridad NT | tokens, ACL y descriptores de seguridad verificables |
+| 7 | 7. Validación de compatibilidad | Windows diferencial, casos reales y Fedora KDE físico con Bubblewrap sin SKIP |
+
+**Regla vinculante:** trabajar en un solo problema cada vez, y no
+empezar el siguiente mientras el anterior tenga contratos pendientes
+resolubles sin poner en peligro el anfitrión. Si surge una dependencia
+de una posición posterior, implementar como máximo la interfaz mínima,
+anotar el bloqueo, y NO tratar el problema como resuelto por omisión.
+No inferir que «95 %» equivale a cinco puntos de esfuerzo pendientes
+ni usar una build verde como sinónimo de paridad Windows.
+
+**Estado inicial de esta orden:** problema 6 activo. Subtarea
+seleccionada: `GROUP_AFFINITY` x64 para hilos propios, con acceso
+verificado al planificador Linux y regresiones PE; faltan aún clases
+de prioridad Windows, política multicgrupo completa, hilos externos y
+sus derechos. Ningún otro problema del orden se considera iniciado.
+
+La secuencia **4 → 1 → 5 → 2 → 3 → 6 → 7** de *componentes* del núcleo
+permanece en vigor una vez terminada la fase 4. Esta cola nueva
+establece el orden **dentro de la fase 4**, no reemplaza los módulos
+del plan maestro.
+
 ## Seguimiento porcentual obligatorio en cada entrega
 
 Tras **cada entrega con cambios en GitHub** (PR, fusión o commit que se comunique al usuario), la respuesta final debe especificar el componente del núcleo NT/Win32 afectado y presentar explícitamente:
