@@ -1915,6 +1915,8 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
                 NT_STATUS_SUCCESS) {
                 thread->primary_group = inherited.group;
                 thread->primary_group_initialized = true;
+                thread->explicit_group_outside_process =
+                    inherited.group != process_primary_group;
             }
         }
         thread->start = start;
