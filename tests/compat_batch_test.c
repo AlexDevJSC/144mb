@@ -1295,7 +1295,7 @@ static void check_native_file_namespaces(void)
 
     /* D: has the same inode-scoped pending registry as C:. Remapping the
      * letter while the handle lives must NEVER delete an unrelated file. */
-    uintptr_t pending = nt_CreateFileA("D:\\pending.bin", UINT32_C(0x80010000),
+    uintptr_t pending = nt_CreateFileA("D:\\pending.bin", UINT32_C(0xc0010000),
                                      7u, NULL, 2u, 0x80u, 0);
     CHECK(pending != UINTPTR_MAX);
     const int32_t pending_removed = nt_DeleteFileA("D:\\pending.bin");
@@ -1329,7 +1329,7 @@ static void check_native_file_namespaces(void)
           rmdir(remapped_root) == 0);
 
     pending = nt_CreateFileA("\\\\lab\\share\\unc-pending.bin",
-                             UINT32_C(0x80010000), 7u, NULL, 2u, 0x80u, 0);
+                             UINT32_C(0xc0010000), 7u, NULL, 2u, 0x80u, 0);
     const uint8_t mark_delete = 1;
     CHECK(pending != UINTPTR_MAX &&
           nt_SetFileInformationByHandle(pending, 4, &mark_delete, 1) &&
