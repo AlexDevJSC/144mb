@@ -413,6 +413,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(AcquireSRWLockExclusive),
     WIN_EXPORT(AreFileApisANSI),
     WIN_EXPORT(CreateDirectoryW),
+    WIN_EXPORT(CreateSymbolicLinkW),
     WIN_EXPORT(CreateEventW),
     WIN_EXPORT(OpenEventW),
     WIN_EXPORT(CreateSemaphoreW),
