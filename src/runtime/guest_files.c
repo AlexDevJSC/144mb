@@ -1133,7 +1133,8 @@ struct guest_file {
     bool text;
     bool delete_disposition;
     bool overlapped_io;
-    bool reparse_handle; /* O_PATH handle of final symlink; never follows its target. */
+    bool reparse_handle; /* Metadata O_PATH handle, never follows the target. */
+    bool reparse_directory; /* Directory placeholder for a same-grant junction. */
     uintptr_t completion_port, completion_key;
     char *path;
 };
@@ -2234,6 +2235,62 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
             }
             return link_handle;
         }
+    }
+
+    /* Directories can be opened for junction metadata only. This grants
+     * no Linux directory stream to the guest, and never traverses the
+     * reparse target. WRITE is required for SET/DELETE reparse controls. */
+    if ((flags & (FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)) ==
+        (FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)) {
+        if (disposition != OPEN_EXISTING ||
+            (desired & ~(generic_read | generic_write)) != 0 ||
+            (flags & (FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OVERLAPPED)) != 0) {
+            close(parent);
+            free(saved_path);
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return UINTPTR_MAX;
+        }
+        const int directory_fd = confined_open_raw(parent, leaf,
+                                                   O_PATH | O_DIRECTORY, 0);
+        const int open_error = errno;
+        close(parent);
+        if (directory_fd < 0) {
+            free(saved_path);
+            nt_SetLastError(path_error(open_error, false));
+            return UINTPTR_MAX;
+        }
+        struct stat pinned;
+        if (fstat(directory_fd, &pinned) != 0 || !S_ISDIR(pinned.st_mode)) {
+            close(directory_fd);
+            free(saved_path);
+            nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+            return UINTPTR_MAX;
+        }
+        uintptr_t directory_handle = UINTPTR_MAX;
+        pthread_mutex_lock(&file_lock);
+        struct guest_file *entry = new_file();
+        if (entry != NULL && next_handle <= UINTPTR_MAX - 16) {
+            directory_handle = next_handle;
+            next_handle += 16;
+            *entry = (struct guest_file){
+                .owner = WIN_HANDLE, .handle = directory_handle,
+                .fd = directory_fd, .share_lease_fd = -1,
+                .share = share, .access = write_access ? FILE_WRITE : 0,
+                .device = pinned.st_dev, .inode = pinned.st_ino,
+                .handle_flags = attributes && attributes->inherit ?
+                                HANDLE_FLAG_INHERIT : 0,
+                .reparse_handle = true, .reparse_directory = true,
+                .path = saved_path
+            };
+            saved_path = NULL;
+        }
+        pthread_mutex_unlock(&file_lock);
+        free(saved_path);
+        if (directory_handle == UINTPTR_MAX) {
+            close(directory_fd);
+            nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        }
+        return directory_handle;
     }
 
     int options = write_access ? (read_access ? O_RDWR : O_WRONLY) : O_RDONLY;
