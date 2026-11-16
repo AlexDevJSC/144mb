@@ -2828,6 +2828,97 @@ uint32_t NT_MS_ABI nt_GetPriorityClass(uintptr_t process)
     return klass;
 }
 
+struct scheduler_priority_entry {
+    pid_t tid;
+    int before, after;
+    bool changed;
+};
+
+/* This transaction is permitted only when all native TIDs belong to
+ * tracked guest threads and the host can *both* apply and undo every
+ * potential change. No Linux privilege is guessed from a Win32 handle.
+ * The runtime's wait_lock gates its pthread creation/completion, but a
+ * foreign library may start threads without this lock; such a change
+ * is detected by the post-commit snapshot, rejected and rolled back.
+ * Dynamic scheduling and an instantaneous CPU-level atomic switch are
+ * not claimed. */
+static uint32_t set_priority_class_many_locked(int new_base, int32_t new_nt_base,
+                                                uint32_t klass)
+{
+    struct scheduler_thread_set threads;
+    if (!snapshot_scheduler_threads_locked(&threads) || threads.count < 2)
+        return NT_ERROR_NOT_SUPPORTED;
+    struct scheduler_priority_entry items[WAITABLE_COUNT + 1] = {0};
+    const int old_base = process_priority_nice_base;
+    for (size_t i = 0; i < threads.count; ++i) {
+        items[i].tid = threads.ids[i];
+        errno = 0;
+        const int nice = getpriority(PRIO_PROCESS, (id_t)items[i].tid);
+        if (errno != 0)
+            return NT_ERROR_NOT_SUPPORTED;
+        int32_t relative = 0;
+        if (!host_nice_priority(nice - old_base, &relative))
+            return NT_ERROR_NOT_SUPPORTED;
+        items[i].before = nice;
+        items[i].after = nice - old_base + new_base;
+        if (items[i].after < -20 || items[i].after > 19)
+            return NT_ERROR_NOT_SUPPORTED;
+        if (items[i].after < nice &&
+            !scheduler_can_restore_nice(items[i].after))
+            return NT_ERROR_NOT_SUPPORTED;
+        if (items[i].after > nice &&
+            !scheduler_can_restore_nice(nice))
+            return NT_ERROR_NOT_SUPPORTED;
+    }
+    if (!scheduler_threads_unchanged_locked(&threads))
+        return NT_ERROR_NOT_SUPPORTED;
+
+    uint32_t error = NT_ERROR_SUCCESS;
+    for (size_t i = 0; i < threads.count; ++i) {
+        if (items[i].after == items[i].before)
+            continue;
+        if (setpriority(PRIO_PROCESS, (id_t)items[i].tid, items[i].after) != 0) {
+            const int failure = errno;
+            error = failure == EPERM || failure == EACCES ?
+                    NT_ERROR_ACCESS_DENIED : NT_ERROR_GEN_FAILURE;
+            break;
+        }
+        items[i].changed = true;
+        errno = 0;
+        const int observed = getpriority(PRIO_PROCESS, (id_t)items[i].tid);
+        if (errno != 0 || observed != items[i].after) {
+            error = NT_ERROR_GEN_FAILURE;
+            break;
+        }
+    }
+    if (error == NT_ERROR_SUCCESS &&
+        !scheduler_threads_unchanged_locked(&threads))
+        error = NT_ERROR_NOT_SUPPORTED;
+
+    if (error != NT_ERROR_SUCCESS) {
+        /* An unprivileged process would be unable to undo a downgraded
+         * Linux nice value. Such transactions were rejected up-front. */
+        for (size_t i = threads.count; i > 0; --i) {
+            struct scheduler_priority_entry *item = &items[i - 1];
+            if (!item->changed)
+                continue;
+            if (setpriority(PRIO_PROCESS, (id_t)item->tid, item->before) != 0)
+                error = NT_ERROR_GEN_FAILURE;
+            else {
+                errno = 0;
+                if (getpriority(PRIO_PROCESS, (id_t)item->tid) != item->before ||
+                    errno != 0)
+                    error = NT_ERROR_GEN_FAILURE;
+            }
+        }
+        return error;
+    }
+    process_priority_class = klass;
+    process_priority_nice_base = new_base;
+    process_priority_nt_base = new_nt_base;
+    return NT_ERROR_SUCCESS;
+}
+
 int32_t NT_MS_ABI nt_SetPriorityClass(uintptr_t process, uint32_t klass)
 {
     const nt_status access = nt_runtime_check_self_process(process, 0x200u);
@@ -2849,9 +2940,11 @@ int32_t NT_MS_ABI nt_SetPriorityClass(uintptr_t process, uint32_t klass)
         return 1; /* No mutation, not a simulated scheduling change. */
     }
     if (!priority_class_is_exclusive()) {
+        const uint32_t result = set_priority_class_many_locked(new_base, new_nt_base, klass);
         pthread_mutex_unlock(&wait_lock);
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
+        if (result != NT_ERROR_SUCCESS)
+            nt_SetLastError(result);
+        return result == NT_ERROR_SUCCESS;
     }
     errno = 0;
     const int old = getpriority(PRIO_PROCESS, (id_t)gettid());
