@@ -63,8 +63,11 @@ static bool observed_ansi_launch;
 static int capture_ansi_launch(int fd, const char *dos_path, const char *command,
                                const char *directory, bool suspended, int environment_fd,
                                const struct nt_child_file_transfer *files,
-                               pid_t *pid, int *status_fd, int *start_fd)
+                               pid_t *pid, int *status_fd, int *start_fd,
+                               int *broker_fd, uint8_t broker_secret[16])
 {
+    *broker_fd = -1; /* legacy mock: no cross-child broker channel */
+    memset(broker_secret, 0, 16);
     if (fd < 0 || dos_path == NULL || command == NULL || directory == NULL ||
         suspended || environment_fd < 0 || files == NULL || files->manifest_fd < 0)
         return EINVAL;
@@ -303,6 +306,47 @@ int main(int argc, char **argv)
           filetime_value(&created) != 0 && filetime_value(&exited) == 0,
           "running child process creation and CPU times");
     check(nt_GetProcessIdOfThread(info.thread) == (uint32_t)child, "child thread owner");
+    /* A CreateProcess-owned initial thread is a trusted, pidfd-pinned
+     * identity. External read-only OpenThread handles must be independent
+     * of the original process/thread handles and never authorize writes. */
+    nt_SetLastError(0x6161u);
+    const uintptr_t child_query = nt_OpenThread(0x800u, 0, (uint32_t)child);
+    check(child_query != 0 && child_query != info.thread &&
+          nt_GetThreadId(child_query) == (uint32_t)child &&
+          nt_GetLastError() == 0x6161u,
+          "read-only OpenThread for owned live child main thread");
+    nt_SetLastError(0);
+    check(nt_SetThreadAffinityMask(child_query, 1u) == 0 &&
+          nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
+          "query-only child handle never modifies Linux affinity");
+    nt_SetLastError(0);
+    check(nt_OpenThread(0x20u, 0, (uint32_t)child) == 0 &&
+          nt_GetLastError() == NT_ERROR_NOT_SUPPORTED,
+          "reject non-query OpenThread access to child TID");
+    uintptr_t remote_teb = UINTPTR_MAX;
+    check(nt_runtime_query_thread(child_query, NULL, &remote_teb, NULL) ==
+          NT_STATUS_NOT_SUPPORTED && remote_teb == UINTPTR_MAX,
+          "remote TEB access remains safely unavailable");
+    uintptr_t native_child = 0x5151u;
+    const struct nt_client_id child_identity = {
+        (uintptr_t)child, (uintptr_t)child
+    };
+    nt_SetLastError(0x7272u);
+    check(nt_NtOpenThread(&native_child, 0x800u, NULL, &child_identity) ==
+          NT_STATUS_SUCCESS && native_child != child_query &&
+          nt_GetThreadId(native_child) == (uint32_t)child &&
+          nt_GetLastError() == 0x7272u,
+          "native NtOpenThread authenticates owned child process+thread pair");
+    check(nt_runtime_close_waitable(native_child),
+          "release native child-query alias");
+    uintptr_t untouched_native = 0x5151u;
+    const struct nt_client_id wrong_owner = {
+        (uintptr_t)child + 1u, (uintptr_t)child
+    };
+    check(nt_NtOpenThread(&untouched_native, 0x800u, NULL, &wrong_owner) ==
+          NT_STATUS_NOT_SUPPORTED && untouched_native == 0x5151u,
+          "NtOpenThread must authenticate CLIENT_ID process owner and not touch outputs");
+
     uintptr_t restricted = 0;
     check(nt_runtime_duplicate_waitable(info.process, 0x1000u, 0, 0, &restricted) ==
           NT_STATUS_SUCCESS && restricted != 0, "restricted process alias");
@@ -347,6 +391,15 @@ int main(int argc, char **argv)
     }
     check(nt_WaitForSingleObject(info.process, 5000) == 0, "wait on child");
     check(nt_WaitForSingleObject(info.thread, 0) == 0, "wait on child primary thread");
+    check(child_query != 0 && nt_GetThreadId(child_query) == (uint32_t)child,
+          "existing child handle keeps immutable identity after termination");
+    nt_SetLastError(0);
+    check(nt_OpenThread(0x800u, 0, (uint32_t)child) == 0 &&
+          nt_GetLastError() == NT_ERROR_NOT_SUPPORTED,
+          "new child-thread opens denied after pidfd invalidation");
+    check(nt_runtime_close_waitable(child_query),
+          "release independent child-query handle after process exit");
+
     check(nt_GetProcessTimes(info.process, &created, &exited, &kernel, &user) &&
           filetime_value(&exited) >= filetime_value(&created) &&
           filetime_value(&exited) != 0,

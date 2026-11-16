@@ -109,8 +109,8 @@ nt_thread_broker_receive_query(int socket_fd,
     if (mismatch != 0)
         return NT_THREAD_BROKER_DENIED;
 
-    if (packet.magic != NT_BROKER_MAGIC ||
-        packet.version != NT_BROKER_VERSION)
+    if (packet.magic != NT_THREAD_BROKER_MAGIC ||
+        packet.version != NT_THREAD_BROKER_VERSION)
         return NT_THREAD_BROKER_BAD_PACKET;
     if (packet.operation != NT_BROKER_QUERY_IDENTITY ||
         packet.requested_access == 0 ||

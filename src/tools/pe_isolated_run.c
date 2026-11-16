@@ -14,6 +14,7 @@
 #include "user_folders.h"
 #include "dxcompiler_path.h"
 #include "child_process.h"
+#include "thread_broker_ipc.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -23,6 +24,7 @@
 #include <stdint.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/socket.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -237,7 +239,7 @@ static bool worker_ready(bool child, bool suspended)
                 return false;
         }
     }
-    if ((child ? (close_range(8u, NT_CHILD_FILE_FD_BASE - 1u, 0) != 0 ||
+    if ((child ? (close_range(9u, NT_CHILD_FILE_FD_BASE - 1u, 0) != 0 ||
                   ((unsigned int)inherited_files < NT_CHILD_FILE_LIMIT &&
                    close_range(NT_CHILD_FILE_FD_BASE + (unsigned int)inherited_files,
                                NT_CHILD_LEASE_FD_BASE - 1u, 0) != 0) ||
@@ -251,7 +253,8 @@ static bool worker_ready(bool child, bool suspended)
         struct stat pipe;
         if (fstat(4, &pipe) != 0 || !S_ISFIFO(pipe.st_mode) ||
             (suspended && (fstat(5, &pipe) != 0 || !S_ISFIFO(pipe.st_mode))) ||
-            fstat(6, &pipe) != 0 || !S_ISREG(pipe.st_mode))
+            fstat(6, &pipe) != 0 || !S_ISREG(pipe.st_mode) ||
+            fstat(8, &pipe) != 0 || !S_ISSOCK(pipe.st_mode))
             return false;
     }
     return true;
@@ -338,16 +341,43 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
 static int launch_child(int fd, const char *dos_path, const char *command,
                         const char *directory, bool suspended, int environment_fd,
                         const struct nt_child_file_transfer *files, pid_t *pid,
-                        int *status_fd, int *start_fd)
+                        int *status_fd, int *start_fd,
+                        int *broker_fd, uint8_t broker_secret[16])
 {
-    int pipe_fds[2];
-    if (pipe2(pipe_fds, O_CLOEXEC | O_NONBLOCK) != 0)
+    /* No paths, host credentials or open host directory FDs reach guest code:
+     * only the private authenticated socket and the existing sealed FDs. */
+    int broker[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, broker) != 0)
         return errno;
+    if (!nt_thread_broker_generate_secret(broker_secret)) {
+        close(broker[0]);
+        close(broker[1]);
+        return EIO;
+    }
+    const int on = 1;
+    if (setsockopt(broker[0], SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) != 0) {
+        const int result = errno;
+        close(broker[0]);
+        close(broker[1]);
+        memset(broker_secret, 0, 16);
+        return result;
+    }
+    int pipe_fds[2];
+    if (pipe2(pipe_fds, O_CLOEXEC | O_NONBLOCK) != 0) {
+        const int result = errno;
+        close(broker[0]);
+        close(broker[1]);
+        memset(broker_secret, 0, 16);
+        return result;
+    }
     int gate[2] = {-1, -1};
     if (suspended && pipe2(gate, O_CLOEXEC) != 0) {
         const int error = errno;
         close(pipe_fds[0]);
         close(pipe_fds[1]);
+        close(broker[0]);
+        close(broker[1]);
+        memset(broker_secret, 0, 16);
         return error;
     }
     int image = fcntl(fd, F_DUPFD_CLOEXEC, 7);
@@ -364,6 +394,9 @@ static int launch_child(int fd, const char *dos_path, const char *command,
     int manifest_reader = error ? -1 : fcntl(files->manifest_fd, F_DUPFD_CLOEXEC, 128);
     if (!error && manifest_reader < 0)
         error = errno;
+    int broker_reader = error ? -1 : fcntl(broker[1], F_DUPFD_CLOEXEC, 128);
+    if (!error && broker_reader < 0)
+        error = errno;
     if (!error) {
         posix_spawn_file_actions_t actions;
         error = posix_spawn_file_actions_init(&actions);
@@ -377,6 +410,8 @@ static int launch_child(int fd, const char *dos_path, const char *command,
                 error = posix_spawn_file_actions_adddup2(&actions, environment_reader, 6);
             if (!error)
                 error = posix_spawn_file_actions_adddup2(&actions, manifest_reader, 7);
+            if (!error)
+                error = posix_spawn_file_actions_adddup2(&actions, broker_reader, 8);
             for (size_t i = 0; !error && i < files->count; ++i) {
                 error = posix_spawn_file_actions_adddup2(&actions, files->source_fds[i],
                                                          NT_CHILD_FILE_FD_BASE + (int)i);
@@ -402,16 +437,22 @@ static int launch_child(int fd, const char *dos_path, const char *command,
         close(environment_reader);
     if (manifest_reader >= 0)
         close(manifest_reader);
+    if (broker_reader >= 0)
+        close(broker_reader);
+    close(broker[1]);
     if (gate[0] >= 0)
         close(gate[0]);
     close(pipe_fds[1]);
     if (error) {
         close(pipe_fds[0]);
+        close(broker[0]);
+        memset(broker_secret, 0, 16);
         if (gate[1] >= 0)
             close(gate[1]);
     } else {
         *status_fd = pipe_fds[0];
         *start_fd = gate[1];
+        *broker_fd = broker[0];
     }
     return error;
 }
@@ -689,6 +730,9 @@ int main(int argc, char **argv)
         const bool suspended = strcmp(argv[1], "--child-suspended") == 0;
         if (!worker_ready(true, suspended))
             return 125;
+        /* Parent handshake must complete before guest PE instructions. */
+        if (!nt_broker_client_attach(8))
+            return 125;
         if (suspended) {
             /* A trusted parent must release the startup gate. EOF must
              * not accidentally execute the guest, even if the parent dies. */
@@ -712,6 +756,7 @@ int main(int argc, char **argv)
         active_child_environment = entries;
         active_child_manifest = 7;
         const int result = execute_pe(3, argv[2], argv[3], argv[4], 4);
+        nt_broker_client_detach();
         if (active_child_manifest >= 0)
             close(active_child_manifest);
         active_child_manifest = -1;

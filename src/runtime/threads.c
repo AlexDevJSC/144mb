@@ -2,6 +2,8 @@
 #define _GNU_SOURCE
 #include "sync.h"
 #include "child_process.h"
+#include "thread_broker_registry.h"
+#include "thread_broker_ipc.h"
 #include "nt_services.h"
 #include "nt_core_information.h"
 #include "object_broker.h"
@@ -11,6 +13,8 @@
 #include <errno.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <fcntl.h>
+#include <sys/socket.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sched.h>
@@ -67,7 +71,8 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started, alerted;
-    bool termination_requested, child_guest, terminate_at_start, self_process;
+    bool termination_requested, child_guest, remote_guest, terminate_at_start, self_process;
+    uint64_t remote_broker_capability, remote_broker_generation;
     int32_t semaphore_count, semaphore_maximum;
     bool brokered;
     struct nt_broker_resource broker;
@@ -680,12 +685,23 @@ nt_status nt_runtime_close_waitable_status(uintptr_t handle)
         status = NT_STATUS_INVALID_HANDLE;
     else if (object->handle_flags & 2u)
         status = NT_STATUS_ACCESS_DENIED;
-    else {
+    uint64_t release_capability = 0;
+    if (status == NT_STATUS_SUCCESS) {
+        struct waitable *canonical = wait_state(object);
         object->handle = 0;
         release_waitable(object);
+        if (canonical->remote_guest && canonical->refs == 0 &&
+            canonical->links == 0 && canonical->remote_broker_capability != 0) {
+            release_capability = canonical->remote_broker_capability;
+            canonical->remote_broker_capability = 0;
+        }
         pthread_cond_broadcast(&wait_changed);
     }
     pthread_mutex_unlock(&wait_lock);
+    /* Never block wait_lock waiting for an IPC round trip; host cleanup is
+     * bounded by the broker's 1-second deadline and may fail on disconnect. */
+    if (release_capability != 0)
+        (void)nt_broker_client_close(release_capability);
     return status;
 }
 
@@ -1632,6 +1648,7 @@ struct child_watch {
     pid_t pid;
     int status_fd;
     struct waitable *process, *thread;
+    uint64_t broker_generation;
 };
 
 static void *reap_child(void *context)
@@ -1662,6 +1679,8 @@ static void *reap_child(void *context)
         close(watch->thread->start_gate_fd);
         watch->thread->start_gate_fd = -1;
     }
+    if (watch->broker_generation != 0)
+        nt_broker_unregister_child(watch->pid, watch->broker_generation);
     if (watch->process->pidfd >= 0) {
         close(watch->process->pidfd);
         watch->process->pidfd = -1;
@@ -1714,7 +1733,16 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
         /* pidfd pins the child identity against PID reuse after waitpid. */
         process->pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
 #endif
-        *watch = (struct child_watch){pid, status_fd, process, thread};
+        uint64_t broker_generation = 0;
+        uint8_t broker_secret[16];
+        if (process->pidfd >= 0 &&
+            nt_thread_broker_generate_secret(broker_secret)) {
+            (void)nt_broker_register_child(pid, process->pidfd, getuid(), getgid(),
+                                           broker_secret, &broker_generation);
+            memset(broker_secret, 0, sizeof(broker_secret));
+        }
+        *watch = (struct child_watch){pid, status_fd, process, thread,
+                                      broker_generation};
         pthread_t worker;
         error = pthread_create(&worker, &attr, reap_child, watch);
         if (!error)
@@ -1724,6 +1752,8 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
         error = ENOMEM;
     }
     if (error) {
+        if (thread && watch->broker_generation != 0)
+            nt_broker_unregister_child(pid, watch->broker_generation);
         if (process) {
             if (process->pidfd >= 0)
                 close(process->pidfd);
@@ -1736,6 +1766,61 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
     pthread_mutex_unlock(&wait_lock);
     pthread_attr_destroy(&attr);
     return error == 0;
+}
+
+/* Only the trusted CreateProcess launcher can activate cross-PE IPC.
+ * The existing watch path preserves child lifetime and read-only primary
+ * thread aliases. The server retains its own pidfd and socket until EOF. */
+bool nt_runtime_watch_child_broker(pid_t pid, int status_fd, int start_fd,
+                                   int broker_fd, const uint8_t secret[16],
+                                   struct nt_process_information *info)
+{
+    if (!nt_runtime_watch_child(pid, status_fd, start_fd, info)) {
+        if (broker_fd >= 0)
+            close(broker_fd);
+        return false;
+    }
+    if (broker_fd < 0)
+        return true; /* trusted native tests / legacy launchers */
+    if (secret == NULL || !nt_broker_install_child_session(pid, secret)) {
+        close(broker_fd);
+        return false;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *process = find_waitable(info->process);
+    int pinned = -1;
+    if (process != NULL && process->kind == PROCESS) {
+        const struct waitable *canonical = wait_state(process);
+        if (canonical->owner_pid == (uint32_t)pid &&
+            canonical->pidfd >= 0 && !canonical->signaled)
+            pinned = fcntl(canonical->pidfd, F_DUPFD_CLOEXEC, 3);
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (pinned < 0) {
+        close(broker_fd);
+        return false;
+    }
+    struct nt_thread_broker_registered_peer peer = {
+        .child_pid = pid, .uid = getuid(), .gid = getgid(),
+        .child_pidfd = pinned,
+        .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION
+    };
+    memcpy(peer.secret, secret, sizeof(peer.secret));
+    nt_broker_grant_existing_sibling_queries(pid);
+    const bool started = nt_broker_server_start(broker_fd, &peer);
+    close(pinned); /* detached server owns an independent pidfd dup */
+    if (!started) {
+        close(broker_fd);
+        return false;
+    }
+    /* Once the detached service exists, it owns broker_fd even on failure.
+     * A failure to authenticate forbids CreateProcess success; the caller
+     * kills the child, while the reaper revokes every registered capability. */
+    if (!nt_broker_server_handshake(broker_fd, secret)) {
+        (void)shutdown(broker_fd, SHUT_RDWR);
+        return false;
+    }
+    return true;
 }
 
 /* Only processes launched by our trusted host have a pidfd and an
@@ -1966,7 +2051,11 @@ nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
         status = NT_STATUS_INVALID_HANDLE;
     else if (object->kind != THREAD)
         status = NT_STATUS_OBJECT_TYPE_MISMATCH;
-    else if (wait_state(object)->owner_pid != (uint32_t)getpid())
+    else if (wait_state(object)->remote_guest &&
+             (teb != NULL || exit_code != NULL))
+        status = NT_STATUS_NOT_SUPPORTED;
+    else if (wait_state(object)->owner_pid != (uint32_t)getpid() &&
+             (!wait_state(object)->child_guest || teb != NULL))
         status = NT_STATUS_NOT_SUPPORTED;
     else if (!(object->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION)))
         status = NT_STATUS_ACCESS_DENIED;
@@ -1994,6 +2083,32 @@ uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle)
     return status == NT_STATUS_SUCCESS ? id : 0;
 }
 
+/* Read-only OpenThread for the initial thread of a child actually launched
+ * by this runtime. The broker validates an owned live pidfd, unique
+ * generation and query authority. Never use a raw guest PID as a syscall
+ * target. Existing local threads retain their previous permissions. */
+static bool registered_child_query_locked(const struct waitable *state,
+                                          uint32_t access)
+{
+    const uint32_t query = access &
+        (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION);
+    if (!state->child_guest || state->signaled ||
+        state->owner_pid != state->thread_id || query == 0 ||
+        (access & ~(THREAD_QUERY_INFORMATION |
+                    THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE)) != 0)
+        return false;
+    uint64_t capability = 0;
+    if (!nt_broker_open_child_thread(getpid(), (pid_t)state->owner_pid,
+                                     query, &capability))
+        return false;
+    struct nt_broker_thread_info observed = {0};
+    const bool validated = nt_broker_query_child_thread(getpid(), capability,
+                                     query, &observed) &&
+                           observed.guest_process_id == state->owner_pid &&
+                           observed.guest_thread_id == state->thread_id;
+    (void)nt_broker_close_child_thread(getpid(), capability);
+    return validated;
+}
 static nt_status open_thread_local(uintptr_t *result, uint32_t access,
                                    bool inherit, uint32_t id)
 {
@@ -2005,7 +2120,9 @@ static nt_status open_thread_local(uintptr_t *result, uint32_t access,
         struct waitable *item = &waitables[i];
         if (item->kind == THREAD && item->shared == NULL &&
             (item->refs != 0 || item->links != 0) &&
-            item->owner_pid == (uint32_t)getpid() && item->thread_id == id) {
+            item->thread_id == id &&
+            (item->owner_pid == (uint32_t)getpid() ||
+             (item->child_guest && item->owner_pid == id))) {
             original = item;
             break;
         }
@@ -2014,6 +2131,9 @@ static nt_status open_thread_local(uintptr_t *result, uint32_t access,
     if (original != NULL) {
         if (access & ~original->access) {
             status = NT_STATUS_ACCESS_DENIED;
+        } else if (original->child_guest &&
+                   !registered_child_query_locked(original, access)) {
+            status = NT_STATUS_NOT_SUPPORTED;
         } else {
             struct waitable *alias = new_waitable(THREAD);
             if (alias == NULL)
@@ -2032,10 +2152,51 @@ static nt_status open_thread_local(uintptr_t *result, uint32_t access,
     return status;
 }
 
+/* A foreign guest ID is never passed to setpriority, sched_setaffinity
+ * or Linux signals. The only supported cross-PE capability here is a
+ * broker-proven QUERY_LIMITED_INFORMATION alias with a stable NT handle. */
+static nt_status open_thread_remote(uintptr_t *result, uint32_t access,
+                                   bool inherit, uint32_t id,
+                                   uint32_t expected_owner)
+{
+    if (result == NULL || access != THREAD_QUERY_LIMITED_INFORMATION || id == 0)
+        return NT_STATUS_NOT_SUPPORTED;
+    struct nt_broker_thread_info identity = {0};
+    uint64_t capability = 0;
+    if (!nt_broker_client_open(id, access, &identity, &capability))
+        return NT_STATUS_NOT_SUPPORTED;
+    if (identity.guest_thread_id != id ||
+        identity.guest_process_id == (uint32_t)getpid() ||
+        (expected_owner != 0 && identity.guest_process_id != expected_owner)) {
+        (void)nt_broker_client_close(capability);
+        return NT_STATUS_NOT_SUPPORTED;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *alias = new_waitable(THREAD);
+    if (alias != NULL) {
+        alias->owner_pid = identity.guest_process_id;
+        alias->thread_id = identity.guest_thread_id;
+        alias->access = access;
+        alias->remote_guest = true;
+        alias->remote_broker_capability = capability;
+        alias->remote_broker_generation = identity.generation;
+        alias->handle_flags = inherit ? 1u : 0u;
+        *result = alias->handle;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (alias == NULL) {
+        (void)nt_broker_client_close(capability);
+        return NT_STATUS_NO_MEMORY;
+    }
+    return NT_STATUS_SUCCESS;
+}
+
 uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
 {
     uintptr_t opened = 0;
-    const nt_status status = open_thread_local(&opened, access, inherit != 0, id);
+    nt_status status = open_thread_local(&opened, access, inherit != 0, id);
+    if (status == NT_STATUS_INVALID_CID && nt_broker_client_is_attached())
+        status = open_thread_remote(&opened, access, inherit != 0, id, 0);
     if (status != NT_STATUS_SUCCESS)
         nt_SetLastError(status == NT_STATUS_INVALID_CID ?
                         NT_ERROR_INVALID_PARAMETER : nt_runtime_nt_error(status));
@@ -2058,20 +2219,45 @@ nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
             (attributes->attributes & ~2u) != 0)
             return NT_STATUS_NOT_SUPPORTED;
     }
-    if (client_id->unique_process != 0 &&
-        client_id->unique_process != (uintptr_t)getpid())
-        return NT_STATUS_NOT_SUPPORTED;
     if (client_id->unique_thread > UINT32_MAX)
         return NT_STATUS_INVALID_CID;
-    return open_thread_local(handle, access,
+    const bool remote = client_id->unique_process != 0 &&
+                        client_id->unique_process != (uintptr_t)getpid();
+    if (remote && client_id->unique_process > UINT32_MAX)
+        return NT_STATUS_INVALID_CID;
+    uintptr_t opened = 0;
+    nt_status result = open_thread_local(&opened, access,
                              attributes != NULL && (attributes->attributes & 2u) != 0,
                              (uint32_t)client_id->unique_thread);
+    if (result == NT_STATUS_SUCCESS && client_id->unique_process != 0) {
+        pthread_mutex_lock(&wait_lock);
+        struct waitable *opened_handle = find_waitable(opened);
+        const bool matches = opened_handle != NULL &&
+            wait_state(opened_handle)->owner_pid ==
+                (uint32_t)client_id->unique_process;
+        pthread_mutex_unlock(&wait_lock);
+        if (!matches) {
+            (void)nt_runtime_close_waitable_status(opened);
+            return NT_STATUS_NOT_SUPPORTED;
+        }
+    }
+    if (result == NT_STATUS_INVALID_CID && nt_broker_client_is_attached())
+        result = open_thread_remote(&opened, access,
+                                   attributes != NULL && (attributes->attributes & 2u) != 0,
+                                   (uint32_t)client_id->unique_thread,
+                                   remote ? (uint32_t)client_id->unique_process : 0);
+    if (remote && result == NT_STATUS_INVALID_CID)
+        return NT_STATUS_NOT_SUPPORTED;
+    if (result == NT_STATUS_SUCCESS)
+        *handle = opened; /* preserve native output exactly on failure */
+    return result;
 }
 
 
 static void finish_thread(struct nt_guest_thread *guest, bool attached)
 {
     nt_runtime_run_fls_cleanup();
+    nt_broker_client_unregister_thread((uint32_t)gettid());
     if (guest->entered) {
         /* A thread killed while CREATE_SUSPENDED has not yet executed
          * TLS callbacks or DLL_THREAD_ATTACH. It must not send DETACH. */
@@ -2106,6 +2292,10 @@ static void finish_thread(struct nt_guest_thread *guest, bool attached)
 static void *thread_main(void *context)
 {
     running_thread = context;
+    const uint32_t host_tid = (uint32_t)gettid();
+    /* This is a host runtime notification only. The parent revalidates
+     * membership against its own /proc/<registered PID>/task/<TID> view. */
+    (void)nt_broker_client_register_thread(host_tid);
     struct nt_guest_thread guest = {0};
     const uintptr_t image = nt_runtime_guest_module();
     const bool ready = image == 0 || nt_runtime_enter_guest_thread(&guest, image, nt_runtime_guest_tls());
