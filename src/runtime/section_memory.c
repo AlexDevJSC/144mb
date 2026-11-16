@@ -463,3 +463,98 @@ bool nt_runtime_section_query(const void *address,
     pthread_mutex_unlock(&section_lock);
     return found;
 }
+
+
+/* NTDLL uses the same section-object table as KERNEL32, with NTSTATUS and
+ * an independent Win32 LastError. This is a deliberately bounded
+ * NtCreateSection/NtMapViewOfSection base, not a general Ldr section server. */
+static nt_status section_status_from_last_error(uint32_t error)
+{
+    switch (error) {
+    case NT_ERROR_INVALID_HANDLE: return NT_STATUS_INVALID_HANDLE;
+    case NT_ERROR_INVALID_ADDRESS: return NT_STATUS_CONFLICTING_ADDRESSES;
+    case NT_ERROR_NOT_ENOUGH_MEMORY: return NT_STATUS_NO_MEMORY;
+    case NT_ERROR_ACCESS_DENIED: return NT_STATUS_ACCESS_DENIED;
+    case NT_ERROR_NOT_SUPPORTED: return NT_STATUS_NOT_SUPPORTED;
+    default: return NT_STATUS_INVALID_PARAMETER;
+    }
+}
+
+nt_status NT_MS_ABI nt_NtCreateSection(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, const int64_t *maximum,
+    uint32_t protect, uint32_t allocation, uintptr_t file)
+{
+    if (!handle)
+        return NT_STATUS_INVALID_PARAMETER;
+    *handle = 0;
+    uint32_t normalized;
+    if (attributes != NULL || file != 0 || !maximum || *maximum <= 0 ||
+        (allocation != 0 && allocation != 0x08000000u) ||
+        !accept_access(access, &normalized) ||
+        (protect != SECTION_PAGE_READONLY &&
+         protect != SECTION_PAGE_READWRITE))
+        return NT_STATUS_NOT_SUPPORTED;
+    if ((normalized & ~section_rights(protect)) != 0)
+        return NT_STATUS_ACCESS_DENIED;
+    const uint32_t saved = nt_GetLastError();
+    const uint64_t amount = (uint64_t)*maximum;
+    uintptr_t result = nt_CreateFileMappingW(UINTPTR_MAX, NULL, protect,
+                                              (uint32_t)(amount >> 32),
+                                              (uint32_t)amount, NULL);
+    const uint32_t mapping_error_value = nt_GetLastError();
+    nt_SetLastError(saved);
+    if (!result)
+        return section_status_from_last_error(mapping_error_value);
+    pthread_mutex_lock(&section_lock);
+    struct section_handle *entry = lookup_handle(result);
+    if (entry)
+        entry->allowed = normalized;
+    pthread_mutex_unlock(&section_lock);
+    *handle = result;
+    return NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtMapViewOfSection(uintptr_t section, uintptr_t process,
+    void **base, uintptr_t zero_bits, size_t commit_size, const int64_t *offset,
+    size_t *view_size, uint32_t inherit, uint32_t allocation, uint32_t protect)
+{
+    if (!base || !view_size)
+        return NT_STATUS_INVALID_PARAMETER;
+    if (process != nt_GetCurrentProcess())
+        return NT_STATUS_NOT_SUPPORTED;
+    if (*base || zero_bits || commit_size || allocation ||
+        (inherit != 1 && inherit != 2) ||
+        (protect != SECTION_PAGE_READONLY && protect != SECTION_PAGE_READWRITE) ||
+        (offset && *offset < 0))
+        return NT_STATUS_NOT_SUPPORTED;
+    const uint64_t start = offset ? (uint64_t)*offset : 0;
+    const uint32_t access = protect == SECTION_PAGE_READONLY ?
+        SECTION_MAP_READ : SECTION_MAP_WRITE;
+    const uint32_t saved = nt_GetLastError();
+    void *mapped = nt_MapViewOfFile(section, access,
+            (uint32_t)(start >> 32), (uint32_t)start, *view_size);
+    const uint32_t mapping_error_value = nt_GetLastError();
+    nt_SetLastError(saved);
+    if (!mapped)
+        return section_status_from_last_error(mapping_error_value);
+    struct nt_memory_basic_information info;
+    if (!nt_runtime_section_query(mapped, &info)) {
+        (void)nt_UnmapViewOfFile(mapped);
+        nt_SetLastError(saved);
+        return NT_STATUS_INVALID_PARAMETER;
+    }
+    *base = mapped;
+    *view_size = info.region_size;
+    return NT_STATUS_SUCCESS;
+}
+
+nt_status NT_MS_ABI nt_NtUnmapViewOfSection(uintptr_t process, const void *base)
+{
+    if (process != nt_GetCurrentProcess())
+        return NT_STATUS_NOT_SUPPORTED;
+    const uint32_t saved = nt_GetLastError();
+    int32_t result = nt_UnmapViewOfFile(base);
+    const uint32_t error = nt_GetLastError();
+    nt_SetLastError(saved);
+    return result ? NT_STATUS_SUCCESS : section_status_from_last_error(error);
+}
