@@ -704,6 +704,91 @@ con contenedores Fedora/RPM no certifica la máquina física; también
 quedan pruebas con aplicaciones PE reales, concesiones D:/UNC, SELinux,
 varios procesos, cierres inesperados y reinicios.
 
+## Filesystem2 P1.6 → P1.5: cierre incremental en orden 3, 2, 1
+
+Este bloque es la **revisión posterior** de las secciones históricas anteriores.
+Los contratos aquí descritos sustituyen los estados pendientes que allí se
+indicaban, pero mantienen límites explícitos donde Linux no ofrece NTFS
+equivalente. Los tests son sintéticos: la aceptación Fedora físico queda para
+la batería conjunta posterior junto a P1.7–P1.9.
+
+### 3. DOS 8.3: identidad de entrada, renombrado y hardlinks
+
+Los alias 8.3 asignados bajo demanda se indexan ahora por
+**(directorio padre: dispositivo/inodo, nombre UTF-8 plegado en ASCII)**,
+con dos hashes de 64 bits en el nombre de un xattr del inodo de destino.
+Así, dos hardlinks a un mismo inodo en carpetas distintas pueden recibir
+alias independientes y un movimiento a otro directorio **no activa
+automáticamente el alias de su antiguo nombre/ruta**. Los cambios solo
+de mayúsculas ASCII conservan el identificador y el alias. El viejo
+atributo `user.ntnative.dos83` permanece como metadato de diagnóstico
+en archivos de enlace único, pero el resolvedor no lo usa para elegir
+archivos: podría ser obsoleto tras un movimiento.
+
+Los locks del registro de compartición serializan las asignaciones entre
+procesos que participen en el runtime. No se pretende controlar escrituras
+por programas Linux externos, ni se eliminan inmediatamente los xattrs de
+entradas antiguas tras un movimiento (solo dejan de ser visibles al
+resolvedor). Tampoco se garantiza igualdad exacta con la generación
+histórica de NTFS para nombres multilingües, cambios entre mounts o
+renombrados host realizados fuera del runtime. Se agregan pruebas de
+hardlink, nombres por carpeta, colisiones y cambios de mayúsculas.
+
+### 2. ACP: separar fronteras ANSI e infraestructura UTF-8
+
+Las entradas de archivo Win32 con sufijo `A` convierten desde
+`GetACP()` a UTF-16/UTF-8 **una vez en la frontera**. Hoy el ACP
+anunciado es Windows-1252. Están cubiertos CreateFileA, CopyFileA,
+CopyFileExA, MoveFileA, MoveFileExA, CreateDirectoryA, DeleteFileA,
+RemoveDirectoryA, GetFileAttributesA, GetFileAttributesExA,
+SetFileAttributesA, GetFileSecurityA, GetFullPathNameA,
+GetCurrentDirectoryA, SetCurrentDirectoryA, GetLongPathNameA,
+GetShortPathNameA, GetTempPathA y las API ANSI de búsqueda. Se
+evita interpretar una secuencia CP1252 válida como UTF-8 accidental.
+Las rutas de salida ANSI (incluida la carpeta temporal) se convierten
+al mismo ACP.
+
+Los wrappers `W` usan rutas UTF-16 inequívocas y los motores internos
+siguen usando UTF-8 sin reconvertirse. CRT/host `nt_fopen` continúa
+aceptando rutas internas UTF-8 como contrato separado, no es
+necesariamente el ABI MSVCRT de un invitado. El resto del proyecto
+(USER32, shell y demás entradas ANSI que **no son este subsistema de
+archivos**) requiere auditoría independiente antes de anunciar una
+política ACP global uniforme.
+
+### 1. Junctions de directorio y FSCTL de reparse
+
+Se admite un **perfil acotado** de `IO_REPARSE_TAG_MOUNT_POINT` sobre
+un directorio físico Linux vacío. Se abre con CreateFileW/A,
+`OPEN_EXISTING` y `FILE_FLAG_OPEN_REPARSE_POINT |
+FILE_FLAG_BACKUP_SEMANTICS`; una apertura con GENERIC_WRITE habilita
+SET y DELETE. El metadato se persiste en el directorio real usando
+`user.ntnative.junction.v1`, con la identidad de la raíz autorizada
+y el destino DOS UTF-8. No se crea ninguna carpeta temporal ni mount
+de sistema.
+
+DeviceIoControl implementa `FSCTL_SET_REPARSE_POINT` (0x000900a4),
+`FSCTL_GET_REPARSE_POINT` (0x000900a8) y
+`FSCTL_DELETE_REPARSE_POINT` (0x000900ac) para ese tag. Se valida
+el layout y los offsets UTF-16LE, la identidad del HANDLE abierto,
+la existencia del destino, el mismo root autorizado, el rechazo
+de symlinks y los límites del buffer. Las aperturas de archivos
+contenidos en el directorio marcado y la enumeración de directorios
+pueden dirigirse al destino físico, mediante FD verificados. Las
+consultas del propio directorio presentan atributos DIRECTORY y
+REPARSE_POINT.
+
+**Limitaciones deliberadas:** solo un salto de junction a un
+directorio físico, sin encadenar otros junctions en la ruta del
+destino; sin montaje de volúmenes, redirección entre raíces autorizadas,
+ACL Windows completas, bypass de SELinux, enlace relativo arbitrario
+o equivalencia total de NTFS. La carpeta Linux original sigue
+existiendo: un programa Linux ajeno al runtime ve esa carpeta
+y no la redirección Win32. El metadata reparse puede quedar obsoleto
+si un programa Linux externo renombra o sustituye directorios;
+se verifica la identidad de las raíces y de los HANDLEs, pero
+no se afirma atomicidad universal contra procesos no cooperantes.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de

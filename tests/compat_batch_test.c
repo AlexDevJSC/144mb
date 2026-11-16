@@ -363,6 +363,40 @@ static uint32_t NT_MS_ABI test_copy_progress(int64_t total, int64_t bytes,
     return test->action;
 }
 
+static void test_write_le16(uint8_t *at, uint16_t number)
+{
+    at[0] = (uint8_t)number;
+    at[1] = (uint8_t)(number >> 8);
+}
+
+static uint32_t test_mount_reparse(uint8_t out[512], const uint16_t *dos_name)
+{
+    size_t chars = 0;
+    while (dos_name[chars])
+        ++chars;
+    const size_t sub_bytes = (chars + 4) * 2;
+    const size_t print_bytes = chars * 2;
+    const size_t total = 16 + sub_bytes + print_bytes;
+    if (total > 512)
+        return 0;
+    memset(out, 0, 512);
+    out[0] = 0x03;
+    out[3] = 0xa0; /* IO_REPARSE_TAG_MOUNT_POINT */
+    test_write_le16(out + 4, (uint16_t)(total - 8));
+    test_write_le16(out + 8, 0);
+    test_write_le16(out + 10, (uint16_t)sub_bytes);
+    test_write_le16(out + 12, (uint16_t)sub_bytes);
+    test_write_le16(out + 14, (uint16_t)print_bytes);
+    const uint16_t prefix[] = {'\\', '?', '?', '\\'};
+    for (size_t i = 0; i < 4; ++i)
+        test_write_le16(out + 16 + 2 * i, prefix[i]);
+    for (size_t i = 0; i < chars; ++i) {
+        test_write_le16(out + 16 + 8 + 2 * i, dos_name[i]);
+        test_write_le16(out + 16 + sub_bytes + 2 * i, dos_name[i]);
+    }
+    return (uint32_t)total;
+}
+
 static void check_files(void)
 {
     BOUND(KERNEL, CreateDirectoryA);
@@ -449,7 +483,13 @@ static void check_files(void)
     uint32_t received = 0;
     CHECK(ansi_handle != UINTPTR_MAX &&
           nt_ReadFile(ansi_handle, &selected, 1, &received, NULL) &&
-          received == 1 && selected == 'U' && nt_CloseHandle(ansi_handle));
+          received == 1 && selected == 'A' && nt_CloseHandle(ansi_handle));
+    /* An explicit W lookup still resolves the distinct true Unicode file. */
+    uintptr_t unicode_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9.txt",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(unicode_handle != UINTPTR_MAX &&
+          nt_ReadFile(unicode_handle, &selected, 1, &received, NULL) &&
+          received == 1 && selected == 'U' && nt_CloseHandle(unicode_handle));
     CHECK(unlink(utf8_native) == 0);
     ansi_handle = nt_CreateFileA(ambiguous_a, UINT32_C(0x80000000),
                                  7u, NULL, 3u, 0x80u, 0);
@@ -575,10 +615,10 @@ static void check_files(void)
 
     /* Unicode case folding is locale-independent, including every parent
      * component and Windows wildcard matching on Unicode characters. */
-    CHECK(nt_CreateDirectoryA("C:\\Étage", NULL) != 0);
-    CHECK(nt_CreateDirectoryA("c:\\étage", NULL) == 0 &&
+    CHECK(nt_CreateDirectoryW(u"C:\\Étage", NULL) != 0);
+    CHECK(nt_CreateDirectoryW(u"c:\\étage", NULL) == 0 &&
           last_error() == NT_ERROR_ALREADY_EXISTS);
-    CHECK(nt_SetFileAttributesA("C:\\éTAGE", 1u | 2u) != 0 &&
+    CHECK(nt_SetFileAttributesW(u"C:\\éTAGE", 1u | 2u) != 0 &&
           (nt_GetFileAttributesW(u"C:\\Étage") & (1u | 2u | 0x10u)) ==
           (1u | 2u | 0x10u));
     void *international = nt_fopen("C:\\Étage\\Résumé.TXT", "wb");
@@ -611,7 +651,7 @@ static void check_files(void)
 
     /* HIDDEN, SYSTEM, ARCHIVE and a mutable Windows creation timestamp
      * are persisted as Linux user xattrs on the original file. */
-    CHECK(nt_SetFileAttributesA("c:\\étage\\RÉSUMÉ.TXT", 2u | 4u | 32u) != 0);
+    CHECK(nt_SetFileAttributesW(u"c:\\étage\\RÉSUMÉ.TXT", 2u | 4u | 32u) != 0);
     CHECK((nt_GetFileAttributesW(u"C:\\ÉTAGE\\résumé.txt") & (2u | 4u | 32u)) ==
           (2u | 4u | 32u));
     uintptr_t info_handle = nt_CreateFileW(u"C:\\étage\\résumé.txt",
@@ -631,12 +671,12 @@ static void check_files(void)
           memcmp(&actual_birth, &birth, sizeof(birth)) == 0 &&
           memcmp(&actual_modified, &modified, sizeof(modified)) == 0);
     CHECK(nt_CloseHandle(info_handle) != 0);
-    CHECK(nt_CopyFileA("C:\\étage\\RÉSUMÉ.TXT", "C:\\Étage\\Clone.bin", 1) != 0);
-    CHECK((nt_GetFileAttributesA("C:\\étage\\clone.bin") & (2u | 4u | 32u)) ==
+    CHECK(nt_CopyFileW(u"C:\\étage\\RÉSUMÉ.TXT", u"C:\\Étage\\Clone.bin", 1) != 0);
+    CHECK((nt_GetFileAttributesW(u"C:\\étage\\clone.bin") & (2u | 4u | 32u)) ==
           (2u | 4u | 32u));
-    CHECK(nt_DeleteFileA("c:\\étage\\CLONE.BIN") != 0 &&
-          nt_DeleteFileA("c:\\étage\\RÉSUMÉ.TXT") != 0 &&
-          nt_RemoveDirectoryA("C:\\ÉTAGE") != 0);
+    CHECK(nt_DeleteFileW(u"c:\\étage\\CLONE.BIN") != 0 &&
+          nt_DeleteFileW(u"c:\\étage\\RÉSUMÉ.TXT") != 0 &&
+          nt_RemoveDirectoryW(u"C:\\ÉTAGE") != 0);
 
     void *text = nt_fopen("C:\\data\\scores.txt", "w");
     CHECK(text != NULL && nt_fwrite("a\nb\n", 2, 2, text) == 2);
@@ -726,8 +766,43 @@ static void check_files(void)
     CHECK(alias_search != UINTPTR_MAX &&
           strcmp(alias_find_a.alternate, "LONGFI~1.TXT") == 0 &&
           nt_FindClose(alias_search));
-    CHECK(nt_DeleteFileA("data/longfilename.txt") &&
-          nt_DeleteFileA("data/longfileextra.txt"));
+    /* DOS aliases must be per directory ENTRY, not per inode. The same
+     * Linux hardlink in another directory receives an independent alias
+     * and cannot inherit the original namespace of the first directory. */
+    CHECK(nt_CreateDirectoryA("C:\\data\\sub83", NULL));
+    char hardlink_native[512];
+    CHECK(snprintf(hardlink_native, sizeof(hardlink_native),
+                   "%s/data/sub83/longfilename.txt", root) > 0 &&
+          linkat(AT_FDCWD, host_real, AT_FDCWD, hardlink_native, 0) == 0);
+    char alias_hardlink[256] = {0};
+    CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\longfilename.txt",
+                                alias_hardlink, sizeof(alias_hardlink)) ==
+          strlen("C:\\DATA\\SUB83\\LONGFI~1.TXT") &&
+          strcmp(alias_hardlink, "C:\\DATA\\SUB83\\LONGFI~1.TXT") == 0);
+    uintptr_t hardlink_handle = nt_CreateFileA(alias_hardlink, UINT32_C(0x80000000),
+                                                 7u, NULL, 3u, 0x80u, 0);
+    CHECK(hardlink_handle != UINTPTR_MAX && nt_CloseHandle(hardlink_handle));
+    /* The former longfileextra alias is scoped to data/. Moving the
+     * entry to sub83/ must not make that stale short name a valid alias
+     * of the moved inode in the new directory. */
+    CHECK(nt_MoveFileA("C:\\data\\longfileextra.txt",
+                       "C:\\data\\sub83\\anotherlongfile.txt"));
+    CHECK(nt_CreateFileA("C:\\data\\sub83\\LONGFI~2.TXT",
+                          UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0) ==
+          UINTPTR_MAX);
+    char alias_moved[256] = {0};
+    CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\anotherlongfile.txt",
+                                alias_moved, sizeof(alias_moved)) > 0 &&
+          strstr(alias_moved, "ANOTHE~1.TXT") != NULL);
+    CHECK(nt_DeleteFileA("C:\\data\\sub83\\anotherlongfile.txt"));
+    CHECK(nt_MoveFileA("C:\\data\\longfilename.txt",
+                       "C:\\data\\LongFilename.TXT"));
+    CHECK(nt_GetShortPathNameA("C:\\data\\LONGFILENAME.TXT",
+                                short_again, sizeof(short_again)) ==
+          strlen(short1) && strcmp(short_again, short1) == 0);
+    CHECK(nt_DeleteFileA("C:\\data\\LongFilename.TXT") &&
+          nt_DeleteFileA("C:\\data\\sub83\\longfilename.txt") &&
+          nt_RemoveDirectoryA("C:\\data\\sub83"));
     /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
      * unlike older mixed-mode A entrypoints, no UTF-8-first guess. */
     uintptr_t cp_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9long.txt",
@@ -800,6 +875,74 @@ static void check_files(void)
     CHECK(nt_DeleteFileA("C:\\data\\api-link") &&
           nt_GetFileAttributesA("C:\\data\\scores.txt") != UINT32_MAX);
 
+
+    /* A junction is a persistent xattr on an empty Linux directory.
+     * SET/GET/DELETE use native mount-point reparse buffers and a pinned
+     * metadata handle, with no host symlink, mount or extra grant. */
+    CHECK(nt_CreateDirectoryW(u"C:\\data\\junction-target", NULL));
+    CHECK(nt_CreateDirectoryW(u"C:\\data\\junction-entry", NULL));
+    uintptr_t junction_file = nt_CreateFileW(u"C:\\data\\junction-target\\payload.bin",
+        UINT32_C(0x40000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(junction_file != UINTPTR_MAX);
+    uint32_t junction_written = 0;
+    CHECK(nt_WriteFile(junction_file, "J", 1, &junction_written, NULL) &&
+          junction_written == 1 && nt_CloseHandle(junction_file));
+    uintptr_t junction = nt_CreateFileW(u"C:\\data\\junction-entry",
+        UINT32_C(0x40000000), 7u, NULL, 3u, 0x02200000u, 0);
+    CHECK(junction != UINTPTR_MAX);
+    uint8_t junction_input[512], junction_output[512] = {0};
+    uint32_t junction_data_size = test_mount_reparse(junction_input,
+                                                     u"C:\\data\\junction-target");
+    uint32_t junction_returned = 999;
+    CHECK(junction_data_size != 0 &&
+          nt_DeviceIoControl(junction, 0x000900a4u, junction_input,
+                             junction_data_size, NULL, 0,
+                             &junction_returned, NULL) &&
+          junction_returned == 0);
+    CHECK((nt_GetFileAttributesW(u"C:\\data\\junction-entry") &
+           (0x10u | 0x400u)) == (0x10u | 0x400u));
+    uintptr_t junction_read = nt_CreateFileW(
+        u"C:\\data\\junction-entry\\payload.bin", UINT32_C(0x80000000),
+        7u, NULL, 3u, 0x80u, 0);
+    char junction_value = 0;
+    uint32_t junction_received = 0;
+    CHECK(junction_read != UINTPTR_MAX &&
+          nt_ReadFile(junction_read, &junction_value, 1, &junction_received, NULL) &&
+          junction_received == 1 && junction_value == 'J' &&
+          nt_CloseHandle(junction_read));
+    struct nt_find_data_w junction_found = {0};
+    uintptr_t junction_search = nt_FindFirstFileW(
+        u"C:\\data\\junction-entry\\*.bin", &junction_found);
+    CHECK(junction_search != UINTPTR_MAX &&
+          junction_found.name[0] == 'p' && nt_FindClose(junction_search));
+    CHECK(!nt_DeviceIoControl(junction, 0x000900a8u, NULL, 0,
+                              junction_output, 4, &junction_returned, NULL) &&
+          last_error() == NT_ERROR_INSUFFICIENT_BUFFER &&
+          junction_returned == 0);
+    CHECK(nt_DeviceIoControl(junction, 0x000900a8u, NULL, 0,
+                             junction_output, sizeof(junction_output),
+                             &junction_returned, NULL) &&
+          junction_returned > 16 &&
+          junction_output[0] == 3 && junction_output[3] == 0xa0);
+    /* A different DOS root or nonexistent Linux target cannot be granted
+     * by reparse data supplied by the Windows process. */
+    uint32_t invalid_mount = test_mount_reparse(junction_input, u"D:\\secrets");
+    CHECK(invalid_mount > 0 &&
+          !nt_DeviceIoControl(junction, 0x000900a4u, junction_input,
+                              invalid_mount, NULL, 0,
+                              &junction_returned, NULL) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    uint8_t remove_mount[8] = {3, 0, 0, 0xa0};
+    CHECK(nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
+                             sizeof(remove_mount), NULL, 0,
+                             &junction_returned, NULL));
+    CHECK(nt_CloseHandle(junction) &&
+          (nt_GetFileAttributesW(u"C:\\data\\junction-entry") & 0x400u) == 0);
+    CHECK(nt_CreateFileW(u"C:\\data\\junction-entry\\payload.bin",
+          UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_DeleteFileW(u"C:\\data\\junction-target\\payload.bin") &&
+          nt_RemoveDirectoryW(u"C:\\data\\junction-entry") &&
+          nt_RemoveDirectoryW(u"C:\\data\\junction-target"));
 
     /* CopyFileEx reuses the regular native copy and preserves its xattrs.
      * Verify Microsoft x64 callback arguments and Windows abort semantics. */
