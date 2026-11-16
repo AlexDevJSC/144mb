@@ -16,10 +16,13 @@
 struct nt_junction_metadata {
     uint32_t magic, version;
     uint64_t root_dev, root_inode;
-    char target[PATH_MAX + 16]; /* canonical guest DOS path, UTF-8 */
+    /* A fixed PATH_MAX-sized xattr exceeds the per-inode xattr budget on
+     * some Linux filesystems (including typical 4 KiB ext4 blocks), so
+     * reserve a bounded namespace path small enough for ordinary xattrs. */
+    char target[1024]; /* canonical guest DOS path, UTF-8 */
 };
-_Static_assert(sizeof(struct nt_junction_metadata) <= 8192,
-               "Junction xattr remains bounded");
+_Static_assert(sizeof(struct nt_junction_metadata) <= 1536,
+               "Junction metadata must fit common Linux xattr budgets");
 
 static bool nt_junction_abs_guest_name(const char *path)
 {
