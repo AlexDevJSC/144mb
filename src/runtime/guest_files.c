@@ -6239,8 +6239,15 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
             close(fd);
             continue;
         }
-        if (valid)
+        if (valid) {
             result.info = file_attributes(fd, &stat_info);
+            char alias[14] = {0};
+            if (dos83_read_at(dirfd(search->directory), entry->d_name, alias))
+                for (size_t i = 0; i < sizeof(result.alternate) /
+                                         sizeof(result.alternate[0]) - 1 &&
+                                   alias[i]; ++i)
+                    result.alternate[i] = (uint16_t)(unsigned char)alias[i];
+        }
         close(fd);
         if (valid) {
             *data = result;
