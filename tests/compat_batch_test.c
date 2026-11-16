@@ -363,6 +363,40 @@ static uint32_t NT_MS_ABI test_copy_progress(int64_t total, int64_t bytes,
     return test->action;
 }
 
+static void test_write_le16(uint8_t *at, uint16_t number)
+{
+    at[0] = (uint8_t)number;
+    at[1] = (uint8_t)(number >> 8);
+}
+
+static uint32_t test_mount_reparse(uint8_t out[512], const uint16_t *dos_name)
+{
+    size_t chars = 0;
+    while (dos_name[chars])
+        ++chars;
+    const size_t sub_bytes = (chars + 4) * 2;
+    const size_t print_bytes = chars * 2;
+    const size_t total = 16 + sub_bytes + print_bytes;
+    if (total > 512)
+        return 0;
+    memset(out, 0, 512);
+    out[0] = 0x03;
+    out[3] = 0xa0; /* IO_REPARSE_TAG_MOUNT_POINT */
+    test_write_le16(out + 4, (uint16_t)(total - 8));
+    test_write_le16(out + 8, 0);
+    test_write_le16(out + 10, (uint16_t)sub_bytes);
+    test_write_le16(out + 12, (uint16_t)sub_bytes);
+    test_write_le16(out + 14, (uint16_t)print_bytes);
+    const uint16_t prefix[] = {'\\', '?', '?', '\\'};
+    for (size_t i = 0; i < 4; ++i)
+        test_write_le16(out + 16 + 2 * i, prefix[i]);
+    for (size_t i = 0; i < chars; ++i) {
+        test_write_le16(out + 16 + 8 + 2 * i, dos_name[i]);
+        test_write_le16(out + 16 + sub_bytes + 2 * i, dos_name[i]);
+    }
+    return (uint32_t)total;
+}
+
 static void check_files(void)
 {
     BOUND(KERNEL, CreateDirectoryA);
@@ -841,6 +875,74 @@ static void check_files(void)
     CHECK(nt_DeleteFileA("C:\\data\\api-link") &&
           nt_GetFileAttributesA("C:\\data\\scores.txt") != UINT32_MAX);
 
+
+    /* A junction is a persistent xattr on an empty Linux directory.
+     * SET/GET/DELETE use native mount-point reparse buffers and a pinned
+     * metadata handle, with no host symlink, mount or extra grant. */
+    CHECK(nt_CreateDirectoryW(u"C:\\data\\junction-target", NULL));
+    CHECK(nt_CreateDirectoryW(u"C:\\data\\junction-entry", NULL));
+    uintptr_t junction_file = nt_CreateFileW(u"C:\\data\\junction-target\\payload.bin",
+        UINT32_C(0x40000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(junction_file != UINTPTR_MAX);
+    uint32_t junction_written = 0;
+    CHECK(nt_WriteFile(junction_file, "J", 1, &junction_written, NULL) &&
+          junction_written == 1 && nt_CloseHandle(junction_file));
+    uintptr_t junction = nt_CreateFileW(u"C:\\data\\junction-entry",
+        UINT32_C(0x40000000), 7u, NULL, 3u, 0x02200000u, 0);
+    CHECK(junction != UINTPTR_MAX);
+    uint8_t junction_input[512], junction_output[512] = {0};
+    uint32_t junction_data_size = test_mount_reparse(junction_input,
+                                                     u"C:\\data\\junction-target");
+    uint32_t junction_returned = 999;
+    CHECK(junction_data_size != 0 &&
+          nt_DeviceIoControl(junction, 0x000900a4u, junction_input,
+                             junction_data_size, NULL, 0,
+                             &junction_returned, NULL) &&
+          junction_returned == 0);
+    CHECK((nt_GetFileAttributesW(u"C:\\data\\junction-entry") &
+           (0x10u | 0x400u)) == (0x10u | 0x400u));
+    uintptr_t junction_read = nt_CreateFileW(
+        u"C:\\data\\junction-entry\\payload.bin", UINT32_C(0x80000000),
+        7u, NULL, 3u, 0x80u, 0);
+    char junction_value = 0;
+    uint32_t junction_received = 0;
+    CHECK(junction_read != UINTPTR_MAX &&
+          nt_ReadFile(junction_read, &junction_value, 1, &junction_received, NULL) &&
+          junction_received == 1 && junction_value == 'J' &&
+          nt_CloseHandle(junction_read));
+    struct nt_find_data_w junction_found = {0};
+    uintptr_t junction_search = nt_FindFirstFileW(
+        u"C:\\data\\junction-entry\\*.bin", &junction_found);
+    CHECK(junction_search != UINTPTR_MAX &&
+          junction_found.name[0] == 'p' && nt_FindClose(junction_search));
+    CHECK(!nt_DeviceIoControl(junction, 0x000900a8u, NULL, 0,
+                              junction_output, 4, &junction_returned, NULL) &&
+          last_error() == NT_ERROR_INSUFFICIENT_BUFFER &&
+          junction_returned == 0);
+    CHECK(nt_DeviceIoControl(junction, 0x000900a8u, NULL, 0,
+                             junction_output, sizeof(junction_output),
+                             &junction_returned, NULL) &&
+          junction_returned > 16 &&
+          junction_output[0] == 3 && junction_output[3] == 0xa0);
+    /* A different DOS root or nonexistent Linux target cannot be granted
+     * by reparse data supplied by the Windows process. */
+    uint32_t invalid_mount = test_mount_reparse(junction_input, u"D:\\secrets");
+    CHECK(invalid_mount > 0 &&
+          !nt_DeviceIoControl(junction, 0x000900a4u, junction_input,
+                              invalid_mount, NULL, 0,
+                              &junction_returned, NULL) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    uint8_t remove_mount[8] = {3, 0, 0, 0xa0};
+    CHECK(nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
+                             sizeof(remove_mount), NULL, 0,
+                             &junction_returned, NULL));
+    CHECK(nt_CloseHandle(junction) &&
+          (nt_GetFileAttributesW(u"C:\\data\\junction-entry") & 0x400u) == 0);
+    CHECK(nt_CreateFileW(u"C:\\data\\junction-entry\\payload.bin",
+          UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_DeleteFileW(u"C:\\data\\junction-target\\payload.bin") &&
+          nt_RemoveDirectoryW(u"C:\\data\\junction-entry") &&
+          nt_RemoveDirectoryW(u"C:\\data\\junction-target"));
 
     /* CopyFileEx reuses the regular native copy and preserves its xattrs.
      * Verify Microsoft x64 callback arguments and Windows abort semantics. */
