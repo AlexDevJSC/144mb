@@ -65,7 +65,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: check-pe-priority-boost all check check-object-broker check-dos83-mediator check-dos83-fuse check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+.PHONY: check-pe-preflight check-pe-priority-boost all check check-object-broker check-dos83-mediator check-dos83-fuse check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(BUILD_DIR)/nt-object-broker $(DOS83_FUSE_TARGET)
 
 $(BUILD_DIR):
@@ -637,9 +637,17 @@ $(BUILD_DIR)/child-fixture.exe: tests/pe/child_process_fixture.c | $(BUILD_DIR)
 $(BUILD_DIR)/command-fixture.exe: tests/pe/command_fixture.c | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< -lshell32 -lkernel32
 
-check-pe-isolated: $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixture.exe \
-    $(BUILD_DIR)/folder-fixture.exe $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe \
-    $(BUILD_DIR)/command-fixture.exe
+PE_ISOLATED_FIXTURES = $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixture.exe \
+    $(BUILD_DIR)/folder-fixture.exe $(BUILD_DIR)/child-parent-fixture.exe \
+    $(BUILD_DIR)/child-fixture.exe $(BUILD_DIR)/command-fixture.exe
+
+# Preflight runs even on hosts where Bubblewrap cannot create namespaces.
+# Direct imports are checked without executing untrusted PE code; this does
+# not claim coverage of delay imports, LoadLibrary or dependent DLL semantics.
+check-pe-preflight: $(BUILD_DIR)/pe-import-audit $(PE_ISOLATED_FIXTURES)
+	$(BUILD_DIR)/pe-import-audit --verify $(PE_ISOLATED_FIXTURES)
+
+check-pe-isolated: check-pe-preflight $(BUILD_DIR)/pe-isolated-run
 	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe \
 	    $(BUILD_DIR)/profile-fixture.exe $(BUILD_DIR)/folder-fixture.exe \
 	    $(BUILD_DIR)/child-parent-fixture.exe $(BUILD_DIR)/child-fixture.exe $(BUILD_DIR)/command-fixture.exe
