@@ -679,11 +679,13 @@ archivos reales confinados y asigna, a nombres largos, un alias tipo
 LONGFI~1.TXT. Lo almacena en el inodo real Linux mediante el atributo
 extendido user.ntnative.dos83. Comprueba colisiones con nombres y alias
 ya asignados. El resolvedor de rutas puede reabrir estos archivos por
-el alias corto sin duplicar su contenido. Si no se admiten xattrs,
+el alias corto sin duplicar su contenido. FindFirstFileA/W incluye los
+alias ya persistidos en el campo alternate, sin generarlos al enumerar.
+Si no se admiten xattrs,
 la llamada falla sin inventar una ruta. **Límites:** no hay asignación
 atómica entre procesos Linux no cooperantes, ni alias por directorio para
 hardlinks, ni reconciliación completa tras renombrados entre carpetas,
-ni alternate de FindFirstFile, ni las reglas exactas de transliteración
+ni asignación automática para todos los directorios, ni las reglas exactas de transliteración
 de NTFS. No se declara compatibilidad 8.3 completa.
 
 **ACP en las API nuevas:** GetShortPathNameA, GetLongPathNameA y
