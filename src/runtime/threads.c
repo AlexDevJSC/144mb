@@ -47,6 +47,14 @@ struct guest_apc_queue {
     struct guest_apc *head, *tail;
     uint32_t count;
 };
+/* The bounded Linux backend can boost a guest by one Linux nice step
+ * and automatically restore its original base after a monotonic deadline.
+ * This is NOT Windows NT's full dynamic priority decay formula. */
+struct guest_dynamic_boost {
+    bool disabled, active;
+    int base_nice;
+    struct timespec expires;
+};
 struct waitable {
     uintptr_t handle;
     unsigned int refs;
@@ -88,6 +96,7 @@ struct waitable {
     bool explicit_group_outside_process;
     int final_nice;
     bool final_nice_valid;
+    struct guest_dynamic_boost dynamic_boost;
 };
 
 static struct waitable waitables[WAITABLE_COUNT];
@@ -108,6 +117,16 @@ static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
 static _Thread_local uint16_t primary_thread_group;
 static _Thread_local bool primary_thread_group_initialized;
+/* Only the main thread has a pseudo-handle that the decay worker can
+ * identify cross-thread. All other guest threads use canonical waitables. */
+static struct guest_dynamic_boost leader_dynamic_boost;
+static bool process_dynamic_boost_disabled;
+static bool boost_rollback_failed;
+static int boost_monitor_state; /* 0: unstarted, 1: running, -1: unavailable */
+static pid_t boost_monitor_tid;
+static bool scheduler_can_restore_nice(int requested_nice);
+static void scheduler_guest_wait_woke_locked(void);
+static bool scheduler_has_active_boosts_locked(void);
 /* Needed by CreateThread before the group-affinity API definitions below. */
 static nt_status thread_primary_affinity_locked(uintptr_t handle,
                                                  const cpu_set_t *cpus,
@@ -1855,6 +1874,10 @@ static void finish_thread(struct nt_guest_thread *guest, bool attached)
     errno = 0;
     running_thread->final_nice = getpriority(PRIO_PROCESS, (id_t)gettid());
     running_thread->final_nice_valid = errno == 0;
+    if (running_thread->dynamic_boost.active) {
+        running_thread->final_nice = running_thread->dynamic_boost.base_nice;
+        running_thread->dynamic_boost.active = false;
+    }
     running_thread->exit_code = thread_result;
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     clear_apcs_locked(&running_thread->apcs);
@@ -2846,7 +2869,8 @@ struct scheduler_thread_set {
 
 static bool tracked_scheduler_tid_locked(pid_t tid)
 {
-    if (tid == getpid())
+    if (tid == getpid() || (boost_monitor_state == 1 &&
+                             tid == boost_monitor_tid && tid > 0))
         return true;
     for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
         const struct waitable *item = &waitables[i];
