@@ -21,7 +21,7 @@ static void require(int success, const char *what, int line)
         exit(1);
     }
 }
-#define CHECK(e) require((e), #e, __LINE__)
+#define CHECK(e) require(!!(e), #e, __LINE__)
 enum { ALL_ACCESS = 0x1f0003u, READ_ACCESS = 0x100004u };
 static const uint16_t *section_name = u"broker_café_section";
 static const uint16_t *event_name = u"broker_event";
