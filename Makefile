@@ -191,6 +191,10 @@ $(BUILD_DIR)/thread-group-affinity-test: tests/thread_group_affinity_test.c $(RU
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
+$(BUILD_DIR)/dynamic-priority-boost-test: tests/dynamic_priority_boost_test.c $(RUNTIME_OBJECTS) src/runtime/sync.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
 $(BUILD_DIR)/process-priority-class-test: tests/process_priority_class_test.c $(RUNTIME_OBJECTS) src/runtime/sync.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -259,7 +263,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
-check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/inherited-file-test \
+check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/inherited-file-test \
        $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator
@@ -270,6 +274,7 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 20s $(BUILD_DIR)/thread-affinity-test
 	timeout 20s $(BUILD_DIR)/thread-group-affinity-test
 	timeout 20s $(BUILD_DIR)/process-priority-class-test
+	timeout 20s $(BUILD_DIR)/dynamic-priority-boost-test
 	timeout 20s $(BUILD_DIR)/process-priority-multithread-test
 	timeout 20s $(BUILD_DIR)/priority-boost-boundary-test
 	timeout 20s $(BUILD_DIR)/process-affinity-mask-test
@@ -644,6 +649,17 @@ check-pe-import: $(BUILD_DIR)/pe-import-host $(BUILD_DIR)/pe-win32-import-host $
 
 $(BUILD_DIR)/counter-bench: tests/bench/counter_bench.c $(BUILD_DIR)/counter.o | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o "$@"
+
+$(BUILD_DIR)/stage4-quantum-host: tests/bench/scheduler_quantum_observation.c | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(WARN_CFLAGS) $(CFLAGS) -std=c11 -pthread -o "$@" "$<"
+
+.PHONY: check-stage4-quantum
+check-stage4-quantum: $(BUILD_DIR)/stage4-quantum-host
+	timeout 20s $(BUILD_DIR)/stage4-quantum-host > $(BUILD_DIR)/stage4-linux-quantum.txt
+	grep -Fx 'SCHEMA=ntnative.stage4.quantum-observation.v1' $(BUILD_DIR)/stage4-linux-quantum.txt
+	grep -Fx 'RESULT=PASS' $(BUILD_DIR)/stage4-linux-quantum.txt
+	grep -Fx 'NT_QUANTUM_VERIFIED=NO' $(BUILD_DIR)/stage4-linux-quantum.txt
+	cat $(BUILD_DIR)/stage4-linux-quantum.txt
 
 benchmark: $(BUILD_DIR)/counter-bench
 	$(BUILD_DIR)/counter-bench

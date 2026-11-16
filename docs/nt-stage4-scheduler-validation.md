@@ -126,33 +126,32 @@ ahora más acotada, pero sigue sin cerrarse.
 
 ## Diferencias detectadas por revisión contractual
 
-1. **Windows 11 / Windows Server 2022 y posteriores:** procesos e
-   hilos pueden abarcar por defecto todos los grupos. Las APIs
-   tradicionales operan sobre el **grupo principal** del hilo o
-   proceso. `GetThreadGroupAffinity` describe el grupo principal, no
-   necesariamente toda la afinidad transgrupo del hilo. El prototipo
-   Linux actualmente **rechaza** una afinidad que abarque varios
-   `cpu_set_t` grupos, porque no conserva un grupo primario separado.
-   La prueba con más de 64 CPUs debe detectar esta divergencia, no
-   adjudicarle un PASS de paridad.
-2. **Topología:** `group = linux_cpu_id / 64` es una convención interna,
-   no garantiza numeración compacta ni correspondencia con topología
-   Windows en hardware/VM distinto. `CPU_SETSIZE` de glibc limita el
-   perfil actual. La fotografía inicial del cpuset no sigue hotplug.
-3. **Boosts de prioridad:** Windows dispone de aumento dinámico de
-   prioridad ante entrada, finalización de espera, etc., con controles
-   `Get/SetThreadPriorityBoost` y `Get/SetProcessPriorityBoost`.
-   `nice` de Linux es por TID y estático para el perfil existente.
-   **No implementar un booleano que afirme que controla boosts cuando
-   Linux no aplica un mecanismo observable equivalente.** El control
-   de Windows se prueba en un hilo de prueba; nuestro runtime sigue
-   `UNSUPPORTED`.
-4. **Quantum:** `QueryThreadCycleTime` y `GetThreadTimes` miden trabajo,
-   no el quantum de CPU del planificador de Windows. Linux
-   `sched_rr_get_interval` y su política `SCHED_RR` tampoco
-   constituyen traducción general de las reglas del planificador NT.
-   Se necesita diseño y medición diferencial de latencia/reparto en
-   tareas controladas antes de ofrecer contrato de quantum.
+1. **Windows 11 / Windows Server 2022 y posteriores:** el runtime
+   conserva un grupo principal por hilo y distingue este grupo de
+   la afinidad completa de Linux. Admite grupos compactos en su cpuset
+   inicial y operaciones sobre la máscara del grupo principal, incluidas
+   pruebas sintéticas de 80 CPU. **No** emula todavía la política
+   completa de CPU Sets, NUMA, particiones, hotplug o asignaciones
+   multicgrupo reales contrastadas en Windows físico.
+2. **Topología:** los procesadores Linux permitidos se enumeran como
+   posiciones invitadas compactas independientes del ID del host.
+   `CPU_SETSIZE` de glibc sigue acotando el perfil y el snapshot
+   inicial no sigue los cambios de cpuset/hotplug. La topología
+   compacta no pretende reproducir la organización NUMA de Windows.
+3. **Boosts de prioridad:** Windows incluye aumentos dinámicos con
+   reglas por tipo de evento y duración. Un backend **experimental**,
+   opt-in y con privilegios reversibles, eleva en un paso `nice` de un
+   hilo invitado tras un despertar real, verifica el efecto y restaura
+   su prioridad base automáticamente. La prueba Linux positiva pasa
+   en CI, pero no reproduce todas las fuentes ni curvas de NT.
+   El perfil predeterminado conserva el rechazo explícito para evitar
+   una promesa falsa de paridad.
+4. **Quantum:** la misma fuente C de prueba mide reparto de tiempo CPU,
+   contención y latencia de dos hilos fijados a una CPU en Windows
+   nativo y Linux CI. Ambos informes y el comparador están integrados
+   y se etiquetan `NT_QUANTUM_VERIFIED=NO`. Las medidas de CPU y
+   latencia **no identifican** la longitud del quantum NT ni
+   demuestran equivalencia de los planificadores.
 5. **Hilos externos / broker:** `OpenThread` o un identificador del
    invitado **no** autoriza `pthread_setaffinity_np`,
    `setpriority` ni `pidfd_send_signal` sobre un PID/TID arbitrario
@@ -174,7 +173,7 @@ ahora más acotada, pero sigue sin cerrarse.
      transversalmente al futuro problema 3 (objetos entre procesos);
      sólo se documenta la frontera en el problema 6.
 
-## Modelo compacto de grupos sobre cpuset disperso (implementación propuesta)
+## Modelo compacto de grupos sobre cpuset disperso (implementado y probado en CI)
 
 El snapshot al arrancar enumera los procesadores Linux permitidos en orden
 ascendente y les asigna índices **guest densos** `0..N-1`, independientemente
@@ -201,6 +200,61 @@ ser una prueba de hardware físico >64 CPU. La topología fija todavía no
 gestiona hotplug, CPU Sets, NUMA ni numeración exacta de Windows sobre
 sistemas con distinta topología. No cambia por sí sola el avance de
 prioridades dinámicas, quantum o broker de hilos externos.
+
+## Boost dinámico Linux medible, condicionado (experimento 16-11-2026)
+
+El backend opcional `NT_NATIVE_EXPERIMENTAL_BOOST=1` activa el
+mecanismo de incremento **real**, en un paso de `nice` Linux, al
+despertar de una espera Win32/NT que efectivamente bloqueó el hilo
+invitado y terminó satisfactoriamente. Un hilo auxiliar del mismo
+runtime, con acceso exclusivo a la tabla de hilos invitados bajo
+`wait_lock`, devuelve automáticamente la prioridad base tras
+20 ms de tiempo monotónico, incluso cuando el invitado queda
+ejecutando código CPU-bound. El monitor nunca acepta un PID/TID
+del invitado para `setpriority`. No emite señales, no habilita
+`SCHED_FIFO/SCHED_RR`, no se ejecuta con permisos adicionales ni
+interfiere intencionadamente con hilos externos al runtime.
+
+El backend solo se considera disponible cuando Linux permite
+restaurar el valor de `nice` (CAP_SYS_NICE o `RLIMIT_NICE` adecuado),
+se verifica el valor realmente aplicado y se ha solicitado mediante
+la variable de entorno. De otro modo los controles Win32
+`Get/SetThreadPriorityBoost` y `Get/SetProcessPriorityBoost`
+continúan devolviendo `ERROR_NOT_SUPPORTED`, sin salidas inventadas.
+La desactivación restaura los boosts en curso y comprueba sus efectos.
+Las consultas de prioridad de base no muestran el boost transitorio.
+Cambiar la clase o base mientras exista un boost en ejecución falla
+expresamente para no sobrescribir una prioridad que debe restaurarse.
+Cualquier error de rollback interrumpe nuevas activaciones.
+
+`tests/dynamic_priority_boost_test.c` mide la transición real
+`nice_base → nice_base-1 → nice_base` del mismo TID del hilo
+invitado después de una espera de evento NT. El job Linux de CI
+exige la ruta **positiva** bajo `sudo prlimit --nice=40:40`;
+las ejecuciones ordinarias no privilegiadas pueden registrar `SKIP`
+y no cuentan como aceptación positiva.
+
+Esto es una **aproximación limitada del scheduler de Windows**,
+no el algoritmo de boost/decay escalonado NT, no cubre todas
+las fuentes de boost (entrada UI, I/O prioritario, MMCSS, etc.)
+y **no equivale a quantum NT**. El experimento no está habilitado
+por defecto y no justifica por sí solo paridad del sistema.
+
+## Medición diferencial de competición sobre una CPU
+
+`tests/bench/scheduler_quantum_observation.c` es la misma fuente C
+compilada con MSVC en Windows nativo y GCC en Linux. Ejecuta dos
+hilos CPU-bound con afinidad real a una única CPU accesible y registra
+tiempo de CPU de cada hilo, tiempo de pared, razón de equidad y
+latencia desde la liberación de una barrera hasta la primera ejecución.
+`scripts/compare-stage4-quantum.py` valida ambos informes, rechaza
+mediciones nulas o esquemas inconsistentes y genera un JSON cruzado
+(`scheduler-quantum-differential` en CI). Ambos artefactos preservan
+`NT_QUANTUM_VERIFIED=NO`. Una ejecución de éxito es únicamente
+evidencia de medición: el intervalo de quantum, reglas NT, escalado
+por prioridad y comparabilidad entre CPU y entornos **no** están
+demostrados. No se altera el scheduler del anfitrión ni se pide
+`CAP_SYS_NICE` para este benchmark.
 
 ## Referencias técnicas, no evidencia de hardware
 
