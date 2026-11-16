@@ -15,11 +15,6 @@ static DWORD WINAPI probe_worker(void *unused)
     return 0x144u;
 }
 
-static KAFFINITY lowest_bit(KAFFINITY value)
-{
-    return value & (~value + (KAFFINITY)1);
-}
-
 static int fail(const char *which, DWORD error)
 {
     printf("%s=FAIL\n%s_ERROR=%lu\n", which, which, (unsigned long)error);
@@ -81,7 +76,7 @@ int main(void)
     if (!thread)
         return fail("CREATE_THREAD", GetLastError());
     printf("CREATE_THREAD=PASS\n");
-    GROUP_AFFINITY before = {0}, current = {0};
+    GROUP_AFFINITY before = {0};
     BOOL before_ok = GetThreadGroupAffinity(thread, &before);
     printf("THREAD_PRIMARY_QUERY=%s\n", before_ok ? "PASS" : "FAIL");
 
