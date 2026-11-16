@@ -46,11 +46,10 @@ int main(void)
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &original))
             continue;
-        const uint16_t group = (uint16_t)(cpu / 64);
+        const uint16_t group = (uint16_t)(expected_total / 64);
         ++expected_per_group[group];
         ++expected_total;
-        if (expected_groups <= group)
-            expected_groups = group + 1;
+        expected_groups = group + 1;
     }
     check(nt_GetActiveProcessorGroupCount() == expected_groups,
           "actual initial Linux cpuset defines processor group count", &failures);
@@ -98,27 +97,28 @@ int main(void)
           "close set-only group-query handle", &failures);
 
     int first = -1, different = -1;
+    unsigned slot = 0;
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &original))
             continue;
         if (first < 0)
             first = cpu;
-        else if (cpu / 64 != first / 64 && different < 0)
+        if (slot == 64)
             different = cpu;
+        ++slot;
     }
     if (first < 0)
         return 1;
 
     const struct nt_group_affinity wanted = {
-        .mask = (uintptr_t)UINT64_C(1) << (first % 64),
-        .group = (uint16_t)(first / 64)
+        .mask = (uintptr_t)UINT64_C(1),
+        .group = 0
     };
     struct nt_group_affinity observed = {.mask = 0x55u, .group = 0x777u};
     const bool multiple_groups = different >= 0;
-    uintptr_t initial_primary_mask = 0;
-    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
-        if (CPU_ISSET(cpu, &original) && cpu / 64 == wanted.group)
-            initial_primary_mask |= (uintptr_t)UINT64_C(1) << (cpu % 64);
+    uintptr_t initial_primary_mask =
+        expected_per_group[0] == 64 ? UINT64_MAX :
+        ((uintptr_t)UINT64_C(1) << expected_per_group[0]) - 1;
     nt_SetLastError(0x3434u);
     check(nt_GetThreadGroupAffinity(nt_GetCurrentThread(), &observed) &&
           observed.group == wanted.group &&
@@ -168,8 +168,8 @@ int main(void)
     struct nt_group_affinity previous = {.mask = 0x66u, .group = 0x777u};
     struct nt_group_affinity next = wanted;
     if (different >= 0) {
-        next.group = (uint16_t)(different / 64);
-        next.mask = (uintptr_t)UINT64_C(1) << (different % 64);
+        next.group = 1;
+        next.mask = (uintptr_t)UINT64_C(1);
     }
     check(nt_SetThreadGroupAffinity(nt_GetCurrentThread(), &next, &previous) &&
           previous.mask == wanted.mask && previous.group == wanted.group,
@@ -206,20 +206,15 @@ int main(void)
     cpu_set_t group_actual;
     check(sched_getaffinity(0, sizeof(group_actual), &group_actual) == 0 &&
           CPU_COUNT(&group_actual) == 1 &&
-          CPU_ISSET((int)next.group * 64 +
-                    (int)__builtin_ctzll((unsigned long long)next.mask), &group_actual),
+          CPU_ISSET(different >= 0 ? different : first, &group_actual),
           "kernel confirms exact CPU after legacy and NT group-local calls",
           &failures);
 
     /* A mask that names a CPU outside the sandbox's group entitlement
      * must fail without changing the thread. */
-    unsigned forbidden_bit = 64;
-    for (unsigned bit = 0; bit < 64; ++bit) {
-        if (!CPU_ISSET((int)next.group * 64 + (int)bit, &original)) {
-            forbidden_bit = bit;
-            break;
-        }
-    }
+    const unsigned forbidden_bit =
+        expected_per_group[next.group] < 64 ?
+        expected_per_group[next.group] : 64;
     if (forbidden_bit < 64) {
         const uintptr_t invalid_mask = (uintptr_t)UINT64_C(1) << forbidden_bit;
         nt_SetLastError(0);
