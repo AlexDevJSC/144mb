@@ -21,6 +21,7 @@
 
 int main(int argc, char **argv)
 {
+    const int strict_library = argc == 2 && strcmp(argv[1], "--require") == 0;
     if (nt_runtime_resolve(MODULE, "new_fluid_settings") == NULL) {
         puts("SKIP native FluidSynth ABI: libfluidsynth.so.3 unavailable");
         return argc == 2 ? 1 : 0;
@@ -51,7 +52,7 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < 1024; ++i)
         CHECK(fabsf(left[i]) < 0.000001f && fabsf(right[i]) < 0.000001f);
 
-    if (argc == 2) {
+    if (argc == 2 && !strict_library) {
         char source[PATH_MAX], guest_path[PATH_MAX];
         CHECK(realpath(argv[1], source) != NULL);
         char *filename = strrchr(source, '/');
