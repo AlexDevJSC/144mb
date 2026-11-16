@@ -46,6 +46,10 @@ int main(void)
     errno = 0;
     const int initial = getpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid));
     if (errno != 0 || initial != 0) {
+        if (getenv("NT_REQUIRE_POSITIVE_MULTITHREAD_PRIORITY") != NULL) {
+            fprintf(stderr, "FAIL: privileged priority test needs initial nice 0\n");
+            return EXIT_FAILURE;
+        }
         puts("SKIP multithread priority test: initial host nice != 0");
         return EXIT_SUCCESS;
     }
@@ -73,6 +77,8 @@ int main(void)
         expect(nt_GetLastError() == NT_ERROR_NOT_SUPPORTED ||
                nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
                "unsupported host rollback or privilege yields explicit error");
+        if (getenv("NT_REQUIRE_POSITIVE_MULTITHREAD_PRIORITY") != NULL)
+            expect(false, "privileged RLIMIT_NICE must permit reversible 0->4 transition");
         puts("SKIP positive multithread priority transition: host cannot safely restore nice");
     }
     errno = 0;
