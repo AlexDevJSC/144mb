@@ -85,13 +85,21 @@ int import_fixture_entry(void)
     if (SetThreadGroupAffinity(thread, &invalid, NULL) ||
         GetLastError() != ERROR_INVALID_PARAMETER)
         return 18;
+    /* Windows 11 native Get/SetThreadGroupAffinity reject NULL buffers
+     * with ERROR_NOACCESS (998), observed in genuine Windows CI; our
+     * bounded Linux guest path returns ERROR_INVALID_PARAMETER (87).
+     * The Win32 docs guarantee failure, not one single error here. */
     SetLastError(0);
-    if (SetThreadGroupAffinity(thread, NULL, NULL) ||
-        GetLastError() != ERROR_INVALID_PARAMETER)
+    const BOOL null_set = SetThreadGroupAffinity(thread, NULL, NULL);
+    const DWORD set_error = GetLastError();
+    if (null_set || (set_error != ERROR_INVALID_PARAMETER &&
+                     set_error != ERROR_NOACCESS))
         return 19;
     SetLastError(0);
-    if (GetThreadGroupAffinity(thread, NULL) ||
-        GetLastError() != ERROR_INVALID_PARAMETER)
+    const BOOL null_get = GetThreadGroupAffinity(thread, NULL);
+    const DWORD get_error = GetLastError();
+    if (null_get || (get_error != ERROR_INVALID_PARAMETER &&
+                     get_error != ERROR_NOACCESS))
         return 20;
     if (!GetThreadGroupAffinity(thread, &observed) ||
         observed.Mask != chosen.Mask || observed.Group != chosen.Group)
