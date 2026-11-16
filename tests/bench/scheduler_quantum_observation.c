@@ -7,6 +7,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #ifdef _WIN32
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
@@ -105,6 +106,16 @@ static void *worker_main(void *argument)
 
 int main(void)
 {
+    /* Same bounded workload on Windows and Linux, no runtime code changes. */
+    unsigned duration_ms = 500;
+    const char *requested = getenv("NT_STAGE4_DURATION_MS");
+    if (requested != NULL) {
+        char *end = NULL;
+        const unsigned long parsed = strtoul(requested, &end, 10);
+        if (end == requested || *end != '\0' || parsed < 100 || parsed > 2000)
+            return 20;
+        duration_ms = (unsigned)parsed;
+    }
     uint64_t t0 = 0, t1 = 0;
     int failed = 0;
 #ifdef _WIN32
@@ -130,7 +141,7 @@ int main(void)
         return 5;
     t0 = tick_now();
     InterlockedExchange(&start_gate, 1);
-    Sleep(500);
+    Sleep(duration_ms);
     InterlockedExchange(&stop_gate, 1);
     t1 = tick_now();
     if (WaitForMultipleObjects(2, threads, TRUE, 5000) != WAIT_OBJECT_0)
@@ -178,7 +189,10 @@ int main(void)
         return 7;
     t0 = tick_now();
     atomic_store_explicit(&start_gate, 1, memory_order_release);
-    const struct timespec duration = {.tv_sec = 0, .tv_nsec = 500000000L};
+    const struct timespec duration = {
+        .tv_sec = duration_ms / 1000,
+        .tv_nsec = (long)(duration_ms % 1000) * 1000000L
+    };
     (void)nanosleep(&duration, NULL);
     atomic_store_explicit(&stop_gate, 1, memory_order_release);
     t1 = tick_now();
@@ -212,6 +226,7 @@ int main(void)
 #endif
     printf("PINNED_ONE_CPU=%s\n", !failed ? "YES" : "NO");
     printf("CONTENDERS=2\n");
+    printf("REQUESTED_DURATION_MS=%u\n", duration_ms);
     printf("WALL_NS=%llu\n", (unsigned long long)tick_to_ns(t1 - t0));
     printf("THREAD0_CPU_NS=%llu\n", (unsigned long long)workers[0].cpu_ns);
     printf("THREAD1_CPU_NS=%llu\n", (unsigned long long)workers[1].cpu_ns);
