@@ -364,8 +364,14 @@ no en el grupo 0 ni como máscara de todo el host.
 **Límites:** sigue siendo una asignación de grupos `linux_cpu_id/64`
 de hasta `CPU_SETSIZE`, no una virtualización completa de la
 topología Windows 11 ni una implementación de máscaras de proceso
-entre grupos. `GetProcessAffinityMask` continúa retornando
-`NOT_SUPPORTED` cuando la política inicial es multigrupo. Si otro
+entre grupos. `GetProcessAffinityMask` ahora consulta la máscara del **grupo principal
+ del hilo llamador** para el proceso propio y deja de rechazar por defecto
+un cpuset inicial multigrupo. `SetProcessAffinityMask` acepta acotar
+un proceso inicialmente multigrupo al grupo primario, siempre que no
+haya hilos guest activos desplazados explícitamente a otro grupo y
+pueda verificar y revertir todos los TID afectados. El modelo
+sigue sin cubrir completamente las políticas de proceso/CPU Sets de
+Windows 11. Si otro
 componente modifica externamente el cpuset Linux y excluye el grupo
 principal ya elegido, las consultas retornan `NOT_SUPPORTED` en vez
 de recolocar silenciosamente el hilo. No se admiten cambios de grupo
