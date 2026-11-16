@@ -490,7 +490,7 @@ Esto no representa cambios Windows dinámicos, MMCSS, quantum,
 REALTIME ni atomicidad exacta del instante de cada TID; la semántica
 positiva multihilo requiere privilegios Linux realmente disponibles.
 
-**Validación:** se amplían
+**Validación:** se añade `tests/process_priority_multithread_test.c` para comprobar ambos TID antes/después, conservar prioridades relativas y diferenciar explícitamente éxito condicionado por permisos de Linux frente a `SKIP` de la ruta positiva con rechazo sin efectos. Se amplían
 `tests/process_affinity_mask_test.c` y
 `tests/pe/process_affinity_mask_fixture.c` para demostrar cambios
 reales del conjunto de CPUs en un hilo guest adicional suspendido,
