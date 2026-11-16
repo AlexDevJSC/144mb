@@ -31,8 +31,8 @@ static int send_packet(int fd, const struct nt_thread_broker_request *packet,
 static int send_child_sequence(int fd, const uint8_t token[16])
 {
     struct nt_thread_broker_request packet = {
-        .magic = NT_BROKER_MAGIC,
-        .version = NT_BROKER_VERSION,
+        .magic = NT_THREAD_BROKER_MAGIC,
+        .version = NT_THREAD_BROKER_VERSION,
         .operation = NT_BROKER_QUERY_IDENTITY,
         .requested_access = NT_BROKER_QUERY_LIMITED_INFORMATION
     };
@@ -42,7 +42,7 @@ static int send_child_sequence(int fd, const uint8_t token[16])
     packet.version = 300;
     if (!send_packet(fd, &packet, sizeof(packet)))
         return 0;
-    packet.version = NT_BROKER_VERSION;
+    packet.version = NT_THREAD_BROKER_VERSION;
     packet.secret[0] ^= 0x5a;
     if (!send_packet(fd, &packet, sizeof(packet)))
         return 0;
@@ -110,7 +110,7 @@ int main(void)
     if (attacker == 0) {
         close(channel[0]);
         struct nt_thread_broker_request packet = {
-            .magic = NT_BROKER_MAGIC, .version = NT_BROKER_VERSION,
+            .magic = NT_THREAD_BROKER_MAGIC, .version = NT_THREAD_BROKER_VERSION,
             .operation = NT_BROKER_QUERY_IDENTITY,
             .requested_access = NT_BROKER_QUERY_LIMITED_INFORMATION
         };
