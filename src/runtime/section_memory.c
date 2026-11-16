@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "section_memory.h"
+#include "object_broker.h"
 #include "nt_services.h"
 
 #include <errno.h>
@@ -34,6 +35,8 @@ struct section_object {
     uint32_t protect;
     uint16_t name[SECTION_NAME_LIMIT + 1];
     bool named;
+    bool brokered;
+    struct nt_broker_resource broker;
     size_t references;
 };
 struct section_handle {
@@ -120,7 +123,10 @@ static struct section_handle *allocate_handle(struct section_object *object,
 static void release_object(struct section_object *object)
 {
     if (object && --object->references == 0) {
-        close(object->fd);
+        if (object->brokered)
+            nt_broker_release(&object->broker);
+        else
+            close(object->fd);
         memset(object, 0, sizeof(*object));
         object->fd = -1;
     }
@@ -148,6 +154,75 @@ static uint32_t section_rights(uint32_t protect)
            SECTION_MAP_READ | SECTION_MAP_WRITE | SECTION_MAP_COPY;
 }
 
+static uint32_t broker_win_error(int status)
+{
+    switch (status) {
+    case NT_BROKER_MISSING: return NT_ERROR_FILE_NOT_FOUND;
+    case NT_BROKER_TYPE_MISMATCH: return NT_ERROR_INVALID_HANDLE;
+    case NT_BROKER_ACCESS_DENIED: return NT_ERROR_ACCESS_DENIED;
+    case NT_BROKER_RESOURCE_ERROR: return NT_ERROR_NOT_ENOUGH_MEMORY;
+    case NT_BROKER_INVALID: return NT_ERROR_INVALID_PARAMETER;
+    default: return NT_ERROR_GEN_FAILURE;
+    }
+}
+
+static uintptr_t broker_section(const uint16_t *name, uint32_t action,
+                                 uint32_t rights, uint32_t protect, uint64_t size,
+                                 bool inherit)
+{
+    struct nt_broker_request request = {
+        .magic = NT_BROKER_MAGIC, .version = NT_BROKER_VERSION,
+        .action = action, .kind = NT_BROKER_SECTION,
+        .rights = rights, .protect = protect, .size = size
+    };
+    if (!nt_WideCharToMultiByte(65001, 0, name, -1, request.name,
+                                 sizeof(request.name), NULL, NULL)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    struct nt_broker_resource broker;
+    int status = nt_broker_acquire(&request, &broker);
+    if (status != NT_BROKER_CREATED && status != NT_BROKER_EXISTS) {
+        nt_SetLastError(broker_win_error(status));
+        return 0;
+    }
+    pthread_mutex_lock(&section_lock);
+    struct section_object *object = NULL;
+    for (size_t i = 0; i < SECTION_LIMIT; ++i)
+        if (!objects[i].alive) {
+            object = &objects[i];
+            break;
+        }
+    if (!object) {
+        pthread_mutex_unlock(&section_lock);
+        nt_broker_release(&broker);
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    *object = (struct section_object){
+        .alive = true, .fd = broker.fd,
+        .size = broker.size, .protect = broker.protect,
+        .brokered = true, .broker = broker,
+        .named = true
+    };
+    const size_t name_length = nt_runtime_wide_length(name, SECTION_NAME_LIMIT);
+    memcpy(object->name, name, (name_length + 1) * sizeof(uint16_t));
+    struct section_handle *slot = allocate_handle(object, rights,
+                                      inherit ? SECTION_HANDLE_INHERIT : 0);
+    if (!slot) {
+        nt_broker_release(&object->broker);
+        memset(object, 0, sizeof(*object));
+        pthread_mutex_unlock(&section_lock);
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    const uintptr_t result = slot->number;
+    pthread_mutex_unlock(&section_lock);
+    nt_SetLastError(status == NT_BROKER_EXISTS ?
+                    NT_ERROR_ALREADY_EXISTS : NT_ERROR_SUCCESS);
+    return result;
+}
+
 uintptr_t NT_MS_ABI nt_CreateFileMappingW(uintptr_t file, const void *security,
     uint32_t protect, uint32_t high, uint32_t low, const uint16_t *name)
 {
@@ -162,6 +237,9 @@ uintptr_t NT_MS_ABI nt_CreateFileMappingW(uintptr_t file, const void *security,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
+    if (local_name[0] && nt_runtime_broker_enabled())
+        return broker_section(local_name, NT_BROKER_CREATE,
+                              section_rights(protect), protect, size, false);
     pthread_mutex_lock(&section_lock);
     const bool named = local_name[0] != 0;
     struct section_object *obj = named ? lookup_named(local_name) : NULL;
@@ -224,6 +302,9 @@ uintptr_t NT_MS_ABI nt_OpenFileMappingW(uint32_t access, int32_t inherit,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
+    if (nt_runtime_broker_enabled())
+        return broker_section(local_name, NT_BROKER_OPEN,
+                              allowed, 0, 0, inherit != 0);
     pthread_mutex_lock(&section_lock);
     struct section_object *obj = lookup_named(local_name);
     struct section_handle *slot = NULL;
