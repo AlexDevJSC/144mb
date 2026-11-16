@@ -294,6 +294,57 @@ levantar la restricción actual de `OpenThread`; los PID/TID del host
 aportados por el invitado siguen siendo denegados. No pasar todavía a
 APC avanzadas (problema 5).
 
+## Registro de hilos principales entre procesos (iteración 16-11-2026)
+
+Se implementa `src/runtime/thread_broker_registry.c`, integrado con
+`src/runtime/threads.c` y con el camino real de lanzamiento/observación
+`nt_runtime_watch_child` utilizado por `CreateProcessA/W`.
+
+**Ruta funcional positiva:**
+
+1. Al registrar un hijo confiable, el runtime comprueba que el
+   `pidfd` corresponde al mismo proceso que el lanzamiento registrado
+   (identidad kernel comparada con una apertura nueva), duplica su FD con
+   `CLOEXEC`, y le asigna una generación creciente. Se registra
+   únicamente el hilo principal (TID=PID verificado de ese hijo).
+2. `OpenThread` y `NtOpenThread` pueden abrir un handle nuevo,
+   independiente y **solo de consulta** del hilo principal de ese hijo
+   *mientras está vivo y registrado*. Los derechos admitidos son
+   `THREAD_QUERY_INFORMATION`, `THREAD_QUERY_LIMITED_INFORMATION` y
+   opcionalmente `SYNCHRONIZE`; `THREAD_SET_INFORMATION` y permisos
+   de control remoto se rechazan. `GetThreadId` y la consulta de
+   identidad nativa funcionan; la TEB remota permanece inaccesible.
+3. La tabla del broker emite capabilities opacas distintas por
+   solicitante y destino, con permisos acotados, generación de registro,
+   apertura/cierre atómicos con mutex, rechazo de otros solicitantes,
+   y revocación al reap del hijo. Los handles nunca se reciclan.
+   El servidor padre solo otorga accesos entre dos hijos tras una
+   concesión explícita (la relación no deriva de UID iguales).
+4. El transporte AF_UNIX autenticado de la entrega anterior está
+   conectado a esta tabla para el caso **consulta remota autorizada
+   del hilo principal**: valida SCM_CREDENTIALS por mensaje, token
+   CSPRNG, `pidfd` estable y concesión antes de emitir una capability.
+   No acepta PID/TID del invitado para realizar syscalls de host.
+5. La ruta se prueba por dos vías: `tests/process_thread_test.c`
+   usa un hijo realmente vigilado (igual que `CreateProcess`) y
+   ejecuta OpenThread/NtOpenThread/GetThreadId con permisos y después
+   de su terminación. `tests/thread_broker_registry_test.c` crea dos
+   hijos reales y un impostor; ejercita IPC autenticado entre
+   hermanos, derechos, intento de suplantación, revocación y
+   registro de nueva generación, además de 600 ciclos concurrentes
+   de apertura/consulta/cierre.
+
+**Límites que no se ocultan:** no existe todavía un protocolo para
+registrar de manera segura hilos secundarios de un proceso PE hijo,
+ni instalación transparente del socket en el arrancador PE, ni
+mapeo universal de NT ACL/token. El helper de consulta entre hijos
+se invoca hoy desde el servidor anfitrión de prueba; para
+aplicaciones PE independientes falta transmitir la capability de
+forma segura al cliente guest y sostener el servicio durante toda
+su vida. No hay operaciones `setpriority`, señales, suspensión o
+afinidad sobre un hilo Linux externo. La iteración no equivale a
+cerrar el broker completo ni habilita la fase APC avanzada.
+
 ## Referencias técnicas, no evidencia de hardware
 
 - [Microsoft: Processor Groups](https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups)
