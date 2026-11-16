@@ -72,6 +72,19 @@ uint32_t NT_MS_ABI nt_SuspendThread(uintptr_t handle);
 uint32_t NT_MS_ABI nt_ResumeThread(uintptr_t handle);
 int32_t NT_MS_ABI nt_GetThreadContext(uintptr_t handle, struct nt_context64 *context);
 int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context64 *context);
+/* x64 GROUP_AFFINITY layout: KAFFINITY, USHORT Group, USHORT Reserved[3].
+ * This bridge reports actual Linux kernel affinity. It does not invent
+ * CPU groups for unsupported host schedulers or foreign Windows threads. */
+struct nt_group_affinity {
+    uintptr_t mask;
+    uint16_t group;
+    uint16_t reserved[3];
+};
+int32_t NT_MS_ABI nt_GetThreadGroupAffinity(uintptr_t handle,
+                                            struct nt_group_affinity *result);
+int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
+                                            const struct nt_group_affinity *desired,
+                                            struct nt_group_affinity *previous);
 uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask);
 int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority);
 int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle);
