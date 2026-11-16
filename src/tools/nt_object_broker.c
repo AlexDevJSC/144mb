@@ -21,8 +21,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-enum { OBJECT_LIMIT = 256, CLIENT_LIMIT = 512, MAX_SECTION_BYTES = 0x80000000u,
-       EVENT_ALL_ACCESS = 0x1f0003u };
+enum { OBJECT_LIMIT = 256, CLIENT_LIMIT = 512 };
+#define MAX_SECTION_BYTES UINT64_C(0x80000000)
 struct broker_object {
     char name[NT_BROKER_NAME_BYTES];
     uint32_t kind, rights, protect, manual, maximum;
