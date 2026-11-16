@@ -28,6 +28,31 @@ int import_fixture_entry(void)
         sum += GetActiveProcessorCount(group);
     if (sum != total || GetActiveProcessorCount(active_groups) != 0)
         return 26;
+    /* A Windows 11 thread may have a full allowed set spanning groups.
+     * Its primary group affinity must still be a valid, nonempty mask. */
+    GROUP_AFFINITY own_primary = {0};
+    if (!GetThreadGroupAffinity(GetCurrentThread(), &own_primary) ||
+        own_primary.Group >= active_groups || own_primary.Mask == 0 ||
+        own_primary.Reserved[0] || own_primary.Reserved[1] || own_primary.Reserved[2])
+        return 28;
+    USHORT group_capacity = 0;
+    USHORT process_groups[16] = {0};
+    SetLastError(0);
+    if (GetProcessGroupAffinity(GetCurrentProcess(), &group_capacity, process_groups) ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER ||
+        group_capacity == 0 || group_capacity > 16)
+        return 29;
+    USHORT group_count = group_capacity;
+    SetLastError(0x2828u);
+    if (!GetProcessGroupAffinity(GetCurrentProcess(), &group_capacity, process_groups) ||
+        GetLastError() != 0x2828u || group_capacity != group_count)
+        return 30;
+    BOOL primary_present = FALSE;
+    for (USHORT i = 0; i < group_count; ++i)
+        if (process_groups[i] == own_primary.Group)
+            primary_present = TRUE;
+    if (!primary_present)
+        return 31;
     HANDLE thread = CreateThread(NULL, 0, test_worker, NULL, CREATE_SUSPENDED, NULL);
     if (thread == NULL)
         return 10;
@@ -85,24 +110,34 @@ int import_fixture_entry(void)
     if (SetThreadGroupAffinity(thread, &invalid, NULL) ||
         GetLastError() != ERROR_INVALID_PARAMETER)
         return 18;
+    /* Windows 11 native Get/SetThreadGroupAffinity reject NULL buffers
+     * with ERROR_NOACCESS (998), observed in genuine Windows CI; our
+     * bounded Linux guest path returns ERROR_INVALID_PARAMETER (87).
+     * The Win32 docs guarantee failure, not one single error here. */
     SetLastError(0);
-    if (SetThreadGroupAffinity(thread, NULL, NULL) ||
-        GetLastError() != ERROR_INVALID_PARAMETER)
+    const BOOL null_set = SetThreadGroupAffinity(thread, NULL, NULL);
+    const DWORD set_error = GetLastError();
+    if (null_set || (set_error != ERROR_INVALID_PARAMETER &&
+                     set_error != ERROR_NOACCESS))
         return 19;
     SetLastError(0);
-    if (GetThreadGroupAffinity(thread, NULL) ||
-        GetLastError() != ERROR_INVALID_PARAMETER)
+    const BOOL null_get = GetThreadGroupAffinity(thread, NULL);
+    const DWORD get_error = GetLastError();
+    if (null_get || (get_error != ERROR_INVALID_PARAMETER &&
+                     get_error != ERROR_NOACCESS))
         return 20;
     if (!GetThreadGroupAffinity(thread, &observed) ||
         observed.Mask != chosen.Mask || observed.Group != chosen.Group)
         return 21;
 
-    if (chosen.Group != 0) {
-        SetLastError(0);
-        if (SetThreadAffinityMask(thread, chosen.Mask) != 0 ||
-            GetLastError() != ERROR_NOT_SUPPORTED)
-            return 22; /* Legacy group-0 API must not truncate. */
-    }
+    /* Legacy SetThreadAffinityMask uses the already-selected current
+     * group of the thread, even if this is group 1 or higher. */
+    SetLastError(0x7272u);
+    if (SetThreadAffinityMask(thread, chosen.Mask) != chosen.Mask ||
+        GetLastError() != 0x7272u ||
+        !GetThreadGroupAffinity(thread, &observed) ||
+        observed.Group != chosen.Group || observed.Mask != chosen.Mask)
+        return 22;
 
     if (GetActiveProcessorGroupCount() != active_groups ||
         GetActiveProcessorCount((WORD)0xffffu) != total)

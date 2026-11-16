@@ -77,6 +77,8 @@ int32_t NT_MS_ABI nt_SetThreadContext(uintptr_t handle, const struct nt_context6
  * CPU groups for unsupported host schedulers or foreign Windows threads. */
 uint16_t NT_MS_ABI nt_GetActiveProcessorGroupCount(void);
 uint32_t NT_MS_ABI nt_GetActiveProcessorCount(uint16_t group);
+int32_t NT_MS_ABI nt_GetProcessGroupAffinity(uintptr_t process, uint16_t *count,
+                                             uint16_t *groups);
 struct nt_group_affinity {
     uintptr_t mask;
     uint16_t group;
