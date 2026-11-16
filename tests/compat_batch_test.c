@@ -737,10 +737,11 @@ static void check_files(void)
     char alias_hardlink[256] = {0};
     CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\longfilename.txt",
                                 alias_hardlink, sizeof(alias_hardlink)) ==
-          strlen("C:\\data\\SUB83\\LONGFI~1.TXT") &&
-          strcmp(alias_hardlink, "C:\\data\\SUB83\\LONGFI~1.TXT") == 0);
-    CHECK(nt_CreateFileA(alias_hardlink, UINT32_C(0x80000000),
-                          7u, NULL, 3u, 0x80u, 0) != UINTPTR_MAX);
+          strlen("C:\\DATA\\SUB83\\LONGFI~1.TXT") &&
+          strcmp(alias_hardlink, "C:\\DATA\\SUB83\\LONGFI~1.TXT") == 0);
+    uintptr_t hardlink_handle = nt_CreateFileA(alias_hardlink, UINT32_C(0x80000000),
+                                                 7u, NULL, 3u, 0x80u, 0);
+    CHECK(hardlink_handle != UINTPTR_MAX && nt_CloseHandle(hardlink_handle));
     /* The former longfileextra alias is scoped to data/. Moving the
      * entry to sub83/ must not make that stale short name a valid alias
      * of the moved inode in the new directory. */
