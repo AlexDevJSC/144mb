@@ -1987,7 +1987,7 @@ uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t id)
 {
     uintptr_t opened = 0;
     nt_status status = open_thread_local(&opened, access, inherit != 0, id);
-    if (status == NT_STATUS_INVALID_CID)
+    if (status == NT_STATUS_INVALID_CID && nt_broker_client_is_attached())
         status = open_thread_remote(&opened, access, inherit != 0, id, 0);
     if (status != NT_STATUS_SUCCESS)
         nt_SetLastError(status == NT_STATUS_INVALID_CID ?
