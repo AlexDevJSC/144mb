@@ -64,7 +64,7 @@ static bool dos83_read_at(int parent, const char *leaf, char alias[14])
 
 static void dos83_make(const char *name, unsigned int ordinal, char alias[14])
 {
-    char stem[9] = {0}, ext[4] = {0}, digit[9] = {0};
+    char stem[9] = {0}, ext[4] = {0}, digit[16] = {0};
     const char *dot = strrchr(name, '.');
     const size_t limit = dot ? (size_t)(dot - name) : strlen(name);
     snprintf(digit, sizeof(digit), "%u", ordinal);
