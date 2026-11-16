@@ -112,3 +112,25 @@ jobs:
           path: build-rpm/RPMS/x86_64/*.rpm
           if-no-files-found: error
           retention-days: 14
+
+  # A genuine Microsoft Windows kernel, on a hosted VM. This is a differential
+  # reference, NOT physical hardware certification or a >64-CPU proof.
+  windows-native-scheduler:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Compile and run native Win32 scheduler probe with MSVC
+        shell: pwsh
+        run: ./scripts/windows-run-stage4-scheduler.ps1 -OutputPath build/stage4-windows-native.txt
+      - name: Preserve real Windows observations (virtual runner, not physical)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scheduler-windows-native-${{ github.sha }}
+          path: |
+            build/stage4-windows-native.txt
+            build/stage4-windows-meta.txt
+          if-no-files-found: error
+          retention-days: 14
