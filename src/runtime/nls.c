@@ -228,6 +228,42 @@ int32_t NT_MS_ABI nt_CompareStringW(uint32_t locale, uint32_t flags, const uint1
     return l < left_size ? 3 : r < right_size ? 1 : 2;
 }
 
+/* lstrcmp uses the caller's default Windows collation. This runtime's
+ * initial NLS profile implements a stable ordinal comparison in
+ * CompareStringW; do not interpret a zero Win32 error as equality. */
+int32_t NT_MS_ABI nt_lstrcmpW(const uint16_t *left, const uint16_t *right)
+{
+    const int32_t order = nt_CompareStringW(USER_DEFAULT, 0, left, -1, right, -1);
+    return order == 1 ? -1 : order == 3 ? 1 : 0;
+}
+
+int32_t NT_MS_ABI nt_lstrcmpA(const char *left, const char *right)
+{
+    if (left == NULL || right == NULL) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const uint32_t page = nt_GetACP();
+    const int32_t left_units = nt_MultiByteToWideChar(page, 0, left, -1, NULL, 0);
+    const int32_t right_units = nt_MultiByteToWideChar(page, 0, right, -1, NULL, 0);
+    if (left_units <= 0 || right_units <= 0)
+        return 0;
+    uint16_t *wide_left = malloc((size_t)left_units * sizeof(*wide_left));
+    uint16_t *wide_right = malloc((size_t)right_units * sizeof(*wide_right));
+    if (!wide_left || !wide_right) {
+        free(wide_left);
+        free(wide_right);
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    const bool okay = nt_MultiByteToWideChar(page, 0, left, -1, wide_left, left_units) > 0 &&
+                      nt_MultiByteToWideChar(page, 0, right, -1, wide_right, right_units) > 0;
+    int32_t result = okay ? nt_lstrcmpW(wide_left, wide_right) : 0;
+    free(wide_left);
+    free(wide_right);
+    return result;
+}
+
 int32_t NT_MS_ABI nt_LCMapStringW(uint32_t locale, uint32_t flags, const uint16_t *source, int32_t count,
                                   uint16_t *target, int32_t capacity)
 {
