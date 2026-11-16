@@ -26,6 +26,22 @@ bool nt_broker_register_child(pid_t pid, int pidfd, uid_t uid, gid_t gid,
                               const uint8_t secret[16], uint64_t *generation);
 void nt_broker_unregister_child(pid_t pid, uint64_t generation);
 
+/* Secondary guest thread life events can only be forwarded by the authenticated
+ * owner via the AF_UNIX broker. task identities are pinned by /proc task
+ * directory inode and rechecked against TID reuse, never mutable host PIDs. */
+bool nt_broker_register_guest_thread(pid_t owner, pid_t tid);
+void nt_broker_unregister_guest_thread(pid_t owner, pid_t tid);
+
+/* Resolve any registered live thread (initial or authenticated secondary),
+ * with the target's owner PID and generation recorded in the handle.
+ * Only query capabilities are ever allowed. */
+bool nt_broker_open_registered_thread(pid_t requester, pid_t tid, uint32_t access,
+                                      uint64_t *opaque_handle);
+
+/* An explicitly registered child may query siblings from the same runtime
+ * only after this parent's trusted launcher installs the grants. */
+void nt_broker_grant_existing_sibling_queries(pid_t new_child);
+
 /* Return an immutable snapshot of a live, trusted registered main thread.
  * Owner may be parent process or a peer explicitly granted query access.
  * All other target threads and raw foreign Linux PIDs fail closed. */
