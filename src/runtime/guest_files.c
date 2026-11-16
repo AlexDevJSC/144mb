@@ -4200,23 +4200,44 @@ uint32_t NT_MS_ABI nt_GetLongPathNameW(const uint16_t *input, uint16_t *buffer,
     return path_result(resolved, size, buffer);
 }
 
-uint32_t NT_MS_ABI nt_GetLongPathNameA(const char *input, char *buffer,
-                                       uint32_t size)
+/* Windows file API A boundaries use the process ACP for both input and
+ * returned path bytes. The underlying guest paths are always UTF-8 and
+ * W calls preserve unambiguous UTF-16. This does not yet migrate all the
+ * older A entrypoints, whose compatibility fallback is documented. */
+static uint32_t file_path_acp_output(const uint16_t *wide, char *buffer,
+                                     uint32_t size)
 {
-    char resolved[PATH_MAX + 16];
-    if (!input || !canonical_existing_guest_path(input, resolved)) {
-        nt_SetLastError(path_error(input ? errno : EINVAL, false));
+    const int32_t required = nt_WideCharToMultiByte(nt_GetACP(), 0,
+                                                     wide, -1, NULL, 0,
+                                                     NULL, NULL);
+    if (required <= 0)
         return 0;
-    }
-    const size_t required = strlen(resolved) + 1;
-    if (size < required)
+    if (size < (uint32_t)required)
         return (uint32_t)required;
     if (!buffer) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    memcpy(buffer, resolved, required);
+    if (nt_WideCharToMultiByte(nt_GetACP(), 0, wide, -1,
+                               buffer, (int32_t)size, NULL, NULL) <= 0)
+        return 0;
     return (uint32_t)required - 1;
+}
+
+uint32_t NT_MS_ABI nt_GetLongPathNameA(const char *input, char *buffer,
+                                       uint32_t size)
+{
+    uint16_t narrow_as_wide[PATH_MAX], output[PATH_MAX + 16];
+    if (!input) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (nt_MultiByteToWideChar(nt_GetACP(), 0, input, -1,
+                                narrow_as_wide, PATH_MAX) <= 0)
+        return 0;
+    if (!nt_GetLongPathNameW(narrow_as_wide, output, PATH_MAX + 16))
+        return 0;
+    return file_path_acp_output(output, buffer, size);
 }
 
 /* Resolve each component to a native inode before allocating its
@@ -4309,20 +4330,17 @@ uint32_t NT_MS_ABI nt_GetShortPathNameW(const uint16_t *input, uint16_t *buffer,
 uint32_t NT_MS_ABI nt_GetShortPathNameA(const char *input, char *buffer,
                                         uint32_t size)
 {
-    char dos[PATH_MAX + 16];
-    if (!input || !short_existing_guest_path(input, dos)) {
-        nt_SetLastError(path_error(input ? errno : EINVAL, false));
-        return 0;
-    }
-    const size_t required = strlen(dos) + 1;
-    if (size < required)
-        return (uint32_t)required;
-    if (!buffer) {
+    uint16_t narrow_as_wide[PATH_MAX], output[PATH_MAX + 16];
+    if (!input) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    memcpy(buffer, dos, required);
-    return (uint32_t)required - 1;
+    if (nt_MultiByteToWideChar(nt_GetACP(), 0, input, -1,
+                                narrow_as_wide, PATH_MAX) <= 0)
+        return 0;
+    if (!nt_GetShortPathNameW(narrow_as_wide, output, PATH_MAX + 16))
+        return 0;
+    return file_path_acp_output(output, buffer, size);
 }
 
 /* Forward declaration: HANDLE duplication is implemented below. */
@@ -5970,8 +5988,14 @@ int32_t NT_MS_ABI nt_CreateSymbolicLinkA(const char *link_name,
                                           uint32_t flags)
 {
     uint16_t link[PATH_MAX], target[PATH_MAX];
-    return utf8_guest_to_wide(link_name, link) &&
-           utf8_guest_to_wide(target_name, target) &&
+    if (!link_name || !target_name) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return nt_MultiByteToWideChar(nt_GetACP(), 0, link_name, -1,
+                                   link, PATH_MAX) > 0 &&
+           nt_MultiByteToWideChar(nt_GetACP(), 0, target_name, -1,
+                                   target, PATH_MAX) > 0 &&
            nt_CreateSymbolicLinkW(link, target, flags);
 }
 
