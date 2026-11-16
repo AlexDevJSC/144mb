@@ -2028,6 +2028,22 @@ struct security_attributes {
 
 _Static_assert(sizeof(struct security_attributes) == 24, "SECURITY_ATTRIBUTES layout");
 
+/* Public Win32 A entrypoints decode bytes with the process ACP exactly
+ * once. Internal runtime paths and W entrypoints remain UTF-8. A valid
+ * UTF-8 byte sequence is NOT a second candidate spelling in CP1252. */
+static bool wide_path(const uint16_t *input, char output[PATH_MAX]);
+static bool acp_path_to_utf8(const char *input, char output[PATH_MAX])
+{
+    if (!input) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    uint16_t wide[PATH_MAX];
+    if (!nt_MultiByteToWideChar(nt_GetACP(), 0, input, -1, wide, PATH_MAX))
+        return false;
+    return wide_path(wide, output);
+}
+
 /* A narrow Win32 pathname may be supplied as UTF-8 by a modern guest
  * or CP1252 by a legacy guest. Invalid UTF-8 was already converted to ACP
  * by normalize_path(). When the bytes are valid UTF-8 *and* the requested
@@ -2257,8 +2273,10 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
                                   const void *security, uint32_t disposition, uint32_t flags,
                                   uintptr_t template_file)
 {
-    return create_file_common(input, desired, share, security, disposition,
-                              flags, template_file, false);
+    char utf8[PATH_MAX];
+    return acp_path_to_utf8(input, utf8) ?
+           create_file_common(utf8, desired, share, security, disposition,
+                              flags, template_file, true) : UINTPTR_MAX;
 }
 
 static int close_file(struct guest_file *file)
