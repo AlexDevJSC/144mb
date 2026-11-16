@@ -63,8 +63,11 @@ static bool observed_ansi_launch;
 static int capture_ansi_launch(int fd, const char *dos_path, const char *command,
                                const char *directory, bool suspended, int environment_fd,
                                const struct nt_child_file_transfer *files,
-                               pid_t *pid, int *status_fd, int *start_fd)
+                               pid_t *pid, int *status_fd, int *start_fd,
+                               int *broker_fd, uint8_t broker_secret[16])
 {
+    *broker_fd = -1; /* legacy mock: no cross-child broker channel */
+    memset(broker_secret, 0, 16);
     if (fd < 0 || dos_path == NULL || command == NULL || directory == NULL ||
         suspended || environment_fd < 0 || files == NULL || files->manifest_fd < 0)
         return EINVAL;
