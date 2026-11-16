@@ -191,6 +191,21 @@ bool nt_broker_register_child(pid_t pid, int pidfd, uid_t uid, gid_t gid,
     return slot >= 0;
 }
 
+bool nt_broker_install_child_session(pid_t pid, const uint8_t secret[16])
+{
+    if (secret == NULL)
+        return false;
+    pthread_mutex_lock(&broker_lock);
+    const int child = find_child_locked(pid);
+    const bool okay = active_child_locked(child);
+    if (okay) {
+        drop_capabilities_locked((unsigned)child);
+        memcpy(children[child].secret, secret, 16);
+    }
+    pthread_mutex_unlock(&broker_lock);
+    return okay;
+}
+
 void nt_broker_unregister_child(pid_t pid, uint64_t generation)
 {
     pthread_mutex_lock(&broker_lock);
