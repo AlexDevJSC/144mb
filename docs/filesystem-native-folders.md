@@ -589,7 +589,7 @@ aprobar en Fedora físico sin pruebas de cambio de raíz, caída y recuperación
 
 ## Seguridad: lectura limitada de descriptores NT a partir de permisos Linux
 
-`GetFileSecurityA/W` se exporta desde ADVAPI32 con un contrato
+`GetFileSecurityA/W` se exporta desde ADVAPI32 y `NtQuerySecurityObject`/`ZwQuerySecurityObject` desde NTDLL con un contrato
 **solo de lectura** para OWNER_SECURITY_INFORMATION (1),
 GROUP_SECURITY_INFORMATION (2) y DACL_SECURITY_INFORMATION (4). Se forma
 un SECURITY_DESCRIPTOR_RELATIVE v1 de endian little, con SIDs sintéticos
@@ -607,7 +607,10 @@ SetFileSecurity, READ_CONTROL, WRITE_DAC/WRITE_OWNER, ACE de denegación,
 herencia, auditoría, privilegios NT, seguridad del registro ni traducción
 bidireccional de identidades y pertenencia a grupos. El permiso efectivo
 continúa siendo el de Linux/SELinux. Los SIDs son identificadores
-sintéticos documentados, no identidades Windows reales. La seguridad
+sintéticos documentados, no identidades Windows reales.
+La consulta nativa por HANDLE requiere actualmente el derecho FILE_READ
+porque READ_CONTROL todavía no está modelado; respeta NTSTATUS y no altera
+GetLastError. La consulta devuelve STATUS_BUFFER_TOO_SMALL si corresponde. La seguridad
 avanzada requiere un contrato propio, pruebas con descriptores hostiles
 y aceptación en Fedora antes de ampliarse.
 
