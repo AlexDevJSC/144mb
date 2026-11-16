@@ -202,6 +202,44 @@ gestiona hotplug, CPU Sets, NUMA ni numeración exacta de Windows sobre
 sistemas con distinta topología. No cambia por sí sola el avance de
 prioridades dinámicas, quantum o broker de hilos externos.
 
+## Paso 6: frontera IPC autenticada para hilos de procesos invitados
+
+Se añade `src/runtime/thread_broker_auth.c` como **contrato Linux
+interno** de acceso read-only, sin integrarlo aún en `OpenThread` ni
+conceder HANDLE NT de procesos remotos. Es una dependencia transversal
+mínima para un futuro registro central de objetos NT, no la implementación
+completa de ese broker.
+
+- Un proceso padre registra un hijo a partir de identidad local de
+  `fork`/lanzamiento legítimo y guarda un `pidfd` abierto y vivo. Jamás
+  adquiere autoridad interpretando un PID/TID recibido de una aplicación.
+- Un `AF_UNIX/SOCK_SEQPACKET` cerrado al `exec` recibe mensajes acotados
+  con credenciales **SCM_CREDENTIALS por mensaje**. A diferencia de
+  `SO_PEERCRED` en un socketpair establecido antes del fork, estas
+  credenciales reflejan el emisor real del mensaje. Compara PID/UID/GID
+  con el hijo registrado, su pidfd vivo y un secreto aleatorio de 128 bits
+  procedente de `getrandom` sin fallback predecible.
+- El protocolo fija versión, formato de 32 bytes y operación de consulta
+  de identidad. Únicamente concede derechos
+  `THREAD_QUERY_INFORMATION`/`THREAD_QUERY_LIMITED_INFORMATION`
+  que el registro padre ya permitió. Rechaza escrituras y peticiones
+  desconocidas, no escribe la salida en fallo y acota la recepción a 1 s.
+  No produce un HANDLE o TID utilizable fuera del broker.
+- `tests/thread_broker_auth_test.c` crea dos hijos propios:
+  un **impostor que conoce el secreto** y un hijo legítimo. Prueba rechazo
+  por credenciales del impostor, paquete truncado, versión incorrecta,
+  secreto falso, `THREAD_SET_INFORMATION`, consulta permitida y
+  revocación tras cierre del pidfd. No altera el scheduler de ninguno.
+  Se ejecuta en `make check`, Fedora RPM y UBSan.
+
+**Pendiente:** integrar este transporte con los procesos PE hijos
+gestionados, tabla de objetos y generaciones, concesión y cierre de
+handles distintos por proceso, NT ACL y tokens, ciclos de vida y pruebas
+de sesión aislada. No declarar acceso a hilos remotos implementado ni
+levantar la restricción actual de `OpenThread`; los PID/TID del host
+aportados por el invitado siguen siendo denegados. No pasar todavía a
+APC avanzadas (problema 5).
+
 ## Referencias técnicas, no evidencia de hardware
 
 - [Microsoft: Processor Groups](https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups)
