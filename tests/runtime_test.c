@@ -64,6 +64,26 @@ static void check_win32(void)
     BIND(error.set, KERNEL, "SetLastError");
     BIND(counter, KERNEL, "QueryPerformanceCounter");
     BIND(mul_div, KERNEL, "MulDiv");
+    int32_t (NT_MS_ABI *compare_a)(const char *, const char *);
+    int32_t (NT_MS_ABI *compare_w)(const uint16_t *, const uint16_t *);
+    BIND(compare_a, KERNEL, "lstrcmpA");
+    BIND(compare_w, "KERNELBASE.dll", "lstrcmpW");
+
+    check(compare_w(u"child", u"child") == 0 &&
+          compare_w(u"child", u"children") < 0 &&
+          compare_w(u"children", u"child") > 0 &&
+          compare_w(u"", u"") == 0 &&
+          compare_w(u"árbol", u"árbol") == 0 &&
+          compare_w(u"Grüße", u"Grüße") == 0,
+          "KERNELBASE lstrcmpW NUL-terminated signed comparisons");
+    check(compare_a("Caf\xE9", "Caf\xE9") == 0 &&
+          compare_a("abc", "abd") < 0 &&
+          compare_a("abd", "abc") > 0 &&
+          compare_a("", "") == 0,
+          "KERNEL32 lstrcmpA CP1252 comparisons");
+    error.set(1234567u);
+    check(compare_w(u"one", u"two") < 0 && error.get() == 1234567u,
+          "lstrcmpW preserves LastError on success");
 
     error.set(UINT32_C(0xfedcba98));
     check(error.get() == UINT32_C(0xfedcba98), "last error preserves all 32 bits");
