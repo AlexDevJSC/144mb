@@ -46,6 +46,51 @@ anotar el bloqueo, y NO tratar el problema como resuelto por omisión.
 No inferir que «95 %» equivale a cinco puntos de esfuerzo pendientes
 ni usar una build verde como sinónimo de paridad Windows.
 
+### Resolución técnica vigente del problema 6 y transición al problema 5 (16-11-2026)
+
+**Decisión del responsable:** no repetir indefinidamente análisis de
+planificación ni bloquear las APC avanzadas por una validación que precisa
+hardware Fedora KDE físico. El perfil implementable y seguro del problema 6
+se considera **cerrable por contratos** al superar la CI de la PR
+[#143](https://github.com/AlexDevJSC/144mb/pull/143). No equivale a
+certificar compatibilidad universal con Windows.
+
+- Subtareas **1 y 2**: prioridad y afinidad de los hilos invitados propios
+  con restauración segura y pruebas de concurrencia.
+- **3**: processor groups Windows compactos, cpuset disperso y prueba
+  sintética de 80 CPU; falta validación física real de >64.
+- **4 y 5**: boost/decay condicionado y comparación estadística de quantum;
+  no hay evidencia suficiente para reescribir el planificador Linux.
+- **6**: vía real `CreateProcess` → lanzador PE `posix_spawn` → socket
+  autenticado padre/hijo → registro de hilos principales y secundarios
+  → `OpenThread`/`NtOpenThread` de solo consulta y handles locales
+  independientes, con permisos limitados y revocación; tests con
+  dos procesos reales e hilo secundario. Las acciones de modificación
+  sobre hilos Linux externos permanecen expresamente denegadas.
+- **7**: Windows nativo en VM y Linux/Fedora RPM por CI. Queda aplazada
+  la prueba física Fedora KDE, >64 procesadores y Bubblewrap sin SKIP,
+  como dependencia del **problema 7 de validación**, no como excusa para
+  seguir desarrollando artificialmente el problema 6.
+
+**Dependencias arquitectónicas explícitas:** la emulación de tokens,
+SID y DACL completos pertenece al problema **4 seguridad NT**; la
+compartición genérica del espacio de objetos NT entre distintos
+procesos pertenece al problema **3 objetos NT**. La suspensión o
+inyección de ejecución remota no se improvisará con un TID Linux
+aportado por el invitado. No presentar estas dependencias como resueltas
+por el broker de consultas. Ver
+[matriz de contratos](nt-stage4-problem6-closure.md).
+
+**Siguiente prioridad vinculante tras CI verde:** problema
+**5. APC avanzadas** (no el componente arquitectónico 5 Memoria
+virtual). La fase arquitectónica **4. Procesos e hilos** sigue
+activa. Madurez estimada y revisable del componente 4:
+**95 % → 96 % (+1 punto porcentual)** por la nueva consulta real
+entre procesos PE con identidad generacional y pruebas positivas,
+**no** por contar APIs ni por la mera documentación. Sin evidencia
+positiva del escenario de hardware físico, el porcentaje no llegará
+a 100 % a causa de esta entrega.
+
 **Actualización 16-11-2026:** trabajo de grupo principal individual
 en la rama `feature/core6-primary-group-model-20261116` apilada
 sobre la PR de validación Windows/Fedora. Se habilitan semánticas
