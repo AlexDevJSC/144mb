@@ -69,17 +69,13 @@ int main(void)
             second = cpu;
     }
     if (first == -1) {
-        uintptr_t process = 0x144u, system = 0x145u;
-        nt_SetLastError(0);
-        check(!nt_GetProcessAffinityMask(UINTPTR_MAX, &process, &system) &&
-              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED &&
-              process == 0x144u && system == 0x145u,
-              "group0 cannot be fabricated from high Linux CPU IDs");
-        nt_SetLastError(0);
-        check(!nt_SetProcessAffinityMask(UINTPTR_MAX, 1u) &&
-              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED,
-              "group0 mask cannot be applied over higher-only cpuset");
-        puts("SKIP positive process affinity: no allowed CPU in group 0");
+        uintptr_t process = 0, system = 0;
+        nt_SetLastError(0x144u);
+        check(nt_GetProcessAffinityMask(UINTPTR_MAX, &process, &system) &&
+              process != 0 && process == system &&
+              nt_GetLastError() == 0x144u,
+              "high-only cpuset selects real process primary group, not group0");
+        puts("SKIP legacy group0-only affinity fixture: no group0 CPU permitted");
         return failures ? EXIT_FAILURE : EXIT_SUCCESS;
     }
 
