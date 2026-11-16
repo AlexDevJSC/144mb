@@ -395,6 +395,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(TerminateProcess),
     WIN_EXPORT(UnhandledExceptionFilter),
     WIN_EXPORT(CompareStringW),
+    WIN_EXPORT(lstrcmpA),
+    WIN_EXPORT(lstrcmpW),
     WIN_EXPORT(EnumSystemLocalesW),
     WIN_EXPORT(GetCPInfo),
     WIN_EXPORT(GetDateFormatW),
