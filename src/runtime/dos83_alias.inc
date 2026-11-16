@@ -6,6 +6,7 @@
 #define WIN_DOS83_XATTR "user.ntnative.dos83"
 static ssize_t read_guest_xattr(int fd, const char *name, void *value, size_t size);
 static int write_guest_xattr(int fd, const char *name, const void *value, size_t size);
+static int open_share_registry(const struct stat *info);
 static pthread_mutex_t dos83_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static bool dos83_char(unsigned char c)
@@ -159,6 +160,26 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
         error = ENOTSUP;
     if (!error && S_ISREG(st.st_mode) && st.st_nlink > 1)
         error = ENOTSUP;
+    /* Serialize assignments among cooperating NT processes through the
+     * existing per-directory (dev,ino) private share-registry gate. Linux
+     * processes that do not participate are intentionally outside scope. */
+    struct stat parent_st;
+    int gate = -1;
+    if (!error && fstat(parent, &parent_st) != 0)
+        error = errno;
+    if (!error) {
+        gate = open_share_registry(&parent_st);
+        if (gate < 0)
+            error = errno;
+    }
+    if (!error) {
+        int locked;
+        do {
+            locked = flock(gate, LOCK_EX);
+        } while (locked < 0 && errno == EINTR);
+        if (locked < 0)
+            error = errno;
+    }
     if (!error && dos83_read_at(parent, name, alias)) {
         const int collision = dos83_collision(parent, name, alias);
         if (collision != 0)
@@ -184,6 +205,8 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
         if (!assigned && !error)
             error = ENOSPC;
     }
+    if (gate >= 0)
+        close(gate);
     close(fd);
     pthread_mutex_unlock(&dos83_lock);
     if (error) {
