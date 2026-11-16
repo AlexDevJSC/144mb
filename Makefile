@@ -29,7 +29,7 @@ DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
 else
 DOS83_FUSE_TARGET =
 endif
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
@@ -65,8 +65,8 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: check-pe-priority-boost all check check-dos83-mediator check-dos83-fuse check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
-all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(DOS83_FUSE_TARGET)
+.PHONY: check-pe-priority-boost all check check-object-broker check-dos83-mediator check-dos83-fuse check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(BUILD_DIR)/nt-object-broker $(DOS83_FUSE_TARGET)
 
 $(BUILD_DIR):
 	mkdir -p "$@"
@@ -103,6 +103,7 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runti
 $(BUILD_DIR)/runtime-guest_files.o: override CPPFLAGS += $(ICU_CFLAGS)
 $(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/junctions.inc src/runtime/junction_control.inc
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-virtual_memory.o $(BUILD_DIR)/runtime-section_memory.o: src/runtime/section_memory.h
+$(BUILD_DIR)/runtime-section_memory.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-object_broker.o: src/runtime/object_broker.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/dynamic_tls.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/nt_core_information.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
@@ -241,6 +242,17 @@ $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnat
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
+$(BUILD_DIR)/nt-object-broker: src/tools/nt_object_broker.c src/runtime/object_broker.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $< $(LDLIBS) -pthread -o "$@"
+
+$(BUILD_DIR)/object-broker-test: tests/object_broker_test.c $(RUNTIME_OBJECTS) src/runtime/object_broker.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+check-object-broker: $(BUILD_DIR)/nt-object-broker $(BUILD_DIR)/object-broker-test
+	sh tests/object_broker_smoke.sh "$(BUILD_DIR)/nt-object-broker" "$(BUILD_DIR)/object-broker-test"
+
 $(BUILD_DIR)/section-memory-test: tests/section_memory_test.c $(RUNTIME_OBJECTS) src/runtime/section_memory.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -294,7 +306,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/inherited-file-test \
-       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/section-memory-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
+       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/section-memory-test $(BUILD_DIR)/nt-object-broker $(BUILD_DIR)/object-broker-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator
 	$(BUILD_DIR)/counter-test
@@ -315,6 +327,7 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 20s $(BUILD_DIR)/inherited-file-test
 	timeout 30s $(BUILD_DIR)/compat-batch-test
 	timeout 30s $(BUILD_DIR)/section-memory-test
+	sh tests/object_broker_smoke.sh "$(BUILD_DIR)/nt-object-broker" "$(BUILD_DIR)/object-broker-test"
 	sh tests/dos83_mediator_smoke.sh "$(BUILD_DIR)/nt-dos83-mediator"
 	timeout 30s $(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test
@@ -696,13 +709,14 @@ check-stage4-quantum: $(BUILD_DIR)/stage4-quantum-host
 benchmark: $(BUILD_DIR)/counter-bench
 	$(BUILD_DIR)/counter-bench
 
-install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(DOS83_FUSE_TARGET)
+install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(BUILD_DIR)/nt-object-broker $(DOS83_FUSE_TARGET)
 	install -D -m 0755 "$(BUILD_DIR)/nt-native-probe" "$(DESTDIR)$(BINDIR)/nt-native-probe"
 	install -D -m 0755 "$(BUILD_DIR)/pe-isolated-run" "$(DESTDIR)$(BINDIR)/pe-isolated-run"
 	install -D -m 0755 "$(BUILD_DIR)/nt-vulkan-probe" "$(DESTDIR)$(BINDIR)/nt-vulkan-probe"
 	install -D -m 0755 "$(BUILD_DIR)/pe-import-audit" "$(DESTDIR)$(BINDIR)/pe-import-audit"
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-mediator" "$(DESTDIR)$(BINDIR)/nt-dos83-mediator"
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-landlock" "$(DESTDIR)$(BINDIR)/nt-dos83-landlock"
+	install -D -m 0755 "$(BUILD_DIR)/nt-object-broker" "$(DESTDIR)$(BINDIR)/nt-object-broker"
 ifneq ($(strip $(FUSE3_LIBS)),)
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-fuse" "$(DESTDIR)$(BINDIR)/nt-dos83-fuse"
 endif
