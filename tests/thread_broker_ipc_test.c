@@ -6,6 +6,7 @@
 #include "thread_broker_ipc.h"
 
 #include <pthread.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,9 @@ static int write_all(int fd, const void *data, size_t length)
 }
 static int read_all(int fd, void *data, size_t length)
 {
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    if (poll(&p, 1, 3000) != 1 || !(p.revents & POLLIN))
+        return 0;
     return read(fd, data, length) == (ssize_t)length;
 }
 static int start_endpoint(struct endpoint *client, void (*body)(int,int,int))
@@ -58,8 +62,12 @@ static void *secondary_main(void *ctx)
 {
     int *fds = ctx;
     const uint32_t tid = (uint32_t)syscall(SYS_gettid);
-    if (!nt_broker_client_register_thread(tid) ||
-        !write_all(fds[0], &tid, sizeof(tid)))
+    if (!nt_broker_client_register_thread(tid)) {
+        fprintf(stderr, "IPC target: authenticated worker REGISTER rejected (pid=%ld tid=%u)\n",
+                (long)getpid(), tid);
+        return (void *)1;
+    }
+    if (!write_all(fds[0], &tid, sizeof(tid)))
         return (void *)1;
     char release = 0;
     if (!read_all(fds[1], &release, 1) || release != 'F')
@@ -69,8 +77,10 @@ static void *secondary_main(void *ctx)
 }
 static void target_child(int fd, int commands, int replies)
 {
-    if (!nt_broker_client_attach(fd))
+    if (!nt_broker_client_attach(fd)) {
+        fprintf(stderr, "IPC target: parent handshake failed\n");
         _exit(2);
+    }
     int worker_release[2];
     if (pipe(worker_release) != 0)
         _exit(3);
@@ -94,8 +104,10 @@ static void target_child(int fd, int commands, int replies)
 }
 static void querying_child(int fd, int commands, int replies)
 {
-    if (!nt_broker_client_attach(fd))
+    if (!nt_broker_client_attach(fd)) {
+        fprintf(stderr, "IPC requester: parent handshake failed\n");
         _exit(11);
+    }
     uint32_t tid = 0;
     if (!read_all(commands, &tid, sizeof(tid)))
         _exit(12);
@@ -107,7 +119,8 @@ static void querying_child(int fd, int commands, int replies)
         !nt_broker_client_query(capability,
                     NT_BROKER_QUERY_LIMITED_INFORMATION, &info) ||
         info.guest_thread_id != tid)
-        _exit(13);
+        { fprintf(stderr, "IPC requester: OPEN or QUERY failed tid=%u opened=%d capability=%llu actual=%u\n",
+                  tid, (int)opened, (unsigned long long)capability, info.guest_thread_id); _exit(13); }
     uint64_t forbidden = 0x5151;
     if (nt_broker_client_open(tid, 0x20u, &info, &forbidden) ||
         forbidden != 0x5151)
@@ -155,11 +168,17 @@ int main(void)
         return 2;
     uint32_t actual_tid = 0;
     char response = 0;
-    if (!read_all(target.replies[0], &actual_tid, sizeof(actual_tid)) ||
-        actual_tid == 0 || actual_tid == (uint32_t)target.pid ||
-        !write_all(asker.commands[1], &actual_tid, sizeof(actual_tid)) ||
-        !read_all(asker.replies[0], &response, 1) || response != 'O')
+    if (!read_all(target.replies[0], &actual_tid, sizeof(actual_tid))) {
+        fprintf(stderr, "IPC parent: target failed to publish secondary TID\n");
         return 3;
+    }
+    if (actual_tid == 0 || actual_tid == (uint32_t)target.pid ||
+        !write_all(asker.commands[1], &actual_tid, sizeof(actual_tid)) ||
+        !read_all(asker.replies[0], &response, 1) || response != 'O') {
+        fprintf(stderr, "IPC parent: cross-process remote OPEN did not confirm TID=%u response=%d\n",
+                actual_tid, (int)response);
+        return 3;
+    }
     uint64_t handle = 0;
     struct nt_broker_thread_info info = {0};
     if (!nt_broker_open_registered_thread(getpid(), (pid_t)actual_tid,
