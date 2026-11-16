@@ -519,6 +519,41 @@ marca tras verificar la identidad. No son ACL NTFS. No impide una
 modificación host deliberada del registro por el mismo usuario.
 Reparse points, SMB real, 8.3 y otras semánticas avanzadas de IOCP permanecen pendientes.
 
+## Copias con progreso y cancelación Win32 (CopyFileExA/W)
+
+`CopyFileExA` y `CopyFileExW` comparten el mismo motor nativo,
+descriptores, control de compartición, copia de atributos y confinamiento
+`openat2` que `CopyFileA/W`. No ejecutan `cp`, no conceden rutas
+Linux adicionales ni crean una segunda copia temporal de los datos.
+
+El perfil implementado admite `COPY_FILE_FAIL_IF_EXISTS` (0x1),
+un `LPPROGRESS_ROUTINE` con ABI Microsoft x64 y los cuatro resultados
+`PROGRESS_CONTINUE`, `PROGRESS_CANCEL`, `PROGRESS_STOP` y
+`PROGRESS_QUIET`. El callback recibe el tamaño total de archivo,
+total transferido, tamaño/avance del único flujo regular, número de
+flujo 1, `CALLBACK_STREAM_SWITCH` al comenzar y
+`CALLBACK_CHUNK_FINISHED` tras cada bloque (64 KiB).
+No se invoca con `file_lock` retenido; puede consultar handles
+o realizar otras llamadas Win32. Se admite también la señal
+`pbCancel` antes de abrir el archivo y durante la transferencia.
+
+El callback `CANCEL` o `pbCancel` distinto de cero devuelven
+`ERROR_REQUEST_ABORTED`; cuando el destino fue creado por esta
+operación, se elimina la copia parcial. `STOP` devuelve el mismo
+error pero **conserva el destino parcial** a petición del callback.
+`QUIET` suprime avisos posteriores y completa la copia normalmente.
+Los flags distintos de 0/1 se rechazan con `ERROR_NOT_SUPPORTED`
+en lugar de afirmar semánticas no implementadas.
+
+Se comprueban callbacks de ABI x64, conteo y motivo del progreso,
+W/A, `FAIL_IF_EXISTS`, silenciamiento, cancelación temprana y
+persistencia o eliminación del destino según STOP/CANCEL. Esta
+ampliación no hace transaccional la sustitución de un destino
+preexistente: si el destino existía y un fallo ocurre tras truncarlo,
+puede quedar parcialmente modificado. Tampoco admite flujos
+alternativos NTFS, `COPY_FILE_RESTARTABLE`, copia de symlinks,
+descompresión/cifrado ni semántica completa de oplocks.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
