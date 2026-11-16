@@ -4014,6 +4014,154 @@ uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size,
     return (uint32_t)required - 1;
 }
 
+/* Read-only NT SECURITY_DESCRIPTOR_RELATIVE derived from the Linux owner,
+ * group and mode bits. Synthetic S-1-22-{1,2} Unix IDs are documented;
+ * this is NOT an NTFS access-control engine or an ACL setter. */
+static void security_le16(uint8_t *p, uint16_t value)
+{
+    p[0] = (uint8_t)value;
+    p[1] = (uint8_t)(value >> 8);
+}
+
+static void security_le32(uint8_t *p, uint32_t value)
+{
+    for (int i = 0; i != 4; ++i)
+        p[i] = (uint8_t)(value >> (8 * i));
+}
+
+static size_t security_sid(uint8_t *p, uint8_t authority, uint32_t kind, uint32_t identity)
+{
+    memset(p, 0, kind ? 16u : 12u);
+    p[0] = 1; /* SID_REVISION */
+    p[1] = kind ? 2u : 1u;
+    p[7] = authority;
+    if (kind) {
+        security_le32(p + 8, kind);
+        security_le32(p + 12, identity);
+        return 16;
+    }
+    security_le32(p + 8, identity);
+    return 12;
+}
+
+static uint32_t security_rights(mode_t bits)
+{
+    uint32_t rights = 0;
+    if (bits & 4u)
+        rights |= 0x00000081u; /* FILE_READ_DATA | FILE_READ_ATTRIBUTES */
+    if (bits & 2u)
+        rights |= 0x00000106u; /* FILE_WRITE_DATA | FILE_APPEND_DATA | WRITE_ATTRIBUTES */
+    if (bits & 1u)
+        rights |= 0x00000020u; /* FILE_EXECUTE / FILE_TRAVERSE */
+    return rights;
+}
+
+static size_t security_allow_ace(uint8_t *p, uint32_t mask,
+                                 uint8_t authority, uint32_t kind, uint32_t identity)
+{
+    const size_t sid_length = kind ? 16u : 12u;
+    p[0] = 0; /* ACCESS_ALLOWED_ACE_TYPE */
+    p[1] = 0;
+    security_le16(p + 2, (uint16_t)(8u + sid_length));
+    security_le32(p + 4, mask);
+    (void)security_sid(p + 8, authority, kind, identity);
+    return 8u + sid_length;
+}
+
+int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information,
+                                      void *descriptor, uint32_t size, uint32_t *needed)
+{
+    if (needed == NULL || information == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if ((information & ~7u) != 0) {
+        /* SACL requests need an explicit privilege model which this
+         * user-space adapter cannot currently claim to implement. */
+        nt_SetLastError((information & 8u) ? NT_ERROR_ACCESS_DENIED :
+                        NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+
+    char narrow[PATH_MAX], path[PATH_MAX];
+    if (!wide_path(name, narrow))
+        return 0;
+    if (!normalize_path(narrow, path, true)) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const int fd = confined_open(root, *relative ? relative : ".", O_PATH | O_NOFOLLOW, 0);
+    const int opened_error = errno;
+    close(root);
+    if (fd < 0) {
+        nt_SetLastError(path_error(opened_error, false));
+        return 0;
+    }
+    struct stat st;
+    const int status = fstat(fd, &st);
+    const int stat_error = errno;
+    close(fd);
+    if (status < 0 || (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
+        nt_SetLastError(status < 0 ? path_error(stat_error, false) :
+                        NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    const uint32_t total = 20u + ((information & 1u) ? 16u : 0u) +
+        ((information & 2u) ? 16u : 0u) + ((information & 4u) ? 76u : 0u);
+    *needed = total;
+    if (!descriptor || size < total) {
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    uint8_t bytes[128] = {0};
+    bytes[0] = 1; /* SECURITY_DESCRIPTOR_REVISION */
+    security_le16(bytes + 2, UINT16_C(0x8000) |
+                  ((information & 4u) ? UINT16_C(0x0004) : 0u));
+    size_t offset = 20u;
+    if (information & 1u) {
+        security_le32(bytes + 4, (uint32_t)offset);
+        offset += security_sid(bytes + offset, 22u, 1u, (uint32_t)st.st_uid);
+    }
+    if (information & 2u) {
+        security_le32(bytes + 8, (uint32_t)offset);
+        offset += security_sid(bytes + offset, 22u, 2u, (uint32_t)st.st_gid);
+    }
+    if (information & 4u) {
+        security_le32(bytes + 16, (uint32_t)offset);
+        bytes[offset] = 2; /* ACL_REVISION */
+        security_le16(bytes + offset + 2, 76u);
+        security_le16(bytes + offset + 4, 3u);
+        offset += 8u;
+        offset += security_allow_ace(bytes + offset,
+            security_rights((st.st_mode >> 6) & 7u), 22u, 1u, (uint32_t)st.st_uid);
+        offset += security_allow_ace(bytes + offset,
+            security_rights((st.st_mode >> 3) & 7u), 22u, 2u, (uint32_t)st.st_gid);
+        offset += security_allow_ace(bytes + offset,
+            security_rights(st.st_mode & 7u), 1u, 0u, 0u); /* Everyone S-1-1-0 */
+    }
+    if (offset != total) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    memcpy(descriptor, bytes, total);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetFileSecurityA(const char *path, uint32_t information,
+                                      void *descriptor, uint32_t size, uint32_t *needed)
+{
+    uint16_t wide[PATH_MAX];
+    return utf8_guest_to_wide(path, wide) &&
+           nt_GetFileSecurityW(wide, information, descriptor, size, needed);
+}
+
 uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path)
 {
     uint16_t wide[PATH_MAX];
