@@ -360,3 +360,40 @@ existen varios hilos, boosts de prioridad dinámica y quantum,
 política Windows multicgrupo completa, acceso autorizado a hilos
 externos y pruebas de comparación con Windows y hardware multigrupo
 real. No avanzar al problema 5 por una CI verde.
+
+### Subtarea 6.3 — Descubrimiento de grupos visibles (16-11-2026)
+
+Se conectan `GetActiveProcessorGroupCount` y
+`GetActiveProcessorCount` (incluido `ALL_PROCESSOR_GROUPS=0xffff`)
+a una **fotografía del cpuset Linux que el sandbox puede utilizar** al
+primer acceso al runtime de hilos. La captura se hace antes de
+`CreateThread`, `SetThreadAffinityMask` o
+`SetThreadGroupAffinity`, de manera que fijar posteriormente un hilo
+a un único procesador **no** reduzca el número de procesadores del
+sistema que el invitado percibe. Una consulta de grupo inexistente
+devuelve cero. Los grupos se enumeran según `cpu_id / 64`, sin
+crear una numeración que deje de corresponder a las máscaras reales.
+
+**Límite explícito:** esta topología es la asignación de CPUs
+**permitidas al sandbox al primer acceso**, no una lectura general de
+los procesadores del anfitrión, ni un sustituto completo de los
+processor groups, NUMA o hotplug Windows. La vista no se actualiza si
+el administrador cambia el cpuset Linux después de la captura; la
+consulta a un grupo alto con CPUs no permitidas indica cero, aunque
+el host físico disponga de esos procesadores. No se exponen funciones
+de máximo potencial que requerirían topología distinta de la activa.
+
+Las pruebas Linux verifican los conteos exactos por grupo y el total
+contra el cpuset original, y su estabilidad tras fijar un hilo. El
+fixture Win64 importa ambas funciones y compara la suma por grupos
+con el total antes y después de alterar la afinidad. La transición
+física entre dos grupos sigue sin haber pasado en CI: el runner solo
+proporciona un grupo permitido.
+
+**Estado del problema 6:** siguen pendientes clases modificables de
+procesos multihilo, prioridades dinámicas de Windows, quantum,
+política plena multicgrupo, acceso autorizado a hilos fuera del
+runtime y comparación diferencial Windows/Fedora físico. El acceso
+a procesos ajenos necesita un broker con autenticación del entorno
+aislado, vinculado al futuro problema 3: no se debe sustituir ese
+broker por syscalls sobre un TID/PID aportado por el invitado.
