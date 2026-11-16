@@ -1293,6 +1293,45 @@ static void check_native_file_namespaces(void)
           handle != UINTPTR_MAX && nt_CloseHandle(handle));
     CHECK(nt_DeleteFileA("D:\\native-file.bin"));
 
+    /* D: has the same inode-scoped pending registry as C:. Remapping the
+     * letter while the handle lives must NEVER delete an unrelated file. */
+    uintptr_t pending = nt_CreateFileA("D:\\pending.bin", UINT32_C(0x80010000),
+                                     7u, NULL, 2u, 0x80u, 0);
+    CHECK(pending != UINTPTR_MAX && nt_DeleteFileA("D:\\pending.bin") &&
+          nt_CreateFileA("D:\\pending.bin", UINT32_C(0x80000000),
+                         7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+
+    char remapped_root[] = "/tmp/nt-native-remap.XXXXXX";
+    CHECK(mkdtemp(remapped_root) != NULL &&
+          nt_runtime_set_drive_root('D', remapped_root));
+    uintptr_t replacement = nt_CreateFileA("D:\\pending.bin",
+        UINT32_C(0xc0000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(replacement != UINTPTR_MAX && nt_CloseHandle(replacement) &&
+          nt_CloseHandle(pending) &&
+          nt_GetFileAttributesA("D:\\pending.bin") != UINT32_MAX);
+    CHECK(nt_runtime_set_drive_root('D', root));
+    CHECK(nt_CreateFileA("D:\\pending.bin", UINT32_C(0x80000000),
+                         7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED &&
+          nt_GetFileAttributesA("D:\\pending.bin") == UINT32_MAX);
+    CHECK(nt_runtime_set_drive_root('D', remapped_root) &&
+          nt_DeleteFileA("D:\\pending.bin") &&
+          nt_runtime_set_drive_root('D', root) &&
+          rmdir(remapped_root) == 0);
+
+    pending = nt_CreateFileA("\\\\lab\\share\\unc-pending.bin",
+                             UINT32_C(0x80010000), 7u, NULL, 2u, 0x80u, 0);
+    const uint8_t mark_delete = 1;
+    CHECK(pending != UINTPTR_MAX &&
+          nt_SetFileInformationByHandle(pending, 4, &mark_delete, 1) &&
+          nt_CreateFileA("\\\\lab\\share\\unc-pending.bin",
+                         UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0) ==
+          UINTPTR_MAX && last_error() == NT_ERROR_ACCESS_DENIED &&
+          nt_CloseHandle(pending) &&
+          nt_GetFileAttributesA("\\\\lab\\share\\unc-pending.bin") == UINT32_MAX);
+
+
     uint16_t c_file[] = u"\\??\\C:\\native-delete.bin";
     name = (struct nt_guest_unicode_string){
         .length = sizeof(c_file) - sizeof(c_file[0]),
