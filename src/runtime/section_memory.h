@@ -9,6 +9,9 @@
  * global cross-process object broker or arbitrary executable views yet. */
 uintptr_t NT_MS_ABI nt_CreateFileMappingW(uintptr_t file, const void *security,
     uint32_t protect, uint32_t maximum_high, uint32_t maximum_low, const uint16_t *name);
+uintptr_t NT_MS_ABI nt_CreateFileMappingA(uintptr_t file, const void *security,
+    uint32_t protect, uint32_t maximum_high, uint32_t maximum_low, const char *name);
+uintptr_t NT_MS_ABI nt_OpenFileMappingA(uint32_t access, int32_t inherit, const char *name);
 uintptr_t NT_MS_ABI nt_OpenFileMappingW(uint32_t access, int32_t inherit, const uint16_t *name);
 void *NT_MS_ABI nt_MapViewOfFile(uintptr_t mapping, uint32_t access,
     uint32_t offset_high, uint32_t offset_low, size_t length);
