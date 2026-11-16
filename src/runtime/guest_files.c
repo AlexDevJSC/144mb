@@ -3662,36 +3662,61 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
     if (attributes->size != sizeof(*attributes) || disposition >= sizeof(win_dispositions) / sizeof(*win_dispositions) ||
         (name->length & 1u) || name->length > name->maximum_length || length >= PATH_MAX)
         return NT_STATUS_INVALID_PARAMETER;
-    const uint32_t supported_access = UINT32_C(0xc0100003);
+    /* Keep the explicitly supported access and create-option subset narrow.
+     * In particular do not pretend READ_CONTROL/WRITE_DAC or reparse support. */
+    const uint32_t supported_access = UINT32_C(0xc0110003);
+    const uint32_t supported_options = UINT32_C(0x00001060);
     if (!disposition || attributes->root || attributes->security || attributes->qos ||
         (attributes->attributes & ~0x42u) || (allocation && *allocation) || ea || ea_length ||
-        (access & ~supported_access) || (options & ~0x60u) || (share & ~7u) ||
+        (access & ~supported_access) || (options & ~supported_options) || (share & ~7u) ||
         (file_attributes & ~FILE_ATTRIBUTE_NORMAL))
         return NT_STATUS_NOT_SUPPORTED;
     if ((options & 0x20u) && !(access & 0x100000u))
         return NT_STATUS_INVALID_PARAMETER;
+    if ((options & 0x1000u) && !(access & 0x10000u))
+        return NT_STATUS_ACCESS_DENIED;
 
+    /* Accept explicit DOS device paths \??\C:\..., \??\D:\... etc. and
+     * \??\UNC\server\share\... . Both are routed through the ordinary
+     * descriptor-backed Win32 resolver: ungranted volumes stay inaccessible. */
     static const uint16_t prefix[] = {'\\', '?', '?', '\\'};
-    if (length < 7 || memcmp(name->buffer, prefix, sizeof(prefix)) ||
-        (name->buffer[4] != 'C' && name->buffer[4] != 'c') ||
-        name->buffer[5] != ':' || name->buffer[6] != '\\')
+    if (length < 7 || memcmp(name->buffer, prefix, sizeof(prefix)))
         return (nt_status)UINT32_C(0xc000003b); /* STATUS_OBJECT_PATH_SYNTAX_BAD */
+    const uint16_t *text = name->buffer;
+    const bool dos = (text[4] >= 'C' && text[4] <= 'Z') ||
+                     (text[4] >= 'c' && text[4] <= 'z');
+    const bool unc = length >= 8 &&
+        (text[4] == 'U' || text[4] == 'u') &&
+        (text[5] == 'N' || text[5] == 'n') &&
+        (text[6] == 'C' || text[6] == 'c') && text[7] == '\\';
+    if ((!dos || text[5] != ':' || text[6] != '\\') && !unc)
+        return (nt_status)UINT32_C(0xc000003b);
     uint16_t path[PATH_MAX];
-    for (size_t i = 4; i < length; ++i) {
-        if (!name->buffer[i])
-            return NT_STATUS_INVALID_PARAMETER;
-        path[i - 4] = name->buffer[i];
+    size_t used = 0, first = 4;
+    if (unc) {
+        path[used++] = '\\';
+        path[used++] = '\\';
+        first = 8;
     }
-    path[length - 4] = 0;
+    for (size_t i = first; i < length; ++i) {
+        if (!text[i])
+            return NT_STATUS_INVALID_PARAMETER;
+        path[used++] = text[i];
+    }
+    path[used] = 0;
     uint32_t desired = access & UINT32_C(0xc0000000);
     if (access & 1u)
         desired |= UINT32_C(0x80000000);
     if (access & 2u)
         desired |= UINT32_C(0x40000000);
+    if (access & 0x10000u)
+        desired |= UINT32_C(0x10000);
+    const uint32_t win_flags = file_attributes |
+        ((options & 0x1000u) ? FILE_FLAG_DELETE_ON_CLOSE : 0u);
     const struct security_attributes security = {sizeof(security), NULL, (attributes->attributes & 2u) != 0};
     const uint32_t saved = nt_GetLastError();
     const uintptr_t result = nt_CreateFileW(path, desired, share, &security,
-                                            win_dispositions[disposition], file_attributes, 0);
+                                            win_dispositions[disposition], win_flags, 0);
     const uint32_t error = nt_GetLastError();
     nt_SetLastError(saved);
     if (result == UINTPTR_MAX)
