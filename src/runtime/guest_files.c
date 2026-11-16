@@ -4672,20 +4672,7 @@ uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer)
         nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
         return 0;
     }
-    const int32_t required = nt_WideCharToMultiByte(65001, 0x80, wide, -1,
-                                                    NULL, 0, NULL, NULL);
-    if (required <= 0)
-        return 0;
-    if (size < (uint32_t)required)
-        return (uint32_t)required;
-    if (!buffer) {
-        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
-        return 0;
-    }
-    if (nt_WideCharToMultiByte(65001, 0x80, wide, -1, buffer, required,
-                               NULL, NULL) != required)
-        return 0;
-    return (uint32_t)required - 1;
+    return file_path_acp_output(wide, buffer, size);
 }
 
 static int duplicate_handle(uintptr_t handle, unsigned int access)
