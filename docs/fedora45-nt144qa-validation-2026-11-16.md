@@ -4,6 +4,11 @@
 >
 > **Para otros proyectos y agentes:** leer también [criterios del núcleo](nt-core-readiness.md), [orden vinculante](nt-core-development-order.md), [fase 4](nt-stage4-process-threads.md), [arquitectura](architecture.md) y [AGENTS.md](../AGENTS.md). No extraer porcentajes de madurez ni declarar paridad a partir de este informe.
 
+**Actualización posterior:** las propuestas de este informe se están abordando
+en [correcciones Fedora 45](fedora45-qa-remediation.md). Esta página conserva
+el diagnóstico y las cifras originales de aquella ejecución; no constituye un
+resultado nuevo de pruebas físicas.
+
 ## 1. Procedencia y límites de la evidencia
 
 - **Fecha de ejecución reportada:** 2026-11-16; **sistema:** Fedora 45 x86-64, según la terminal del usuario.
