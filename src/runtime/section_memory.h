@@ -15,6 +15,16 @@ void *NT_MS_ABI nt_MapViewOfFile(uintptr_t mapping, uint32_t access,
 int32_t NT_MS_ABI nt_UnmapViewOfFile(const void *address);
 int32_t NT_MS_ABI nt_FlushViewOfFile(const void *address, size_t length);
 
+/* Native section subset: anonymous committed memory in the current process.
+ * These use NTSTATUS and preserve Win32 LastError. */
+nt_status NT_MS_ABI nt_NtCreateSection(uintptr_t *handle, uint32_t access,
+    const struct nt_object_attributes *attributes, const int64_t *maximum,
+    uint32_t protect, uint32_t allocation, uintptr_t file);
+nt_status NT_MS_ABI nt_NtMapViewOfSection(uintptr_t section, uintptr_t process,
+    void **base, uintptr_t zero_bits, size_t commit_size, const int64_t *offset,
+    size_t *view_size, uint32_t inherit, uint32_t allocation, uint32_t protect);
+nt_status NT_MS_ABI nt_NtUnmapViewOfSection(uintptr_t process, const void *base);
+
 /* Hooks into the existing Windows HANDLE and MEM_MAPPED bookkeeping. */
 int nt_runtime_section_close(uintptr_t handle);
 nt_status nt_runtime_section_duplicate(uintptr_t source, uint32_t access,
