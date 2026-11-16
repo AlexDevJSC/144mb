@@ -1347,6 +1347,7 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
     pthread_mutex_lock(&wait_lock);
     nt_status result = acquire_wait_objects(objects, count, handles);
     struct guest_apc *apc = NULL;
+    bool really_waited = false;
     if (result == NT_STATUS_SUCCESS) {
         int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
         for (;;) {
@@ -1365,6 +1366,7 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
             result = check_wait_objects(objects, count, type == 0);
             if (result != NT_STATUS_TIMEOUT || error)
                 break;
+            really_waited = true;
             error = timeout ? pthread_cond_clockwait(&wait_changed, &wait_lock, deadline.clock, &deadline.time) :
                               pthread_cond_wait(&wait_changed, &wait_lock);
         }
@@ -1373,6 +1375,12 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
         for (uint32_t i = 0; i < count; ++i)
             release_waitable(objects[i]);
     }
+    /* A signal must satisfy a REAL blocked guest wait, not timeout/poll.
+     * The monitor restores nice on a monotonic deadline independently
+     * of subsequent guest calls, even if the guest becomes CPU-bound. */
+    if (really_waited && result >= NT_STATUS_SUCCESS &&
+        result < (nt_status)MAXIMUM_WAIT_OBJECTS)
+        scheduler_guest_wait_woke_locked();
     pthread_mutex_unlock(&wait_lock);
     if (apc != NULL)
         invoke_apc(apc);
@@ -3238,6 +3246,11 @@ int32_t NT_MS_ABI nt_SetPriorityClass(uintptr_t process, uint32_t klass)
         return 0;
     }
     pthread_mutex_lock(&wait_lock);
+    if (scheduler_has_active_boosts_locked()) {
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0; /* do not overwrite a base while decay still owns it */
+    }
     const int old_base = process_priority_nice_base;
     if (klass == process_priority_class) {
         pthread_mutex_unlock(&wait_lock);
@@ -3690,6 +3703,18 @@ nt_status nt_runtime_query_thread_scheduling(uintptr_t handle, uintptr_t *affini
             errno = 0;
             nice = getpriority(PRIO_PROCESS, (id_t)tid);
             valid = errno == 0;
+            if (valid && state != NULL && state->dynamic_boost.active) {
+                if (nice != state->dynamic_boost.base_nice - 1)
+                    valid = false;
+                else
+                    nice = state->dynamic_boost.base_nice;
+            } else if (valid && state == NULL && gettid() == getpid() &&
+                       leader_dynamic_boost.active) {
+                if (nice != leader_dynamic_boost.base_nice - 1)
+                    valid = false;
+                else
+                    nice = leader_dynamic_boost.base_nice;
+            }
         }
         int32_t relative = 0;
         if (!valid || mask == 0 || !host_nice_priority(nice - process_priority_nice_base, &relative))
@@ -3722,6 +3747,12 @@ int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority)
     if (status != NT_STATUS_SUCCESS) {
         pthread_mutex_unlock(&wait_lock);
         nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
+    struct guest_dynamic_boost *boost = dynamic_boost_for_thread_locked(handle);
+    if (boost != NULL && boost->active) {
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
     errno = 0;
