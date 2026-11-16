@@ -90,6 +90,22 @@ permanecen diferencias críticas, el informe debe etiquetarse
 `NOT_DEMONSTRATED` aunque todas las pruebas funcionales disponibles
 hayan pasado. No publicar porcentajes como medición de compatibilidad.
 
+## Primer contraste real del mismo fixture (Windows CI, 16-11-2026)
+
+La ejecución nativa Windows de la fuente compartida
+`tests/pe/thread_group_affinity_fixture.c` devolvió primero **19**.
+La causa fue una expectativa **demasiado estricta** del fixture:
+ante un puntero `NULL` en `SetThreadGroupAffinity` y
+`GetThreadGroupAffinity`, Windows nativo devolvió `ERROR_NOACCESS`
+(**998**), mientras el backend Linux devuelve
+`ERROR_INVALID_PARAMETER` (**87**). Las llamadas fallan en ambos
+casos. Se ajustó el fixture para comprobar fracaso y aceptar ambos
+errores; no se modificó el runtime para falsificar la respuesta
+nativa. Evidencia: [GitHub Actions 43841045953](https://github.com/AlexDevJSC/144mb/actions/runs/43841045953),
+job Windows nativo (4 CPU, un grupo). Una coincidencia posterior
+del fixture no constituirá equivalencia de todos los códigos
+`LastError` ni comportamiento multigrupo.
+
 ## Diferencias detectadas por revisión contractual
 
 1. **Windows 11 / Windows Server 2022 y posteriores:** procesos e
