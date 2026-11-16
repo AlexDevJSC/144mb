@@ -646,11 +646,25 @@ PE_ISOLATED_FIXTURES = $(BUILD_DIR)/win32-desktop.exe $(BUILD_DIR)/profile-fixtu
     $(BUILD_DIR)/folder-fixture.exe $(BUILD_DIR)/child-parent-fixture.exe \
     $(BUILD_DIR)/child-fixture.exe $(BUILD_DIR)/command-fixture.exe
 
+$(BUILD_DIR)/fixture-missing-import.a: tests/pe/missing_import_fixture.def | $(BUILD_DIR)
+	$(MINGW_DLLTOOL) -d "$<" -l "$@"
+
+$(BUILD_DIR)/missing-import-fixture.exe: tests/pe/missing_import_fixture.c $(BUILD_DIR)/fixture-missing-import.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) \
+	    -o "$@" $^
+
 # Preflight runs even on hosts where Bubblewrap cannot create namespaces.
 # Direct imports are checked without executing untrusted PE code; this does
 # not claim coverage of delay imports, LoadLibrary or dependent DLL semantics.
-check-pe-preflight: $(BUILD_DIR)/pe-import-audit $(PE_ISOLATED_FIXTURES)
+check-pe-preflight: $(BUILD_DIR)/pe-import-audit $(PE_ISOLATED_FIXTURES) $(BUILD_DIR)/missing-import-fixture.exe
 	$(BUILD_DIR)/pe-import-audit --verify $(PE_ISOLATED_FIXTURES)
+	@status=0; $(BUILD_DIR)/pe-import-audit --verify $(BUILD_DIR)/missing-import-fixture.exe \
+	    > $(BUILD_DIR)/missing-import-audit.log 2>&1 || status=$?; \
+	    if [ "$status" -ne 1 ] || ! grep -q 'MissingNtNativeApi' $(BUILD_DIR)/missing-import-audit.log; then \
+	        cat $(BUILD_DIR)/missing-import-audit.log; \
+	        echo "FAIL: auditor did not reject unsupported KERNEL32 import" >&2; exit 1; \
+	    fi; \
+	    echo "PASS PE import preflight rejects a genuinely missing runtime API"
 
 check-pe-isolated: check-pe-preflight $(BUILD_DIR)/pe-isolated-run
 	sh tests/pe/run_external_fixture.sh $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/win32-desktop.exe \
