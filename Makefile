@@ -209,7 +209,8 @@ $(BUILD_DIR)/process-group-inheritance-test: tests/process_group_inheritance_tes
 $(BUILD_DIR)/process-group-synthetic-80cpu-test: tests/process_group_synthetic_80cpu_test.c $(RUNTIME_OBJECTS) src/runtime/sync.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=sched_getaffinity \
-	    -Wl,--wrap=pthread_getaffinity_np $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+	    -Wl,--wrap=pthread_getaffinity_np -Wl,--wrap=pthread_setaffinity_np \
+	    -Wl,--wrap=sched_getcpu $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
 $(BUILD_DIR)/external-thread-boundary-test: tests/external_thread_boundary_test.c $(RUNTIME_OBJECTS) src/runtime/sync.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
