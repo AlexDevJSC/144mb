@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #endif
 #include "virtual_memory.h"
+#include "section_memory.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -324,6 +325,8 @@ size_t NT_MS_ABI nt_VirtualQuery(const void *address, struct nt_memory_basic_inf
     const struct memory_region *region = find_locked(at);
     if (region == NULL) {
         pthread_mutex_unlock(&memory_lock);
+        if (nt_runtime_section_query(address, info))
+            return sizeof(*info);
         nt_SetLastError(NT_ERROR_INVALID_ADDRESS);
         return 0;
     }
