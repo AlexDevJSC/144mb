@@ -467,9 +467,9 @@ static void check_files(void)
           (nt_GetFileAttributesA(cp1252_directory) & 0x10u) != 0 &&
           nt_RemoveDirectoryA(cp1252_directory) != 0);
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
-    /* For direct A calls, try UTF-8 first and use CP1252 only when the
-     * UTF-8 file is absent. A W call is UTF-16 and MUST NOT be reinterpreted
-     * as CP1252 when the requested Unicode name is missing. */
+    /* Win32 A and CRT fopen always interpret bytes as the process ACP,
+     * even when those bytes also form a valid UTF-8 sequence. A W call
+     * must not guess an alternate CP1252 spelling either. */
     char utf8_native[512], acp_native[512];
     CHECK(snprintf(utf8_native, sizeof(utf8_native), "%s/data/caf\xc3\xa9.txt", root) > 0);
     CHECK(snprintf(acp_native, sizeof(acp_native), "%s/data/caf\xc3\x83\xc2\xa9.txt", root) > 0);
@@ -485,6 +485,10 @@ static void check_files(void)
     CHECK(ansi_handle != UINTPTR_MAX &&
           nt_ReadFile(ansi_handle, &selected, 1, &received, NULL) &&
           received == 1 && selected == 'A' && nt_CloseHandle(ansi_handle));
+    /* CRT fopen is an ANSI API too: it must select the CP1252 file. */
+    void *ansi_stream = nt_fopen(ambiguous_a, "rb");
+    CHECK(ansi_stream != NULL && nt_fread(&selected, 1, 1, ansi_stream) == 1 &&
+          selected == 'A' && nt_fclose(ansi_stream) == 0);
     /* An explicit W lookup still resolves the distinct true Unicode file. */
     uintptr_t unicode_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9.txt",
         UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
@@ -622,10 +626,10 @@ static void check_files(void)
     CHECK(nt_SetFileAttributesW(u"C:\\éTAGE", 1u | 2u) != 0 &&
           (nt_GetFileAttributesW(u"C:\\Étage") & (1u | 2u | 0x10u)) ==
           (1u | 2u | 0x10u));
-    void *international = nt_fopen("C:\\Étage\\Résumé.TXT", "wb");
+    void *international = nt_fopen("C:\\\xc9tage\\Résumé.TXT", "wb");
     CHECK(international != NULL && nt_fwrite("ok", 1, 2, international) == 2 &&
           nt_fclose(international) == 0);
-    international = nt_fopen("c:\\étage\\résumé.txt", "rb");
+    international = nt_fopen("c:\\\xe9tage\\résumé.txt", "rb");
     char international_bytes[2];
     CHECK(international != NULL &&
           nt_fread(international_bytes, 1, 2, international) == 2 &&
