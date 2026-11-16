@@ -5761,6 +5761,12 @@ int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
     struct stat stat_info;
     if (fd < 0 || fstat(fd, &stat_info) != 0)
         return file_result(fd, false);
+    if (S_ISLNK(stat_info.st_mode)) {
+        /* With O_PATH|O_NOFOLLOW, openat2 may successfully return the
+         * final link FD instead of ELOOP: keep reporting its metadata. */
+        *info = reparse_attributes(&stat_info);
+        return file_result(fd, true);
+    }
     if (!S_ISREG(stat_info.st_mode) && !S_ISDIR(stat_info.st_mode)) {
         errno = EACCES;
         return file_result(fd, false);
@@ -5835,6 +5841,15 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
             continue;
         }
         struct stat stat_info;
+        if (fstat(fd, &stat_info) == 0 && S_ISLNK(stat_info.st_mode)) {
+            close(fd);
+            if (!search->directories_only) {
+                result.info = reparse_attributes(&stat_info);
+                *data = result;
+                return -1;
+            }
+            continue;
+        }
         const bool valid = fstat(fd, &stat_info) == 0 &&
                            (S_ISREG(stat_info.st_mode) || S_ISDIR(stat_info.st_mode));
         if (valid && search->directories_only && !S_ISDIR(stat_info.st_mode)) {
