@@ -38,6 +38,18 @@ class QACheck(unittest.TestCase):
             ["PASS PE child launched inside the same Linux sandbox"],
             ["native FluidSynth ABI"])["status"], "PASS")
 
+    def test_later_positive_may_resolve_only_same_skip(self):
+        result = module.classify(
+            ["SKIP positive boost: unprivileged or not opted in",
+             "PASS dynamic priority: real Linux nice wake boost, Win32 base query and autonomous decay"],
+            [], [], {"SKIP positive boost": "PASS dynamic priority: real Linux nice wake boost"})
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(len(result["resolved_skips"]), 1)
+        self.assertEqual(module.classify(
+            ["SKIP positive boost: unprivileged or not opted in",
+             "PASS unrelated runtime test"], [],
+            [], {"SKIP positive boost": "PASS dynamic priority"})["status"], "INCOMPLETE")
+
     def test_real_make_failure(self):
         self.assertEqual(module.classify(["make: *** [Makefile:101: check] Error 2"],
                                          [], [])["status"], "FAIL")
