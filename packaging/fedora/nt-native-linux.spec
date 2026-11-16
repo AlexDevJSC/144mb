@@ -48,6 +48,7 @@ incomplete and must not be represented as general Windows compatibility.
 %{_bindir}/pe-isolated-run
 %{_bindir}/nt-vulkan-probe
 %{_bindir}/pe-import-audit
+%{_bindir}/nt-dos83-mediator
 
 %changelog
 * Mon Nov 09 2026 nt-native-linux contributors - 0.1.0-1
