@@ -561,6 +561,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(SetProcessAffinityMask),
     WIN_EXPORT(SetThreadAffinityMask),
     WIN_EXPORT(SetThreadPriority),
+    WIN_EXPORT(SetThreadPriorityBoost),
+    WIN_EXPORT(SetProcessPriorityBoost),
     WIN_EXPORT(SetPriorityClass),
     WIN_EXPORT(SetThreadDescription),
     WIN_EXPORT(Sleep),
