@@ -22,8 +22,13 @@
 int main(int argc, char **argv)
 {
     if (nt_runtime_resolve(MODULE, "new_fluid_settings") == NULL) {
+        const char *required = getenv("NT_REQUIRE_FLUIDSYNTH");
+        if ((required && strcmp(required, "0") != 0) || argc == 2) {
+            fputs("INCOMPLETE native FluidSynth ABI: install fluidsynth-libs (libfluidsynth.so.3)\n", stderr);
+            return 3;
+        }
         puts("SKIP native FluidSynth ABI: libfluidsynth.so.3 unavailable");
-        return argc == 2 ? 1 : 0;
+        return 0;
     }
     LOAD(void *, new_fluid_settings, (void));
     LOAD(int, fluid_settings_setnum, (void *, const char *, double));
