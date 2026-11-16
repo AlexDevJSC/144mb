@@ -58,8 +58,8 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: check-pe-priority-boost all check check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
-all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe
+.PHONY: check-pe-priority-boost all check check-dos83-mediator check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/nt-dos83-mediator
 
 $(BUILD_DIR):
 	mkdir -p "$@"
@@ -94,6 +94,7 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/r
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-sync.o \
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-guest_files.o: override CPPFLAGS += $(ICU_CFLAGS)
+$(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/junctions.inc src/runtime/junction_control.inc
 $(BUILD_DIR)/runtime-exports.o: src/runtime/dynamic_tls.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/nt_core_information.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
@@ -228,6 +229,13 @@ $(BUILD_DIR)/compat-batch-test: tests/compat_batch_test.c $(RUNTIME_OBJECTS) src
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=clock_gettime -Wl,--wrap=pread $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
+$(BUILD_DIR)/nt-dos83-mediator: src/tools/dos83_mediator.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+check-dos83-mediator: $(BUILD_DIR)/nt-dos83-mediator
+	sh tests/dos83_mediator_smoke.sh "$(BUILD_DIR)/nt-dos83-mediator"
+
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/user_folders.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=fdatasync $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -254,7 +262,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/inherited-file-test \
        $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
-       $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1
+       $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator
 	$(BUILD_DIR)/counter-test
 	$(BUILD_DIR)/nt-native-probe
 	$(BUILD_DIR)/runtime-test
@@ -270,6 +278,7 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 20s $(BUILD_DIR)/external-thread-boundary-test
 	timeout 20s $(BUILD_DIR)/inherited-file-test
 	timeout 30s $(BUILD_DIR)/compat-batch-test
+	sh tests/dos83_mediator_smoke.sh "$(BUILD_DIR)/nt-dos83-mediator"
 	timeout 30s $(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test
 	$(BUILD_DIR)/guest-thread-test
@@ -639,8 +648,9 @@ $(BUILD_DIR)/counter-bench: tests/bench/counter_bench.c $(BUILD_DIR)/counter.o |
 benchmark: $(BUILD_DIR)/counter-bench
 	$(BUILD_DIR)/counter-bench
 
-install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/pe-import-audit
+install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/nt-dos83-mediator
 	install -D -m 0755 "$(BUILD_DIR)/nt-native-probe" "$(DESTDIR)$(BINDIR)/nt-native-probe"
 	install -D -m 0755 "$(BUILD_DIR)/pe-isolated-run" "$(DESTDIR)$(BINDIR)/pe-isolated-run"
 	install -D -m 0755 "$(BUILD_DIR)/nt-vulkan-probe" "$(DESTDIR)$(BINDIR)/nt-vulkan-probe"
 	install -D -m 0755 "$(BUILD_DIR)/pe-import-audit" "$(DESTDIR)$(BINDIR)/pe-import-audit"
+	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-mediator" "$(DESTDIR)$(BINDIR)/nt-dos83-mediator"
