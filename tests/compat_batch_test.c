@@ -709,6 +709,20 @@ static void check_files(void)
           strlen(short1) + 1);
     CHECK(nt_DeleteFileA("data/longfilename.txt") &&
           nt_DeleteFileA("data/longfileextra.txt"));
+    /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
+     * unlike older mixed-mode A entrypoints, no UTF-8-first guess. */
+    uintptr_t cp_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9long.txt",
+                                          UINT32_C(0x40000000),
+                                          7u, NULL, 2u, 0x80u, 0);
+    CHECK(cp_handle != UINTPTR_MAX && nt_CloseHandle(cp_handle));
+    const char cp_input[] = "C:\\data\\caf\xe9long.txt";
+    char cp_output[256] = {0};
+    CHECK(nt_GetLongPathNameA(cp_input, cp_output, sizeof(cp_output)) ==
+          strlen(cp_input) && strcmp(cp_input, cp_output) == 0);
+    CHECK(nt_GetShortPathNameA(cp_input, cp_output, sizeof(cp_output)) > 0 &&
+          strstr(cp_output, "~1.TXT") != NULL);
+    CHECK(nt_DeleteFileW(u"C:\\data\\caf\u00e9long.txt"));
+
 
     raw = nt_fopen("data/target.txt", "wb");
     CHECK(raw != NULL && nt_fclose(raw) == 0);
