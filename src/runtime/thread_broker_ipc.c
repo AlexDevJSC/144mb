@@ -240,6 +240,14 @@ void nt_broker_server_loop(int fd,
     }
 }
 
+bool nt_broker_client_is_attached(void)
+{
+    pthread_mutex_lock(&client_lock);
+    const bool attached = client_socket >= 0;
+    pthread_mutex_unlock(&client_lock);
+    return attached;
+}
+
 bool nt_broker_client_attach(int fd)
 {
     if (!fd_seqpacket(fd) || !read_ready(fd, POLLIN))
