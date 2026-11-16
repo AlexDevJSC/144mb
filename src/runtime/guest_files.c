@@ -4075,6 +4075,125 @@ uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size,
     return (uint32_t)required - 1;
 }
 
+/* GetLongPathName performs an actual case-insensitive, component-by-
+ * component directory lookup inside the granted Linux root. It does not
+ * silently follow symlinks or treat guessed DOS 8.3 aliases as real names.
+ * An ambiguous Unicode fold fails instead of picking an arbitrary inode. */
+static bool canonical_existing_guest_path(const char *input,
+                                          char output[PATH_MAX + 16])
+{
+    char normalized[PATH_MAX];
+    if (!normalize_path(input, normalized, true))
+        return false;
+    const char *relative = normalized[0] ? normalized : ".";
+    int directory = duplicate_root(&relative);
+    if (directory < 0)
+        return false;
+    if (strcmp(relative, ".") == 0) {
+        const bool ok = copy_dos_path(normalized, output, PATH_MAX + 16);
+        close(directory);
+        return ok;
+    }
+    const size_t normalized_len = strlen(normalized);
+    const size_t relative_len = strlen(relative);
+    if (relative_len > normalized_len ||
+        strcmp(normalized + normalized_len - relative_len, relative) != 0) {
+        close(directory);
+        errno = EINVAL;
+        return false;
+    }
+    char canonical[PATH_MAX];
+    size_t used = normalized_len - relative_len;
+    memcpy(canonical, normalized, used);
+    if (used && canonical[used - 1] != '/')
+        canonical[used++] = '/';
+    const char *cursor = relative;
+    for (;;) {
+        const char *slash = strchr(cursor, '/');
+        const size_t count = slash ? (size_t)(slash - cursor) : strlen(cursor);
+        if (count == 0 || count > NAME_MAX) {
+            close(directory);
+            errno = EINVAL;
+            return false;
+        }
+        char asked[NAME_MAX + 1], actual[NAME_MAX + 1];
+        memcpy(asked, cursor, count);
+        asked[count] = '\0';
+        const int found = resolve_name(directory, asked, actual);
+        if (found <= 0) {
+            const int error = found == 0 ? ENOENT : errno;
+            close(directory);
+            errno = error;
+            return false;
+        }
+        const size_t length = strlen(actual);
+        if (used + length + 2 > sizeof(canonical)) {
+            close(directory);
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        memcpy(canonical + used, actual, length);
+        used += length;
+        if (!slash) {
+            struct stat entry;
+            const int ok = fstatat(directory, actual, &entry,
+                                   AT_SYMLINK_NOFOLLOW);
+            const int error = errno;
+            close(directory);
+            if (ok != 0) {
+                errno = error;
+                return false;
+            }
+            break;
+        }
+        canonical[used++] = '/';
+        const int next = confined_open_raw(directory, actual,
+                                           O_PATH | O_DIRECTORY, 0);
+        const int error = errno;
+        close(directory);
+        if (next < 0) {
+            errno = error;
+            return false;
+        }
+        directory = next;
+        cursor = slash + 1;
+    }
+    canonical[used] = '\0';
+    return copy_dos_path(canonical, output, PATH_MAX + 16);
+}
+
+uint32_t NT_MS_ABI nt_GetLongPathNameW(const uint16_t *input, uint16_t *buffer,
+                                       uint32_t size)
+{
+    char narrow[PATH_MAX], resolved[PATH_MAX + 16];
+    if (!wide_path(input, narrow))
+        return 0;
+    if (!canonical_existing_guest_path(narrow, resolved)) {
+        nt_SetLastError(path_error(errno, false));
+        return 0;
+    }
+    return path_result(resolved, size, buffer);
+}
+
+uint32_t NT_MS_ABI nt_GetLongPathNameA(const char *input, char *buffer,
+                                       uint32_t size)
+{
+    char resolved[PATH_MAX + 16];
+    if (!input || !canonical_existing_guest_path(input, resolved)) {
+        nt_SetLastError(path_error(input ? errno : EINVAL, false));
+        return 0;
+    }
+    const size_t required = strlen(resolved) + 1;
+    if (size < required)
+        return (uint32_t)required;
+    if (!buffer) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    memcpy(buffer, resolved, required);
+    return (uint32_t)required - 1;
+}
+
 /* Forward declaration: HANDLE duplication is implemented below. */
 static int duplicate_handle(uintptr_t handle, unsigned int access);
 
