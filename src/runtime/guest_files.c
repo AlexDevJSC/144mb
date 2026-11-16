@@ -611,6 +611,7 @@ static int confined_open_raw(int root, const char *path, int flags, unsigned int
 }
 
 #include "dos83_alias.inc"
+#include "junctions.inc"
 
 /* Exact spelling wins, including a symlink (the actual open rejects it).
  * Two differently-cased alternatives without an exact match are ambiguous. */
@@ -671,16 +672,29 @@ static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1]
 
 /* Walk under verified directory FDs; intermediates must exist and cannot
  * escape the allowed root through symlinks, mounts or textual traversal. */
+/* Resolve NT names component by component on pinned Linux descriptors.
+ * Only an explicitly marked, same-grant junction can rebase an intermediate
+ * component; arbitrary Linux symlinks remain denied by openat2. A finite
+ * hop budget also rejects junction cycles without recursing the C stack. */
 static int open_parent(int root, const char *path, char leaf[NAME_MAX + 1])
 {
     if (!path || !*path || strcmp(path, ".") == 0) {
         errno = EINVAL;
         return -1;
     }
+    if (strnlen(path, PATH_MAX) >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    char rewritten[PATH_MAX];
+    strcpy(rewritten, path);
+    unsigned int junction_hops = 0;
+restart:
+    ;
     int parent = fcntl(root, F_DUPFD_CLOEXEC, 0);
     if (parent < 0)
         return -1;
-    const char *cursor = path;
+    const char *cursor = rewritten;
     for (;;) {
         const char *slash = strchr(cursor, '/');
         const size_t length = slash ? (size_t)(slash - cursor) : strlen(cursor);
@@ -710,12 +724,42 @@ static int open_parent(int root, const char *path, char leaf[NAME_MAX + 1])
             return -1;
         }
         const int child = confined_open_raw(parent, actual, O_PATH | O_DIRECTORY, 0);
-        const int error = errno;
-        close(parent);
+        const int opened_error = errno;
         if (child < 0) {
-            errno = error;
+            close(parent);
+            errno = opened_error;
             return -1;
         }
+        struct nt_junction_record record;
+        const int junction = junction_read(child, root, &record);
+        const int reparse_error = errno;
+        if (junction < 0) {
+            close(child);
+            close(parent);
+            errno = reparse_error;
+            return -1;
+        }
+        if (junction > 0) {
+            const size_t base_len = strlen(record.target_relative);
+            const size_t suffix_len = strlen(slash + 1);
+            if (++junction_hops > WIN_JUNCTION_MAX_HOPS ||
+                base_len + 1 + suffix_len >= PATH_MAX) {
+                close(child);
+                close(parent);
+                errno = junction_hops > WIN_JUNCTION_MAX_HOPS ?
+                        ELOOP : ENAMETOOLONG;
+                return -1;
+            }
+            char next[PATH_MAX];
+            memcpy(next, record.target_relative, base_len);
+            next[base_len] = '/';
+            memcpy(next + base_len + 1, slash + 1, suffix_len + 1);
+            close(child);
+            close(parent);
+            memcpy(rewritten, next, base_len + 1 + suffix_len + 1);
+            goto restart;
+        }
+        close(parent);
         parent = child;
         cursor = slash + 1;
     }
