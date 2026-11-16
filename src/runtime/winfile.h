@@ -86,6 +86,12 @@ int32_t NT_MS_ABI nt_CopyFileExA(const char *source, const char *destination,
 int32_t NT_MS_ABI nt_CopyFileExW(const uint16_t *source, const uint16_t *destination,
                                 nt_copy_progress_routine progress, void *context,
                                 const int32_t *cancel, uint32_t flags);
+/* Partial, read-only ADVAPI32 GetFileSecurity bridge: owner/group/DACL from
+ * Linux UID/GID/mode. SACL and extended NTFS ACEs are not represented. */
+int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information,
+                                      void *descriptor, uint32_t size, uint32_t *needed);
+int32_t NT_MS_ABI nt_GetFileSecurityA(const char *name, uint32_t information,
+                                      void *descriptor, uint32_t size, uint32_t *needed);
 uint32_t NT_MS_ABI nt_GetLogicalDrives(void);
 uint32_t NT_MS_ABI nt_GetDriveTypeW(const uint16_t *root);
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer);
