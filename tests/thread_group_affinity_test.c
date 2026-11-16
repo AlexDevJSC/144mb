@@ -225,16 +225,16 @@ int main(void)
               &failures);
     }
 
-    /* Legacy process affinity remains a separate group-0 limitation. */
-    if (next.group > 0) {
-        uintptr_t process = 0x5151u, system = 0x6161u;
-        nt_SetLastError(0);
-        check(!nt_GetProcessAffinityMask(UINTPTR_MAX, &process, &system) &&
-              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED &&
-              process == 0x5151u && system == 0x6161u,
-              "legacy GetProcessAffinityMask refuses a group-1 mask",
-              &failures);
-    }
+    /* Windows 11: the current process is viewed through the calling
+     * thread's primary group, including when that group is above 0. */
+    uintptr_t process = 0, system = 0;
+    nt_SetLastError(0x6161u);
+    check(nt_GetProcessAffinityMask(UINTPTR_MAX, &process, &system) &&
+          system != 0 && (system & next.mask) == next.mask &&
+          (process & system) == process &&
+          nt_GetLastError() == 0x6161u,
+          "process mask query uses caller primary group without truncation",
+          &failures);
 
     struct nt_group_affinity bad = next;
     bad.reserved[1] = 1;
