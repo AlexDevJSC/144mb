@@ -746,7 +746,7 @@ static void check_files(void)
           last_error() == NT_ERROR_FILE_NOT_FOUND);
 
 
-    /* Long names acquire stable per-inode DOS aliases only on demand.
+    /* Long names acquire per-directory-entry DOS aliases on demand.
      * The short alias must resolve to the real data, and collisions must
      * produce distinct aliases without creating a second host file. */
     void *alias_stream = nt_fopen("data/longfilename.txt", "wb");
