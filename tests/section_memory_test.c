@@ -110,6 +110,19 @@ int main(void)
     CHECK(nt_OpenFileMappingW(4, 0, name) == 0 &&
           nt_GetLastError() == NT_ERROR_FILE_NOT_FOUND);
 
+    /* Name identity at A/W boundaries is CP1252, never guessed UTF-8. */
+    CHECK(nt_runtime_resolve(dll, "CreateFileMappingA") ==
+          (nt_guest_proc)nt_CreateFileMappingA);
+    uintptr_t ansi = nt_CreateFileMappingA(UINTPTR_MAX, NULL, 4, 0, 4096,
+                                            "Caf\xE9Map");
+    CHECK(ansi != 0);
+    uintptr_t wide_alias = nt_OpenFileMappingW(4, 0, u"CaféMap");
+    CHECK(wide_alias != 0 && wide_alias != ansi);
+    uintptr_t ansi_alias = nt_OpenFileMappingA(4, 0, "Caf\xE9Map");
+    CHECK(ansi_alias != 0 && ansi_alias != ansi &&
+          nt_CloseHandle(ansi_alias) && nt_CloseHandle(wide_alias) &&
+          nt_CloseHandle(ansi));
+
     /* The same backend is now reachable through ntdll Nt/Zw imports.
      * NTDLL returns NTSTATUS, not a Win32 BOOL, and preserves LastError. */
     CHECK(nt_runtime_resolve("ntdll.dll", "NtCreateSection") ==
