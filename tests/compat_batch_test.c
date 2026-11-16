@@ -449,7 +449,13 @@ static void check_files(void)
     uint32_t received = 0;
     CHECK(ansi_handle != UINTPTR_MAX &&
           nt_ReadFile(ansi_handle, &selected, 1, &received, NULL) &&
-          received == 1 && selected == 'U' && nt_CloseHandle(ansi_handle));
+          received == 1 && selected == 'A' && nt_CloseHandle(ansi_handle));
+    /* An explicit W lookup still resolves the distinct true Unicode file. */
+    uintptr_t unicode_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9.txt",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(unicode_handle != UINTPTR_MAX &&
+          nt_ReadFile(unicode_handle, &selected, 1, &received, NULL) &&
+          received == 1 && selected == 'U' && nt_CloseHandle(unicode_handle));
     CHECK(unlink(utf8_native) == 0);
     ansi_handle = nt_CreateFileA(ambiguous_a, UINT32_C(0x80000000),
                                  7u, NULL, 3u, 0x80u, 0);
@@ -575,10 +581,10 @@ static void check_files(void)
 
     /* Unicode case folding is locale-independent, including every parent
      * component and Windows wildcard matching on Unicode characters. */
-    CHECK(nt_CreateDirectoryA("C:\\Étage", NULL) != 0);
-    CHECK(nt_CreateDirectoryA("c:\\étage", NULL) == 0 &&
+    CHECK(nt_CreateDirectoryW(u"C:\\Étage", NULL) != 0);
+    CHECK(nt_CreateDirectoryW(u"c:\\étage", NULL) == 0 &&
           last_error() == NT_ERROR_ALREADY_EXISTS);
-    CHECK(nt_SetFileAttributesA("C:\\éTAGE", 1u | 2u) != 0 &&
+    CHECK(nt_SetFileAttributesW(u"C:\\éTAGE", 1u | 2u) != 0 &&
           (nt_GetFileAttributesW(u"C:\\Étage") & (1u | 2u | 0x10u)) ==
           (1u | 2u | 0x10u));
     void *international = nt_fopen("C:\\Étage\\Résumé.TXT", "wb");
@@ -611,7 +617,7 @@ static void check_files(void)
 
     /* HIDDEN, SYSTEM, ARCHIVE and a mutable Windows creation timestamp
      * are persisted as Linux user xattrs on the original file. */
-    CHECK(nt_SetFileAttributesA("c:\\étage\\RÉSUMÉ.TXT", 2u | 4u | 32u) != 0);
+    CHECK(nt_SetFileAttributesW(u"c:\\étage\\RÉSUMÉ.TXT", 2u | 4u | 32u) != 0);
     CHECK((nt_GetFileAttributesW(u"C:\\ÉTAGE\\résumé.txt") & (2u | 4u | 32u)) ==
           (2u | 4u | 32u));
     uintptr_t info_handle = nt_CreateFileW(u"C:\\étage\\résumé.txt",
@@ -631,12 +637,12 @@ static void check_files(void)
           memcmp(&actual_birth, &birth, sizeof(birth)) == 0 &&
           memcmp(&actual_modified, &modified, sizeof(modified)) == 0);
     CHECK(nt_CloseHandle(info_handle) != 0);
-    CHECK(nt_CopyFileA("C:\\étage\\RÉSUMÉ.TXT", "C:\\Étage\\Clone.bin", 1) != 0);
-    CHECK((nt_GetFileAttributesA("C:\\étage\\clone.bin") & (2u | 4u | 32u)) ==
+    CHECK(nt_CopyFileW(u"C:\\étage\\RÉSUMÉ.TXT", u"C:\\Étage\\Clone.bin", 1) != 0);
+    CHECK((nt_GetFileAttributesW(u"C:\\étage\\clone.bin") & (2u | 4u | 32u)) ==
           (2u | 4u | 32u));
-    CHECK(nt_DeleteFileA("c:\\étage\\CLONE.BIN") != 0 &&
-          nt_DeleteFileA("c:\\étage\\RÉSUMÉ.TXT") != 0 &&
-          nt_RemoveDirectoryA("C:\\ÉTAGE") != 0);
+    CHECK(nt_DeleteFileW(u"c:\\étage\\CLONE.BIN") != 0 &&
+          nt_DeleteFileW(u"c:\\étage\\RÉSUMÉ.TXT") != 0 &&
+          nt_RemoveDirectoryW(u"C:\\ÉTAGE") != 0);
 
     void *text = nt_fopen("C:\\data\\scores.txt", "w");
     CHECK(text != NULL && nt_fwrite("a\nb\n", 2, 2, text) == 2);
