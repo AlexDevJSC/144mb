@@ -4068,8 +4068,8 @@ static size_t security_allow_ace(uint8_t *p, uint32_t mask,
     return 8u + sid_length;
 }
 
-int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information,
-                                      void *descriptor, uint32_t size, uint32_t *needed)
+static int32_t security_descriptor_from_fd(int fd, uint32_t information,
+                                         void *descriptor, uint32_t size, uint32_t *needed)
 {
     if (needed == NULL || information == 0) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
@@ -4083,26 +4083,6 @@ int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information
         return 0;
     }
 
-    char narrow[PATH_MAX], path[PATH_MAX];
-    if (!wide_path(name, narrow))
-        return 0;
-    if (!normalize_path(narrow, path, true)) {
-        nt_SetLastError(path_error(errno, true));
-        return 0;
-    }
-    const char *relative = path;
-    const int root = duplicate_root(&relative);
-    if (root < 0) {
-        nt_SetLastError(path_error(errno, true));
-        return 0;
-    }
-    const int fd = confined_open(root, *relative ? relative : ".", O_PATH | O_NOFOLLOW, 0);
-    const int opened_error = errno;
-    close(root);
-    if (fd < 0) {
-        nt_SetLastError(path_error(opened_error, false));
-        return 0;
-    }
     struct stat st;
     const int status = fstat(fd, &st);
     const int stat_error = errno;
@@ -4123,12 +4103,10 @@ int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information
         if (acl >= 0 || acl_error == ERANGE ||
             (acl_error != ENODATA && acl_error != ENOTSUP &&
              acl_error != EOPNOTSUPP)) {
-            close(fd);
             nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
             return 0;
         }
     }
-    close(fd);
     if (status < 0 || (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
         nt_SetLastError(status < 0 ? path_error(stat_error, false) :
                         NT_ERROR_NOT_SUPPORTED);
@@ -4174,6 +4152,60 @@ int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information
     }
     memcpy(descriptor, bytes, total);
     return 1;
+}
+
+int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information,
+                                      void *descriptor, uint32_t size, uint32_t *needed)
+{
+    char narrow[PATH_MAX], path[PATH_MAX];
+    if (!wide_path(name, narrow))
+        return 0;
+    if (!normalize_path(narrow, path, true)) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const int fd = confined_open(root, *relative ? relative : ".", O_PATH | O_NOFOLLOW, 0);
+    const int opened_error = errno;
+    close(root);
+    if (fd < 0) {
+        nt_SetLastError(path_error(opened_error, false));
+        return 0;
+    }
+    const int32_t success = security_descriptor_from_fd(
+        fd, information, descriptor, size, needed);
+    close(fd);
+    return success;
+}
+
+nt_status NT_MS_ABI nt_NtQuerySecurityObject(uintptr_t handle, uint32_t information,
+                                              void *descriptor, uint32_t length,
+                                              uint32_t *needed)
+{
+    if (!needed)
+        return NT_STATUS_ACCESS_VIOLATION;
+    const int fd = duplicate_handle(handle, FILE_READ);
+    if (fd < 0)
+        return nt_file_error(path_error(errno, false));
+
+    /* Native NT status and Win32 LastError remain independent. This narrow
+     * read-only projection requires FILE_READ until READ_CONTROL exists. */
+    const uint32_t previous = nt_GetLastError();
+    const int32_t result = security_descriptor_from_fd(fd, information,
+                                                        descriptor, length, needed);
+    const uint32_t error = nt_GetLastError();
+    close(fd);
+    nt_SetLastError(previous);
+    if (result)
+        return NT_STATUS_SUCCESS;
+    if (error == NT_ERROR_INSUFFICIENT_BUFFER)
+        return (nt_status)UINT32_C(0xc0000023); /* STATUS_BUFFER_TOO_SMALL */
+    return nt_file_error(error);
 }
 
 int32_t NT_MS_ABI nt_GetFileSecurityA(const char *path, uint32_t information,
