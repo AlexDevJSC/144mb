@@ -313,6 +313,11 @@ de semántica en Windows. No se pasa todavía al problema 5.
 
 ### Subtarea 6.2 — Clases de prioridad de proceso verificadas por Linux (16-11-2026)
 
+**Nota de evolución:** la restricción original «un único hilo» de esta
+subtarea fue ampliada en la **6.5**; el perfil multihilo actual solo
+se autoriza si la restauración de todos los TIDs es verificablemente
+posible. El texto original se mantiene como antecedente histórico.
+
 Se añaden `GetPriorityClass` y `SetPriorityClass` a KERNEL32/KERNELBASE.
 Se admiten los valores Win32 `IDLE`, `BELOW_NORMAL`, `NORMAL`,
 `ABOVE_NORMAL` y `HIGH` como clases estáticas, **solo cuando**
@@ -399,6 +404,10 @@ aislado, vinculado al futuro problema 3: no se debe sustituir ese
 broker por syscalls sobre un TID/PID aportado por el invitado.
 
 ### Subtarea 6.4 — SetProcessAffinityMask real y distinción de máscaras (16-11-2026)
+
+**Nota de evolución:** el contrato de un solo hilo descrito a continuación
+ha sido sustituido por la transacción de todos los TIDs *guest* de
+la **6.5**. No se permite aún modificar pthreads anfitriones ajenos.
 
 Se añade `SetProcessAffinityMask` a la exportación Win32 de
 KERNEL32/KERNELBASE. No equivale a `SetThreadAffinityMask`: el
