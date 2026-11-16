@@ -3569,7 +3569,9 @@ void *NT_MS_ABI nt_fopen(const char *input, const char *mode)
         return NULL;
     }
     if (!file_ansi_to_utf8(input, utf8)) {
-        errno = EILSEQ;
+        const uint32_t error = nt_GetLastError();
+        errno = error == NT_ERROR_INSUFFICIENT_BUFFER ? ENAMETOOLONG :
+                error == NT_ERROR_INVALID_PARAMETER ? EINVAL : EILSEQ;
         return NULL;
     }
     if (!guest_path(utf8, path))
@@ -4262,8 +4264,8 @@ uint32_t NT_MS_ABI nt_GetLongPathNameW(const uint16_t *input, uint16_t *buffer,
 
 /* Windows file API A boundaries use the process ACP for both input and
  * returned path bytes. The underlying guest paths are always UTF-8 and
- * W calls preserve unambiguous UTF-16. This does not yet migrate all the
- * older A entrypoints, whose compatibility fallback is documented. */
+ * W calls preserve unambiguous UTF-16. The CRT fopen boundary now follows
+ * the same explicit ACP rule. */
 static uint32_t file_path_acp_output(const uint16_t *wide, char *buffer,
                                      uint32_t size)
 {
