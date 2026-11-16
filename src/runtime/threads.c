@@ -2692,32 +2692,29 @@ static bool host_nice_priority(int nice, int32_t *guest)
 
 /* Read process-local TIDs from the canonical thread object; a numerical
  * Windows HANDLE never becomes a Linux process identifier. */
-static nt_status priority_thread_tid(uintptr_t handle, uint32_t rights, pid_t *tid)
+/* Caller owns wait_lock throughout scheduler syscalls: the target
+ * cannot finish/release its canonical object and let Linux recycle
+ * its TID between access checking and setpriority/getpriority. */
+static nt_status priority_thread_tid_locked(uintptr_t handle, uint32_t rights, pid_t *tid)
 {
     if (handle == nt_GetCurrentThread()) {
         *tid = gettid();
         return NT_STATUS_SUCCESS;
     }
-    pthread_mutex_lock(&wait_lock);
     struct waitable *thread = find_waitable(handle);
-    nt_status status = NT_STATUS_SUCCESS;
     if (thread == NULL)
-        status = NT_STATUS_INVALID_HANDLE;
-    else if (thread->kind != THREAD)
-        status = NT_STATUS_OBJECT_TYPE_MISMATCH;
-    else if (!(thread->access & rights))
-        status = NT_STATUS_ACCESS_DENIED;
-    else {
-        struct waitable *state = wait_state(thread);
-        if (state->owner_pid != (uint32_t)getpid())
-            status = NT_STATUS_NOT_SUPPORTED;
-        else if (state->signaled)
-            status = NT_STATUS_THREAD_IS_TERMINATING;
-        else
-            *tid = (pid_t)state->thread_id;
-    }
-    pthread_mutex_unlock(&wait_lock);
-    return status;
+        return NT_STATUS_INVALID_HANDLE;
+    if (thread->kind != THREAD)
+        return NT_STATUS_OBJECT_TYPE_MISMATCH;
+    if (!(thread->access & rights))
+        return NT_STATUS_ACCESS_DENIED;
+    struct waitable *state = wait_state(thread);
+    if (state->owner_pid != (uint32_t)getpid())
+        return NT_STATUS_NOT_SUPPORTED;
+    if (state->signaled || state->terminate_at_start)
+        return NT_STATUS_THREAD_IS_TERMINATING;
+    *tid = (pid_t)state->thread_id;
+    return NT_STATUS_SUCCESS;
 }
 
 /* Native KPRIORITY values for the subset of Windows relative priorities
@@ -2772,67 +2769,88 @@ nt_status nt_runtime_query_thread_scheduling(uintptr_t handle, uintptr_t *affini
 
 int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority)
 {
-    int requested = 0;
-    if (!guest_priority_nice(priority, &requested)) {
+    int relative = 0;
+    if (!guest_priority_nice(priority, &relative)) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
     pthread_mutex_lock(&wait_lock);
-    const int priority_base = process_priority_nice_base;
-    pthread_mutex_unlock(&wait_lock);
-    if (requested + priority_base < -20 || requested + priority_base > 19) {
+    const int requested = relative + process_priority_nice_base;
+    if (requested < -20 || requested > 19) {
+        pthread_mutex_unlock(&wait_lock);
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
-    requested += priority_base;
     pid_t tid = 0;
-    const nt_status status = priority_thread_tid(handle, THREAD_SET_INFORMATION, &tid);
+    const nt_status status = priority_thread_tid_locked(handle, THREAD_SET_INFORMATION, &tid);
     if (status != NT_STATUS_SUCCESS) {
+        pthread_mutex_unlock(&wait_lock);
         nt_SetLastError(nt_runtime_nt_error(status));
         return 0;
     }
-    /* Avoid relying on getpriority's ambiguous -1 return on success. */
     errno = 0;
     const int previous = getpriority(PRIO_PROCESS, (id_t)tid);
-    if (previous == -1 && errno != 0) {
-        nt_SetLastError(errno == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
+    if (errno != 0) {
+        const int failure = errno;
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(failure == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
         return 0;
     }
-    if (previous == requested)
+    if (previous == requested) {
+        pthread_mutex_unlock(&wait_lock);
         return 1;
+    }
     if (setpriority(PRIO_PROCESS, (id_t)tid, requested) != 0) {
-        nt_SetLastError(errno == EACCES || errno == EPERM ? NT_ERROR_ACCESS_DENIED :
-                        errno == ESRCH ? NT_ERROR_INVALID_HANDLE :
-                        errno == EINVAL ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_GEN_FAILURE);
+        const int failure = errno;
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(failure == EACCES || failure == EPERM ? NT_ERROR_ACCESS_DENIED :
+                        failure == ESRCH ? NT_ERROR_INVALID_HANDLE :
+                        failure == EINVAL ? NT_ERROR_INVALID_PARAMETER :
+                        NT_ERROR_GEN_FAILURE);
         return 0;
     }
+    errno = 0;
+    const int observed = getpriority(PRIO_PROCESS, (id_t)tid);
+    if (errno != 0 || observed != requested) {
+        /* The Linux kernel might have intersected a scheduling request
+         * with policy. Do not claim the guest-visible priority was set. */
+        (void)setpriority(PRIO_PROCESS, (id_t)tid, previous);
+        pthread_mutex_unlock(&wait_lock);
+        nt_SetLastError(NT_ERROR_GEN_FAILURE);
+        return 0;
+    }
+    pthread_mutex_unlock(&wait_lock);
     return 1;
 }
 
 int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle)
 {
+    pthread_mutex_lock(&wait_lock);
     pid_t tid = 0;
-    const nt_status status = priority_thread_tid(handle,
-                           THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, &tid);
+    const nt_status status = priority_thread_tid_locked(handle,
+        THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, &tid);
     if (status != NT_STATUS_SUCCESS) {
+        pthread_mutex_unlock(&wait_lock);
         nt_SetLastError(nt_runtime_nt_error(status));
-        return INT32_MAX; /* THREAD_PRIORITY_ERROR_RETURN */
-    }
-    errno = 0;
-    const int value = getpriority(PRIO_PROCESS, (id_t)tid);
-    if (value == -1 && errno != 0) {
-        nt_SetLastError(errno == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
         return INT32_MAX;
     }
-    int32_t priority = 0;
-    pthread_mutex_lock(&wait_lock);
-    const int base = process_priority_nice_base;
+    errno = 0;
+    const int actual = getpriority(PRIO_PROCESS, (id_t)tid);
+    const int failure = errno;
+    const int nice_base = process_priority_nice_base;
+    int32_t relative = 0;
+    const bool representable = failure == 0 &&
+                              host_nice_priority(actual - nice_base, &relative);
     pthread_mutex_unlock(&wait_lock);
-    if (!host_nice_priority(value - base, &priority)) {
+    if (failure != 0) {
+        nt_SetLastError(failure == ESRCH ? NT_ERROR_INVALID_HANDLE : NT_ERROR_GEN_FAILURE);
+        return INT32_MAX;
+    }
+    if (!representable) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return INT32_MAX;
     }
-    return priority;
+    return relative;
 }
 
 /* Windows GetThreadTimes / GetProcessTimes, bounded to threads and
