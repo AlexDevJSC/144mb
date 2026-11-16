@@ -112,8 +112,14 @@ Se ha añadido al runtime una identidad `primary_group` separada del
 cpuset Linux completo para hilos invitados propios. Esta evolución
 permite que las llamadas de afinidad **de hilo** trabajen sobre el
 grupo principal incluso cuando el cpuset permite ejecutar en varios
-grupos. No se ha implementado la política inicial multigrupo del
-**proceso**, ni un mapa virtual compacto de grupos para subconjuntos
+grupos. Se han incorporado consultas de grupos realmente asignados con
+`GetProcessGroupAffinity` y una política acotada de proceso por grupo
+principal que permite `GetProcessAffinityMask` y, bajo transacción
+verificable de TIDs guest, `SetProcessAffinityMask` en el caso
+inicial multigrupo sin cambios explícitos externos. Esto no equivale
+a una implementación completa de CPU Sets, NUMA, grupos de procesadores
+compactos de Windows ni hotplug. Sigue pendiente un mapa virtual
+compacto de grupos para subconjuntos
 Linux con CPUs no contiguas. Tampoco se ha probado el cambio entre
 grupos físicamente distintos en CI. La diferencia con Windows 11 es
 ahora más acotada, pero sigue sin cerrarse.

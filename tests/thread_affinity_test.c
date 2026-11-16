@@ -72,15 +72,15 @@ int main(void)
             break;
         }
     if (selected == -1) {
-        /* No CPU fits the Windows x64 processor-group profile. Verify
-         * honest failure, not guessed/truncated success. */
-        uintptr_t process_mask = 42, system_mask = 43;
-        nt_SetLastError(0);
-        check(!nt_GetProcessAffinityMask(UINTPTR_MAX, &process_mask, &system_mask) &&
-              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED &&
-              process_mask == 42 && system_mask == 43,
-              "reject unrepresentable host group");
-        puts("SKIP positive processor-group case: host cpuset has no CPUs below 64");
+        /* The legacy thread-0 fixture cannot run on a high-only cpuset;
+         * a process-wide query must nevertheless use a real primary group. */
+        uintptr_t process_mask = 0, system_mask = 0;
+        nt_SetLastError(0x144u);
+        check(nt_GetProcessAffinityMask(UINTPTR_MAX, &process_mask, &system_mask) &&
+              process_mask != 0 && process_mask == system_mask &&
+              nt_GetLastError() == 0x144u,
+              "process group query succeeds on high-only Linux cpuset");
+        puts("SKIP legacy thread group0 fixture: no CPUs below 64 available");
         return failures ? EXIT_FAILURE : EXIT_SUCCESS;
     }
 

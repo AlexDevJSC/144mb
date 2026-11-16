@@ -551,6 +551,8 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(SetStdHandle),
     WIN_EXPORT(GetActiveProcessorGroupCount),
     WIN_EXPORT(GetActiveProcessorCount),
+    WIN_EXPORT(GetCurrentProcessorNumber),
+    WIN_EXPORT(GetCurrentProcessorNumberEx),
     WIN_EXPORT(GetProcessGroupAffinity),
     WIN_EXPORT(GetThreadGroupAffinity),
     WIN_EXPORT(SetThreadGroupAffinity),

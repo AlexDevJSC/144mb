@@ -71,9 +71,10 @@ int import_fixture_entry(void)
     if (!GetProcessAffinityMask(GetCurrentProcess(), &policy, &system_after) ||
         policy != before || system_after != available)
         return 25;
-    GROUP_AFFINITY worker_group = {0};
-    if (!GetThreadGroupAffinity(thread, &worker_group) ||
-        worker_group.Group != 0 || worker_group.Mask != before)
+    GROUP_AFFINITY parent_group = {0}, worker_group = {0};
+    if (!GetThreadGroupAffinity(GetCurrentThread(), &parent_group) ||
+        !GetThreadGroupAffinity(thread, &worker_group) ||
+        worker_group.Group != parent_group.Group || worker_group.Mask != before)
         return 26;
     if (!SetProcessAffinityMask(GetCurrentProcess(), target) ||
         !GetThreadGroupAffinity(thread, &worker_group) ||

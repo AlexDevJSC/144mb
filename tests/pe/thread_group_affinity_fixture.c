@@ -14,6 +14,12 @@ static DWORD WINAPI test_worker(void *unused)
         observed.Group != chosen.Group || observed.Mask != chosen.Mask ||
         observed.Reserved[0] || observed.Reserved[1] || observed.Reserved[2])
         return 0x182u;
+    PROCESSOR_NUMBER cpu = {0};
+    GetCurrentProcessorNumberEx(&cpu);
+    if (cpu.Group != chosen.Group || cpu.Number >= 64 ||
+        !(chosen.Mask & ((KAFFINITY)UINT64_C(1) << cpu.Number)) ||
+        GetCurrentProcessorNumber() != cpu.Number)
+        return 0x183u; /* actual executing CPU, not just allowed mask */
     return 0x144u;
 }
 

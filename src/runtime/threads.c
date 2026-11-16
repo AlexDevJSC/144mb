@@ -85,6 +85,7 @@ struct waitable {
     /* Primary Windows group survives a multigroup host cpuset. */
     uint16_t primary_group;
     bool primary_group_initialized;
+    bool explicit_group_outside_process;
     int final_nice;
     bool final_nice_valid;
 };
@@ -122,8 +123,11 @@ static uintptr_t processor_group_masks[CPU_SETSIZE / 64];
 /* Process policy is distinct from the affinity of an individual host
  * pthread. An explicit SetThreadAffinityMask may narrow one thread
  * without changing the process-wide Win32 policy. Protected by wait_lock. */
-static uintptr_t process_group0_affinity;
-static bool process_group0_affinity_initialized;
+static uintptr_t process_primary_affinity;
+static bool process_primary_affinity_initialized;
+static bool process_affinity_explicit;
+static bool process_leader_group_outside;
+static uint16_t process_primary_group;
 static uint16_t processor_group_count;
 static uint32_t processor_group_total;
 static void capture_processor_groups(void)
@@ -135,6 +139,8 @@ static void capture_processor_groups(void)
         if (!CPU_ISSET(cpu, &initial))
             continue;
         const uint16_t group = (uint16_t)(cpu / 64);
+        if (processor_group_total == 0)
+            process_primary_group = group;
         ++processor_group_counts[group];
         processor_group_masks[group] |= (uintptr_t)UINT64_C(1) << (cpu % 64);
         ++processor_group_total;
@@ -160,6 +166,32 @@ uint32_t NT_MS_ABI nt_GetActiveProcessorCount(uint16_t group)
     ensure_processor_groups();
     return group == UINT16_MAX ? processor_group_total :
            group < processor_group_count ? processor_group_counts[group] : 0;
+}
+
+/* The real Linux executing CPU is sampled by the kernel, not inferred
+ * from a thread's allowed cpuset. Windows reports the number local to
+ * the processor group; PROCESSOR_NUMBER also includes the group ID. */
+_Static_assert(sizeof(struct nt_processor_number) == 4,
+               "Windows x64 PROCESSOR_NUMBER ABI layout");
+
+uint32_t NT_MS_ABI nt_GetCurrentProcessorNumber(void)
+{
+    const int cpu = sched_getcpu();
+    return cpu >= 0 ? (uint32_t)(cpu % 64) : 0;
+}
+
+void NT_MS_ABI nt_GetCurrentProcessorNumberEx(struct nt_processor_number *result)
+{
+    if (result == NULL)
+        return;
+    const int cpu = sched_getcpu();
+    if (cpu < 0)
+        return;
+    *result = (struct nt_processor_number){
+        .group = (uint16_t)(cpu / 64),
+        .number = (uint8_t)(cpu % 64),
+        .reserved = 0
+    };
 }
 
 /* Scheduler-class state is process-local and protected by wait_lock.
@@ -1883,6 +1915,8 @@ uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_threa
                 NT_STATUS_SUCCESS) {
                 thread->primary_group = inherited.group;
                 thread->primary_group_initialized = true;
+                thread->explicit_group_outside_process =
+                    inherited.group != process_primary_group;
             }
         }
         thread->start = start;
@@ -2361,9 +2395,12 @@ static void update_thread_primary_group_locked(uintptr_t handle, uint16_t group)
     if (state != NULL) {
         state->primary_group = group;
         state->primary_group_initialized = true;
+        state->explicit_group_outside_process = group != process_primary_group;
     } else {
         primary_thread_group = group;
         primary_thread_group_initialized = true;
+        if (gettid() == getpid())
+            process_leader_group_outside = group != process_primary_group;
     }
 }
 
@@ -2674,36 +2711,52 @@ int32_t NT_MS_ABI nt_GetProcessGroupAffinity(uintptr_t process,
 }
 
 int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *process_mask,
-                                            uintptr_t *system_mask)
+                                             uintptr_t *system_mask)
 {
     if (process_mask == NULL || system_mask == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    const nt_status status = nt_runtime_check_self_process(process, 0x1400u);
-    if (status != NT_STATUS_SUCCESS) {
-        nt_SetLastError(nt_runtime_nt_error(status));
+    const nt_status access = nt_runtime_check_self_process(process, 0x1400u);
+    if (access != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(access));
         return 0;
     }
     ensure_processor_groups();
     pthread_mutex_lock(&wait_lock);
-    const bool supported = processor_group_count == 1 &&
-                           processor_group_masks[0] != 0;
-    if (supported && !process_group0_affinity_initialized) {
-        process_group0_affinity = processor_group_masks[0];
-        process_group0_affinity_initialized = true;
+    cpu_set_t current;
+    struct nt_group_affinity calling_primary = {0};
+    nt_status result = NT_STATUS_SUCCESS;
+    if (pthread_getaffinity_np(pthread_self(), sizeof(current), &current) != 0)
+        result = NT_STATUS_NOT_SUPPORTED;
+    else
+        result = thread_primary_affinity_locked(nt_GetCurrentThread(),
+                                                &current, &calling_primary);
+    const uint16_t group = calling_primary.group;
+    uintptr_t policy = 0, system = 0;
+    if (result == NT_STATUS_SUCCESS) {
+        system = processor_group_masks[group];
+        if (!process_primary_affinity_initialized) {
+            process_primary_affinity = processor_group_masks[process_primary_group];
+            process_primary_affinity_initialized = true;
+        }
+        if (group == process_primary_group)
+            policy = process_primary_affinity;
+        else if (!process_affinity_explicit)
+            policy = processor_group_masks[group]; /* default Windows 11 multi-group */
+        else
+            result = NT_STATUS_NOT_SUPPORTED; /* no invented cross-group process policy */
+        if (policy == 0 || (policy & ~system) != 0)
+            result = NT_STATUS_NOT_SUPPORTED;
     }
-    const uintptr_t policy = process_group0_affinity;
-    const uintptr_t system = processor_group_masks[0];
     pthread_mutex_unlock(&wait_lock);
-    if (!supported || policy == 0 || (policy & ~system) != 0) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    if (result != NT_STATUS_SUCCESS) {
+        nt_SetLastError(nt_runtime_nt_error(result));
         return 0;
     }
-    /* Process affinity is the runtime-owned policy, not the current
-     * pthread's potentially narrower per-thread affinity. This is a
-     * snapshot of sandbox entitlement at startup; direct Linux/cgroup
-     * changes behind our back require explicit revalidation. */
+    /* For the current process Windows 11 uses the caller's primary group.
+     * Never truncate the full host cpuset or confuse thread pinning with
+     * process policy. This is still a snapshot of startup entitlement. */
     *process_mask = policy;
     *system_mask = system;
     return 1;
@@ -2872,9 +2925,22 @@ static bool priority_class_is_exclusive(void)
  * the caller or ignore cpuset intersection on another TID. */
 static uint32_t set_process_affinity_locked(uintptr_t requested)
 {
-    if (processor_group_count != 1 || processor_group_masks[0] == 0 ||
-        (requested & ~processor_group_masks[0]) != 0)
-        return NT_ERROR_NOT_SUPPORTED;
+    if (processor_group_masks[process_primary_group] == 0 ||
+        (requested & ~processor_group_masks[process_primary_group]) != 0)
+        return NT_ERROR_INVALID_PARAMETER;
+    /* Windows 11 allows narrowing the default multi-group policy as long
+     * as no living guest thread was explicitly moved to another primary
+     * group. This check uses owned objects, never host-supplied PIDs. */
+    if (process_leader_group_outside)
+        return NT_ERROR_INVALID_PARAMETER;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+        const struct waitable *item = &waitables[i];
+        if (item->kind == THREAD && item->shared == NULL &&
+            (item->refs != 0 || item->links != 0) &&
+            item->owner_pid == (uint32_t)getpid() && !item->signaled &&
+            item->explicit_group_outside_process)
+            return NT_ERROR_INVALID_PARAMETER;
+    }
 
     struct scheduler_thread_set threads;
     if (!snapshot_scheduler_threads_locked(&threads))
@@ -2893,7 +2959,7 @@ static uint32_t set_process_affinity_locked(uintptr_t requested)
     CPU_ZERO(&wanted);
     for (int cpu = 0; cpu < 64; ++cpu)
         if ((requested & ((uintptr_t)UINT64_C(1) << cpu)) != 0)
-            CPU_SET(cpu, &wanted);
+            CPU_SET((int)process_primary_group * 64 + cpu, &wanted);
 
     uint32_t error = NT_ERROR_SUCCESS;
     for (size_t i = 0; i < threads.count; ++i) {
@@ -2903,10 +2969,12 @@ static uint32_t set_process_affinity_locked(uintptr_t requested)
             error = NT_ERROR_NOT_SUPPORTED;
             break;
         }
-        for (int cpu = 64; cpu < CPU_SETSIZE; ++cpu)
-            if (CPU_ISSET(cpu, &items[i].before)) {
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+            if (CPU_ISSET(cpu, &items[i].before) &&
+                (processor_group_masks[cpu / 64] &
+                 ((uintptr_t)UINT64_C(1) << (cpu % 64))) == 0) {
                 error = NT_ERROR_NOT_SUPPORTED;
-                break;
+                break; /* host entitlement changed outside captured topology */
             }
         if (error != NT_ERROR_SUCCESS)
             break;
@@ -2947,8 +3015,9 @@ static uint32_t set_process_affinity_locked(uintptr_t requested)
                 error = NT_ERROR_GEN_FAILURE;
         }
     } else {
-        process_group0_affinity = requested;
-        process_group0_affinity_initialized = true;
+        process_primary_affinity = requested;
+        process_primary_affinity_initialized = true;
+        process_affinity_explicit = true;
     }
     free(items);
     return error;

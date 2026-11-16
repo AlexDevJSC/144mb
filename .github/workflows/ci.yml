@@ -31,6 +31,13 @@ jobs:
           x86_64-w64-mingw32-gcc --version
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 all check check-pe check-pe-import check-pe-image
+      - name: Positive reversible process priority class on multiple guest TIDs
+        run: |
+          # This changes only nice/RLIMIT_NICE in the disposable test process.
+          # No host service, SELinux policy or foreign thread is touched.
+          command -v prlimit
+          sudo prlimit --nice=40:40 -- env NT_REQUIRE_POSITIVE_MULTITHREAD_PRIORITY=1 \
+            ./build/process-priority-multithread-test
       - name: Diagnose native Vulkan without claiming D3D12 compatibility
         run: build/nt-vulkan-probe
       - name: Paint and close a PE fixture under Wayland
