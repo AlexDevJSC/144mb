@@ -75,6 +75,9 @@ if grep -q 'SKIP external-PE sandbox test' "$log" ||
 fi
 
 echo "[4/4] Scheduler rights and CPU topology"
+make -j2 build/process-group-synthetic-80cpu-test
+timeout 20s build/process-group-synthetic-80cpu-test
+echo "PASS synthetic 80-CPU group bookkeeping (not a physical multicgroup result)"
 if [[ "$priority" == 1 ]]; then
     for tool in sudo prlimit setpriv; do
         if ! command -v "$tool" >/dev/null; then
