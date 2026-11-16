@@ -554,6 +554,37 @@ puede quedar parcialmente modificado. Tampoco admite flujos
 alternativos NTFS, `COPY_FILE_RESTARTABLE`, copia de symlinks,
 descompresión/cifrado ni semántica completa de oplocks.
 
+## NtCreateFile/NtOpenFile y delete-pending por identidad física (Filesystem2)
+
+El perfil acotado de NtCreateFile/NtOpenFile acepta nombres de dispositivo
+\??\C:\, \??\D:\ ... \??\Z:\ y \??\UNC\server\share\filename.
+Los nombres se traducen por el mismo resolvedor seguro y las mismas
+concesiones explícitas que CreateFileW; no se descubre ni monta ningún
+servidor o disco por el hecho de nombrarlo. Los argumentos NT siguen
+rechazando RootDirectory, EA, SecurityDescriptor, QoS y opciones ajenas
+al subconjunto implementado. Se admite acceso DELETE explícito y la
+opción FILE_DELETE_ON_CLOSE cuando se ha solicitado ese derecho; no
+debe confundirse con una implementación de READ_CONTROL/WRITE_DAC.
+
+Los nuevos registros delete-pending guardan el dispositivo e inodo de la
+raíz Linux autorizada, además de la identidad del archivo y su ruta
+normalizada. Esto permite preparar el borrado diferido sobre archivos
+regulares en C:, unidades D:–Z: y alias UNC locales explícitamente
+concedidos, compartiendo el registro OFD entre procesos cooperantes.
+El borrado final solo opera si la concesión actual vuelve a identificar
+exactamente el directorio físico original y el nombre sigue apuntando al
+mismo inodo de archivo. Los registros legados de C: permanecen legibles.
+
+**Límite importante:** la identidad física segura evita borrar un archivo
+distinto al cambiar una asignación, pero NO garantiza la recogida automática
+de una marca pendiente si todos los procesos perdieron la concesión original.
+En ese caso el puente falla conservadoramente y puede quedar una marca
+pendiente huérfana hasta que se vuelva a autorizar la raíz correcta y un
+acceso cooperante ejecute la recuperación. No hay broker global, semántica
+completa de vínculos duros ni coordinación con procesos Linux que ignoren
+los bloqueos advisory. No se debe declarar esto equivalente a NTFS ni
+aprobar en Fedora físico sin pruebas de cambio de raíz, caída y recuperación.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
@@ -594,7 +625,8 @@ en el apartado del registro de compartición.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
 points, conexiones UNC/SMB de red reales, coordinación de `FILE_SHARE_*`
-fuera de procesos NT cooperantes y `delete-pending` de NT fuera del perfil C:,
+fuera de procesos NT cooperantes y recuperación automática de marcas
+`delete-pending` cuando se pierde o se reasigna el volumen autorizado,
 E/S NT/APC/IOCP completa, cancelación de operaciones ya iniciadas, ACL
 NTFS y otras funciones avanzadas. La persistencia de las concesiones de
 unidades y recursos UNC y los directorios actuales por unidad sí están
