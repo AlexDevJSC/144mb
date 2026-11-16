@@ -250,3 +250,63 @@ con ptrace ni señales.
 Siguen pendientes la captura en cualquier PC PE, `SetThreadContext`
 funcional, suspensión asíncrona universal, threads externos, tokens/
 ACL, broker de objetos NT y pruebas comparativas con Windows real.
+
+## Perímetro de crítica: problema 6 / planificación avanzada (16-11-2026)
+
+**Orden impuesto para el backlog de fase 4:** 6 → 5 → 3 → 2 → 1 → 4 → 7.
+Esta numeración representa **problemas** específicos, no componentes
+del núcleo. Solo el 6 está activo: no se debe comenzar APC avanzadas ni
+seguridad NT durante esta entrega.
+
+### Subtarea 6.1 — Afinidad explícita por grupos de CPU x64
+
+Se añaden `GetThreadGroupAffinity` y `SetThreadGroupAffinity`, con
+estructura ABI `GROUP_AFFINITY` de 16 bytes (mascara de 64 bits, WORD
+group y tres WORD reservados), disponibles desde KERNEL32/KERNELBASE.
+El grupo `g` corresponde exactamente a los índices Linux `64*g`
+hasta `64*g + 63`. El planificador Linux sigue asignando los ciclos
+de CPU; nunca se simula la aplicación de un conjunto no concedido.
+
+- La consulta con HANDLE de hilo local vivo o pseudo-handle actual
+  lee el conjunto de CPU real del kernel. Rechaza `NOT_SUPPORTED` si
+  su host cpuset inicial abarca más de un grupo: no se inventa un único
+  grupo ni se omiten CPUs superiores.
+- La escritura comprueba `THREAD_SET_INFORMATION`, campos reservados,
+  máscara no vacía y grupo soportado. La aplicación pasa por
+  `pthread_setaffinity_np`, con relectura **exacta**; cualquier
+  intersección parcial de máscara por cgroups se revierte antes de
+  informar fracaso. Si el llamante necesita `PreviousGroupAffinity`
+  pero el cpuset anterior no cabe en un solo grupo, la API rechaza la
+  transición **antes** de cambiar la afinidad.
+- Se validan los derechos `THREAD_QUERY_INFORMATION` o
+  `THREAD_QUERY_LIMITED_INFORMATION` para lectura; se rechazan hilos
+  externos, terminados y HANDLE de otro tipo. Los objetos canónicos y
+  sus alias apuntan al mismo hilo Linux; nunca se interpreta el número
+  de HANDLE como TID/PID Linux.
+- El runtime usa `cpu_set_t` de glibc (hasta `CPU_SETSIZE`); los
+  grupos que superan ese límite devuelven `NOT_SUPPORTED`. Esto
+  **no** implementa grupos Windows arbitrarios, políticas multicgrupo
+  del host ni asignación del grupo inicial de Windows, y mantiene el
+  rechazo de APIs heredadas como `GetProcessAffinityMask` cuando
+  existen CPUs no representables en 64 bits.
+- El `LastError` Win32 se conserva en éxito y se asigna en fracaso.
+
+**Pruebas:** `make check` incorpora
+`tests/thread_group_affinity_test.c` (kernel y regresiones). Un
+PE32+ x64 independiente en
+`tests/pe/thread_group_affinity_fixture.c` comprueba importaciones
+Win64, CPU permitida real, derechos, semántica del grupo anterior y
+lectura de la CPU fijada por su hilo invitado. El fixture prueba
+primero grupos altos y no asume CPU0. `make check-pe-thread-groups`
+se ejecuta en Linux, UBSan, Fedora 45 RPM y el script de aceptación
+física Fedora. Solo se considera probada la transición entre **dos
+grupos distintos** si el anfitrión expone al menos una CPU permitida
+en ambos grupos; si no, se registra la rama no disponible como SKIP
+explícito, no como éxito.
+
+**Resto sin cerrar del problema 6:** clases de prioridad de procesos
+(incluida la interacción de clases y prioridad de hilo), mapeo de
+prioridades dinámicas y quantum, acceso autenticado a hilos externos
+sin violar aislamiento, política de processor groups Windows, tests
+con un host real que disponga de CPUs en más de un grupo y comparativa
+de semántica en Windows. No se pasa todavía al problema 5.
