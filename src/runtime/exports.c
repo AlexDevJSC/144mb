@@ -12,6 +12,7 @@
 #include "crypto.h"
 #include "sync.h"
 #include "dynamic_tls.h"
+#include "section_memory.h"
 #include "winbase.h"
 #include "winfile.h"
 #include "child_process.h"
@@ -297,6 +298,9 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(FreeVirtualMemory),
     NT_EXPORT(ProtectVirtualMemory),
     NT_EXPORT(QueryVirtualMemory),
+    NT_EXPORT(CreateSection),
+    NT_EXPORT(MapViewOfSection),
+    NT_EXPORT(UnmapViewOfSection),
     WIN_EXPORT(RtlGetCurrentPeb),
     EXPORT("RtlAddVectoredExceptionHandler", nt_AddVectoredExceptionHandler),
     EXPORT("RtlRemoveVectoredExceptionHandler", nt_RemoveVectoredExceptionHandler),
@@ -406,6 +410,13 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(LCMapStringEx),
     WIN_EXPORT(LCMapStringW),
     WIN_EXPORT(VirtualAlloc),
+    WIN_EXPORT(CreateFileMappingA),
+    WIN_EXPORT(CreateFileMappingW),
+    WIN_EXPORT(OpenFileMappingA),
+    WIN_EXPORT(OpenFileMappingW),
+    WIN_EXPORT(MapViewOfFile),
+    WIN_EXPORT(UnmapViewOfFile),
+    WIN_EXPORT(FlushViewOfFile),
     WIN_EXPORT(VirtualFree),
     WIN_EXPORT(VirtualProtect),
     WIN_EXPORT(VirtualQuery),

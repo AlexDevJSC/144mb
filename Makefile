@@ -29,7 +29,7 @@ DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
 else
 DOS83_FUSE_TARGET =
 endif
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
@@ -102,6 +102,7 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runti
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-guest_files.o: override CPPFLAGS += $(ICU_CFLAGS)
 $(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/junctions.inc src/runtime/junction_control.inc
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-virtual_memory.o $(BUILD_DIR)/runtime-section_memory.o: src/runtime/section_memory.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/dynamic_tls.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/nt_core_information.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
@@ -240,6 +241,10 @@ $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnat
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
+$(BUILD_DIR)/section-memory-test: tests/section_memory_test.c $(RUNTIME_OBJECTS) src/runtime/section_memory.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
 $(BUILD_DIR)/compat-batch-test: tests/compat_batch_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=clock_gettime -Wl,--wrap=pread $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -289,7 +294,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
 check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/inherited-file-test \
-       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
+       $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/section-memory-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator
 	$(BUILD_DIR)/counter-test
@@ -309,6 +314,7 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 20s $(BUILD_DIR)/thread-broker-auth-test
 	timeout 20s $(BUILD_DIR)/inherited-file-test
 	timeout 30s $(BUILD_DIR)/compat-batch-test
+	timeout 30s $(BUILD_DIR)/section-memory-test
 	sh tests/dos83_mediator_smoke.sh "$(BUILD_DIR)/nt-dos83-mediator"
 	timeout 30s $(BUILD_DIR)/mines-services-test
 	$(BUILD_DIR)/import-scan-test
