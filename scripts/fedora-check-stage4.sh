@@ -64,6 +64,11 @@ touch "$log"
 echo "NT144 QA evidence: $evidence"
 cat "$metadata"
 
+if ! bash scripts/fedora-qa-preflight.sh 2>&1 | tee -a "$log"; then
+    echo "INCOMPLETE: Fedora QA prerequisites unavailable. Evidence: $evidence" >&2
+    exit 3
+fi
+
 run_logged() {
     printf '\nCOMMAND:' | tee -a "$log"
     printf ' %q' "$@" | tee -a "$log"
@@ -99,6 +104,10 @@ if [[ ${NT144_QA_POSITIVE_NICE:-0} == 1 ]]; then
 else
     echo "SKIP positive scheduler acceptance: set NT144_QA_POSITIVE_NICE=1 for scoped, reversible privileged tests" | tee -a "$log"
 fi
+
+# FluidSynth is explicitly mandatory for the full Fedora QA profile.
+# No SoundFont is required to prove the native DLL ABI / synthesis startup.
+run_logged make check-native-audio-required
 
 echo "[2/4] Native Windows PE32+ AMD64 APC/TLS/process plus lstrcmpW IAT"
 SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 run_logged make -j2 \
