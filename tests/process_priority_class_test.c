@@ -5,9 +5,13 @@
 #define _GNU_SOURCE
 #include "sync.h"
 #include "nt_services.h"
+#include "nt_core_information.h"
 #include "winbase.h"
 
 #include <errno.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
@@ -113,6 +117,44 @@ int main(void)
         expect(nt_GetExitCodeThread(thread, &result) && result == 0x144u,
                "worker observed actual nice 12 and relative priority -1");
         expect(nt_runtime_close_waitable(thread), "close thread handle");
+    }
+    /* An unrelated Linux process has a numeric PID/TID but never gains
+     * a guest HANDLE via that number. No scheduler request may escape to
+     * it, even when it belongs to the same UNIX account. */
+    extern char **environ;
+    pid_t foreign = 0;
+    char *argv[] = {"sleep", "5", NULL};
+    const int spawn_result = posix_spawnp(&foreign, "sleep", NULL, NULL, argv, environ);
+    expect(spawn_result == 0 && foreign > 0, "spawn unrelated Linux child");
+    if (spawn_result == 0 && foreign > 0) {
+        nt_SetLastError(0);
+        const uintptr_t opened = nt_OpenThread(0x20u, 0, (uint32_t)foreign);
+        expect(opened == 0 && nt_GetLastError() == NT_ERROR_INVALID_PARAMETER,
+               "OpenThread never binds a foreign TID from Linux");
+        struct nt_client_id client = {(uintptr_t)foreign, (uintptr_t)foreign};
+        uintptr_t native_handle = 0x5151u;
+        expect(nt_NtOpenThread(&native_handle, 0x20u, NULL, &client) ==
+                   NT_STATUS_NOT_SUPPORTED && native_handle == 0x5151u,
+               "NtOpenThread explicitly rejects a foreign client ID");
+        nt_SetLastError(0);
+        expect(!nt_SetThreadPriority((uintptr_t)foreign, -1) &&
+               nt_GetLastError() == NT_ERROR_INVALID_HANDLE,
+               "host PID value is never an authorized priority HANDLE");
+        nt_SetLastError(0);
+        struct nt_group_affinity group = {.group = 0, .mask = 1};
+        expect(!nt_SetThreadGroupAffinity((uintptr_t)foreign, &group, NULL) &&
+               nt_GetLastError() == NT_ERROR_INVALID_HANDLE,
+               "host PID value is never an authorized group-affinity HANDLE");
+        nt_SetLastError(0);
+        expect(nt_GetPriorityClass((uintptr_t)foreign) == 0 &&
+               nt_GetLastError() == NT_ERROR_INVALID_HANDLE,
+               "host PID is not a Win32 process HANDLE");
+        errno = 0;
+        const int actual = getpriority(PRIO_PROCESS, (id_t)foreign);
+        expect(errno == 0 && actual == 10,
+               "foreign Linux child retained its scheduler priority");
+        (void)kill(foreign, SIGTERM);
+        (void)waitpid(foreign, NULL, 0);
     }
     expect(nt_runtime_close_waitable(read_only) &&
            nt_runtime_close_waitable(write_only), "close process handles");
