@@ -4,6 +4,8 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <string.h>
@@ -45,6 +47,55 @@ static bool send_packet(int fd, const void *data, size_t bytes)
 {
     return fd_seqpacket(fd) && read_ready(fd, POLLOUT) &&
            send(fd, data, bytes, MSG_NOSIGNAL | MSG_DONTWAIT) == (ssize_t)bytes;
+}
+
+struct server_context {
+    int fd;
+    struct nt_thread_broker_registered_peer peer;
+};
+static void *server_main(void *context)
+{
+    struct server_context *owner = context;
+    nt_broker_server_loop(owner->fd, &owner->peer);
+    close(owner->fd);
+    close(owner->peer.child_pidfd);
+    memset(owner->peer.secret, 0, sizeof(owner->peer.secret));
+    free(owner);
+    return NULL;
+}
+bool nt_broker_server_start(int fd,
+    const struct nt_thread_broker_registered_peer *peer)
+{
+    if (peer == NULL || !fd_seqpacket(fd) || !live_child(peer))
+        return false;
+    struct server_context *owner = calloc(1, sizeof(*owner));
+    if (owner == NULL)
+        return false;
+    owner->fd = fd;
+    owner->peer = *peer;
+    owner->peer.child_pidfd = fcntl(peer->child_pidfd, F_DUPFD_CLOEXEC, 3);
+    if (owner->peer.child_pidfd < 0) {
+        free(owner);
+        return false;
+    }
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) {
+        close(owner->peer.child_pidfd);
+        free(owner);
+        return false;
+    }
+    const int detached = pthread_attr_setdetachstate(&attributes,
+                                                      PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    const int error = detached == 0 ? pthread_create(&thread, &attributes,
+                                                     server_main, owner) : detached;
+    pthread_attr_destroy(&attributes);
+    if (error != 0) {
+        close(owner->peer.child_pidfd);
+        free(owner);
+        return false;
+    }
+    return true;
 }
 
 bool nt_broker_server_handshake(int fd, const uint8_t secret[16])
