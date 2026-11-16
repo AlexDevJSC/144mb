@@ -102,6 +102,50 @@ static _Thread_local sigjmp_buf thread_exit;
 static _Thread_local struct guest_apc_queue primary_apcs;
 static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
+/* At runtime startup, capture the Linux cpuset visible to this sandbox.
+ * Thread-specific pinning must not silently change the system-wide
+ * processor-group topology reported to Win32 callers. Only CPUs the
+ * sandbox is permitted to use are advertised. CPU hotplug and cpuset
+ * reconfiguration after first use are outside this bounded profile. */
+static pthread_once_t processor_groups_once = PTHREAD_ONCE_INIT;
+static uint32_t processor_group_counts[CPU_SETSIZE / 64];
+static uint16_t processor_group_count;
+static uint32_t processor_group_total;
+static void capture_processor_groups(void)
+{
+    cpu_set_t initial;
+    if (sched_getaffinity(0, sizeof(initial), &initial) != 0)
+        return;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &initial))
+            continue;
+        const uint16_t group = (uint16_t)(cpu / 64);
+        ++processor_group_counts[group];
+        ++processor_group_total;
+        if (processor_group_count <= group)
+            processor_group_count = group + 1;
+    }
+}
+static void ensure_processor_groups(void)
+{
+    (void)pthread_once(&processor_groups_once, capture_processor_groups);
+}
+
+/* Windows x64 WORD group identifiers, ALL_PROCESSOR_GROUPS=0xffff.
+ * Values reflect the startup sandbox CPU entitlement, not Linux
+ * system-wide online CPUs or a fabricated Windows kernel topology. */
+uint16_t NT_MS_ABI nt_GetActiveProcessorGroupCount(void)
+{
+    ensure_processor_groups();
+    return processor_group_count;
+}
+uint32_t NT_MS_ABI nt_GetActiveProcessorCount(uint16_t group)
+{
+    ensure_processor_groups();
+    return group == UINT16_MAX ? processor_group_total :
+           group < processor_group_count ? processor_group_counts[group] : 0;
+}
+
 /* Scheduler-class state is process-local and protected by wait_lock.
  * It is never a permission to change Linux threads in another process. */
 static uint32_t process_priority_class = 0x20u; /* NORMAL_PRIORITY_CLASS */
@@ -1793,6 +1837,7 @@ static void *thread_main(void *context)
 uintptr_t NT_MS_ABI nt_CreateThread(const void *security, size_t stack, nt_thread_start start,
                                    void *parameter, uint32_t flags, uint32_t *thread_id)
 {
+    ensure_processor_groups();
     if (start == NULL || security != NULL || (flags & ~4u) != 0) {
         nt_SetLastError(start == NULL ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_NOT_SUPPORTED);
         return 0;
@@ -2286,6 +2331,7 @@ static nt_status group_affinity_handle(uintptr_t handle, uint32_t access,
 int32_t NT_MS_ABI nt_GetThreadGroupAffinity(uintptr_t handle,
                                             struct nt_group_affinity *result)
 {
+    ensure_processor_groups();
     if (result == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -2317,6 +2363,7 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
                                             const struct nt_group_affinity *desired,
                                             struct nt_group_affinity *previous)
 {
+    ensure_processor_groups();
     if (desired == NULL || desired->mask == 0 ||
         desired->reserved[0] != 0 || desired->reserved[1] != 0 ||
         desired->reserved[2] != 0) {
@@ -2385,6 +2432,7 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
 static nt_status set_guest_thread_affinity(uintptr_t handle, uintptr_t requested,
                                            uintptr_t *previous)
 {
+    ensure_processor_groups();
     if (requested == 0)
         return NT_STATUS_INVALID_PARAMETER;
     pthread_mutex_lock(&wait_lock);
