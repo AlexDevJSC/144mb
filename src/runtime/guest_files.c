@@ -610,6 +610,8 @@ static int confined_open_raw(int root, const char *path, int flags, unsigned int
     return (int)syscall(SYS_openat2, root, path, &how, sizeof(how));
 }
 
+#include "dos83_alias.inc"
+
 /* Exact spelling wins, including a symlink (the actual open rejects it).
  * Two differently-cased alternatives without an exact match are ambiguous. */
 static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1])
@@ -644,7 +646,11 @@ static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1]
             error = errno;
             break;
         }
-        if (same_unicode_name(asked, entry->d_name)) {
+        char alias[14] = {0};
+        const bool short_match = strchr(asked, '~') != NULL &&
+                                 dos83_read_at(parent, entry->d_name, alias) &&
+                                 strcasecmp(asked, alias) == 0;
+        if (same_unicode_name(asked, entry->d_name) || short_match) {
             if (++matches > 1) {
                 error = EEXIST;
                 break;
