@@ -17,7 +17,7 @@ struct nt_broker_rpc {
     uint64_t capability;
     uint8_t secret[16];
 };
-struct nt_broker_reply {
+struct nt_thread_broker_reply {
     uint32_t magic, status, process_id, thread_id;
     uint64_t generation, capability;
 };
