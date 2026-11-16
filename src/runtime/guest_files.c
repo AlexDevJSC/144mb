@@ -611,7 +611,6 @@ static int confined_open_raw(int root, const char *path, int flags, unsigned int
 }
 
 #include "dos83_alias.inc"
-#include "junctions.inc"
 
 /* Exact spelling wins, including a symlink (the actual open rejects it).
  * Two differently-cased alternatives without an exact match are ambiguous. */
@@ -670,31 +669,22 @@ static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1]
     return matches;
 }
 
+#include "junctions.inc"
+
 /* Walk under verified directory FDs; intermediates must exist and cannot
- * escape the allowed root through symlinks, mounts or textual traversal. */
-/* Resolve NT names component by component on pinned Linux descriptors.
- * Only an explicitly marked, same-grant junction can rebase an intermediate
- * component; arbitrary Linux symlinks remain denied by openat2. A finite
- * hop budget also rejects junction cycles without recursing the C stack. */
+ * escape the allowed root through symlinks, mounts or textual traversal.
+ * A marked directory junction is resolved to a separate pinned directory
+ * under the same granted root, never via a host symlink. */
 static int open_parent(int root, const char *path, char leaf[NAME_MAX + 1])
 {
     if (!path || !*path || strcmp(path, ".") == 0) {
         errno = EINVAL;
         return -1;
     }
-    if (strnlen(path, PATH_MAX) >= PATH_MAX) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    char rewritten[PATH_MAX];
-    strcpy(rewritten, path);
-    unsigned int junction_hops = 0;
-restart:
-    ;
     int parent = fcntl(root, F_DUPFD_CLOEXEC, 0);
     if (parent < 0)
         return -1;
-    const char *cursor = rewritten;
+    const char *cursor = path;
     for (;;) {
         const char *slash = strchr(cursor, '/');
         const size_t length = slash ? (size_t)(slash - cursor) : strlen(cursor);
@@ -724,43 +714,15 @@ restart:
             return -1;
         }
         const int child = confined_open_raw(parent, actual, O_PATH | O_DIRECTORY, 0);
-        const int opened_error = errno;
-        if (child < 0) {
-            close(parent);
-            errno = opened_error;
-            return -1;
-        }
-        struct nt_junction_record record;
-        const int junction = junction_read(child, root, &record);
-        const int reparse_error = errno;
-        if (junction < 0) {
-            close(child);
-            close(parent);
-            errno = reparse_error;
-            return -1;
-        }
-        if (junction > 0) {
-            const size_t base_len = strlen(record.target_relative);
-            const size_t suffix_len = strlen(slash + 1);
-            if (++junction_hops > WIN_JUNCTION_MAX_HOPS ||
-                base_len + 1 + suffix_len >= PATH_MAX) {
-                close(child);
-                close(parent);
-                errno = junction_hops > WIN_JUNCTION_MAX_HOPS ?
-                        ELOOP : ENAMETOOLONG;
-                return -1;
-            }
-            char next[PATH_MAX];
-            memcpy(next, record.target_relative, base_len);
-            next[base_len] = '/';
-            memcpy(next + base_len + 1, slash + 1, suffix_len + 1);
-            close(child);
-            close(parent);
-            memcpy(rewritten, next, base_len + 1 + suffix_len + 1);
-            goto restart;
-        }
+        const int error = errno;
         close(parent);
-        parent = child;
+        if (child < 0) {
+            errno = error;
+            return -1;
+        }
+        parent = nt_junction_follow(root, child);
+        if (parent < 0)
+            return -1;
         cursor = slash + 1;
     }
 }
@@ -769,44 +731,41 @@ static int confined_open(int root, const char *path, int flags, unsigned int mod
 {
     if (strcmp(path, ".") == 0)
         return confined_open_raw(root, ".", flags, mode);
-    if (!path || strnlen(path, PATH_MAX) >= PATH_MAX) {
-        errno = ENAMETOOLONG;
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, path, leaf);
+    if (parent < 0)
         return -1;
-    }
-    char rewritten[PATH_MAX];
-    strcpy(rewritten, path);
-    for (unsigned int hops = 0; hops <= WIN_JUNCTION_MAX_HOPS; ++hops) {
-        char leaf[NAME_MAX + 1];
-        const int parent = open_parent(root, rewritten, leaf);
-        if (parent < 0)
-            return -1;
-        const int fd = confined_open_raw(parent, leaf, flags, mode);
-        const int opened_error = errno;
-        close(parent);
-        if (fd < 0) {
-            errno = opened_error;
-            return -1;
+    int fd;
+    if ((flags & O_DIRECTORY) != 0 && (flags & O_CREAT) == 0) {
+        /* A directory opened by FindFirstFile/CWD may itself be a
+         * junction leaf. Reopen only its pinned FD for data operations:
+         * there is no text-based host path or symlink traversal. */
+        const int physical = confined_open_raw(parent, leaf,
+                                               O_PATH | O_DIRECTORY, 0);
+        if (physical < 0) {
+            fd = -1;
+        } else {
+            const int selected = nt_junction_follow(root, physical);
+            if (selected < 0) {
+                fd = -1;
+            } else if ((flags & O_PATH) != 0) {
+                fd = selected;
+            } else {
+                char pinned_path[64];
+                snprintf(pinned_path, sizeof(pinned_path), "/proc/self/fd/%d", selected);
+                fd = open(pinned_path, flags | O_CLOEXEC);
+                const int open_error = errno;
+                close(selected);
+                errno = open_error;
+            }
         }
-        /* A directory enumeration / CWD open follows a marked junction
-         * as an NT namespace operation, not a Linux symlink. Metadata
-         * O_PATH opens intentionally inspect the original directory. */
-        if ((flags & O_DIRECTORY) == 0 || (flags & O_PATH) != 0)
-            return fd;
-        struct nt_junction_record record;
-        const int junction = junction_read(fd, root, &record);
-        const int error = errno;
-        if (junction < 0) {
-            close(fd);
-            errno = error;
-            return -1;
-        }
-        if (junction == 0)
-            return fd;
-        close(fd);
-        strcpy(rewritten, record.target_relative);
+    } else {
+        fd = confined_open_raw(parent, leaf, flags, mode);
     }
-    errno = ELOOP;
-    return -1;
+    const int error = errno;
+    close(parent);
+    errno = error;
+    return fd;
 }
 
 static int open_regular(int root, const char *path, int flags, bool *created)
@@ -1109,6 +1068,23 @@ static uint32_t path_error(int error, bool parent)
     }
 }
 
+/* Windows A file entrypoints are byte strings in the process ACP (1252
+ * today), not opportunistic UTF-8. Host/internal paths and W entrypoints
+ * use UTF-8 and must bypass this converter. Keep the two contracts apart. */
+static bool file_ansi_to_utf8(const char *source, char target[PATH_MAX])
+{
+    if (!source) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    uint16_t wide[PATH_MAX];
+    if (nt_MultiByteToWideChar(nt_GetACP(), 0, source, -1,
+                                wide, PATH_MAX) == 0)
+        return false;
+    return nt_WideCharToMultiByte(65001, 0, wide, -1, target,
+                                  PATH_MAX, NULL, NULL) != 0;
+}
+
 enum {
     FILE_READ = 1, FILE_WRITE = 2, FILE_DELETE = 4, FILE_TABLE_SIZE = 256,
     HANDLE_FLAG_INHERIT = 1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 2,
@@ -1133,8 +1109,8 @@ struct guest_file {
     bool text;
     bool delete_disposition;
     bool overlapped_io;
-    bool reparse_handle; /* Metadata O_PATH handle, never follows the target. */
-    bool reparse_directory; /* Directory placeholder for a same-grant junction. */
+    bool reparse_handle; /* Final symlink or directory junction metadata handle. */
+    bool junction_handle; /* O_PATH directory FD, never redirected by CreateFile. */
     uintptr_t completion_port, completion_key;
     char *path;
 };
@@ -2102,26 +2078,55 @@ struct security_attributes {
 
 _Static_assert(sizeof(struct security_attributes) == 24, "SECURITY_ATTRIBUTES layout");
 
-/* Public Win32 A entrypoints decode bytes with the process ACP exactly
- * once. Internal runtime paths and W entrypoints remain UTF-8. A valid
- * UTF-8 byte sequence is NOT a second candidate spelling in CP1252. */
-static bool wide_path(const uint16_t *input, char output[PATH_MAX]);
-static bool acp_path_to_utf8(const char *input, char output[PATH_MAX])
+/* A narrow Win32 pathname may be supplied as UTF-8 by a modern guest
+ * or CP1252 by a legacy guest. Invalid UTF-8 was already converted to ACP
+ * by normalize_path(). When the bytes are valid UTF-8 *and* the requested
+ * existing file is absent, check the other CP1252 spelling before failing.
+ *
+ * Never apply this heuristic to W calls: they are unambiguously UTF-16,
+ * converted to UTF-8 by wide_path(). Never guess for CREATE_NEW or other
+ * mutating dispositions; this fallback cannot silently create a different
+ * filename. The Linux permission checks still govern the final open. */
+static void existing_ansi_path_fallback(const char *input, char path[PATH_MAX])
 {
-    if (!input) {
-        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
-        return false;
-    }
-    uint16_t wide[PATH_MAX];
-    if (!nt_MultiByteToWideChar(nt_GetACP(), 0, input, -1, wide, PATH_MAX))
-        return false;
-    return wide_path(wide, output);
+    bool has_nonascii = false;
+    for (const unsigned char *p = (const unsigned char *)input; *p; ++p)
+        if (*p & 0x80u) {
+            has_nonascii = true;
+            break;
+        }
+    if (!has_nonascii || nt_MultiByteToWideChar(65001, 8, input, -1, NULL, 0) == 0)
+        return;
+
+    char *encoded = nt_runtime_ansi_to_utf8(input, strlen(input));
+    if (!encoded)
+        return;
+    char alternative[PATH_MAX];
+    const bool valid = guest_path(encoded, alternative);
+    free(encoded);
+    if (!valid || strcmp(path, alternative) == 0)
+        return;
+
+    char dos_name[PATH_MAX];
+    bool exists = false;
+    const bool primary_checked =
+        nt_runtime_check_guest_file(path, dos_name, sizeof(dos_name), &exists);
+    if (primary_checked && exists)
+        return;
+    /* Never bypass an inaccessible existing object or an invalid guest
+     * path by interpreting the same bytes using a different encoding. */
+    if (!primary_checked && errno != ENOENT && errno != ENOTDIR)
+        return;
+    bool alternate_exists = false;
+    if (nt_runtime_check_guest_file(alternative, dos_name, sizeof(dos_name),
+                                    &alternate_exists) && alternate_exists)
+        memcpy(path, alternative, strlen(alternative) + 1);
 }
 
 static uintptr_t create_file_common(const char *input, uint32_t desired,
                                     uint32_t share, const void *security,
                                     uint32_t disposition, uint32_t flags,
-                                    uintptr_t template_file)
+                                    uintptr_t template_file, bool from_wide)
 {
     const uint32_t generic_read = UINT32_C(0x80000000), generic_write = UINT32_C(0x40000000);
     const struct security_attributes *attributes = security;
@@ -2159,6 +2164,13 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     if (!guest_path(input, path)) {
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
+    }
+    if (!from_wide && disposition == OPEN_EXISTING) {
+        /* A successful Win32 operation must not leak GetLastError from
+         * the optional encoding probe into the calling thread. */
+        const uint32_t saved_error = nt_GetLastError();
+        existing_ansi_path_fallback(input, path);
+        nt_SetLastError(saved_error);
     }
     const char *resolved = path;
     const int root = duplicate_root(&resolved);
@@ -2237,60 +2249,58 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         }
     }
 
-    /* Directories can be opened for junction metadata only. This grants
-     * no Linux directory stream to the guest, and never traverses the
-     * reparse target. WRITE is required for SET/DELETE reparse controls. */
-    if ((flags & (FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)) ==
-        (FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)) {
-        if (disposition != OPEN_EXISTING ||
-            (desired & ~(generic_read | generic_write)) != 0 ||
+    if ((flags & (FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)) ==
+        (FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)) {
+        if (disposition != OPEN_EXISTING || read_access ||
             (flags & (FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OVERLAPPED)) != 0) {
             close(parent);
             free(saved_path);
             nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
             return UINTPTR_MAX;
         }
-        const int directory_fd = confined_open_raw(parent, leaf,
-                                                   O_PATH | O_DIRECTORY, 0);
+        /* Physical directory metadata HANDLE, not a handle to the redirected
+         * junction target. Writes are limited to the xattr owned by Linux. */
+        const int dirfd = confined_open_raw(parent, leaf,
+                                            O_PATH | O_NOFOLLOW | O_DIRECTORY, 0);
         const int open_error = errno;
         close(parent);
-        if (directory_fd < 0) {
+        if (dirfd < 0) {
             free(saved_path);
             nt_SetLastError(path_error(open_error, false));
             return UINTPTR_MAX;
         }
         struct stat pinned;
-        if (fstat(directory_fd, &pinned) != 0 || !S_ISDIR(pinned.st_mode)) {
-            close(directory_fd);
+        if (fstat(dirfd, &pinned) != 0 || !S_ISDIR(pinned.st_mode)) {
+            close(dirfd);
             free(saved_path);
             nt_SetLastError(NT_ERROR_ACCESS_DENIED);
             return UINTPTR_MAX;
         }
-        uintptr_t directory_handle = UINTPTR_MAX;
+        uintptr_t meta_handle = UINTPTR_MAX;
         pthread_mutex_lock(&file_lock);
-        struct guest_file *entry = new_file();
-        if (entry != NULL && next_handle <= UINTPTR_MAX - 16) {
-            directory_handle = next_handle;
+        struct guest_file *slot = new_file();
+        if (slot != NULL && next_handle <= UINTPTR_MAX - 16) {
+            meta_handle = next_handle;
             next_handle += 16;
-            *entry = (struct guest_file){
-                .owner = WIN_HANDLE, .handle = directory_handle,
-                .fd = directory_fd, .share_lease_fd = -1,
-                .share = share, .access = write_access ? FILE_WRITE : 0,
+            *slot = (struct guest_file){
+                .owner = WIN_HANDLE, .handle = meta_handle,
+                .fd = dirfd, .share_lease_fd = -1, .share = share,
+                .access = write_access ? FILE_WRITE : 0,
                 .device = pinned.st_dev, .inode = pinned.st_ino,
                 .handle_flags = attributes && attributes->inherit ?
                                 HANDLE_FLAG_INHERIT : 0,
-                .reparse_handle = true, .reparse_directory = true,
+                .reparse_handle = true, .junction_handle = true,
                 .path = saved_path
             };
             saved_path = NULL;
         }
         pthread_mutex_unlock(&file_lock);
         free(saved_path);
-        if (directory_handle == UINTPTR_MAX) {
-            close(directory_fd);
+        if (meta_handle == UINTPTR_MAX) {
+            close(dirfd);
             nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
         }
-        return directory_handle;
+        return meta_handle;
     }
 
     int options = write_access ? (read_access ? O_RDWR : O_WRONLY) : O_RDONLY;
@@ -2352,9 +2362,10 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
                                   uintptr_t template_file)
 {
     char utf8[PATH_MAX];
-    return acp_path_to_utf8(input, utf8) ?
-           create_file_common(utf8, desired, share, security, disposition,
-                              flags, template_file) : UINTPTR_MAX;
+    if (!file_ansi_to_utf8(input, utf8))
+        return UINTPTR_MAX;
+    return create_file_common(utf8, desired, share, security, disposition,
+                              flags, template_file, true);
 }
 
 static int close_file(struct guest_file *file)
@@ -3158,19 +3169,19 @@ int32_t NT_MS_ABI nt_CreateDirectoryA(const char *path, const void *security)
         return 0;
     }
     char utf8[PATH_MAX];
-    return acp_path_to_utf8(path, utf8) && change_path(utf8, MAKE_DIRECTORY);
+    return file_ansi_to_utf8(path, utf8) && change_path(utf8, MAKE_DIRECTORY);
 }
 
 int32_t NT_MS_ABI nt_DeleteFileA(const char *path)
 {
     char utf8[PATH_MAX];
-    return acp_path_to_utf8(path, utf8) && change_path(utf8, REMOVE_FILE);
+    return file_ansi_to_utf8(path, utf8) && change_path(utf8, REMOVE_FILE);
 }
 
 int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path)
 {
     char utf8[PATH_MAX];
-    return acp_path_to_utf8(path, utf8) && change_path(utf8, REMOVE_DIRECTORY);
+    return file_ansi_to_utf8(path, utf8) && change_path(utf8, REMOVE_DIRECTORY);
 }
 
 /* Check that cross-root copy+delete will be permitted before a new
@@ -3231,6 +3242,8 @@ static bool path_breaks_guest_root(const char *source)
     return blocked;
 }
 
+/* File copy uses the same UTF-8 core, also for cross-root MoveFileEx.
+ * Declare before the move implementation without going through the A ABI. */
 static int32_t copy_file_common(const char *source, const char *destination,
                                 int32_t fail_if_exists,
                                 nt_copy_progress_routine progress, void *context,
@@ -3241,7 +3254,7 @@ int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
     return nt_MoveFileExA(from, to, 0);
 }
 
-static int32_t move_file_common(const char *from, const char *to, uint32_t flags)
+static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
 {
     char source[PATH_MAX], destination[PATH_MAX];
     /* MOVEFILE_REPLACE_EXISTING and MOVEFILE_COPY_ALLOWED are the
@@ -3393,10 +3406,10 @@ static int32_t move_file_common(const char *from, const char *to, uint32_t flags
 
 int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags)
 {
-    char source[PATH_MAX], target[PATH_MAX];
-    return acp_path_to_utf8(from, source) &&
-           acp_path_to_utf8(to, target) &&
-           move_file_common(source, target, flags);
+    char decoded_from[PATH_MAX], decoded_to[PATH_MAX];
+    return file_ansi_to_utf8(from, decoded_from) &&
+           file_ansi_to_utf8(to, decoded_to) &&
+           move_file_utf8(decoded_from, decoded_to, flags);
 }
 
 enum { CRT_APPEND = 0x0008, CRT_TEXT = 0x4000, CRT_BINARY = 0x8000 };
@@ -3879,7 +3892,7 @@ uintptr_t NT_MS_ABI nt_CreateFileW(const uint16_t *path, uint32_t access, uint32
     char narrow[PATH_MAX];
     return wide_path(path, narrow) ?
            create_file_common(narrow, access, share, security, disposition,
-                              flags, template_file) : UINTPTR_MAX;
+                              flags, template_file, true) : UINTPTR_MAX;
 }
 
 _Static_assert(sizeof(struct nt_io_status_block) == 16 &&
@@ -4009,11 +4022,11 @@ uintptr_t NT_MS_ABI nt_CreateFile2(const uint16_t *path, uint32_t access, uint32
 
 int32_t NT_MS_ABI nt_CreateDirectoryW(const uint16_t *path, const void *security)
 {
-    if (security != NULL) {
+    char narrow[PATH_MAX];
+    if (security) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    char narrow[PATH_MAX];
     return wide_path(path, narrow) && change_path(narrow, MAKE_DIRECTORY);
 }
 
@@ -4032,8 +4045,7 @@ int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path)
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags)
 {
     char from[PATH_MAX], to[PATH_MAX];
-    return wide_path(source, from) && wide_path(destination, to) &&
-           move_file_common(from, to, flags);
+    return wide_path(source, from) && wide_path(destination, to) && move_file_utf8(from, to, flags);
 }
 
 int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination)
@@ -4151,55 +4163,57 @@ uint32_t NT_MS_ABI nt_GetFullPathNameW(const uint16_t *path, uint32_t size, uint
     return length;
 }
 
-/* Win32 ANSI path boundaries have exactly one decoding step. Keep UTF-8
- * inside the guest namespace and CP1252 (GetACP) only at the A ABI. */
-static bool acp_path_to_wide(const char *input, uint16_t output[PATH_MAX])
+/* The A path APIs decode the advertised Windows process ACP once.
+ * Host/native paths remain UTF-8; callers of W never take this route. */
+static bool file_ansi_to_wide(const char *path, uint16_t result[PATH_MAX])
 {
-    if (!input) {
+    if (!path) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return false;
     }
-    return nt_MultiByteToWideChar(nt_GetACP(), 0, input, -1,
-                                   output, PATH_MAX) > 0;
+    return nt_MultiByteToWideChar(nt_GetACP(), 0, path, -1,
+                                  result, PATH_MAX) != 0;
 }
 
+/* Forward: path output conversion is shared with GetLongPathNameA. */
 static uint32_t file_path_acp_output(const uint16_t *wide, char *buffer,
                                      uint32_t size);
 
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryA(uint32_t size, char *buffer)
 {
-    uint16_t wide[PATH_MAX];
-    if (!nt_GetCurrentDirectoryW(PATH_MAX, wide))
+    uint16_t path[PATH_MAX + 16];
+    if (nt_GetCurrentDirectoryW(PATH_MAX + 16, path) == 0)
         return 0;
-    return file_path_acp_output(wide, buffer, size);
+    return file_path_acp_output(path, buffer, size);
 }
 
 int32_t NT_MS_ABI nt_SetCurrentDirectoryA(const char *path)
 {
     uint16_t wide[PATH_MAX];
-    return acp_path_to_wide(path, wide) && nt_SetCurrentDirectoryW(wide);
+    return file_ansi_to_wide(path, wide) && nt_SetCurrentDirectoryW(wide);
 }
 
 uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size,
                                       char *buffer, char **leaf)
 {
-    uint16_t input[PATH_MAX], output[PATH_MAX], *wide_leaf = NULL;
+    uint16_t wide_path[PATH_MAX], dos[PATH_MAX + 16];
     if (leaf)
         *leaf = NULL;
-    if (!acp_path_to_wide(path, input))
+    if (!file_ansi_to_wide(path, wide_path))
         return 0;
-    const uint32_t length = nt_GetFullPathNameW(input, PATH_MAX, output, &wide_leaf);
-    if (!length || length >= PATH_MAX) {
-        if (length >= PATH_MAX)
+    const uint32_t count = nt_GetFullPathNameW(wide_path, PATH_MAX + 16, dos, NULL);
+    if (!count || count >= PATH_MAX + 16) {
+        if (count)
             nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
         return 0;
     }
-    const uint32_t result = file_path_acp_output(output, buffer, size);
-    if (leaf && buffer && result < size && wide_leaf)
-        *leaf = strrchr(buffer, '\\') ? strrchr(buffer, '\\') + 1 : NULL;
-    return result;
+    const uint32_t bytes = file_path_acp_output(dos, buffer, size);
+    if (bytes && bytes < size && leaf && buffer) {
+        char *base = strrchr(buffer, '\\');
+        *leaf = base && base[1] != 0 ? base + 1 : NULL;
+    }
+    return bytes;
 }
-
 
 /* GetLongPathName performs an actual case-insensitive, component-by-
  * component directory lookup inside the granted Linux root. It does not
@@ -4645,14 +4659,14 @@ int32_t NT_MS_ABI nt_GetFileSecurityA(const char *path, uint32_t information,
                                       void *descriptor, uint32_t size, uint32_t *needed)
 {
     uint16_t wide[PATH_MAX];
-    return acp_path_to_wide(path, wide) &&
+    return file_ansi_to_wide(path, wide) &&
            nt_GetFileSecurityW(wide, information, descriptor, size, needed);
 }
 
 uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path)
 {
     uint16_t wide[PATH_MAX];
-    return acp_path_to_wide(path, wide) ?
+    return file_ansi_to_wide(path, wide) ?
            nt_GetFileAttributesW(wide) : UINT32_MAX;
 }
 
@@ -4660,14 +4674,14 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
                                          struct nt_file_attribute_data *info)
 {
     uint16_t wide[PATH_MAX];
-    return acp_path_to_wide(path, wide) &&
+    return file_ansi_to_wide(path, wide) &&
            nt_GetFileAttributesExW(wide, level, info);
 }
 
 /* Only the meaningful native equivalents of NORMAL and READONLY can be
  * changed here. DIRECTORY, SYSTEM, HIDDEN and NTFS attributes are not
  * Linux chmod flags and must never be silently claimed as supported. */
-static int32_t set_file_attributes_common(const char *input, uint32_t attributes)
+static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
 {
     if (attributes == 0 || (attributes & ~(WIN_READONLY | WIN_EXTENDED | WIN_NORMAL)) ||
         ((attributes & WIN_NORMAL) && attributes != WIN_NORMAL)) {
@@ -4728,22 +4742,20 @@ static int32_t set_file_attributes_common(const char *input, uint32_t attributes
 int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
 {
     char utf8[PATH_MAX];
-    return acp_path_to_utf8(input, utf8) &&
-           set_file_attributes_common(utf8, attributes);
+    return file_ansi_to_utf8(input, utf8) && set_file_attributes_utf8(utf8, attributes);
 }
 
 int32_t NT_MS_ABI nt_SetFileAttributesW(const uint16_t *input, uint32_t attributes)
 {
     char narrow[PATH_MAX];
-    return wide_path(input, narrow) &&
-           set_file_attributes_common(narrow, attributes);
+    return wide_path(input, narrow) && set_file_attributes_utf8(narrow, attributes);
 }
 
 uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer)
 {
     uint16_t wide[PATH_MAX];
     const uint32_t count = nt_GetTempPathW(PATH_MAX, wide);
-    if (!count || count >= PATH_MAX) {
+    if (count == 0 || count >= PATH_MAX) {
         nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
         return 0;
     }
@@ -5403,7 +5415,7 @@ static int32_t copy_file_common(const char *source, const char *destination,
     const uint32_t generic_read = UINT32_C(0x80000000);
     const uint32_t generic_write = UINT32_C(0x40000000);
     const uintptr_t from = create_file_common(source, generic_read, FILE_READ, NULL,
-                                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+                                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0, true);
     if (from == UINTPTR_MAX)
         return 0;
     /* Capture source metadata before reading: a copy must not lose the
@@ -5421,8 +5433,8 @@ static int32_t copy_file_common(const char *source, const char *destination,
     }
 
     const uintptr_t to = create_file_common(destination, generic_write, 0, NULL,
-                                              fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
-                                              FILE_ATTRIBUTE_NORMAL, 0);
+                                           fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
+                                           FILE_ATTRIBUTE_NORMAL, 0, true);
     if (to == UINTPTR_MAX) {
         const uint32_t error = nt_GetLastError();
         nt_CloseHandle(from);
@@ -5533,7 +5545,7 @@ static int32_t copy_file_common(const char *source, const char *destination,
     if (!success) {
         /* A newly created partial destination is not a valid copy. */
         if (created && !leave_partial)
-            change_path(destination, REMOVE_FILE);
+            (void)change_path(destination, REMOVE_FILE);
         nt_SetLastError(error);
     }
     return success;
@@ -5543,8 +5555,8 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
                                int32_t fail_if_exists)
 {
     char from[PATH_MAX], to[PATH_MAX];
-    return acp_path_to_utf8(source, from) &&
-           acp_path_to_utf8(destination, to) &&
+    return file_ansi_to_utf8(source, from) &&
+           file_ansi_to_utf8(destination, to) &&
            copy_file_common(from, to, fail_if_exists, NULL, NULL, NULL);
 }
 
@@ -5563,8 +5575,8 @@ int32_t NT_MS_ABI nt_CopyFileExA(const char *source, const char *destination,
         return 0;
     }
     char from[PATH_MAX], to[PATH_MAX];
-    return acp_path_to_utf8(source, from) &&
-           acp_path_to_utf8(destination, to) &&
+    return file_ansi_to_utf8(source, from) &&
+           file_ansi_to_utf8(destination, to) &&
            copy_file_common(from, to, (flags & 1u) != 0,
                             progress, context, cancel);
 }
@@ -5583,8 +5595,7 @@ int32_t NT_MS_ABI nt_CopyFileExW(const uint16_t *source, const uint16_t *destina
         return 0;
     }
     return wide_path(source, from) && wide_path(destination, to) &&
-           copy_file_common(from, to, (flags & 1u) != 0,
-                            progress, context, cancel);
+           copy_file_common(from, to, (flags & 1u) != 0, progress, context, cancel);
 }
 
 /* Native NTDLL file operations use the same guest HANDLE table and the
@@ -5970,6 +5981,13 @@ static struct nt_file_attribute_data file_attributes(int fd, const struct stat *
         stored = 0;
     uint32_t attributes = (S_ISDIR(stat_info->st_mode) ? WIN_DIRECTORY : 0) |
                           (stored & WIN_EXTENDED);
+    if (S_ISDIR(stat_info->st_mode)) {
+        struct nt_junction_metadata junction;
+        const ssize_t count = read_guest_xattr(fd, NT_JUNCTION_XATTR,
+                                                &junction, sizeof(junction));
+        if (nt_junction_metadata_valid(&junction, count))
+            attributes |= UINT32_C(0x400); /* FILE_ATTRIBUTE_REPARSE_POINT */
+    }
     if (((stat_info->st_mode & 0222) == 0) ||
         (S_ISDIR(stat_info->st_mode) && (stored & WIN_READONLY) != 0))
         attributes |= WIN_READONLY;
@@ -6109,6 +6127,8 @@ int32_t NT_MS_ABI nt_CreateSymbolicLinkA(const char *link_name,
            nt_CreateSymbolicLinkW(link, target, flags);
 }
 
+#include "junction_control.inc"
+
 /* FSCTL_GET_REPARSE_POINT, supported only for a final Linux symlink opened
  * explicitly with FILE_FLAG_OPEN_REPARSE_POINT. Windows relative symlink
  * buffer (tag 0xA000000C), not an NTFS junction or an emulated mount.
@@ -6122,21 +6142,42 @@ int32_t NT_MS_ABI nt_DeviceIoControl(uintptr_t handle, uint32_t control,
     const uint32_t symlink_tag = UINT32_C(0xa000000c);
     if (returned)
         *returned = 0;
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    const bool junction = file != NULL && file->reparse_handle &&
+                          file->junction_handle;
+    const unsigned int rights = junction ? file->access : 0;
+    const int pinned = file && file->reparse_handle ?
+                       fcntl(file->fd, F_DUPFD_CLOEXEC, 3) : -1;
+    const char *path = junction && file->path ? file->path : NULL;
+    char *saved_path = path ? strdup(path) : NULL;
+    pthread_mutex_unlock(&file_lock);
+    if (pinned < 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if (junction) {
+        if (!saved_path) {
+            close(pinned);
+            nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
+        const int32_t result = nt_junction_control(pinned, rights, saved_path,
+                                 control, input, input_size, output,
+                                 output_size, returned, overlapped);
+        close(pinned);
+        free(saved_path);
+        return result;
+    }
+    free(saved_path);
     if (control != get_reparse_point || input || input_size || overlapped) {
+        close(pinned);
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
     if (!returned || !output) {
+        close(pinned);
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
-        return 0;
-    }
-    pthread_mutex_lock(&file_lock);
-    const struct guest_file *file = find_handle(handle);
-    const int pinned = file && file->reparse_handle ?
-                       fcntl(file->fd, F_DUPFD_CLOEXEC, 3) : -1;
-    pthread_mutex_unlock(&file_lock);
-    if (pinned < 0) {
-        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
         return 0;
     }
     char target[PATH_MAX];

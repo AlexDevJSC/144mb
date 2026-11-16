@@ -1,54 +1,40 @@
 /* SPDX-License-Identifier: MIT */
 /* Included after confined_open_raw and before resolve_name.
- * Every alias is bound to the *current directory entry*, not just an inode:
- * renaming a file invalidates its old alias; hardlinks carry independent
- * names. Normal files retain per-inode xattrs; hardlinks use a per-directory
- * xattr keyed by the name and guarded by the existing share registry.
- * External non-cooperating Linux writers are outside the atomicity model. */
+ * Lazy DOS 8.3 aliases: persistent on native Linux inodes. Restricted:
+ * no hardlinked files, no symlinks, no guarantee against Linux processes
+ * allocating aliases concurrently outside this runtime's mutex. */
 #define WIN_DOS83_XATTR "user.ntnative.dos83"
+/* NTFS short names belong to directory entries, not to bare inodes. Use a
+ * separate key for each (parent directory, leaf), so Linux hardlinks and
+ * a file moved between directories do not inherit a different entry's name.
+ * Both hashes are from untrusted spellings; a collision is only a hint:
+ * caller still verifies real inode/name and rejects ambiguous aliases. */
+static bool dos83_entry_key(int parent, const char *leaf, char key[112])
+{
+    struct stat st;
+    if (fstat(parent, &st) != 0)
+        return false;
+    uint64_t hash1 = UINT64_C(0xcbf29ce484222325);
+    uint64_t hash2 = UINT64_C(0x84222325cbf29ce4);
+    for (const unsigned char *p = (const unsigned char *)leaf; *p; ++p) {
+        const uint8_t c = *p >= 'A' && *p <= 'Z' ? (uint8_t)(*p + 32) : *p;
+        hash1 = (hash1 ^ c) * UINT64_C(0x100000001b3);
+        hash2 = (hash2 ^ (uint8_t)(c ^ 0xa5u)) * UINT64_C(0x100000001b3);
+    }
+    const int n = snprintf(key, 112, "%s.%016llx.%016llx.%016llx.%016llx",
+          WIN_DOS83_XATTR, (unsigned long long)(uint64_t)st.st_dev,
+          (unsigned long long)(uint64_t)st.st_ino,
+          (unsigned long long)hash1, (unsigned long long)hash2);
+    if (n <= 0 || n >= 112) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    return true;
+}
 static ssize_t read_guest_xattr(int fd, const char *name, void *value, size_t size);
 static int write_guest_xattr(int fd, const char *name, const void *value, size_t size);
 static int open_share_registry(const struct stat *info);
 static pthread_mutex_t dos83_lock = PTHREAD_MUTEX_INITIALIZER;
-static bool dos83_char(unsigned char c);
-
-/* New inode format: a single xattr update commits both alias and original
- * basename. Existing raw NUL-terminated aliases are read for compatibility
- * and migrated when GetShortPathName next claims them. */
-struct dos83_inode_record {
-    char signature[4]; /* D832 */
-    char name[NAME_MAX + 1];
-    char alias[14];
-};
-struct dos83_directory_record {
-    char signature[4]; /* D833 */
-    uint64_t device, inode;
-    char name[NAME_MAX + 1];
-    char alias[14];
-};
-static bool dos83_alias_valid(const char alias[14])
-{
-    const size_t length = strnlen(alias, 14);
-    if (length < 2 || length > 12 || length == 14 ||
-        strchr(alias, '~') == NULL)
-        return false;
-    for (size_t i = 0; i < length; ++i) {
-        const unsigned char c = (unsigned char)alias[i];
-        if (!dos83_char(c) && c != '~' && c != '.')
-            return false;
-    }
-    return true;
-}
-static void dos83_xattr_key(const char *name, char key[64])
-{
-    uint64_t hash = UINT64_C(14695981039346656037);
-    for (const unsigned char *p = (const unsigned char *)name; *p; ++p) {
-        hash ^= *p;
-        hash *= UINT64_C(1099511628211);
-    }
-    snprintf(key, 64, "user.ntnative.dos83.%016" PRIx64, hash);
-}
-
 
 static bool dos83_char(unsigned char c)
 {
@@ -85,71 +71,30 @@ static bool dos83_read_at(int parent, const char *leaf, char alias[14])
     const int fd = confined_open_raw(parent, leaf, O_PATH | O_NOFOLLOW, 0);
     if (fd < 0)
         return false;
-    alias[0] = '\0';
     struct stat st;
-    bool valid = fstat(fd, &st) == 0 &&
-                 (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode));
-    if (valid) {
-        char key[64];
-        struct dos83_directory_record directory_record = {0};
-        dos83_xattr_key(leaf, key);
-        const ssize_t count = read_guest_xattr(parent, key, &directory_record,
-                                                sizeof(directory_record));
-        if (count == (ssize_t)sizeof(directory_record) &&
-            memcmp(directory_record.signature, "D833", 4) == 0 &&
-            directory_record.device == (uint64_t)st.st_dev &&
-            directory_record.inode == (uint64_t)st.st_ino &&
-            strnlen(directory_record.name, sizeof(directory_record.name)) ==
-                strlen(leaf) &&
-            strcmp(directory_record.name, leaf) == 0 &&
-            dos83_alias_valid(directory_record.alias)) {
-            memcpy(alias, directory_record.alias, 14);
-        } else if (S_ISDIR(st.st_mode) || st.st_nlink == 1) {
-            /* Regular file moved to another folder: the stored original
-             * name must still match. Never expose a stale alias after rename. */
-            struct dos83_inode_record inode_record = {0};
-            const ssize_t bytes = read_guest_xattr(fd, WIN_DOS83_XATTR,
-                                                    &inode_record, sizeof(inode_record));
-            if (bytes == (ssize_t)sizeof(inode_record) &&
-                memcmp(inode_record.signature, "D832", 4) == 0 &&
-                strnlen(inode_record.name, sizeof(inode_record.name)) ==
-                    strlen(leaf) &&
-                strcmp(inode_record.name, leaf) == 0 &&
-                dos83_alias_valid(inode_record.alias))
-                memcpy(alias, inode_record.alias, 14);
-            else if (bytes >= 3 && bytes <= 13) {
-                /* Old pre-D832 data: read-only compatibility. */
-                const char *raw = (const char *)&inode_record;
-                if (raw[bytes - 1] == '\0' && dos83_alias_valid(raw))
-                    memcpy(alias, raw, (size_t)bytes);
-            }
-        } else {
-            valid = false;
+    bool ok = fstat(fd, &st) == 0 &&
+              (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode));
+    if (ok) {
+        char key[112];
+        if (!dos83_entry_key(parent, leaf, key)) {
+            close(fd);
+            return false;
         }
+        /* Older per-inode aliases are intentionally not used for lookups:
+         * they could refer to another hardlink or a renamed directory entry. */
+        const ssize_t count = read_guest_xattr(fd, key, alias, 14);
+        ok = count >= 3 && count <= 13 && alias[count - 1] == '\0' &&
+             memchr(alias, '~', (size_t)count - 1) != NULL;
+        if (ok)
+            for (ssize_t i = 0; i < count - 1; ++i)
+                if (!dos83_char((unsigned char)alias[i]) &&
+                    alias[i] != '.' && alias[i] != '~') {
+                    ok = false;
+                    break;
+                }
     }
     close(fd);
-    return valid && dos83_alias_valid(alias);
-}
-
-static bool dos83_save_at(int parent, int fd, const struct stat *st,
-                          const char *name, const char alias[14])
-{
-    if (st->st_nlink > 1 && S_ISREG(st->st_mode)) {
-        char key[64];
-        dos83_xattr_key(name, key);
-        struct dos83_directory_record value = {0};
-        memcpy(value.signature, "D833", 4);
-        value.device = (uint64_t)st->st_dev;
-        value.inode = (uint64_t)st->st_ino;
-        strcpy(value.name, name);
-        memcpy(value.alias, alias, 14);
-        return write_guest_xattr(parent, key, &value, sizeof(value)) == 0;
-    }
-    struct dos83_inode_record value = {0};
-    memcpy(value.signature, "D832", 4);
-    strcpy(value.name, name);
-    memcpy(value.alias, alias, 14);
-    return write_guest_xattr(fd, WIN_DOS83_XATTR, &value, sizeof(value)) == 0;
+    return ok;
 }
 
 static void dos83_make(const char *name, unsigned int ordinal, char alias[14])
@@ -271,8 +216,6 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
         const int collision = dos83_collision(parent, name, alias);
         if (collision != 0)
             error = collision < 0 ? errno : EEXIST;
-        else if (!dos83_save_at(parent, fd, &st, name, alias))
-            error = errno; /* migrate legacy xattrs and record hardlinks */
     } else if (!error) {
         bool assigned = false;
         for (unsigned int i = 1; i <= 999999; ++i) {
@@ -283,10 +226,21 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
                 break;
             }
             if (collision == 0) {
-                if (dos83_save_at(parent, fd, &st, name, alias))
-                    assigned = true;
-                else
+                char key[112];
+                if (!dos83_entry_key(parent, name, key)) {
                     error = errno;
+                } else if (write_guest_xattr(fd, key, alias,
+                                              strlen(alias) + 1) == 0) {
+                    assigned = true;
+                    /* Keep the legacy attribute solely as an optional
+                     * diagnostic for single-link files. It is NOT a
+                     * lookup key and does not affect alias correctness. */
+                    if (S_ISREG(st.st_mode) && st.st_nlink == 1)
+                        (void)write_guest_xattr(fd, WIN_DOS83_XATTR,
+                                                alias, strlen(alias) + 1);
+                } else {
+                    error = errno;
+                }
                 break;
             }
         }
