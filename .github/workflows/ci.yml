@@ -24,8 +24,9 @@ jobs:
         run: |
           bash -n scripts/fedora-check-stage4.sh scripts/fedora-stage4-multigroup-acceptance.sh scripts/fedora-p2-3-acceptance.sh scripts/fedora-qa-environment.sh scripts/dos83-fuse-confined.sh
           bash scripts/fedora-qa-environment.sh --help >/dev/null
-          python3 -m py_compile scripts/compare-stage4-scheduler.py scripts/compare-stage4-quantum.py
+          python3 -m py_compile scripts/compare-stage4-scheduler.py scripts/compare-stage4-quantum.py scripts/analyze-fedora-qa.py
           python3 -m unittest discover -s tests -p 'test_compare_stage4_quantum.py'
+          python3 -m unittest discover -s tests -p 'test_fedora_qa_report.py'
       - name: Install Linux build and desktop test dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 update
