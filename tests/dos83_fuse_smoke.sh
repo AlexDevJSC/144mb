@@ -112,11 +112,16 @@ PY
 # Stronger perimeter: even a Linux program that knows the lower path
 # must be unable to rename, create or truncate it after the Landlock policy.
 if "$landlock" --probe >/dev/null 2>&1; then
-    # Capture expected EPERM output from outside the confined shell.
-    # Redirecting to /dev/null *inside* Landlock can itself be denied and
-    # could make an unattempted backing mutation appear safely rejected.
-    # All protected operations below must actually be attempted.
-    if ! "$landlock" --view "$tmp/view" -- /bin/sh -c '
+    # Landlock rejects inherited host REGULAR FILE descriptors 0..2
+    # intentionally. Capture diagnostics through a FIFO inherited as fd2,
+    # while the trusted parent reader stores the log outside the sandbox.
+    # Redirection to /dev/null *inside* Landlock is not permitted and can
+    # otherwise make an unattempted mutation look like a successful denial.
+    mkfifo "$tmp/landlock-denials.fifo"
+    cat "$tmp/landlock-denials.fifo" >"$tmp/landlock-denials.log" &
+    capture_pid=$!
+    denied_status=0
+    "$landlock" --view "$tmp/view" -- /bin/sh -c '
         set -eu
         printf "allowed" > "$1/landlock-created.txt"
         if (printf "FORBIDDEN" > "$2/direct-bypass.txt"); then
@@ -134,7 +139,12 @@ if "$landlock" --probe >/dev/null 2>&1; then
         if (ln "$2/hostRenamedFile.txt" "$1/hardlink-from-lower.txt"); then
             exit 95
         fi
-    ' sh "$tmp/view" "$tmp/lower" 2>"$tmp/landlock-denials.log"; then
+    ' sh "$tmp/view" "$tmp/lower" 2>"$tmp/landlock-denials.fifo" || denied_status=$?
+    if ! wait "$capture_pid"; then
+        echo "FAIL P2.3 denial diagnostic reader failed" >&2
+        exit 1
+    fi
+    if [ "$denied_status" -ne 0 ]; then
         cat "$tmp/landlock-denials.log" >&2
         echo "FAIL P2.3 confined shell did not complete all denial probes" >&2
         exit 1
