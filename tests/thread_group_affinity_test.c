@@ -177,6 +177,14 @@ int main(void)
     check(nt_GetThreadGroupAffinity(nt_GetCurrentThread(), &observed) &&
           observed.mask == next.mask && observed.group == next.group,
           "observe group transition from the Linux kernel", &failures);
+    struct nt_processor_number cpu_number = {0};
+    nt_GetCurrentProcessorNumberEx(&cpu_number);
+    check(cpu_number.group == next.group &&
+          cpu_number.number < 64 &&
+          (next.mask & ((uintptr_t)UINT64_C(1) << cpu_number.number)) != 0 &&
+          nt_GetCurrentProcessorNumber() == cpu_number.number,
+          "Win32 processor number reflects actual Linux executing CPU",
+          &failures);
 
     /* The legacy 64-bit mask is group-local once the thread has an
      * unambiguous group. In particular, group 1 must not be confused with
