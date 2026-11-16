@@ -53,20 +53,6 @@ static int start_endpoint(struct endpoint *client, void (*body)(int,int,int))
     client->pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
     return client->pidfd >= 0;
 }
-static void *secondary_thread(void *ctx)
-{
-    int *reply_fd = ctx;
-    const uint32_t id = (uint32_t)syscall(SYS_gettid);
-    if (!nt_broker_client_register_thread(id) ||
-        !write_all(*reply_fd, &id, sizeof(id)))
-        return (void *)1;
-    /* Keep this worker registered during the entire external OPEN+QUERY. */
-    char token;
-    if (!read_all(*reply_fd + 1, &token, 1) || token != 'R')
-        return (void *)1;
-    nt_broker_client_unregister_thread(id);
-    return NULL;
-}
 /* Worker uses fds[0] for write notifications and fds[1] for release. */
 static void *secondary_main(void *ctx)
 {
