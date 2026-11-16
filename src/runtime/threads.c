@@ -110,6 +110,11 @@ static _Thread_local uint16_t *primary_thread_description;
 static pthread_once_t processor_groups_once = PTHREAD_ONCE_INIT;
 static uint32_t processor_group_counts[CPU_SETSIZE / 64];
 static uintptr_t processor_group_masks[CPU_SETSIZE / 64];
+/* Process policy is distinct from the affinity of an individual host
+ * pthread. An explicit SetThreadAffinityMask may narrow one thread
+ * without changing the process-wide Win32 policy. Protected by wait_lock. */
+static uintptr_t process_group0_affinity;
+static bool process_group0_affinity_initialized;
 static uint16_t processor_group_count;
 static uint32_t processor_group_total;
 static void capture_processor_groups(void)
@@ -2532,44 +2537,32 @@ int32_t NT_MS_ABI nt_GetProcessAffinityMask(uintptr_t process, uintptr_t *proces
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    /* Only the current sandboxed process is representable. Other PIDs
-     * never pass to sched_getaffinity via an untrusted Windows handle. */
     const nt_status status = nt_runtime_check_self_process(process, 0x1400u);
     if (status != NT_STATUS_SUCCESS) {
         nt_SetLastError(nt_runtime_nt_error(status));
         return 0;
     }
     ensure_processor_groups();
-    cpu_set_t allowed;
-    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
-        nt_SetLastError(NT_ERROR_GEN_FAILURE);
-        return 0;
+    pthread_mutex_lock(&wait_lock);
+    const bool supported = processor_group_count == 1 &&
+                           processor_group_masks[0] != 0;
+    if (supported && !process_group0_affinity_initialized) {
+        process_group0_affinity = processor_group_masks[0];
+        process_group0_affinity_initialized = true;
     }
-    uintptr_t mask = 0;
-    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
-        if (!CPU_ISSET(cpu, &allowed))
-            continue;
-        if (cpu >= 64) {
-            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-            return 0;
-        }
-        mask |= (uintptr_t)UINT64_C(1) << cpu;
-    }
-    if (mask == 0) {
-        nt_SetLastError(NT_ERROR_GEN_FAILURE);
-        return 0;
-    }
-    /* The process mask can shrink independently. The guest-visible system
-     * mask is the sandbox's ORIGINAL permitted group-0 set: pinning a
-     * thread cannot make every other CPU disappear from the system.
-     * A wider initial cpuset is deliberately rejected, not truncated. */
-    if (processor_group_count != 1 || processor_group_masks[0] == 0 ||
-        (mask & ~processor_group_masks[0]) != 0) {
+    const uintptr_t policy = process_group0_affinity;
+    const uintptr_t system = processor_group_masks[0];
+    pthread_mutex_unlock(&wait_lock);
+    if (!supported || policy == 0 || (policy & ~system) != 0) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
-    *process_mask = mask;
-    *system_mask = processor_group_masks[0];
+    /* Process affinity is the runtime-owned policy, not the current
+     * pthread's potentially narrower per-thread affinity. This is a
+     * snapshot of sandbox entitlement at startup; direct Linux/cgroup
+     * changes behind our back require explicit revalidation. */
+    *process_mask = policy;
+    *system_mask = system;
     return 1;
 }
 
@@ -2728,14 +2721,96 @@ static bool priority_class_is_exclusive(void)
     return count == 1 && close_error == 0;
 }
 
-/* A Win64 SetProcessAffinityMask changes the process affinity, not
- * merely one pthread. On Linux sched_setaffinity(0) applies to the
- * calling TID; do not imply process-wide success in a multithreaded
- * guest. Restrict the positive path to a verified one-thread process
- * while holding wait_lock (the runtime's CreateThread gate).
- *
- * No requested guest mask is ever used as a Linux PID, and a hardware
- * cpuset crossing 64-bit group boundaries is explicitly unsupported. */
+/* A Windows process affinity policy is distinct from Linux per-TID
+ * masks. A transaction can update all runtime-owned threads while
+ * wait_lock excludes their creation/completion and competing runtime
+ * affinity changes. Unknown host threads cause a fail-closed result.
+ * Verification and rollback are mandatory: do not silently pin just
+ * the caller or ignore cpuset intersection on another TID. */
+static uint32_t set_process_affinity_locked(uintptr_t requested)
+{
+    if (processor_group_count != 1 || processor_group_masks[0] == 0 ||
+        (requested & ~processor_group_masks[0]) != 0)
+        return NT_ERROR_NOT_SUPPORTED;
+
+    struct scheduler_thread_set threads;
+    if (!snapshot_scheduler_threads_locked(&threads))
+        return NT_ERROR_NOT_SUPPORTED;
+
+    struct scheduler_affinity_entry {
+        pid_t tid;
+        cpu_set_t before;
+        bool changed;
+    };
+    struct scheduler_affinity_entry *items = calloc(threads.count, sizeof(*items));
+    if (items == NULL)
+        return NT_ERROR_NOT_ENOUGH_MEMORY;
+
+    cpu_set_t wanted;
+    CPU_ZERO(&wanted);
+    for (int cpu = 0; cpu < 64; ++cpu)
+        if ((requested & ((uintptr_t)UINT64_C(1) << cpu)) != 0)
+            CPU_SET(cpu, &wanted);
+
+    uint32_t error = NT_ERROR_SUCCESS;
+    for (size_t i = 0; i < threads.count; ++i) {
+        items[i].tid = threads.ids[i];
+        if (sched_getaffinity(threads.ids[i], sizeof(items[i].before),
+                              &items[i].before) != 0) {
+            error = NT_ERROR_NOT_SUPPORTED;
+            break;
+        }
+        for (int cpu = 64; cpu < CPU_SETSIZE; ++cpu)
+            if (CPU_ISSET(cpu, &items[i].before)) {
+                error = NT_ERROR_NOT_SUPPORTED;
+                break;
+            }
+        if (error != NT_ERROR_SUCCESS)
+            break;
+    }
+    if (error == NT_ERROR_SUCCESS && !scheduler_threads_unchanged_locked(&threads))
+        error = NT_ERROR_NOT_SUPPORTED;
+
+    for (size_t i = 0; error == NT_ERROR_SUCCESS && i < threads.count; ++i) {
+        if (CPU_EQUAL(&wanted, &items[i].before))
+            continue;
+        if (sched_setaffinity(items[i].tid, sizeof(wanted), &wanted) != 0) {
+            const int failure = errno;
+            error = failure == EPERM || failure == EACCES ? NT_ERROR_ACCESS_DENIED :
+                    failure == EINVAL ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_GEN_FAILURE;
+            break;
+        }
+        items[i].changed = true;
+        cpu_set_t verified;
+        if (sched_getaffinity(items[i].tid, sizeof(verified), &verified) != 0 ||
+            !CPU_EQUAL(&wanted, &verified)) {
+            error = NT_ERROR_GEN_FAILURE;
+            break;
+        }
+    }
+    if (error == NT_ERROR_SUCCESS &&
+        !scheduler_threads_unchanged_locked(&threads))
+        error = NT_ERROR_NOT_SUPPORTED;
+
+    if (error != NT_ERROR_SUCCESS) {
+        for (size_t i = threads.count; i > 0; --i) {
+            struct scheduler_affinity_entry *item = &items[i - 1];
+            if (!item->changed)
+                continue;
+            cpu_set_t verified;
+            if (sched_setaffinity(item->tid, sizeof(item->before), &item->before) != 0 ||
+                sched_getaffinity(item->tid, sizeof(verified), &verified) != 0 ||
+                !CPU_EQUAL(&verified, &item->before))
+                error = NT_ERROR_GEN_FAILURE;
+        }
+    } else {
+        process_group0_affinity = requested;
+        process_group0_affinity_initialized = true;
+    }
+    free(items);
+    return error;
+}
+
 int32_t NT_MS_ABI nt_SetProcessAffinityMask(uintptr_t process, uintptr_t requested)
 {
     const nt_status access = nt_runtime_check_self_process(process, 0x200u);
@@ -2749,47 +2824,7 @@ int32_t NT_MS_ABI nt_SetProcessAffinityMask(uintptr_t process, uintptr_t request
     }
     ensure_processor_groups();
     pthread_mutex_lock(&wait_lock);
-    uint32_t error = NT_ERROR_SUCCESS;
-    if (!priority_class_is_exclusive()) {
-        error = NT_ERROR_NOT_SUPPORTED;
-    } else if (processor_group_count != 1 ||
-               processor_group_masks[0] == 0 ||
-               (requested & ~processor_group_masks[0]) != 0) {
-        error = NT_ERROR_NOT_SUPPORTED;
-    } else {
-        cpu_set_t before, wanted, after;
-        if (sched_getaffinity(0, sizeof(before), &before) != 0) {
-            error = NT_ERROR_GEN_FAILURE;
-        } else {
-            bool outside = false;
-            for (int cpu = 64; cpu < CPU_SETSIZE; ++cpu)
-                if (CPU_ISSET(cpu, &before)) {
-                    outside = true;
-                    break;
-                }
-            if (outside) {
-                error = NT_ERROR_NOT_SUPPORTED;
-            } else {
-                CPU_ZERO(&wanted);
-                for (int cpu = 0; cpu < 64; ++cpu)
-                    if ((requested & ((uintptr_t)UINT64_C(1) << cpu)) != 0)
-                        CPU_SET(cpu, &wanted);
-                if (sched_setaffinity(0, sizeof(wanted), &wanted) != 0) {
-                    const int failure = errno;
-                    error = failure == EPERM || failure == EACCES ?
-                            NT_ERROR_ACCESS_DENIED :
-                            failure == EINVAL ? NT_ERROR_INVALID_PARAMETER :
-                            NT_ERROR_GEN_FAILURE;
-                } else if (sched_getaffinity(0, sizeof(after), &after) != 0 ||
-                           !CPU_EQUAL(&after, &wanted)) {
-                    /* Never treat cgroup intersection as applied success.
-                     * Rollback is best effort if Linux policy changed. */
-                    (void)sched_setaffinity(0, sizeof(before), &before);
-                    error = NT_ERROR_GEN_FAILURE;
-                }
-            }
-        }
-    }
+    const uint32_t error = set_process_affinity_locked(requested);
     pthread_mutex_unlock(&wait_lock);
     if (error != NT_ERROR_SUCCESS) {
         nt_SetLastError(error);
