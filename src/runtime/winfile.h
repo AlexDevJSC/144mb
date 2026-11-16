@@ -69,6 +69,10 @@ uintptr_t NT_MS_ABI nt_CreateFile2(const uint16_t *path, uint32_t access, uint32
                                   uint32_t disposition, const struct nt_createfile2_params *params);
 int32_t NT_MS_ABI nt_CreateDirectoryW(const uint16_t *path, const void *security);
 int32_t NT_MS_ABI nt_RemoveDirectoryW(const uint16_t *path);
+int32_t NT_MS_ABI nt_CreateSymbolicLinkW(const uint16_t *link_name, const uint16_t *target_name,
+                                          uint32_t flags);
+int32_t NT_MS_ABI nt_CreateSymbolicLinkA(const char *link_name, const char *target_name,
+                                          uint32_t flags);
 int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path);
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags);
 int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination);
