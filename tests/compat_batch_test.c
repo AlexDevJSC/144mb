@@ -649,7 +649,7 @@ static void check_files(void)
           nt_GetFileAttributesW(u"C:\\data\\caf\u00e9-source.txt") != UINT32_MAX);
     CHECK(nt_CopyFileA(cp_source, cp_copy, 1) != 0 &&
           nt_MoveFileA(cp_copy, cp_moved) != 0);
-    char returned_acp[PATH_MAX];
+    char returned_acp[512];
     char *returned_leaf = NULL;
     CHECK(nt_GetFullPathNameA(cp_moved, sizeof(returned_acp),
                               returned_acp, &returned_leaf) == strlen(cp_moved) &&
