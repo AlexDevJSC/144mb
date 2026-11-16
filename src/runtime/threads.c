@@ -658,6 +658,10 @@ static void release_waitable(struct waitable *object)
             canonical->thread_description = NULL;
         }
     } else if (object->links == 0) {
+        if (object->brokered) {
+            nt_broker_release(&object->broker);
+            object->brokered = false;
+        }
         free(object->thread_description);
         object->thread_description = NULL;
     }
