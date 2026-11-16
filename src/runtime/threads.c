@@ -2601,6 +2601,115 @@ static bool priority_class_map(uint32_t klass, int *nice_base, int32_t *nt_base)
     }
 }
 
+/* A bounded snapshot of the native Linux task group. A Windows process
+ * priority/affinity operation must never change a pthread belonging to
+ * an untracked Linux library or an unrelated process. Every non-leader
+ * TID must correspond to a live, canonical guest thread while wait_lock
+ * is held; the leader is getpid(). No numbers come from guest HANDLEs.
+ * Runtime-created thread start and completion are serialized by wait_lock.
+ * Other host libraries can create pthreads independently; an independent
+ * task causes the transaction to fail closed. */
+struct scheduler_thread_set {
+    pid_t ids[WAITABLE_COUNT + 1];
+    size_t count;
+};
+
+static bool tracked_scheduler_tid_locked(pid_t tid)
+{
+    if (tid == getpid())
+        return true;
+    for (size_t i = 0; i < WAITABLE_COUNT; ++i) {
+        const struct waitable *item = &waitables[i];
+        if (item->kind == THREAD && item->shared == NULL &&
+            (item->refs != 0 || item->links != 0) && item->started &&
+            !item->signaled && item->owner_pid == (uint32_t)getpid() &&
+            item->thread_id == (uint32_t)tid)
+            return true;
+    }
+    return false;
+}
+
+static int compare_scheduler_tid(const void *a, const void *b)
+{
+    const pid_t left = *(const pid_t *)a, right = *(const pid_t *)b;
+    return (left > right) - (left < right);
+}
+
+static bool snapshot_scheduler_threads_locked(struct scheduler_thread_set *out)
+{
+    DIR *directory = opendir("/proc/self/task");
+    if (directory == NULL)
+        return false;
+    out->count = 0;
+    bool accepted = true;
+    struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(directory)) != NULL) {
+        if (!isdigit((unsigned char)entry->d_name[0]))
+            continue;
+        char *end = NULL;
+        errno = 0;
+        const long raw = strtol(entry->d_name, &end, 10);
+        if (errno != 0 || end == entry->d_name || *end != '\0' ||
+            raw <= 0 || raw > INT32_MAX ||
+            out->count == WAITABLE_COUNT + 1 ||
+            !tracked_scheduler_tid_locked((pid_t)raw)) {
+            accepted = false;
+            break;
+        }
+        out->ids[out->count++] = (pid_t)raw;
+    }
+    const int close_error = closedir(directory);
+    if (!accepted || close_error != 0 || out->count == 0)
+        return false;
+    qsort(out->ids, out->count, sizeof(out->ids[0]), compare_scheduler_tid);
+    for (size_t i = 1; i < out->count; ++i)
+        if (out->ids[i] <= out->ids[i - 1])
+            return false;
+    return true;
+}
+
+static bool scheduler_threads_unchanged_locked(const struct scheduler_thread_set *before)
+{
+    struct scheduler_thread_set after;
+    if (!snapshot_scheduler_threads_locked(&after) || after.count != before->count)
+        return false;
+    return memcmp(after.ids, before->ids,
+                  before->count * sizeof(before->ids[0])) == 0;
+}
+
+/* Conservative Linux rollback proof. Without CAP_SYS_NICE or an
+ * adequate RLIMIT_NICE, nice can be *increased* (lower priority) but
+ * cannot later be restored to a more favorable number. Do not begin
+ * a multi-TID downgrade without enough rights to roll it back.
+ * Effective capability is obtained from our own /proc/self/status,
+ * never from the guest. */
+static bool scheduler_can_restore_nice(int old_nice)
+{
+    bool has_cap = false;
+    FILE *file = fopen("/proc/self/status", "r");
+    if (file != NULL) {
+        char line[256];
+        while (fgets(line, sizeof(line), file) != NULL) {
+            unsigned long long caps = 0;
+            if (sscanf(line, "CapEff: %llx", &caps) == 1) {
+                has_cap = (caps & (UINT64_C(1) << 23)) != 0;
+                break;
+            }
+        }
+        fclose(file);
+    }
+    if (has_cap)
+        return true;
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NICE, &limit) != 0)
+        return false;
+    if (limit.rlim_cur == RLIM_INFINITY || limit.rlim_cur > 40)
+        return true;
+    return limit.rlim_cur >= 1 &&
+           old_nice >= 20 - (int)limit.rlim_cur;
+}
+
 /* Check the whole host process before a per-TID class transition.
  * Readdir uses the kernel's own /proc/self/task namespace; this test
  * never interprets guest HANDLEs as Linux TIDs. */
