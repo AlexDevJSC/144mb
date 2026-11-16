@@ -169,6 +169,17 @@ A partir de esta línea base, toda variación porcentual debe anotarse junto a l
 > **Pendientes:** [limitaciones reales].\
 > **Verificación:** [pruebas ejecutadas, resultado y enlace a PR/CI].
 
+### Priorización pendiente de boosts y quantum (16-11-2026)
+
+La superficie de cuatro controles `Get/Set*PriorityBoost` está registrada
+con permisos comprobados y resultado explícito `NOT_SUPPORTED`; ello
+evita una respuesta de éxito falsa y no cierra boosts ni quantum. Para
+completar el problema 6 se requiere un cambio observable del planificador
+Linux acompañado de una regresión que pruebe incremento al despertar,
+decaimiento temporal y restauración, sin privar al host de recursos ni
+interpretar `nice` estático como el quantum de NT. Evidencia y límites:
+[validación de planificador](nt-stage4-scheduler-validation.md).
+
 ## Criterios de avance y salida de fase
 
 1. Listar contratos implementados, contratos sin implementar, supuestos y limitaciones explícitas.

@@ -185,3 +185,32 @@ ahora más acotada, pero sigue sin cerrarse.
 **Estado de entrega:** instrumentos de evidencia creados, no
 comparación física ejecutada. No aceptar 100 % de componente 4 ni
 pasar a APC avanzadas basándose en esta PR.
+
+## 16-11-2026: Superficie Win32 de control de prioridad dinámica (fail-closed)
+
+Se registran en KERNEL32/KERNELBASE las cuatro entradas
+`GetThreadPriorityBoost`, `SetThreadPriorityBoost`,
+`GetProcessPriorityBoost` y `SetProcessPriorityBoost`.
+**No se considera implementado el mecanismo de boosts.** El runtime
+comprueba los derechos del HANDLE de hilo/proceso auténtico y no
+interpreta PID/TID externos; los métodos de lectura no modifican la
+salida si fallan y los de escritura no alteran el planificador Linux.
+
+En un HANDLE local válido con permisos, todos devuelven
+`FALSE / ERROR_NOT_SUPPORTED`. Los handles sin derechos reciben
+`ERROR_ACCESS_DENIED` y un output NULL en lectura recibe
+`ERROR_INVALID_PARAMETER`. El éxito sin cambios reales sería
+incompatible con el contrato dinámico de Windows: activación durante
+entrada, UI y terminación de espera, y descenso posterior hacia
+prioridad base. No basta con almacenar `disabled=TRUE` en una tabla
+ni con asignar un valor `nice` inmutable.
+
+Pruebas: `tests/priority_boost_boundary_test.c` valida derechos,
+outputs sin mutación y conservación del `nice` del host.
+`tests/pe/priority_boost_boundary_fixture.c` verifica imports,
+ABI Microsoft AMD64, errores y vida útil de hilo suspendido en Linux.
+Ambas rutas son parte de CI/UBSan/Fedora. Windows nativo mantiene su
+prueba positiva independiente; **no** se utiliza el fixture negativo
+como una prueba de paridad con Windows. El quantum y el broker siguen
+pendientes. Componente 4: 95 % → 95 % (+0 pp), porque estas APIs todavía
+no ofrecen compatibilidad funcional de planificación.
