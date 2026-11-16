@@ -168,6 +168,32 @@ uint32_t NT_MS_ABI nt_GetActiveProcessorCount(uint16_t group)
            group < processor_group_count ? processor_group_counts[group] : 0;
 }
 
+/* The real Linux executing CPU is sampled by the kernel, not inferred
+ * from a thread's allowed cpuset. Windows reports the number local to
+ * the processor group; PROCESSOR_NUMBER also includes the group ID. */
+_Static_assert(sizeof(struct nt_processor_number) == 4,
+               "Windows x64 PROCESSOR_NUMBER ABI layout");
+
+uint32_t NT_MS_ABI nt_GetCurrentProcessorNumber(void)
+{
+    const int cpu = sched_getcpu();
+    return cpu >= 0 ? (uint32_t)(cpu % 64) : 0;
+}
+
+void NT_MS_ABI nt_GetCurrentProcessorNumberEx(struct nt_processor_number *result)
+{
+    if (result == NULL)
+        return;
+    const int cpu = sched_getcpu();
+    if (cpu < 0)
+        return;
+    *result = (struct nt_processor_number){
+        .group = (uint16_t)(cpu / 64),
+        .number = (uint8_t)(cpu % 64),
+        .reserved = 0
+    };
+}
+
 /* Scheduler-class state is process-local and protected by wait_lock.
  * It is never a permission to change Linux threads in another process. */
 static uint32_t process_priority_class = 0x20u; /* NORMAL_PRIORITY_CLASS */
