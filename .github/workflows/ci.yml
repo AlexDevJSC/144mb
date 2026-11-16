@@ -74,7 +74,7 @@ jobs:
       - name: Exercise window messages and clipboard offscreen
         run: SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-desktop
       - name: Map and execute trusted external desktop PE on Linux
-        run: make check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-memory check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-priority-boost check-pe-process-affinity check-pe-teb-tls
+        run: make check-pe-lstrcmp check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-memory check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-priority-boost check-pe-process-affinity check-pe-teb-tls
       - name: Execute Win32 display topology fixture on Linux
         run: make check-pe-displayconfig
       - name: Execute native Win32 console PE fixture on Linux
