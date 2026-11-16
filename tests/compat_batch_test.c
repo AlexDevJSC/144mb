@@ -637,6 +637,38 @@ static void check_files(void)
           nt_DeleteFileW(u"c:\\étage\\RÉSUMÉ.TXT") != 0 &&
           nt_RemoveDirectoryW(u"C:\\ÉTAGE") != 0);
 
+    /* Consistent CP1252 across the filesystem A surface: input names are
+     * decoded at the ABI boundary, and all returned path bytes use ACP. */
+    const char cp_source[] = "C:\\data\\caf\xe9-source.txt";
+    const char cp_copy[] = "C:\\data\\caf\xe9-copy.txt";
+    const char cp_moved[] = "C:\\data\\caf\xe9-moved.txt";
+    uintptr_t cp_roundtrip = nt_CreateFileA(cp_source, UINT32_C(0x40000000),
+                                            7u, NULL, 2u, 0x80u, 0);
+    CHECK(cp_roundtrip != UINTPTR_MAX && nt_CloseHandle(cp_roundtrip));
+    CHECK(nt_GetFileAttributesA(cp_source) != UINT32_MAX &&
+          nt_GetFileAttributesW(u"C:\\data\\caf\u00e9-source.txt") != UINT32_MAX);
+    CHECK(nt_CopyFileA(cp_source, cp_copy, 1) != 0 &&
+          nt_MoveFileA(cp_copy, cp_moved) != 0);
+    char returned_acp[PATH_MAX];
+    char *returned_leaf = NULL;
+    CHECK(nt_GetFullPathNameA(cp_moved, sizeof(returned_acp),
+                              returned_acp, &returned_leaf) == strlen(cp_moved) &&
+          strcmp(returned_acp, cp_moved) == 0 &&
+          returned_leaf != NULL && strcmp(returned_leaf, "caf\xe9-moved.txt") == 0);
+    CHECK(nt_GetLongPathNameA(cp_moved, returned_acp,
+                              sizeof(returned_acp)) == strlen(cp_moved) &&
+          strcmp(returned_acp, cp_moved) == 0);
+    CHECK(nt_SetFileAttributesA(cp_moved, 2u) &&
+          (nt_GetFileAttributesA(cp_moved) & 2u) != 0 &&
+          nt_SetFileAttributesA(cp_moved, 0x80u));
+    CHECK(nt_DeleteFileA(cp_source) && nt_DeleteFileA(cp_moved));
+    const char cp_directory[] = "C:\\data\\caf\xe9-folder";
+    CHECK(nt_CreateDirectoryA(cp_directory, NULL) &&
+          nt_SetCurrentDirectoryA(cp_directory));
+    CHECK(nt_GetCurrentDirectoryA(sizeof(returned_acp), returned_acp) ==
+          strlen(cp_directory) && strcmp(returned_acp, cp_directory) == 0);
+    CHECK(nt_SetCurrentDirectoryW(u"C:\\") && nt_RemoveDirectoryA(cp_directory));
+
     void *text = nt_fopen("C:\\data\\scores.txt", "w");
     CHECK(text != NULL && nt_fwrite("a\nb\n", 2, 2, text) == 2);
     nt_cexit();
