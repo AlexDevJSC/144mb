@@ -442,19 +442,29 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         return 0;
     }
     pid_t pid = 0;
-    int status_fd = -1, start_fd = -1;
+    int status_fd = -1, start_fd = -1, broker_fd = -1;
+    uint8_t broker_secret[16] = {0};
     int error = launch_child(fd, path, converted ? converted : default_command, workdir,
                              (flags & 4u) != 0, environment_fd, &files,
-                             &pid, &status_fd, &start_fd);
+                             &pid, &status_fd, &start_fd, &broker_fd, broker_secret);
     nt_runtime_release_inherited_files(&files);
     close(environment_fd);
     free(converted);
     close(fd);
     if (error) {
+        if (broker_fd >= 0)
+            close(broker_fd);
+        memset(broker_secret, 0, sizeof(broker_secret));
         nt_SetLastError(error == ENOMEM || error == EAGAIN ? NT_ERROR_NOT_ENOUGH_MEMORY : NT_ERROR_GEN_FAILURE);
         return 0;
     }
-    if (!nt_runtime_watch_child(pid, status_fd, start_fd, info)) {
+    const bool registered = nt_runtime_watch_child_broker(
+        pid, status_fd, start_fd, broker_fd,
+        broker_fd >= 0 ? broker_secret : NULL, info);
+    memset(broker_secret, 0, sizeof(broker_secret));
+    if (!registered) {
+        if (broker_fd >= 0)
+            close(broker_fd);
         close(status_fd);
         if (start_fd >= 0)
             close(start_fd);
