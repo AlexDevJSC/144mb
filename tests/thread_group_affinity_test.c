@@ -131,7 +131,54 @@ int main(void)
           observed.mask == next.mask && observed.group == next.group,
           "observe group transition from the Linux kernel", &failures);
 
-    /* Legacy APIs cannot describe CPUs outside group 0; no truncation. */
+    /* The legacy 64-bit mask is group-local once the thread has an
+     * unambiguous group. In particular, group 1 must not be confused with
+     * Linux CPU indices 0..63. The underlying affinity remains exact. */
+    nt_SetLastError(0x7777u);
+    check(nt_SetThreadAffinityMask(nt_GetCurrentThread(), next.mask) ==
+          next.mask && nt_GetLastError() == 0x7777u,
+          "legacy SetThreadAffinityMask operates in the current group",
+          &failures);
+    check(nt_GetThreadGroupAffinity(nt_GetCurrentThread(), &observed) &&
+          observed.group == next.group && observed.mask == next.mask,
+          "legacy group-local operation preserves the processor group",
+          &failures);
+    uintptr_t native_mask = next.mask;
+    check(nt_NtSetInformationThread(nt_GetCurrentThread(), 4u, &native_mask,
+                                    sizeof(native_mask)) == NT_STATUS_SUCCESS,
+          "native ThreadAffinityMask also uses current group-relative bits",
+          &failures);
+    cpu_set_t group_actual;
+    check(sched_getaffinity(0, sizeof(group_actual), &group_actual) == 0 &&
+          CPU_COUNT(&group_actual) == 1 &&
+          CPU_ISSET((int)next.group * 64 +
+                    (int)__builtin_ctzll((unsigned long long)next.mask), &group_actual),
+          "kernel confirms exact CPU after legacy and NT group-local calls",
+          &failures);
+
+    /* A mask that names a CPU outside the sandbox's group entitlement
+     * must fail without changing the thread. */
+    unsigned forbidden_bit = 64;
+    for (unsigned bit = 0; bit < 64; ++bit) {
+        if (!CPU_ISSET((int)next.group * 64 + (int)bit, &original)) {
+            forbidden_bit = bit;
+            break;
+        }
+    }
+    if (forbidden_bit < 64) {
+        const uintptr_t invalid_mask = (uintptr_t)UINT64_C(1) << forbidden_bit;
+        nt_SetLastError(0);
+        check(nt_SetThreadAffinityMask(nt_GetCurrentThread(), invalid_mask) == 0 &&
+              nt_GetLastError() == NT_ERROR_INVALID_PARAMETER,
+              "reject unavailable group-local CPU without changing affinity",
+              &failures);
+        check(nt_GetThreadGroupAffinity(nt_GetCurrentThread(), &observed) &&
+              observed.group == next.group && observed.mask == next.mask,
+              "invalid legacy group-local mask preserves real CPU placement",
+              &failures);
+    }
+
+    /* Legacy process affinity remains a separate group-0 limitation. */
     if (next.group > 0) {
         uintptr_t process = 0x5151u, system = 0x6161u;
         nt_SetLastError(0);
