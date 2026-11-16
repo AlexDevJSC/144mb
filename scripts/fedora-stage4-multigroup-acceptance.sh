@@ -50,6 +50,14 @@ with open(path, "w", encoding="utf-8") as result:
     result.write("GROUP_IDS=" + ",".join(map(str, groups)) + "\n")
     result.write(f"CPUS_ALLOWED={','.join(map(str, allowed))}\n")
     result.write("KERNEL=" + platform.release() + "\n")
+    # These are host scheduler diagnostics, NOT a Windows NT quantum.
+    result.write(f"LINUX_NICE={os.getpriority(os.PRIO_PROCESS, 0)}\n")
+    result.write(f"LINUX_SCHED_POLICY={os.sched_getscheduler(0)}\n")
+    try:
+        interval = os.sched_rr_get_interval(0)
+        result.write(f"LINUX_RR_INTERVAL_SECONDS={interval:.9f}\n")
+    except OSError as exc:
+        result.write(f"LINUX_RR_INTERVAL_ERROR={exc.errno}\n")
     result.write("GIT_COMMIT=" + subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True).strip() + "\n")
     result.write("PHYSICAL_HARDWARE_VERIFIED=HEURISTIC_ONLY\n")
