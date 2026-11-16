@@ -2017,16 +2017,31 @@ nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
                         client_id->unique_process != (uintptr_t)getpid();
     if (remote && client_id->unique_process > UINT32_MAX)
         return NT_STATUS_INVALID_CID;
-    nt_status result = open_thread_local(handle, access,
+    uintptr_t opened = 0;
+    nt_status result = open_thread_local(&opened, access,
                              attributes != NULL && (attributes->attributes & 2u) != 0,
                              (uint32_t)client_id->unique_thread);
-    if (result == NT_STATUS_INVALID_CID)
-        result = open_thread_remote(handle, access,
+    if (result == NT_STATUS_SUCCESS && client_id->unique_process != 0) {
+        pthread_mutex_lock(&wait_lock);
+        struct waitable *opened_handle = find_waitable(opened);
+        const bool matches = opened_handle != NULL &&
+            wait_state(opened_handle)->owner_pid ==
+                (uint32_t)client_id->unique_process;
+        pthread_mutex_unlock(&wait_lock);
+        if (!matches) {
+            (void)nt_runtime_close_waitable_status(opened);
+            return NT_STATUS_NOT_SUPPORTED;
+        }
+    }
+    if (result == NT_STATUS_INVALID_CID && nt_broker_client_is_attached())
+        result = open_thread_remote(&opened, access,
                                    attributes != NULL && (attributes->attributes & 2u) != 0,
                                    (uint32_t)client_id->unique_thread,
                                    remote ? (uint32_t)client_id->unique_process : 0);
     if (remote && result == NT_STATUS_INVALID_CID)
         return NT_STATUS_NOT_SUPPORTED;
+    if (result == NT_STATUS_SUCCESS)
+        *handle = opened; /* preserve native output exactly on failure */
     return result;
 }
 
