@@ -2,6 +2,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "compat.h"
 #include "winfile.h"
+#include "nt_services.h"
+#include "ntnative/guest_thread.h"
 #include "file_share_cleanup.h"
 #include "sync.h"
 
@@ -335,6 +337,31 @@ static void check_crt(void)
     puts("PASS C locale, numeric overflow, isolated environment and callback order");
 }
 
+struct copy_progress_test {
+    int64_t expected, last;
+    uint32_t switches, chunks, action;
+};
+
+static uint32_t NT_MS_ABI test_copy_progress(int64_t total, int64_t bytes,
+                                             int64_t stream_total, int64_t stream_bytes,
+                                             uint32_t stream_number, uint32_t reason,
+                                             uintptr_t source, uintptr_t destination,
+                                             void *user_data)
+{
+    struct copy_progress_test *test = user_data;
+    CHECK(test != NULL && total == test->expected && stream_total == total &&
+          bytes == stream_bytes && bytes >= test->last && bytes <= total &&
+          source != UINTPTR_MAX && destination != UINTPTR_MAX && stream_number == 1u);
+    test->last = bytes;
+    if (reason == 1u)
+        ++test->switches;
+    else {
+        CHECK(reason == 0u);
+        ++test->chunks;
+    }
+    return test->action;
+}
+
 static void check_files(void)
 {
     BOUND(KERNEL, CreateDirectoryA);
@@ -345,6 +372,8 @@ static void check_files(void)
     BOUND(KERNEL, MoveFileW);
     BOUND(KERNEL, CopyFileA);
     BOUND(KERNEL, CopyFileW);
+    BOUND(KERNEL, CopyFileExA);
+    BOUND(KERNEL, CopyFileExW);
     BOUND(KERNEL, SetFileAttributesA);
     BOUND(KERNEL, SetFileAttributesW);
     BOUND(KERNEL, GetFinalPathNameByHandleW);
@@ -621,6 +650,52 @@ static void check_files(void)
 
     raw = nt_fopen("data/target.txt", "wb");
     CHECK(raw != NULL && nt_fclose(raw) == 0);
+    /* CopyFileEx reuses the regular native copy and preserves its xattrs.
+     * Verify Microsoft x64 callback arguments and Windows abort semantics. */
+    struct copy_progress_test progress = {.expected = 6};
+    CHECK(nt_CopyFileExA("data/scores.txt", "data/copyex.txt",
+                          test_copy_progress, &progress, NULL, 0) &&
+          progress.switches == 1 && progress.chunks == 1 && progress.last == 6);
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex.txt",
+                           NULL, NULL, NULL, 1u) &&
+          last_error() == NT_ERROR_FILE_EXISTS);
+    CHECK(nt_DeleteFileA("data/copyex.txt"));
+
+    progress = (struct copy_progress_test){.expected = 6, .action = 3};
+    CHECK(nt_CopyFileExA("data/scores.txt", "data/copyex-quiet.bin",
+                          test_copy_progress, &progress, NULL, 0) &&
+          progress.switches == 1 && progress.chunks == 0 &&
+          nt_DeleteFileA("data/copyex-quiet.bin"));
+
+    progress = (struct copy_progress_test){.expected = 6, .action = 1};
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex-cancel.bin",
+                           test_copy_progress, &progress, NULL, 0) &&
+          last_error() == NT_ERROR_REQUEST_ABORTED &&
+          nt_GetFileAttributesA("data/copyex-cancel.bin") == UINT32_MAX);
+
+    progress = (struct copy_progress_test){.expected = 6, .action = 2};
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex-stop.bin",
+                           test_copy_progress, &progress, NULL, 0) &&
+          last_error() == NT_ERROR_REQUEST_ABORTED);
+    const uintptr_t stopped = nt_CreateFileA("data/copyex-stop.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    int64_t stopped_size = -1;
+    CHECK(stopped != UINTPTR_MAX && nt_GetFileSizeEx(stopped, &stopped_size) &&
+          stopped_size == 0 && nt_CloseHandle(stopped) &&
+          nt_DeleteFileA("data/copyex-stop.bin"));
+
+    int32_t cancel_flag = 1;
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex-preabort.bin",
+                           NULL, NULL, &cancel_flag, 0) &&
+          last_error() == NT_ERROR_REQUEST_ABORTED &&
+          nt_GetFileAttributesA("data/copyex-preabort.bin") == UINT32_MAX);
+    CHECK(!nt_CopyFileExA("data/scores.txt", "data/copyex-badflag.bin",
+                           NULL, NULL, NULL, 2u) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
+    CHECK(nt_CopyFileExW(u"data/scores.txt", u"data/copyex-wide.bin",
+                          NULL, NULL, NULL, 1u) &&
+          nt_DeleteFileA("data/copyex-wide.bin"));
+
     /* Native copy does not invoke cp(1), create an alternate drive, or
      * duplicate files merely because the Windows caller changes case. */
     /* An open handle without delete sharing blocks the operation; an
@@ -1183,6 +1258,156 @@ static void check_files(void)
     puts("PASS scoped files, text and binary I/O, and denied paths");
 }
 
+
+/* Native NT device paths must use the exact same confined Linux roots and
+ * DELETE rights as their Win32 counterparts. No implicit mount discovery. */
+static void check_native_file_namespaces(void)
+{
+    char root[] = "/tmp/nt-native-namespaces.XXXXXX";
+    CHECK(mkdtemp(root) != NULL && nt_runtime_set_file_root(root) &&
+          nt_runtime_set_drive_root('D', root) &&
+          nt_runtime_set_unc_root("lab", "share", root));
+
+    uint16_t dos[] = u"\\??\\D:\\native-file.bin";
+    struct nt_guest_unicode_string name = {
+        .length = sizeof(dos) - sizeof(dos[0]),
+        .maximum_length = sizeof(dos), .buffer = dos
+    };
+    struct nt_object_attributes attrs = {
+        .size = sizeof(attrs), .name = &name, .attributes = 0x40u
+    };
+    struct nt_io_status_block io = {0};
+    uintptr_t handle = 0;
+    CHECK(nt_NtCreateFile(&handle, UINT32_C(0xc0000003), &attrs, &io,
+                          NULL, 0x80u, 7u, 2u, 0u, NULL, 0) == NT_STATUS_SUCCESS &&
+          handle != UINTPTR_MAX && io.information == 2u &&
+          nt_CloseHandle(handle));
+
+    uint16_t unc[] = u"\\??\\UNC\\lab\\share\\native-file.bin";
+    name = (struct nt_guest_unicode_string){
+        .length = sizeof(unc) - sizeof(unc[0]),
+        .maximum_length = sizeof(unc), .buffer = unc
+    };
+    CHECK(nt_NtOpenFile(&handle, UINT32_C(0x80000001), &attrs, &io,
+                        7u, 0u) == NT_STATUS_SUCCESS &&
+          handle != UINTPTR_MAX && nt_CloseHandle(handle));
+    CHECK(nt_DeleteFileA("D:\\native-file.bin"));
+
+    /* D: has the same inode-scoped pending registry as C:. Remapping the
+     * letter while the handle lives must NEVER delete an unrelated file. */
+    uintptr_t pending = nt_CreateFileA("D:\\pending.bin", UINT32_C(0xc0010000),
+                                     7u, NULL, 2u, 0x80u, 0);
+    CHECK(pending != UINTPTR_MAX);
+    const int32_t pending_removed = nt_DeleteFileA("D:\\pending.bin");
+    const uint32_t remove_error = last_error();
+    const uintptr_t pending_reopen = nt_CreateFileA("D:\\pending.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    const uint32_t reopen_error = last_error();
+    if (!pending_removed || pending_reopen != UINTPTR_MAX ||
+        reopen_error != NT_ERROR_ACCESS_DENIED)
+        fprintf(stderr, "D_PENDING_DIAG removed=%d remove_error=%u reopened=%llu reopen_error=%u\n",
+                pending_removed, remove_error, (unsigned long long)pending_reopen, reopen_error);
+    CHECK(pending_removed && pending_reopen == UINTPTR_MAX &&
+          reopen_error == NT_ERROR_ACCESS_DENIED);
+
+    char remapped_root[] = "/tmp/nt-native-remap.XXXXXX";
+    CHECK(mkdtemp(remapped_root) != NULL &&
+          nt_runtime_set_drive_root('D', remapped_root));
+    uintptr_t replacement = nt_CreateFileA("D:\\pending.bin",
+        UINT32_C(0xc0000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(replacement != UINTPTR_MAX && nt_CloseHandle(replacement) &&
+          nt_CloseHandle(pending) &&
+          nt_GetFileAttributesA("D:\\pending.bin") != UINT32_MAX);
+    CHECK(nt_runtime_set_drive_root('D', root));
+    CHECK(nt_CreateFileA("D:\\pending.bin", UINT32_C(0x80000000),
+                         7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED &&
+          nt_GetFileAttributesA("D:\\pending.bin") == UINT32_MAX);
+    CHECK(nt_runtime_set_drive_root('D', remapped_root) &&
+          nt_DeleteFileA("D:\\pending.bin") &&
+          nt_runtime_set_drive_root('D', root) &&
+          rmdir(remapped_root) == 0);
+
+    pending = nt_CreateFileA("\\\\lab\\share\\unc-pending.bin",
+                             UINT32_C(0xc0010000), 7u, NULL, 2u, 0x80u, 0);
+    const uint8_t mark_delete = 1;
+    CHECK(pending != UINTPTR_MAX &&
+          nt_SetFileInformationByHandle(pending, 4, &mark_delete, 1) &&
+          nt_CreateFileA("\\\\lab\\share\\unc-pending.bin",
+                         UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0) ==
+          UINTPTR_MAX && last_error() == NT_ERROR_ACCESS_DENIED &&
+          nt_CloseHandle(pending) &&
+          nt_GetFileAttributesA("\\\\lab\\share\\unc-pending.bin") == UINT32_MAX);
+
+
+    uint16_t c_file[] = u"\\??\\C:\\native-delete.bin";
+    name = (struct nt_guest_unicode_string){
+        .length = sizeof(c_file) - sizeof(c_file[0]),
+        .maximum_length = sizeof(c_file), .buffer = c_file
+    };
+    CHECK(nt_NtCreateFile(&handle, UINT32_C(0xc0000003), &attrs, &io,
+                          NULL, 0x80u, 7u, 2u, 0x1000u, NULL, 0) ==
+          NT_STATUS_ACCESS_DENIED);
+    CHECK(nt_NtCreateFile(&handle, UINT32_C(0xc0010003), &attrs, &io,
+                          NULL, 0x80u, 7u, 2u, 0x1000u, NULL, 0) == NT_STATUS_SUCCESS);
+    CHECK(nt_CreateFileA("C:\\native-delete.bin", UINT32_C(0x80000000),
+                         7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(nt_CloseHandle(handle) &&
+          nt_GetFileAttributesA("C:\\native-delete.bin") == UINT32_MAX);
+
+
+    /* A self-relative security descriptor exposes Linux owner/group/mode
+     * without claiming support for NTFS ACL writes or SACL privileges. */
+    BOUND("ADVAPI32.dll", GetFileSecurityA);
+    BOUND("ADVAPI32.dll", GetFileSecurityW);
+    uintptr_t secure_file = nt_CreateFileA("C:\\security-mode.bin",
+        UINT32_C(0xc0000000), 7u, NULL, 2u, 0x80u, 0);
+    CHECK(secure_file != UINTPTR_MAX && nt_CloseHandle(secure_file));
+    uint8_t sd[128] = {0};
+    uint32_t required = 0;
+    CHECK(!nt_GetFileSecurityW(u"C:\\security-mode.bin", 7u,
+                                NULL, 0u, &required) &&
+          last_error() == NT_ERROR_INSUFFICIENT_BUFFER && required == 128u);
+    CHECK(nt_GetFileSecurityA("C:\\security-mode.bin", 7u, sd, sizeof(sd),
+                               &required) && required == sizeof(sd) &&
+          sd[0] == 1u && sd[2] == 4u && sd[3] == 0x80u &&
+          sd[4] == 20u && sd[8] == 36u && sd[16] == 52u &&
+          sd[20] == 1u && sd[21] == 2u && sd[27] == 22u &&
+          sd[52] == 2u && sd[54] == 76u && sd[56] == 3u);
+    CHECK(!nt_GetFileSecurityW(u"C:\\security-mode.bin", 8u, sd,
+                                sizeof(sd), &required) &&
+          last_error() == NT_ERROR_ACCESS_DENIED);
+
+    CHECK(nt_runtime_resolve("ntdll.dll", "NtQuerySecurityObject") ==
+          (nt_guest_proc)nt_NtQuerySecurityObject);
+    CHECK(nt_runtime_resolve("ntdll.dll", "ZwQuerySecurityObject") ==
+          (nt_guest_proc)nt_NtQuerySecurityObject);
+    uintptr_t secure_handle = nt_CreateFileA("C:\\security-mode.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    CHECK(secure_handle != UINTPTR_MAX);
+    const uint32_t preserved = last_error();
+    required = 0;
+    CHECK(nt_NtQuerySecurityObject(secure_handle, 7u, NULL, 0u, &required) ==
+          (nt_status)UINT32_C(0xc0000023) && required == sizeof(sd) &&
+          last_error() == preserved);
+    memset(sd, 0, sizeof(sd));
+    CHECK(nt_NtQuerySecurityObject(secure_handle, 7u, sd, sizeof(sd), &required) ==
+          NT_STATUS_SUCCESS && required == sizeof(sd) &&
+          sd[0] == 1u && sd[4] == 20u && sd[16] == 52u &&
+          last_error() == preserved);
+    CHECK(nt_NtQuerySecurityObject(secure_handle, 8u, sd, sizeof(sd), &required) ==
+          NT_STATUS_ACCESS_DENIED && last_error() == preserved);
+    CHECK(nt_CloseHandle(secure_handle) &&
+          nt_DeleteFileA("C:\\security-mode.bin"));
+
+    CHECK(nt_runtime_set_unc_root("lab", "share", NULL) &&
+          nt_runtime_set_drive_root('D', NULL) &&
+          nt_runtime_set_file_root(NULL) &&
+          nt_test_cleanup_share_registry(root) && rmdir(root) == 0);
+    puts("PASS native NtCreateFile DOS/UNC namespaces and DELETE_ON_CLOSE");
+}
+
 static void *make_thread_context(void *output)
 {
     *(uintptr_t *)output = nt_CreateCompatibleDC(0);
@@ -1382,6 +1607,7 @@ int main(void)
     check_unicode_and_rects();
     check_crt();
     check_files();
+    check_native_file_namespaces();
     check_gdi();
     check_menus();
     check_messages();

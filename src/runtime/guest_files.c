@@ -13,6 +13,7 @@
 #include <unicode/utf8.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <sys/mman.h>
@@ -1192,15 +1193,36 @@ static bool set_share_pending(int gate, const struct stat *file, const char *pat
         errno = EACCES;
         return false;
     }
-    if (!private_c_path(path) || strlen(path) >= sizeof(record.path)) {
+    if (!path || strlen(path) >= sizeof(record.path)) {
         errno = EINVAL;
+        return false;
+    }
+    /* Persist an authorized root's physical identity, not the DOS letter
+     * or UNC alias. An unrelated process may map D: to another directory.
+     * A pending file can only be unlinked using an equal (dev,ino) root. */
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0)
+        return false;
+    struct stat root_info;
+    const int stat_result = fstat(root, &root_info);
+    const int stat_error = errno;
+    close(root);
+    if (stat_result < 0) {
+        errno = stat_error;
         return false;
     }
     memset(&record, 0, sizeof(record));
     record.magic = SHARE_PENDING_MAGIC;
     record.dev = (uint64_t)file->st_dev;
     record.ino = (uint64_t)file->st_ino;
-    memcpy(record.path, path, strlen(path) + 1);
+    const int written_path = snprintf(record.path, sizeof(record.path),
+        "@ROOT:%jx:%jx|%s", (uintmax_t)root_info.st_dev,
+        (uintmax_t)root_info.st_ino, path);
+    if (written_path < 0 || (size_t)written_path >= sizeof(record.path)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
     /* Commit the fully written name and inode *before* marking pending.
      * A crash prior to the last four-byte write cannot expose an
      * incomplete path as an active disposition. */
@@ -1269,14 +1291,51 @@ static bool finalize_share_pending_locked(int gate,
 {
     if (!pending->pending)
         return true;
-    if (!private_c_path(pending->path)) {
+    const char *relative = pending->path;
+    uintmax_t root_device = 0, root_inode = 0;
+    bool volume_bound = false;
+    if (strncmp(relative, "@ROOT:", 6) == 0) {
+        /* Preserve old C: records while requiring all new records to bind
+         * to a stable host root identity before any unlink is attempted. */
+        const char *cursor = relative + 6;
+        char *end;
+        errno = 0;
+        root_device = strtoumax(cursor, &end, 16);
+        if (errno != 0 || end == cursor || *end != ':') {
+            errno = EIO;
+            return false;
+        }
+        cursor = end + 1;
+        errno = 0;
+        root_inode = strtoumax(cursor, &end, 16);
+        if (errno != 0 || end == cursor || *end != '|' || end[1] == '\0') {
+            errno = EIO;
+            return false;
+        }
+        relative = end + 1;
+        volume_bound = true;
+    } else if (!private_c_path(relative)) {
+        /* Legacy records may only contain old-style C: relative names. */
         errno = EIO;
         return false;
     }
-    const char *relative = pending->path;
     const int root = duplicate_root(&relative);
     if (root < 0)
         return false;
+    if (volume_bound) {
+        struct stat actual_root;
+        const int valid = fstat(root, &actual_root) == 0 &&
+            (uintmax_t)actual_root.st_dev == root_device &&
+            (uintmax_t)actual_root.st_ino == root_inode;
+        if (!valid) {
+            const int failure = errno;
+            close(root);
+            /* Alias changed or grant revoked: fail closed. Never delete a
+             * similarly named file through a different granted root. */
+            errno = failure == 0 ? EACCES : failure;
+            return false;
+        }
+    }
     char leaf[NAME_MAX + 1];
     int parent = open_parent(root, relative, leaf);
     const int opened_error = errno;
@@ -2760,9 +2819,9 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
  * destination must not be moved out of the guarded name. This uses the
  * same private registry but is not a transaction with external Linux
  * writers, which remain outside the NT guest's namespace protocol. */
-static int check_inode_not_pending(const struct stat *info, const char *path)
+static int check_inode_not_pending(const struct stat *info)
 {
-    if (!private_c_path(path) || !S_ISREG(info->st_mode))
+    if (!S_ISREG(info->st_mode))
         return 0;
     const int gate = open_share_registry(info);
     if (gate < 0)
@@ -2791,7 +2850,7 @@ static int check_inode_not_pending(const struct stat *info, const char *path)
 static int remove_file_or_defer(int parent, const char *leaf, const char *dos_path,
                                 const struct stat *target)
 {
-    if (!private_c_path(dos_path) || !S_ISREG(target->st_mode))
+    if (!S_ISREG(target->st_mode))
         return unlinkat(parent, leaf, 0);
     int gate = open_share_registry(target);
     if (gate < 0)
@@ -3079,7 +3138,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         } else if (file_blocks_delete(&info)) {
             errno = EBUSY;
             status = -1;
-        } else if (check_inode_not_pending(&info, source) != 0) {
+        } else if (check_inode_not_pending(&info) != 0) {
             status = -1;
         } else {
             struct stat target;
@@ -3092,7 +3151,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
                 errno = EBUSY;
                 status = -1;
             } else if (exists == 0 && (flags & 1u) != 0 &&
-                       check_inode_not_pending(&target, destination) != 0) {
+                       check_inode_not_pending(&target) != 0) {
                 status = -1;
             } else if (exists < 0 && errno != ENOENT) {
                 status = -1;
@@ -3662,36 +3721,61 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
     if (attributes->size != sizeof(*attributes) || disposition >= sizeof(win_dispositions) / sizeof(*win_dispositions) ||
         (name->length & 1u) || name->length > name->maximum_length || length >= PATH_MAX)
         return NT_STATUS_INVALID_PARAMETER;
-    const uint32_t supported_access = UINT32_C(0xc0100003);
+    /* Keep the explicitly supported access and create-option subset narrow.
+     * In particular do not pretend READ_CONTROL/WRITE_DAC or reparse support. */
+    const uint32_t supported_access = UINT32_C(0xc0110003);
+    const uint32_t supported_options = UINT32_C(0x00001060);
     if (!disposition || attributes->root || attributes->security || attributes->qos ||
         (attributes->attributes & ~0x42u) || (allocation && *allocation) || ea || ea_length ||
-        (access & ~supported_access) || (options & ~0x60u) || (share & ~7u) ||
+        (access & ~supported_access) || (options & ~supported_options) || (share & ~7u) ||
         (file_attributes & ~FILE_ATTRIBUTE_NORMAL))
         return NT_STATUS_NOT_SUPPORTED;
     if ((options & 0x20u) && !(access & 0x100000u))
         return NT_STATUS_INVALID_PARAMETER;
+    if ((options & 0x1000u) && !(access & 0x10000u))
+        return NT_STATUS_ACCESS_DENIED;
 
+    /* Accept explicit DOS device paths \??\C:\..., \??\D:\... etc. and
+     * \??\UNC\server\share\... . Both are routed through the ordinary
+     * descriptor-backed Win32 resolver: ungranted volumes stay inaccessible. */
     static const uint16_t prefix[] = {'\\', '?', '?', '\\'};
-    if (length < 7 || memcmp(name->buffer, prefix, sizeof(prefix)) ||
-        (name->buffer[4] != 'C' && name->buffer[4] != 'c') ||
-        name->buffer[5] != ':' || name->buffer[6] != '\\')
+    if (length < 7 || memcmp(name->buffer, prefix, sizeof(prefix)))
         return (nt_status)UINT32_C(0xc000003b); /* STATUS_OBJECT_PATH_SYNTAX_BAD */
+    const uint16_t *text = name->buffer;
+    const bool dos = (text[4] >= 'C' && text[4] <= 'Z') ||
+                     (text[4] >= 'c' && text[4] <= 'z');
+    const bool unc = length >= 8 &&
+        (text[4] == 'U' || text[4] == 'u') &&
+        (text[5] == 'N' || text[5] == 'n') &&
+        (text[6] == 'C' || text[6] == 'c') && text[7] == '\\';
+    if ((!dos || text[5] != ':' || text[6] != '\\') && !unc)
+        return (nt_status)UINT32_C(0xc000003b);
     uint16_t path[PATH_MAX];
-    for (size_t i = 4; i < length; ++i) {
-        if (!name->buffer[i])
-            return NT_STATUS_INVALID_PARAMETER;
-        path[i - 4] = name->buffer[i];
+    size_t used = 0, first = 4;
+    if (unc) {
+        path[used++] = '\\';
+        path[used++] = '\\';
+        first = 8;
     }
-    path[length - 4] = 0;
+    for (size_t i = first; i < length; ++i) {
+        if (!text[i])
+            return NT_STATUS_INVALID_PARAMETER;
+        path[used++] = text[i];
+    }
+    path[used] = 0;
     uint32_t desired = access & UINT32_C(0xc0000000);
     if (access & 1u)
         desired |= UINT32_C(0x80000000);
     if (access & 2u)
         desired |= UINT32_C(0x40000000);
+    if (access & 0x10000u)
+        desired |= UINT32_C(0x10000);
+    const uint32_t win_flags = file_attributes |
+        ((options & 0x1000u) ? FILE_FLAG_DELETE_ON_CLOSE : 0u);
     const struct security_attributes security = {sizeof(security), NULL, (attributes->attributes & 2u) != 0};
     const uint32_t saved = nt_GetLastError();
     const uintptr_t result = nt_CreateFileW(path, desired, share, &security,
-                                            win_dispositions[disposition], file_attributes, 0);
+                                            win_dispositions[disposition], win_flags, 0);
     const uint32_t error = nt_GetLastError();
     nt_SetLastError(saved);
     if (result == UINTPTR_MAX)
@@ -3928,6 +4012,211 @@ uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size,
         *leaf = slash ? slash + 1 : NULL;
     }
     return (uint32_t)required - 1;
+}
+
+/* Forward declaration: HANDLE duplication is implemented below. */
+static int duplicate_handle(uintptr_t handle, unsigned int access);
+
+/* Read-only NT SECURITY_DESCRIPTOR_RELATIVE derived from the Linux owner,
+ * group and mode bits. Synthetic S-1-22-{1,2} Unix IDs are documented;
+ * this is NOT an NTFS access-control engine or an ACL setter. */
+static void security_le16(uint8_t *p, uint16_t value)
+{
+    p[0] = (uint8_t)value;
+    p[1] = (uint8_t)(value >> 8);
+}
+
+static void security_le32(uint8_t *p, uint32_t value)
+{
+    for (int i = 0; i != 4; ++i)
+        p[i] = (uint8_t)(value >> (8 * i));
+}
+
+static size_t security_sid(uint8_t *p, uint8_t authority, uint32_t kind, uint32_t identity)
+{
+    memset(p, 0, kind ? 16u : 12u);
+    p[0] = 1; /* SID_REVISION */
+    p[1] = kind ? 2u : 1u;
+    p[7] = authority;
+    if (kind) {
+        security_le32(p + 8, kind);
+        security_le32(p + 12, identity);
+        return 16;
+    }
+    security_le32(p + 8, identity);
+    return 12;
+}
+
+static uint32_t security_rights(mode_t bits)
+{
+    uint32_t rights = 0;
+    if (bits & 4u)
+        rights |= 0x00000081u; /* FILE_READ_DATA | FILE_READ_ATTRIBUTES */
+    if (bits & 2u)
+        rights |= 0x00000106u; /* FILE_WRITE_DATA | FILE_APPEND_DATA | WRITE_ATTRIBUTES */
+    if (bits & 1u)
+        rights |= 0x00000020u; /* FILE_EXECUTE / FILE_TRAVERSE */
+    return rights;
+}
+
+static size_t security_allow_ace(uint8_t *p, uint32_t mask,
+                                 uint8_t authority, uint32_t kind, uint32_t identity)
+{
+    const size_t sid_length = kind ? 16u : 12u;
+    p[0] = 0; /* ACCESS_ALLOWED_ACE_TYPE */
+    p[1] = 0;
+    security_le16(p + 2, (uint16_t)(8u + sid_length));
+    security_le32(p + 4, mask);
+    (void)security_sid(p + 8, authority, kind, identity);
+    return 8u + sid_length;
+}
+
+static int32_t security_descriptor_from_fd(int fd, uint32_t information,
+                                         void *descriptor, uint32_t size, uint32_t *needed)
+{
+    if (needed == NULL || information == 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if ((information & ~7u) != 0) {
+        /* SACL requests need an explicit privilege model which this
+         * user-space adapter cannot currently claim to implement. */
+        nt_SetLastError((information & 8u) ? NT_ERROR_ACCESS_DENIED :
+                        NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+
+    struct stat st;
+    const int status = fstat(fd, &st);
+    const int stat_error = errno;
+    if (status == 0 && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))) {
+        /* POSIX extended ACLs are not representable by the three mode
+         * ACEs below. Detect them through the already-authorized FD and
+         * fail closed rather than fabricate an incomplete NT DACL. */
+        char proc_fd[64];
+        const int name_len = snprintf(proc_fd, sizeof(proc_fd),
+                                      "/proc/self/fd/%d", fd);
+        uint8_t probe;
+        ssize_t acl = -1;
+        int acl_error = ENAMETOOLONG;
+        if (name_len > 0 && (size_t)name_len < sizeof(proc_fd)) {
+            acl = getxattr(proc_fd, "system.posix_acl_access", &probe, 1);
+            acl_error = errno;
+        }
+        if (acl >= 0 || acl_error == ERANGE ||
+            (acl_error != ENODATA && acl_error != ENOTSUP &&
+             acl_error != EOPNOTSUPP)) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+    }
+    if (status < 0 || (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
+        nt_SetLastError(status < 0 ? path_error(stat_error, false) :
+                        NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    const uint32_t total = 20u + ((information & 1u) ? 16u : 0u) +
+        ((information & 2u) ? 16u : 0u) + ((information & 4u) ? 76u : 0u);
+    *needed = total;
+    if (!descriptor || size < total) {
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    uint8_t bytes[128] = {0};
+    bytes[0] = 1; /* SECURITY_DESCRIPTOR_REVISION */
+    security_le16(bytes + 2, UINT16_C(0x8000) |
+                  ((information & 4u) ? UINT16_C(0x0004) : 0u));
+    size_t offset = 20u;
+    if (information & 1u) {
+        security_le32(bytes + 4, (uint32_t)offset);
+        offset += security_sid(bytes + offset, 22u, 1u, (uint32_t)st.st_uid);
+    }
+    if (information & 2u) {
+        security_le32(bytes + 8, (uint32_t)offset);
+        offset += security_sid(bytes + offset, 22u, 2u, (uint32_t)st.st_gid);
+    }
+    if (information & 4u) {
+        security_le32(bytes + 16, (uint32_t)offset);
+        bytes[offset] = 2; /* ACL_REVISION */
+        security_le16(bytes + offset + 2, 76u);
+        security_le16(bytes + offset + 4, 3u);
+        offset += 8u;
+        offset += security_allow_ace(bytes + offset,
+            security_rights((st.st_mode >> 6) & 7u), 22u, 1u, (uint32_t)st.st_uid);
+        offset += security_allow_ace(bytes + offset,
+            security_rights((st.st_mode >> 3) & 7u), 22u, 2u, (uint32_t)st.st_gid);
+        offset += security_allow_ace(bytes + offset,
+            security_rights(st.st_mode & 7u), 1u, 0u, 0u); /* Everyone S-1-1-0 */
+    }
+    if (offset != total) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    memcpy(descriptor, bytes, total);
+    return 1;
+}
+
+int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information,
+                                      void *descriptor, uint32_t size, uint32_t *needed)
+{
+    char narrow[PATH_MAX], path[PATH_MAX];
+    if (!wide_path(name, narrow))
+        return 0;
+    if (!normalize_path(narrow, path, true)) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const char *relative = path;
+    const int root = duplicate_root(&relative);
+    if (root < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    const int fd = confined_open(root, *relative ? relative : ".", O_PATH | O_NOFOLLOW, 0);
+    const int opened_error = errno;
+    close(root);
+    if (fd < 0) {
+        nt_SetLastError(path_error(opened_error, false));
+        return 0;
+    }
+    const int32_t success = security_descriptor_from_fd(
+        fd, information, descriptor, size, needed);
+    close(fd);
+    return success;
+}
+
+nt_status NT_MS_ABI nt_NtQuerySecurityObject(uintptr_t handle, uint32_t information,
+                                              void *descriptor, uint32_t length,
+                                              uint32_t *needed)
+{
+    if (!needed)
+        return NT_STATUS_ACCESS_VIOLATION;
+    const int fd = duplicate_handle(handle, FILE_READ);
+    if (fd < 0)
+        return nt_file_error(path_error(errno, false));
+
+    /* Native NT status and Win32 LastError remain independent. This narrow
+     * read-only projection requires FILE_READ until READ_CONTROL exists. */
+    const uint32_t previous = nt_GetLastError();
+    const int32_t result = security_descriptor_from_fd(fd, information,
+                                                        descriptor, length, needed);
+    const uint32_t error = nt_GetLastError();
+    close(fd);
+    nt_SetLastError(previous);
+    if (result)
+        return NT_STATUS_SUCCESS;
+    if (error == NT_ERROR_INSUFFICIENT_BUFFER)
+        return (nt_status)UINT32_C(0xc0000023); /* STATUS_BUFFER_TOO_SMALL */
+    return nt_file_error(error);
+}
+
+int32_t NT_MS_ABI nt_GetFileSecurityA(const char *path, uint32_t information,
+                                      void *descriptor, uint32_t size, uint32_t *needed)
+{
+    uint16_t wide[PATH_MAX];
+    return utf8_guest_to_wide(path, wide) &&
+           nt_GetFileSecurityW(wide, information, descriptor, size, needed);
 }
 
 uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path)
@@ -4649,8 +4938,42 @@ int32_t NT_MS_ABI nt_UnlockFileEx(uintptr_t handle, uint32_t reserved,
  * as CreateFile. In particular, OPEN_ALWAYS does not truncate until
  * both descriptors are safely opened and the source/destination inodes
  * have been checked for identity. */
-int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
-                              int32_t fail_if_exists)
+/* CopyFileEx shares exactly the same confined real-Linux file traversal as
+ * CopyFile. The callback is a Windows guest function (ms_abi) and must not
+ * run with file_lock held: it may invoke Win32 file APIs recursively. */
+static bool copy_progress(nt_copy_progress_routine routine, void *context,
+                          const int32_t *cancel, int64_t total, int64_t done,
+                          uintptr_t from, uintptr_t to, uint32_t reason,
+                          bool *quiet, bool *leave_partial, uint32_t *error)
+{
+    if (cancel && *cancel) {
+        *error = NT_ERROR_REQUEST_ABORTED;
+        return false;
+    }
+    if (!routine || *quiet)
+        return true;
+    const uint32_t action = routine(total, done, total, done, 1, reason, from, to, context);
+    if (cancel && *cancel) {
+        *error = NT_ERROR_REQUEST_ABORTED;
+        return false;
+    }
+    if (action == 0)
+        return true; /* PROGRESS_CONTINUE */
+    if (action == 3) {
+        *quiet = true;
+        return true; /* PROGRESS_QUIET */
+    }
+    if (action == 2)
+        *leave_partial = true; /* PROGRESS_STOP keeps partial output. */
+    *error = action == 1 || action == 2 ? NT_ERROR_REQUEST_ABORTED :
+             NT_ERROR_INVALID_PARAMETER;
+    return false;
+}
+
+static int32_t copy_file_common(const char *source, const char *destination,
+                                int32_t fail_if_exists,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel)
 {
     const uint32_t generic_read = UINT32_C(0x80000000);
     const uint32_t generic_write = UINT32_C(0x40000000);
@@ -4696,6 +5019,7 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
 
     uint32_t error = NT_ERROR_SUCCESS;
     int32_t success = 0;
+    bool quiet = false, leave_partial = false;
     unsigned char *buffer = NULL;
     if (identical) {
         error = NT_ERROR_ACCESS_DENIED;
@@ -4705,8 +5029,14 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
         error = nt_GetLastError();
     } else {
         bool finished = false;
-        for (;;) {
-            uint32_t received = 0;
+        int64_t transferred = 0;
+        /* First switch to the one regular-file data stream. Subsequent
+         * progress events report committed bytes after each write chunk. */
+        if (copy_progress(progress, context, cancel, source_info.st_size,
+                          transferred, from, to, 1u, &quiet,
+                          &leave_partial, &error)) {
+            for (;;) {
+                uint32_t received = 0;
             if (!nt_ReadFile(from, buffer, 64u * 1024u, &received, NULL)) {
                 error = nt_GetLastError();
                 break;
@@ -4728,10 +5058,16 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
                 }
                 position += written;
             }
-            if (error != NT_ERROR_SUCCESS)
-                break;
+                if (error != NT_ERROR_SUCCESS)
+                    break;
+                transferred += received;
+                if (!copy_progress(progress, context, cancel, source_info.st_size,
+                                   transferred, from, to, 0u, &quiet,
+                                   &leave_partial, &error))
+                    break;
+            }
         }
-        if (finished) {
+        if (finished && error == NT_ERROR_SUCCESS) {
             const int output_fd = duplicate_handle(to, FILE_WRITE);
             if (output_fd < 0) {
                 error = path_error(errno, false);
@@ -4771,11 +5107,45 @@ int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
     }
     if (!success) {
         /* A newly created partial destination is not a valid copy. */
-        if (created)
+        if (created && !leave_partial)
             nt_DeleteFileA(destination);
         nt_SetLastError(error);
     }
     return success;
+}
+
+int32_t NT_MS_ABI nt_CopyFileA(const char *source, const char *destination,
+                               int32_t fail_if_exists)
+{
+    return copy_file_common(source, destination, fail_if_exists,
+                            NULL, NULL, NULL);
+}
+
+int32_t NT_MS_ABI nt_CopyFileExA(const char *source, const char *destination,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel, uint32_t flags)
+{
+    /* COPY_FILE_FAIL_IF_EXISTS is implemented; all other flags have
+     * different NT semantics and must not be silently ignored. */
+    if ((flags & ~1u) != 0) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (cancel && *cancel) {
+        nt_SetLastError(NT_ERROR_REQUEST_ABORTED);
+        return 0;
+    }
+    return copy_file_common(source, destination, (flags & 1u) != 0,
+                            progress, context, cancel);
+}
+
+int32_t NT_MS_ABI nt_CopyFileExW(const uint16_t *source, const uint16_t *destination,
+                                nt_copy_progress_routine progress, void *context,
+                                const int32_t *cancel, uint32_t flags)
+{
+    char from[PATH_MAX], to[PATH_MAX];
+    return wide_path(source, from) && wide_path(destination, to) &&
+           nt_CopyFileExA(from, to, progress, context, cancel, flags);
 }
 
 /* Native NTDLL file operations use the same guest HANDLE table and the
@@ -5670,8 +6040,7 @@ static int32_t set_file_disposition(uintptr_t handle, bool deleting)
     struct guest_file *file = find_handle(handle);
     int error = file == NULL ? EBADF :
                 (file->access & FILE_DELETE) == 0 ? EACCES : 0;
-    if (error == 0 && (!private_c_path(file->path) ||
-                       file->share_lease_fd <= 0))
+    if (error == 0 && (file->path == NULL || file->share_lease_fd <= 0))
         error = ENOTSUP;
     struct stat file_info;
     if (error == 0 && fstat(file->fd, &file_info) != 0)

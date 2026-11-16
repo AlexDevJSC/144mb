@@ -478,7 +478,7 @@ liberación tras el cierre y una prueba entre procesos reales.
 permisos de lectura/escritura sobre él; los programas Linux externos
 que ignoran este protocolo siguen siendo libres de actuar sobre
 sus propios archivos. No es un servicio del kernel, ni un gestor
-de ACL NTFS. **Delete-pending cooperativo en C:.** Se añade un registro de estado
+de ACL NTFS. **Delete-pending cooperativo en raíces autorizadas C:, D:–Z: y UNC.** Se añade un registro de estado
 por inodo que se serializa con el mismo bloqueo `flock` y los mismos
 leases OFD de `FILE_SHARE_*`. Cuando `DeleteFileA/W` encuentra al
 menos un HANDLE activo que permite compartir borrado, marca el nombre
@@ -505,11 +505,13 @@ la disposición pendiente al abrir el archivo y la finaliza al último cierre.
 una marca pendiente, y un acceso posterior del puente intenta
 finalizarla tras verificar que no queden leases.
 
-**Límites conocidos:** la política diferida de esta vuelta se aplica
-solamente al perfil `C:` compartido entre procesos NT: las letras
-D:–Z: y los alias UNC pueden identificar distintas carpetas Linux en
-procesos diferentes y no se pueden reconstruir de forma segura desde
-un alias ajeno. En ellos sigue vigente el borrado inmediato previo.
+**Límites conocidos:** la política de borrado diferido se extiende
+a archivos regulares bajo C:, D:–Z: y alias UNC locales concedidos.
+Cada marca nueva registra la identidad física de la raíz autorizada
+para evitar que una asignación distinta de la letra o del recurso UNC
+pueda borrar un archivo sustituto. Si la raíz original deja de estar
+concedida, la marca puede quedar pendiente hasta restablecerla;
+no hay resolución global independiente de las concesiones.
 Tampoco existe atomicidad con editores Linux que no utilizan este
 protocolo, ni cobertura completa para todos los tipos de objeto,
 enlaces múltiples o modificaciones externas de las concesiones.
@@ -518,6 +520,99 @@ inodo nuevo: la operación falla conservadoramente o descarta la
 marca tras verificar la identidad. No son ACL NTFS. No impide una
 modificación host deliberada del registro por el mismo usuario.
 Reparse points, SMB real, 8.3 y otras semánticas avanzadas de IOCP permanecen pendientes.
+
+## Copias con progreso y cancelación Win32 (CopyFileExA/W)
+
+`CopyFileExA` y `CopyFileExW` comparten el mismo motor nativo,
+descriptores, control de compartición, copia de atributos y confinamiento
+`openat2` que `CopyFileA/W`. No ejecutan `cp`, no conceden rutas
+Linux adicionales ni crean una segunda copia temporal de los datos.
+
+El perfil implementado admite `COPY_FILE_FAIL_IF_EXISTS` (0x1),
+un `LPPROGRESS_ROUTINE` con ABI Microsoft x64 y los cuatro resultados
+`PROGRESS_CONTINUE`, `PROGRESS_CANCEL`, `PROGRESS_STOP` y
+`PROGRESS_QUIET`. El callback recibe el tamaño total de archivo,
+total transferido, tamaño/avance del único flujo regular, número de
+flujo 1, `CALLBACK_STREAM_SWITCH` al comenzar y
+`CALLBACK_CHUNK_FINISHED` tras cada bloque (64 KiB).
+No se invoca con `file_lock` retenido; puede consultar handles
+o realizar otras llamadas Win32. Se admite también la señal
+`pbCancel` antes de abrir el archivo y durante la transferencia.
+
+El callback `CANCEL` o `pbCancel` distinto de cero devuelven
+`ERROR_REQUEST_ABORTED`; cuando el destino fue creado por esta
+operación, se elimina la copia parcial. `STOP` devuelve el mismo
+error pero **conserva el destino parcial** a petición del callback.
+`QUIET` suprime avisos posteriores y completa la copia normalmente.
+Los flags distintos de 0/1 se rechazan con `ERROR_NOT_SUPPORTED`
+en lugar de afirmar semánticas no implementadas.
+
+Se comprueban callbacks de ABI x64, conteo y motivo del progreso,
+W/A, `FAIL_IF_EXISTS`, silenciamiento, cancelación temprana y
+persistencia o eliminación del destino según STOP/CANCEL. Esta
+ampliación no hace transaccional la sustitución de un destino
+preexistente: si el destino existía y un fallo ocurre tras truncarlo,
+puede quedar parcialmente modificado. Tampoco admite flujos
+alternativos NTFS, `COPY_FILE_RESTARTABLE`, copia de symlinks,
+descompresión/cifrado ni semántica completa de oplocks.
+
+## NtCreateFile/NtOpenFile y delete-pending por identidad física (Filesystem2)
+
+El perfil acotado de NtCreateFile/NtOpenFile acepta nombres de dispositivo
+\??\C:\, \??\D:\ ... \??\Z:\ y \??\UNC\server\share\filename.
+Los nombres se traducen por el mismo resolvedor seguro y las mismas
+concesiones explícitas que CreateFileW; no se descubre ni monta ningún
+servidor o disco por el hecho de nombrarlo. Los argumentos NT siguen
+rechazando RootDirectory, EA, SecurityDescriptor, QoS y opciones ajenas
+al subconjunto implementado. Se admite acceso DELETE explícito y la
+opción FILE_DELETE_ON_CLOSE cuando se ha solicitado ese derecho; no
+debe confundirse con una implementación de READ_CONTROL/WRITE_DAC.
+
+Los nuevos registros delete-pending guardan el dispositivo e inodo de la
+raíz Linux autorizada, además de la identidad del archivo y su ruta
+normalizada. Esto permite preparar el borrado diferido sobre archivos
+regulares en C:, unidades D:–Z: y alias UNC locales explícitamente
+concedidos, compartiendo el registro OFD entre procesos cooperantes.
+El borrado final solo opera si la concesión actual vuelve a identificar
+exactamente el directorio físico original y el nombre sigue apuntando al
+mismo inodo de archivo. Los registros legados de C: permanecen legibles.
+
+**Límite importante:** la identidad física segura evita borrar un archivo
+distinto al cambiar una asignación, pero NO garantiza la recogida automática
+de una marca pendiente si todos los procesos perdieron la concesión original.
+En ese caso el puente falla conservadoramente y puede quedar una marca
+pendiente huérfana hasta que se vuelva a autorizar la raíz correcta y un
+acceso cooperante ejecute la recuperación. No hay broker global, semántica
+completa de vínculos duros ni coordinación con procesos Linux que ignoren
+los bloqueos advisory. No se debe declarar esto equivalente a NTFS ni
+aprobar en Fedora físico sin pruebas de cambio de raíz, caída y recuperación.
+
+## Seguridad: lectura limitada de descriptores NT a partir de permisos Linux
+
+`GetFileSecurityA/W` se exporta desde ADVAPI32 y `NtQuerySecurityObject`/`ZwQuerySecurityObject` desde NTDLL con un contrato
+**solo de lectura** para OWNER_SECURITY_INFORMATION (1),
+GROUP_SECURITY_INFORMATION (2) y DACL_SECURITY_INFORMATION (4). Se forma
+un SECURITY_DESCRIPTOR_RELATIVE v1 de endian little, con SIDs sintéticos
+`S-1-22-1-UID` (usuario Linux) y `S-1-22-2-GID` (grupo Linux).
+La DACL básica incluye ACE de permitido para propietario, grupo y
+Everyone, con máscaras derivadas únicamente de los bits rwx del modo.
+`GetFileSecurity` comprueba acceso a la ruta mediante descriptores
+confinados por openat2; no usa rutas Linux arbitrarias ni omite SELinux.
+Solicitar SACL falla con ACCESS_DENIED. Si se detecta una ACL POSIX
+extendida, se informa NOT_SUPPORTED en lugar de inventar una DACL
+incompleta.
+
+**No equivale a una ACL NTFS:** todavía no se implementan cambios
+SetFileSecurity, READ_CONTROL, WRITE_DAC/WRITE_OWNER, ACE de denegación,
+herencia, auditoría, privilegios NT, seguridad del registro ni traducción
+bidireccional de identidades y pertenencia a grupos. El permiso efectivo
+continúa siendo el de Linux/SELinux. Los SIDs son identificadores
+sintéticos documentados, no identidades Windows reales.
+La consulta nativa por HANDLE requiere actualmente el derecho FILE_READ
+porque READ_CONTROL todavía no está modelado; respeta NTSTATUS y no altera
+GetLastError. La consulta devuelve STATUS_BUFFER_TOO_SMALL si corresponde. La seguridad
+avanzada requiere un contrato propio, pruebas con descriptores hostiles
+y aceptación en Fedora antes de ampliarse.
 
 ## Límites actuales
 
@@ -551,15 +646,17 @@ concedida (o sus ancestros) se rechaza con un error de compartición,
 igual que su cambio de nombre, para no dejar una ruta DOS inválida;
 existe una regresión que comprueba el directorio de trabajo vacío.
 La comprobación del nombre y el borrado siguen sin ser atómicos frente
-a modificaciones concurrentes de otro proceso Linux. La marca `delete-pending` ya impide reaperturas en el perfil C:
-entre procesos NT cooperantes y difiere la eliminación hasta el último
-cierre. Los demás volúmenes, los programas externos Linux y las
-transiciones NT más avanzadas siguen limitados por lo documentado
-en el apartado del registro de compartición.
+a modificaciones concurrentes de otro proceso Linux. La marca `delete-pending` impide reaperturas entre procesos NT
+cooperantes en C:, D:–Z: y UNC local autorizado, y difiere la
+eliminación hasta el último cierre cuando la identidad de la raíz
+original puede verificarse. Las modificaciones por programas Linux
+externos y las transiciones NT más avanzadas siguen limitadas por lo
+documentado en el apartado del registro de compartición.
 
 Siguen pendientes la **implementación completa** de junctions/reparse
 points, conexiones UNC/SMB de red reales, coordinación de `FILE_SHARE_*`
-fuera de procesos NT cooperantes y `delete-pending` de NT fuera del perfil C:,
+fuera de procesos NT cooperantes y recuperación automática de marcas
+`delete-pending` cuando se pierde o se reasigna el volumen autorizado,
 E/S NT/APC/IOCP completa, cancelación de operaciones ya iniciadas, ACL
 NTFS y otras funciones avanzadas. La persistencia de las concesiones de
 unidades y recursos UNC y los directorios actuales por unidad sí están

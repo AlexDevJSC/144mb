@@ -48,6 +48,8 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
 nt_status NT_MS_ABI nt_NtOpenFile(uintptr_t *handle, uint32_t access,
     const struct nt_object_attributes *attributes, struct nt_io_status_block *io,
     uint32_t share, uint32_t options);
+nt_status NT_MS_ABI nt_NtQuerySecurityObject(uintptr_t handle, uint32_t information,
+    void *descriptor, uint32_t length, uint32_t *needed);
 
 /* Synchronous file I/O for handles held by the shared Win32 file table.
  * These are the native NT argument layouts, with unsupported asynchronous

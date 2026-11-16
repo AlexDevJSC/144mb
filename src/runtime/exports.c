@@ -263,6 +263,7 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(Close),
     NT_EXPORT(CreateFile),
     NT_EXPORT(OpenFile),
+    NT_EXPORT(QuerySecurityObject),
     NT_EXPORT(ReadFile),
     NT_EXPORT(WriteFile),
     NT_EXPORT(QueryInformationFile),
@@ -337,6 +338,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(CreateDirectoryA),
     WIN_EXPORT(CreateFileA),
     WIN_EXPORT(CopyFileA),
+    WIN_EXPORT(CopyFileExA),
     WIN_EXPORT(MoveFileA),
     WIN_EXPORT(SetCurrentDirectoryA),
     WIN_EXPORT(DeleteFileA),
@@ -416,6 +418,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(CreateFile2),
     WIN_EXPORT(CreateFileW),
     WIN_EXPORT(CopyFileW),
+    WIN_EXPORT(CopyFileExW),
     WIN_EXPORT(MoveFileW),
     WIN_EXPORT(CreateThread),
     WIN_EXPORT(CreateRemoteThread),
@@ -764,6 +767,8 @@ static const struct runtime_export imm32_exports[] = {
 };
 
 static const struct runtime_export advapi32_exports[] = {
+    WIN_EXPORT(GetFileSecurityA),
+    WIN_EXPORT(GetFileSecurityW),
     WIN_EXPORT(RegOpenKeyExW),
     WIN_EXPORT(RegQueryValueExW),
     WIN_EXPORT(RegCloseKey)
