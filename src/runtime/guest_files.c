@@ -5799,6 +5799,9 @@ int32_t NT_MS_ABI nt_CreateSymbolicLinkW(const uint16_t *link_name,
     /* Link targets must already be regular files, pinned through the
      * non-following, same-mount resolver. No Linux absolute symlink
      * target or cross-volume permission can be introduced. */
+    for (char *p = target; *p; ++p)
+        if (*p == '\\')
+            *p = '/';
     const int target_fd = confined_open(parent, target, O_PATH, 0);
     const int target_error = errno;
     struct stat target_stat;
