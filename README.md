@@ -128,6 +128,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | [Broker NT entre procesos](docs/nt-object-broker.md) | IPC Unix con nombres compartidos, memfd, eventos, semáforos, referencias y pruebas con procesos independientes |
 | [Prueba del componente 4 en Fedora físico](scripts/fedora-check-stage4.sh) | Puerta de aceptación que rechaza los tests aislados omitidos y conserva los límites de compatibilidad |
 | [Informe NT144 QA Fedora 45 (16-11-2026)](docs/fedora45-nt144qa-validation-2026-11-16.md) | Tres ejecuciones reportadas, matriz por componente, bloqueo reproducible de `KERNEL32.dll!lstrcmpW` y criterios de aceptación para colaboradores |
+| [Remediación Fedora 45](docs/fedora45-qa-remediation-2026-11-16.md) | Cambios reproducibles por prioridad, CLI de preflight/aceptación estricta y límites de pruebas físicas |
 | [Mediación de alias DOS 8.3](docs/dos83-mediation.md) | Renombrados cooperantes, reconciliación Linux/inotify, comandos y límites |
 | [P2.3: FUSE3 + Landlock](docs/dos83-p2-3-fuse.md) | Vista POSIX mediada antes de renombrados, aislamiento de escritura por proceso, [aceptación Fedora](scripts/fedora-p2-3-acceptance.sh) y límites de seguridad |
 | [Orden de desarrollo NT](docs/nt-core-development-order.md) | Prioridad acordada 4 → 5 → 2 → 3 → 1 → 6 → 7 y criterios de transición |
