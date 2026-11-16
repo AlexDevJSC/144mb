@@ -397,3 +397,53 @@ runtime y comparación diferencial Windows/Fedora físico. El acceso
 a procesos ajenos necesita un broker con autenticación del entorno
 aislado, vinculado al futuro problema 3: no se debe sustituir ese
 broker por syscalls sobre un TID/PID aportado por el invitado.
+
+### Subtarea 6.4 — SetProcessAffinityMask real y distinción de máscaras (16-11-2026)
+
+Se añade `SetProcessAffinityMask` a la exportación Win32 de
+KERNEL32/KERNELBASE. No equivale a `SetThreadAffinityMask`: el
+contrato exige cambiar **todos** los hilos del proceso invitado.
+Linux `sched_setaffinity(0,...)` solo cambia el TID llamador,
+por lo que el runtime exige, bajo `wait_lock`, que
+`/proc/self/task` confirme **exactamente un hilo** antes de
+aplicar la máscara. Un proceso con dos o más hilos devuelve
+`ERROR_NOT_SUPPORTED`, sin efectuar un cambio parcial. Esta
+limitación es deliberada y no se presenta como soporte general
+de procesos multihilo.
+
+La llamada exige `PROCESS_SET_INFORMATION` en un handle
+canónico del **proceso actual** o pseudo-handle; no permite
+interpretar un PID Linux numérico como handle, ni modificar
+procesos externos. Se rechazan máscara cero, CPU no habilitada
+en el cpuset inicial, grupos fuera de 64 bits y solicitudes que
+el kernel interseque sin cumplir exactamente el conjunto pedido.
+Tras `sched_setaffinity`, el runtime relee el conjunto aplicado;
+ante error o divergencia intenta restaurar el conjunto anterior
+y devuelve fallo, nunca éxito ficticio. `LastError` se conserva
+en éxito.
+
+La máscara `GetProcessAffinityMask.ProcessAffinityMask` sigue
+siendo la afinidad realmente observada del único TID actual.
+La salida `SystemAffinityMask` ahora refleja la **instantánea
+del cpuset permitido al inicio** del sandbox (grupo 0), y no
+encoge simplemente porque el invitado haya fijado el proceso a
+un único procesador. Si la instantánea contiene múltiples grupos,
+el API heredado se rechaza como no representable. Esto tampoco
+afirma que el cpuset al inicio sea la topología física completa
+de Windows o que se haya implementado el scheduler multicgrupo.
+
+Se añaden tests `tests/process_affinity_mask_test.c` y
+`tests/pe/process_affinity_mask_fixture.c`: transición
+verificada por `sched_getaffinity`, separación estable de
+máscara de proceso y máscara del sistema, permisos, handles
+erróneos, máscara vacía y denegación sin efectos parciales
+al existir otro hilo Windows. Ambos se incorporan a la
+CI Ubuntu/UBSan/Fedora RPM y al script de validación Fedora.
+
+**Pendiente del problema 6:** modificar máscaras de proceso y
+clases de prioridad de manera coherente para todos los hilos
+activos, prioridades dinámicas/quantum, grupos Windows completos,
+operaciones auténticas autorizadas sobre hilos de otro proceso
+y pruebas entre varios grupos reales. Las funcionalidades
+transversales al broker NT son una dependencia arquitectónica del
+problema 3 y **no se implementan ad hoc**. No pasar al 5.
