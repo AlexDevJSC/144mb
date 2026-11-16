@@ -763,7 +763,7 @@ static void check_files(void)
                    "%s/data/hardlinked-alpha-long.txt", root) > 0 &&
           snprintf(hardlink_b, sizeof(hardlink_b),
                    "%s/data/hardlinked-beta-long.txt", root) > 0);
-    CHECK(link(hardlink_a, hardlink_b) == 0);
+    CHECK(linkat(AT_FDCWD, hardlink_a, AT_FDCWD, hardlink_b, 0) == 0);
     char short_a[256], short_b[256];
     CHECK(nt_GetShortPathNameA("data/hardlinked-alpha-long.txt",
                                 short_a, sizeof(short_a)) > 0 &&
