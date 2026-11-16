@@ -374,6 +374,8 @@ static void check_files(void)
     BOUND(KERNEL, CopyFileW);
     BOUND(KERNEL, CopyFileExA);
     BOUND(KERNEL, CopyFileExW);
+    BOUND(KERNEL, CreateSymbolicLinkA);
+    BOUND(KERNEL, CreateSymbolicLinkW);
     BOUND(KERNEL, SetFileAttributesA);
     BOUND(KERNEL, SetFileAttributesW);
     BOUND(KERNEL, GetFinalPathNameByHandleW);
@@ -704,6 +706,25 @@ static void check_files(void)
           last_error() == NT_ERROR_NOT_SUPPORTED &&
           nt_CloseHandle(link_handle));
     CHECK(unlink(safe_link) == 0 && unlink(forbidden_link) == 0);
+    char created_link[512];
+    CHECK(snprintf(created_link, sizeof(created_link), "%s/data/api-link", root) > 0);
+    CHECK(nt_CreateSymbolicLinkW(u"C:\\data\\api-link", u"scores.txt", 0) != 0);
+    CHECK((nt_GetFileAttributesA("C:\\data\\api-link") & 0x400u) != 0);
+    link_handle = nt_CreateFileW(u"C:\\data\\api-link", 0, 7, NULL,
+                                 3u, 0x00200000u, 0);
+    CHECK(link_handle != UINTPTR_MAX &&
+          nt_DeviceIoControl(link_handle, 0x000900a8u, NULL, 0,
+                             reparse_data, sizeof(reparse_data),
+                             &reparse_bytes, NULL) &&
+          nt_CloseHandle(link_handle));
+    CHECK(!nt_CreateSymbolicLinkW(u"C:\\data\\outside", u"..\\secret", 0) &&
+          last_error() == NT_ERROR_INVALID_NAME);
+    CHECK(!nt_CreateSymbolicLinkW(u"C:\\data\\junction", u"scores.txt", 1) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
+    CHECK(!nt_CreateSymbolicLinkA("C:\\data\\again", "/etc/passwd", 0) &&
+          last_error() == NT_ERROR_INVALID_NAME);
+    CHECK(unlink(created_link) == 0);
+
 
     /* CopyFileEx reuses the regular native copy and preserves its xattrs.
      * Verify Microsoft x64 callback arguments and Windows abort semantics. */
