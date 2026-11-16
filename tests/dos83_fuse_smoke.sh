@@ -112,25 +112,40 @@ PY
 # Stronger perimeter: even a Linux program that knows the lower path
 # must be unable to rename, create or truncate it after the Landlock policy.
 if "$landlock" --probe >/dev/null 2>&1; then
-    "$landlock" --view "$tmp/view" -- /bin/sh -c '
+    # Capture expected EPERM output from outside the confined shell.
+    # Redirecting to /dev/null *inside* Landlock can itself be denied and
+    # could make an unattempted backing mutation appear safely rejected.
+    # All protected operations below must actually be attempted.
+    if ! "$landlock" --view "$tmp/view" -- /bin/sh -c '
         set -eu
         printf "allowed" > "$1/landlock-created.txt"
-        if (printf "FORBIDDEN" > "$2/direct-bypass.txt") 2>/dev/null; then
+        if (printf "FORBIDDEN" > "$2/direct-bypass.txt"); then
             exit 91
         fi
-        if (printf "TRUNCATE" > "$2/hostRenamedFile.txt") 2>/dev/null; then
+        if (printf "TRUNCATE" > "$2/hostRenamedFile.txt"); then
             exit 92
         fi
-        if (mv "$2/hostRenamedFile.txt" "$2/direct-rename.txt") 2>/dev/null; then
+        if (mv "$2/hostRenamedFile.txt" "$2/direct-rename.txt"); then
             exit 93
         fi
-        if (rm "$2/hostRenamedFile.txt") 2>/dev/null; then
+        if (rm "$2/hostRenamedFile.txt"); then
             exit 94
         fi
-        if (ln "$2/hostRenamedFile.txt" "$1/hardlink-from-lower.txt") 2>/dev/null; then
+        if (ln "$2/hostRenamedFile.txt" "$1/hardlink-from-lower.txt"); then
             exit 95
         fi
-    ' sh "$tmp/view" "$tmp/lower"
+    ' sh "$tmp/view" "$tmp/lower" 2>"$tmp/landlock-denials.log"; then
+        cat "$tmp/landlock-denials.log" >&2
+        echo "FAIL P2.3 confined shell did not complete all denial probes" >&2
+        exit 1
+    fi
+    # The original Fedora evidence showed /dev/null denials. None may occur
+    # in this probe; if present, treat the test itself as defective.
+    if grep -F '/dev/null' "$tmp/landlock-denials.log" >/dev/null; then
+        cat "$tmp/landlock-denials.log" >&2
+        echo "FAIL P2.3 attempted an inaccessible /dev/null redirection" >&2
+        exit 1
+    fi
     test -f "$tmp/lower/landlock-created.txt"
     test ! -e "$tmp/lower/direct-bypass.txt"
     test ! -e "$tmp/lower/direct-rename.txt"
