@@ -41,13 +41,17 @@ import sys
 
 path = sys.argv[1]
 allowed = sorted(os.sched_getaffinity(0))
-groups = sorted({cpu // 64 for cpu in allowed})
+# Windows guest groups are compact ordinal blocks of allowed CPUs, not
+# host Linux CPU IDs divided by 64. Keep both for diagnostics.
+host_bins = sorted({cpu // 64 for cpu in allowed})
+guest_groups = (len(allowed) + 63) // 64
 with open(path, "w", encoding="utf-8") as result:
     result.write("SCHEMA=ntnative.stage4.scheduler.v1\n")
     result.write("PLATFORM=FEDORA_KDE_PHYSICAL\n")
     result.write(f"ACTIVE_CPUS={len(allowed)}\n")
-    result.write(f"GROUPS={len(groups)}\n")
-    result.write("GROUP_IDS=" + ",".join(map(str, groups)) + "\n")
+    result.write(f"GROUPS={guest_groups}\n")
+    result.write("GROUP_IDS=" + ",".join(map(str, range(guest_groups))) + "\n")
+    result.write("LINUX_HOST_CPU64_BINS=" + ",".join(map(str, host_bins)) + "\n")
     result.write(f"CPUS_ALLOWED={','.join(map(str, allowed))}\n")
     result.write("KERNEL=" + platform.release() + "\n")
     # These are host scheduler diagnostics, NOT a Windows NT quantum.
@@ -61,14 +65,14 @@ with open(path, "w", encoding="utf-8") as result:
     result.write("GIT_COMMIT=" + subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True).strip() + "\n")
     result.write("PHYSICAL_HARDWARE_VERIFIED=HEURISTIC_ONLY\n")
-    result.write("PROCESSOR_GROUP_TOPOLOGY=LINUX_CPUID_DIV_64\n")
-    result.write("DYNAMIC_BOOST=UNSUPPORTED\n")
-    result.write("QUANTUM=UNVERIFIED\n")
-    result.write("EXTERNAL_THREADS=DENIED_UNTIL_BROKER\n")
-if len(allowed) < 65 or len(groups) < 2:
-    print("INCOMPLETE: need >=65 allowed CPUs in at least two Linux cpuid/64 groups", file=sys.stderr)
+    result.write("PROCESSOR_GROUP_TOPOLOGY=COMPACT_ALLOWED_CPU_ORDINALS\n")
+    result.write("DYNAMIC_BOOST=OPT_IN_REVERSIBLE_NICE_NOT_NT_EQUIVALENT\n")
+    result.write("QUANTUM=NOT_NT_PARITY_VERIFIED\n")
+    result.write("EXTERNAL_THREADS=QUERY_ONLY_AUTHENTICATED_GUEST_CHILDREN\n")
+if len(allowed) < 65 or guest_groups < 2:
+    print("INCOMPLETE: need >=65 allowed CPUs for at least two compact guest groups", file=sys.stderr)
     sys.exit(3)
-print(f"PRECHECK: {len(allowed)} CPUs across {len(groups)} real Linux affinity groups: {groups}")
+print(f"PRECHECK: {len(allowed)} CPUs across {guest_groups} compact guest groups; host bins {host_bins}")
 PY
 preflight=$?
 set -e
@@ -89,7 +93,7 @@ fi
 if grep -q 'SKIP external-PE sandbox test' "$log"; then
     fail "Bubblewrap isolation was skipped"
 fi
-if ! grep -q '^PASS: all currently implemented stage-4 acceptance suites' "$log"; then
+if ! grep -q '^PASS: stage4 tests completed without mandatory SKIP' "$log"; then
     fail "base stage4 acceptance evidence absent"
 fi
 {
@@ -98,10 +102,15 @@ fi
     echo "THREAD_GROUP=PASS"
     echo "LEGACY_MASK_PRIMARY_GROUP=PASS"
     echo "ISOLATED_PE=PASS"
-    if grep -q 'SKIP positive multithread priority transition' "$log"; then
-        echo "PRIORITY_MULTITHREAD_POSITIVE=SKIP_NO_CAPABILITY"
+    if grep -q 'PASS privileged multithread priority transition' "$log"; then
+        echo "PRIORITY_MULTITHREAD_POSITIVE=PASS"
     else
-        echo "PRIORITY_MULTITHREAD_POSITIVE=REVIEW_FULL_LOG"
+        echo "PRIORITY_MULTITHREAD_POSITIVE=INCOMPLETE"
+    fi
+    if grep -q 'PASS dynamic priority: real Linux nice wake boost' "$log"; then
+        echo "DYNAMIC_BOOST_POSITIVE=PASS"
+    else
+        echo "DYNAMIC_BOOST_POSITIVE=INCOMPLETE"
     fi
 } >> "$facts"
 echo "PASS: real Fedora KDE multigroup transitions in current physical session."
