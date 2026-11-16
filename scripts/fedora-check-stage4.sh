@@ -79,6 +79,27 @@ run_logged() {
 echo "[1/4] Linux runtime and real pthread/handle lifetime"
 run_logged make -j2 check
 
+# Positive scheduler tests require capability to restore *exactly* the
+# original nice of this disposable process. Never elevate the runtime itself
+# or touch any other host PID/TID. The operator must explicitly opt in.
+if [[ ${NT144_QA_POSITIVE_NICE:-0} == 1 ]]; then
+    if command -v sudo >/dev/null 2>&1 &&
+       command -v prlimit >/dev/null 2>&1 &&
+       sudo -n true >/dev/null 2>&1; then
+        echo "[stage4] Positive reversible nice transactions (disposable test processes)"
+        run_logged sudo -n prlimit --nice=40:40 -- env \
+            NT_REQUIRE_POSITIVE_MULTITHREAD_PRIORITY=1 \
+            ./build/process-priority-multithread-test
+        run_logged sudo -n prlimit --nice=40:40 -- env \
+            NT_NATIVE_EXPERIMENTAL_BOOST=1 NT_REQUIRE_POSITIVE_BOOST=1 \
+            ./build/dynamic-priority-boost-test
+    else
+        echo "SKIP positive scheduler acceptance: explicit opt-in cannot acquire reversible nice privilege" | tee -a "$log"
+    fi
+else
+    echo "SKIP positive scheduler acceptance: set NT144_QA_POSITIVE_NICE=1 for scoped, reversible privileged tests" | tee -a "$log"
+fi
+
 echo "[2/4] Native Windows PE32+ AMD64 APC/TLS/process plus lstrcmpW IAT"
 SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 run_logged make -j2 \
   check-pe-lstrcmp check-pe-core-objects check-pe-apc check-pe-suspended-thread \
@@ -99,7 +120,9 @@ SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
 
 python3 scripts/qa_classify.py "$log" --json-out "$report" \
   --require 'PASS PE child launched inside the same Linux sandbox and returned its full exit code' \
-  --require 'PASS PE launcher preserves Windows arguments, escaping and Unicode'
+  --require 'PASS PE launcher preserves Windows arguments, escaping and Unicode' \
+  --resolved-by 'SKIP positive boost::PASS dynamic priority: real Linux nice wake boost' \
+  --resolved-by 'SKIP positive multithread priority transition::PASS privileged multithread priority transition'
 echo "PASS: stage4 tests completed without mandatory SKIP."
 echo "Evidence: $evidence"
 echo "LIMITATION: this is not proof of universal Windows NT compatibility."
