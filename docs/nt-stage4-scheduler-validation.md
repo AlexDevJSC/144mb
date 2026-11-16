@@ -12,6 +12,7 @@ Esta comprobación no habilita la transición al problema 5 (APC avanzadas).
 | `scripts/fedora-stage4-multigroup-acceptance.sh` | **Fedora KDE x64 instalado en máquina física**, terminal Plasma | cpuset con >=65 CPUs **permitidas**, al menos dos grupos `cpu_id/64`, `cross-group=yes`, pruebas del runtime/PE/UBSan/Bubblewrap en host | Que Linux emule la topología de Windows 11 o que tenga permisos para prioridad reversible |
 | `tests/windows/stage4_scheduler_probe.c` | Windows real, compilado MSVC | `GetActiveProcessorGroupCount`, `GetThreadGroupAffinity`, `GetProcessGroupAffinity`, `SetThreadGroupAffinity`, `SetThreadAffinityMask`, `Get*PriorityBoost` y QueryThreadCycleTime | Quantum de NT, igualdad de reparto de CPU, paridad con Linux |
 | `windows-native-scheduler` GitHub Actions | Windows **hosted VM** | Código ejecutado por kernel Windows auténtico y artefacto con resultados | Aceptación de máquina **física** ni multicpu >64 si el runner no tiene esos procesadores |
+| `tests/pe/thread_group_affinity_fixture.c` idéntico en ambos entornos | PE en Linux y compilación nativa MSVC en Windows | Código de contrato común, exit code de Windows preservado como `MATCHED` o `DIVERGED` sin ocultar un desajuste | Que una diferencia sea automáticamente un error de Linux; el fixture puede incorporar una hipótesis errónea |
 | `scripts/compare-stage4-scheduler.py` | Cualquier Python 3 | Comparación de invariantes estructurales y listado de brechas explícitas | Igualdad de rendimiento entre hardware o scheduler distinto |
 
 ## Ejecución sobre Fedora KDE físico
@@ -64,6 +65,15 @@ Windows de la CI, pero un equipo de un grupo registra
 independiente del dispositivo. La ejecución nativa y su compilación
 MSVC prueban únicamente comportamiento de Windows; no ejecutan el
 runtime Linux.
+
+Además, `scripts/windows-run-stage4-scheduler.ps1` compila con
+`/Dimport_fixture_entry=main` la misma fuente
+`tests/pe/thread_group_affinity_fixture.c` que Linux ejecuta como
+PE controlado. Guarda su código de salida en
+`build/stage4-windows-linux-fixture.txt`; el resultado
+`DIVERGED` **no se transforma en éxito** ni hace fallar la recolección
+de evidencias del sistema Windows. Primero se revisa la suposición
+exacta del fixture y se contrasta con la documentación oficial.
 
 Con ambas evidencias físicas verificadas:
 
