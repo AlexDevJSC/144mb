@@ -60,7 +60,7 @@ int main(void)
     if (sched_getaffinity(0, sizeof(original), &original) != 0)
         return EXIT_FAILURE;
     int first = -1, second = -1;
-    for (int cpu = 0; cpu < 64; ++cpu) {
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &original))
             continue;
         if (first == -1)
@@ -88,9 +88,9 @@ int main(void)
         CPU_SET(second, &baseline);
     check(sched_setaffinity(0, sizeof(baseline), &baseline) == 0,
           "prepare one-group Linux cpuset");
-    const uintptr_t first_mask = (uintptr_t)UINT64_C(1) << first;
+    const uintptr_t first_mask = (uintptr_t)UINT64_C(1);
     const uintptr_t baseline_mask = first_mask |
-        (second < 0 ? 0 : (uintptr_t)UINT64_C(1) << second);
+        (second < 0 ? 0 : (uintptr_t)UINT64_C(1) << 1);
     uintptr_t process_mask = 0, system_mask = 0;
     nt_SetLastError(0x5151u);
     check(nt_GetProcessAffinityMask(UINTPTR_MAX, &process_mask, &system_mask) &&
@@ -136,7 +136,7 @@ int main(void)
           "Linux kernel confirms exact process mask");
 
     if (second >= 0) {
-        const uintptr_t second_mask = (uintptr_t)UINT64_C(1) << second;
+        const uintptr_t second_mask = (uintptr_t)UINT64_C(1) << 1;
         nt_SetLastError(0);
         check(nt_SetProcessAffinityMask(UINTPTR_MAX, second_mask),
               "single-thread process may move to another permitted CPU");
