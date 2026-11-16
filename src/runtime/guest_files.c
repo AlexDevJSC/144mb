@@ -4014,6 +4014,9 @@ uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size,
     return (uint32_t)required - 1;
 }
 
+/* Forward declaration: HANDLE duplication is implemented below. */
+static int duplicate_handle(uintptr_t handle, unsigned int access);
+
 /* Read-only NT SECURITY_DESCRIPTOR_RELATIVE derived from the Linux owner,
  * group and mode bits. Synthetic S-1-22-{1,2} Unix IDs are documented;
  * this is NOT an NTFS access-control engine or an ACL setter. */
