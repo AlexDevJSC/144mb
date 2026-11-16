@@ -707,6 +707,18 @@ static void check_files(void)
           short_wide[8] == 'L');
     CHECK(nt_GetShortPathNameA("data/longfilename.txt", short_again, 1) ==
           strlen(short1) + 1);
+    struct nt_find_data_w alias_find_w = {0};
+    uintptr_t alias_search = nt_FindFirstFileW(
+        u"C:\\data\\longfilename.txt", &alias_find_w);
+    CHECK(alias_search != UINTPTR_MAX &&
+          alias_find_w.alternate[0] == 'L' &&
+          alias_find_w.alternate[6] == '~' &&
+          nt_FindClose(alias_search));
+    struct nt_find_data_a alias_find_a = {0};
+    alias_search = nt_FindFirstFileA("C:\\data\\longfilename.txt", &alias_find_a);
+    CHECK(alias_search != UINTPTR_MAX &&
+          strcmp(alias_find_a.alternate, "LONGFI~1.TXT") == 0 &&
+          nt_FindClose(alias_search));
     CHECK(nt_DeleteFileA("data/longfilename.txt") &&
           nt_DeleteFileA("data/longfileextra.txt"));
     /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
@@ -778,7 +790,8 @@ static void check_files(void)
           last_error() == NT_ERROR_NOT_SUPPORTED);
     CHECK(!nt_CreateSymbolicLinkA("C:\\data\\again", "/etc/passwd", 0) &&
           last_error() == NT_ERROR_INVALID_NAME);
-    CHECK(unlink(created_link) == 0);
+    CHECK(nt_DeleteFileA("C:\\data\\api-link") &&
+          nt_GetFileAttributesA("C:\\data\\scores.txt") != UINT32_MAX);
 
 
     /* CopyFileEx reuses the regular native copy and preserves its xattrs.
