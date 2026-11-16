@@ -205,7 +205,7 @@ int main(void)
 #ifdef _WIN32
     printf("PLATFORM=WINDOWS_NATIVE\n");
     printf("CPU_GROUP=%u\nCPU_SLOT=%u\n",
-           (unsigned)chosen.Group, (unsigned)__lzcnt64((unsigned __int64)chosen.Mask));
+           (unsigned)chosen.Group, (unsigned)number.Number);
 #else
     printf("PLATFORM=LINUX_HOST\n");
     printf("LINUX_CPU_ID=%d\n", chosen_cpu);
