@@ -726,8 +726,42 @@ static void check_files(void)
     CHECK(alias_search != UINTPTR_MAX &&
           strcmp(alias_find_a.alternate, "LONGFI~1.TXT") == 0 &&
           nt_FindClose(alias_search));
-    CHECK(nt_DeleteFileA("data/longfilename.txt") &&
-          nt_DeleteFileA("data/longfileextra.txt"));
+    /* DOS aliases must be per directory ENTRY, not per inode. The same
+     * Linux hardlink in another directory receives an independent alias
+     * and cannot inherit the original namespace of the first directory. */
+    CHECK(nt_CreateDirectoryA("C:\\data\\sub83", NULL));
+    char hardlink_native[512];
+    CHECK(snprintf(hardlink_native, sizeof(hardlink_native),
+                   "%s/data/sub83/longfilename.txt", root) > 0 &&
+          link(host_real, hardlink_native) == 0);
+    char alias_hardlink[256] = {0};
+    CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\longfilename.txt",
+                                alias_hardlink, sizeof(alias_hardlink)) ==
+          strlen("C:\\data\\SUB83\\LONGFI~1.TXT") &&
+          strcmp(alias_hardlink, "C:\\data\\SUB83\\LONGFI~1.TXT") == 0);
+    CHECK(nt_CreateFileA(alias_hardlink, UINT32_C(0x80000000),
+                          7u, NULL, 3u, 0x80u, 0) != UINTPTR_MAX);
+    /* The former longfileextra alias is scoped to data/. Moving the
+     * entry to sub83/ must not make that stale short name a valid alias
+     * of the moved inode in the new directory. */
+    CHECK(nt_MoveFileA("C:\\data\\longfileextra.txt",
+                       "C:\\data\\sub83\\anotherlongfile.txt"));
+    CHECK(nt_CreateFileA("C:\\data\\sub83\\LONGFI~2.TXT",
+                          UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0) ==
+          UINTPTR_MAX);
+    char alias_moved[256] = {0};
+    CHECK(nt_GetShortPathNameA("C:\\data\\sub83\\anotherlongfile.txt",
+                                alias_moved, sizeof(alias_moved)) > 0 &&
+          strstr(alias_moved, "ANOTHE~1.TXT") != NULL);
+    CHECK(nt_DeleteFileA("C:\\data\\sub83\\anotherlongfile.txt"));
+    CHECK(nt_MoveFileA("C:\\data\\longfilename.txt",
+                       "C:\\data\\LongFilename.TXT"));
+    CHECK(nt_GetShortPathNameA("C:\\data\\LONGFILENAME.TXT",
+                                short_again, sizeof(short_again)) ==
+          strlen(short1) && strcmp(short_again, short1) == 0);
+    CHECK(nt_DeleteFileA("C:\\data\\LongFilename.TXT") &&
+          nt_DeleteFileA("C:\\data\\sub83\\longfilename.txt") &&
+          nt_RemoveDirectoryA("C:\\data\\sub83"));
     /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
      * unlike older mixed-mode A entrypoints, no UTF-8-first guess. */
     uintptr_t cp_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9long.txt",
