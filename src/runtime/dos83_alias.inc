@@ -104,7 +104,7 @@ static bool dos83_read_at(int parent, const char *leaf, char alias[14])
             strcmp(directory_record.name, leaf) == 0 &&
             dos83_alias_valid(directory_record.alias)) {
             memcpy(alias, directory_record.alias, 14);
-        } else if (st.st_nlink == 1) {
+        } else if (S_ISDIR(st.st_mode) || st.st_nlink == 1) {
             /* Regular file moved to another folder: the stored original
              * name must still match. Never expose a stale alias after rename. */
             struct dos83_inode_record inode_record = {0};
