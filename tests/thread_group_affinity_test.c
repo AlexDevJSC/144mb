@@ -62,6 +62,41 @@ int main(void)
     check(nt_GetActiveProcessorCount(expected_groups) == 0,
           "group outside the startup topology reports no processors", &failures);
 
+    uint16_t wanted_count = 0;
+    uint16_t reported_groups[CPU_SETSIZE / 64];
+    for (size_t i = 0; i < CPU_SETSIZE / 64; ++i)
+        reported_groups[i] = 0x7777u;
+    uint16_t active_nonempty = 0;
+    for (uint16_t group = 0; group < expected_groups; ++group)
+        if (expected_per_group[group] != 0)
+            ++active_nonempty;
+    nt_SetLastError(0);
+    check(!nt_GetProcessGroupAffinity(UINTPTR_MAX, &wanted_count, reported_groups) &&
+          wanted_count == active_nonempty &&
+          nt_GetLastError() == NT_ERROR_INSUFFICIENT_BUFFER &&
+          reported_groups[0] == 0x7777u,
+          "group query reports required capacity without partial output", &failures);
+    wanted_count = CPU_SETSIZE / 64;
+    nt_SetLastError(0x3434u);
+    check(nt_GetProcessGroupAffinity(UINTPTR_MAX, &wanted_count, reported_groups) &&
+          wanted_count == active_nonempty && nt_GetLastError() == 0x3434u,
+          "process group query returns permitted guest group list", &failures);
+    uint16_t index = 0;
+    for (uint16_t group = 0; group < expected_groups; ++group)
+        if (expected_per_group[group] != 0)
+            check(index < wanted_count && reported_groups[index++] == group,
+                  "process group list is sorted and includes active groups",
+                  &failures);
+    uintptr_t process_set_only = nt_OpenProcess(0x200u, 0, (uint32_t)getpid());
+    nt_SetLastError(0);
+    check(process_set_only && !nt_GetProcessGroupAffinity(process_set_only,
+             &wanted_count, reported_groups) &&
+          nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
+          "process handle without query rights cannot inspect group membership",
+          &failures);
+    check(nt_runtime_close_waitable(process_set_only),
+          "close set-only group-query handle", &failures);
+
     int first = -1, different = -1;
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &original))
