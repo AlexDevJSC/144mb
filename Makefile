@@ -31,7 +31,7 @@ DOS83_FUSE_TARGET =
 endif
 RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
-                dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry shell console
+                dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry thread_broker_ipc shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS) $(ICU_LIBS)
 ifneq ($(strip $(IMAGE_LIBS)),)
@@ -114,6 +114,8 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runti
 $(BUILD_DIR)/runtime-child_process.o: src/runtime/winbase.h src/runtime/winfile.h src/pe/pe_bytes.h
 $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-thread_broker_registry.o: src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h
 $(BUILD_DIR)/runtime-thread_broker_auth.o: src/runtime/thread_broker_auth.h
+$(BUILD_DIR)/runtime-thread_broker_ipc.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-child_process.o: src/runtime/thread_broker_ipc.h
+$(BUILD_DIR)/runtime-thread_broker_ipc.o: src/runtime/thread_broker_registry.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-shell.o: src/runtime/shell.h
 $(BUILD_DIR)/runtime-shell.o: src/runtime/child_process.h src/runtime/dialogs.h src/runtime/winfile.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-dialogs.o \
