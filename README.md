@@ -126,6 +126,7 @@ DESTDIR="$PWD/build-stage" PREFIX=/usr`.
 | [Núcleo NT: estado y criterios](docs/nt-core-readiness.md) | Siete componentes críticos, pruebas y límites pendientes |
 | [Prueba del componente 4 en Fedora físico](scripts/fedora-check-stage4.sh) | Puerta de aceptación que rechaza los tests aislados omitidos y conserva los límites de compatibilidad |
 | [Mediación de alias DOS 8.3](docs/dos83-mediation.md) | Renombrados cooperantes, reconciliación Linux/inotify, comandos y límites |
+| [P2.3: FUSE3 + Landlock](docs/dos83-p2-3-fuse.md) | Vista POSIX mediada antes de renombrados, aislamiento de escritura por proceso, [aceptación Fedora](scripts/fedora-p2-3-acceptance.sh) y límites de seguridad |
 | [Orden de desarrollo NT](docs/nt-core-development-order.md) | Prioridad acordada 4 → 5 → 2 → 3 → 1 → 6 → 7 y criterios de transición |
 | [Reutilización y licencias](docs/reuse.md) | Inventario, fuentes y dependencias |
 | [Decisiones](docs/decisions.md) | Fundamento, alcance y condiciones de revisión |

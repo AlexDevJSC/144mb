@@ -22,6 +22,13 @@ VKD3D_CFLAGS ?= $(patsubst -I%,-isystem %,$(shell $(PKG_CONFIG) --cflags $(VKD3D
 VKD3D_LIBS ?= $(shell $(PKG_CONFIG) --libs $(VKD3D_PACKAGES) 2>/dev/null)
 ICU_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags icu-uc)
 ICU_LIBS ?= $(shell $(PKG_CONFIG) --libs icu-uc)
+FUSE3_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags fuse3 2>/dev/null)
+FUSE3_LIBS ?= $(shell $(PKG_CONFIG) --libs fuse3 2>/dev/null)
+ifneq ($(strip $(FUSE3_LIBS)),)
+DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
+else
+DOS83_FUSE_TARGET =
+endif
 RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process shell console
@@ -58,8 +65,8 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: check-pe-priority-boost all check check-dos83-mediator check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
-all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/nt-dos83-mediator
+.PHONY: check-pe-priority-boost all check check-dos83-mediator check-dos83-fuse check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(DOS83_FUSE_TARGET)
 
 $(BUILD_DIR):
 	mkdir -p "$@"
@@ -232,6 +239,20 @@ $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnat
 $(BUILD_DIR)/compat-batch-test: tests/compat_batch_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=clock_gettime -Wl,--wrap=pread $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+$(BUILD_DIR)/nt-dos83-landlock: src/tools/dos83_landlock.c | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) $< $(LDLIBS) -o "$@"
+
+ifneq ($(strip $(FUSE3_LIBS)),)
+$(BUILD_DIR)/nt-dos83-fuse: src/tools/dos83_fuse.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(FUSE3_CFLAGS) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) $(FUSE3_LIBS) -o "$@"
+
+check-dos83-fuse: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-landlock $(BUILD_DIR)/nt-dos83-mediator
+	sh tests/dos83_fuse_smoke.sh "$(BUILD_DIR)/nt-dos83-fuse"
+
+check: check-dos83-fuse
+endif
 
 $(BUILD_DIR)/nt-dos83-mediator: src/tools/dos83_mediator.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
@@ -664,9 +685,13 @@ check-stage4-quantum: $(BUILD_DIR)/stage4-quantum-host
 benchmark: $(BUILD_DIR)/counter-bench
 	$(BUILD_DIR)/counter-bench
 
-install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/nt-dos83-mediator
+install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(DOS83_FUSE_TARGET)
 	install -D -m 0755 "$(BUILD_DIR)/nt-native-probe" "$(DESTDIR)$(BINDIR)/nt-native-probe"
 	install -D -m 0755 "$(BUILD_DIR)/pe-isolated-run" "$(DESTDIR)$(BINDIR)/pe-isolated-run"
 	install -D -m 0755 "$(BUILD_DIR)/nt-vulkan-probe" "$(DESTDIR)$(BINDIR)/nt-vulkan-probe"
 	install -D -m 0755 "$(BUILD_DIR)/pe-import-audit" "$(DESTDIR)$(BINDIR)/pe-import-audit"
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-mediator" "$(DESTDIR)$(BINDIR)/nt-dos83-mediator"
+	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-landlock" "$(DESTDIR)$(BINDIR)/nt-dos83-landlock"
+ifneq ($(strip $(FUSE3_LIBS)),)
+	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-fuse" "$(DESTDIR)$(BINDIR)/nt-dos83-fuse"
+endif
