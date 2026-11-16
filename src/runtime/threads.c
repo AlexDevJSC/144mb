@@ -1162,10 +1162,19 @@ nt_status NT_MS_ABI nt_NtQuerySemaphore(uintptr_t handle, uint32_t information_c
         status = NT_STATUS_ACCESS_DENIED;
     else {
         const struct waitable *state = wait_state(entry);
-        const struct nt_semaphore_basic_information info = {
-            state->semaphore_count, state->semaphore_maximum
-        };
-        memcpy(buffer, &info, sizeof(info));
+        if (state->brokered && !nt_broker_lock(&state->broker)) {
+            status = NT_STATUS_UNSUCCESSFUL;
+        } else {
+            const struct nt_broker_sync_state *shared =
+                state->brokered ? state->broker.state : NULL;
+            const struct nt_semaphore_basic_information info = {
+                shared ? shared->count : state->semaphore_count,
+                shared ? shared->maximum : state->semaphore_maximum
+            };
+            memcpy(buffer, &info, sizeof(info));
+            if (state->brokered)
+                nt_broker_unlock(&state->broker);
+        }
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
@@ -1186,14 +1195,28 @@ nt_status NT_MS_ABI nt_NtReleaseSemaphore(uintptr_t handle, int32_t count, int32
         status = NT_STATUS_ACCESS_DENIED;
     else {
         struct waitable *state = wait_state(entry);
-        if (count > state->semaphore_maximum - state->semaphore_count) {
-            status = NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+        if (state->brokered && !nt_broker_lock(&state->broker)) {
+            status = NT_STATUS_UNSUCCESSFUL;
         } else {
-            if (previous != NULL)
-                *previous = state->semaphore_count;
-            state->semaphore_count += count;
-            state->signaled = true;
-            pthread_cond_broadcast(&wait_changed);
+            struct nt_broker_sync_state *shared =
+                state->brokered ? state->broker.state : NULL;
+            int32_t current = shared ? shared->count : state->semaphore_count;
+            int32_t limit = shared ? shared->maximum : state->semaphore_maximum;
+            if (count > limit - current)
+                status = NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+            else {
+                if (previous)
+                    *previous = current;
+                if (shared)
+                    shared->count += count;
+                else {
+                    state->semaphore_count += count;
+                    state->signaled = true;
+                }
+                pthread_cond_broadcast(&wait_changed);
+            }
+            if (state->brokered)
+                nt_broker_unlock(&state->broker);
         }
     }
     pthread_mutex_unlock(&wait_lock);
@@ -1315,9 +1338,19 @@ nt_status NT_MS_ABI nt_NtQueryEvent(uintptr_t handle, uint32_t information_class
         status = NT_STATUS_ACCESS_DENIED;
     else {
         struct waitable *state = wait_state(entry);
-        const struct nt_event_basic_information information =
-            {(uint32_t)(state->manual ? 0 : 1), state->signaled ? 1 : 0};
-        memcpy(buffer, &information, sizeof(information));
+        if (state->brokered && !nt_broker_lock(&state->broker)) {
+            status = NT_STATUS_UNSUCCESSFUL;
+        } else {
+            const struct nt_broker_sync_state *shared =
+                state->brokered ? state->broker.state : NULL;
+            const struct nt_event_basic_information information = {
+                shared ? (shared->manual ? 0u : 1u) : (state->manual ? 0u : 1u),
+                shared ? (shared->count != 0) : (state->signaled ? 1 : 0)
+            };
+            memcpy(buffer, &information, sizeof(information));
+            if (state->brokered)
+                nt_broker_unlock(&state->broker);
+        }
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
@@ -1336,11 +1369,22 @@ static nt_status change_event(uintptr_t handle, bool signaled, int32_t *previous
         status = NT_STATUS_ACCESS_DENIED;
     } else {
         struct waitable *state = wait_state(event);
-        if (previous)
-            *previous = state->signaled;
-        state->signaled = signaled;
-        if (signaled)
-            pthread_cond_broadcast(&wait_changed);
+        if (state->brokered && !nt_broker_lock(&state->broker))
+            status = NT_STATUS_UNSUCCESSFUL;
+        else {
+            struct nt_broker_sync_state *shared =
+                state->brokered ? state->broker.state : NULL;
+            if (previous)
+                *previous = shared ? (shared->count != 0) : (state->signaled ? 1 : 0);
+            if (shared)
+                shared->count = signaled ? 1 : 0;
+            else
+                state->signaled = signaled;
+            if (state->brokered)
+                nt_broker_unlock(&state->broker);
+            if (signaled)
+                pthread_cond_broadcast(&wait_changed);
+        }
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
