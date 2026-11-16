@@ -103,7 +103,6 @@ int main(void)
     CHECK(nt_GetProcessHandleCount(nt_GetCurrentProcess(), &count) &&
           count == initial);
     CHECK(reader[0] == 17 && writer[1] == 73);
-    CHECK(nt_OpenFileMappingW(4, 0, name) != 0);
     uintptr_t lingering = nt_OpenFileMappingW(4, 0, name);
     CHECK(lingering != 0 && nt_CloseHandle(lingering));
     CHECK(nt_UnmapViewOfFile(copy) && nt_UnmapViewOfFile(reader) &&
