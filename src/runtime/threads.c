@@ -107,6 +107,10 @@ static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
 static _Thread_local uint16_t primary_thread_group;
 static _Thread_local bool primary_thread_group_initialized;
+/* Needed by CreateThread before the group-affinity API definitions below. */
+static nt_status thread_primary_affinity_locked(uintptr_t handle,
+                                                 const cpu_set_t *cpus,
+                                                 struct nt_group_affinity *result);
 /* At runtime startup, capture the Linux cpuset visible to this sandbox.
  * Thread-specific pinning must not silently change the system-wide
  * processor-group topology reported to Win32 callers. Only CPUs the
