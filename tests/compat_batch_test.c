@@ -1297,10 +1297,18 @@ static void check_native_file_namespaces(void)
      * letter while the handle lives must NEVER delete an unrelated file. */
     uintptr_t pending = nt_CreateFileA("D:\\pending.bin", UINT32_C(0x80010000),
                                      7u, NULL, 2u, 0x80u, 0);
-    CHECK(pending != UINTPTR_MAX && nt_DeleteFileA("D:\\pending.bin") &&
-          nt_CreateFileA("D:\\pending.bin", UINT32_C(0x80000000),
-                         7u, NULL, 3u, 0x80u, 0) == UINTPTR_MAX &&
-          last_error() == NT_ERROR_ACCESS_DENIED);
+    CHECK(pending != UINTPTR_MAX);
+    const int32_t pending_removed = nt_DeleteFileA("D:\\pending.bin");
+    const uint32_t remove_error = last_error();
+    const uintptr_t pending_reopen = nt_CreateFileA("D:\\pending.bin",
+        UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
+    const uint32_t reopen_error = last_error();
+    if (!pending_removed || pending_reopen != UINTPTR_MAX ||
+        reopen_error != NT_ERROR_ACCESS_DENIED)
+        fprintf(stderr, "D_PENDING_DIAG removed=%d remove_error=%u reopened=%llu reopen_error=%u\n",
+                pending_removed, remove_error, (unsigned long long)pending_reopen, reopen_error);
+    CHECK(pending_removed && pending_reopen == UINTPTR_MAX &&
+          reopen_error == NT_ERROR_ACCESS_DENIED);
 
     char remapped_root[] = "/tmp/nt-native-remap.XXXXXX";
     CHECK(mkdtemp(remapped_root) != NULL &&
