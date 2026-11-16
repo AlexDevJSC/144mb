@@ -29,6 +29,9 @@ struct nt_broker_hello {
 /* Parent side. Send an authenticated handshake before PE startup;
  * serve in a separate runtime-owned thread until EOF/revocation. */
 bool nt_broker_server_handshake(int fd, const uint8_t secret[16]);
+/* Takes ownership of fd only when true; detached server owns a pidfd dup. */
+bool nt_broker_server_start(int fd,
+    const struct nt_thread_broker_registered_peer *peer);
 void nt_broker_server_loop(int fd,
     const struct nt_thread_broker_registered_peer *peer);
 
