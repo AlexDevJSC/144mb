@@ -66,7 +66,7 @@ int main(void)
           filetime_value(&created) != 0 && filetime_value(&ended) == 0,
           "native current-process FILETIME and CPU accounting");
     int selected = -1;
-    for (int i = 0; i < 64; ++i)
+    for (int i = 0; i < CPU_SETSIZE; ++i)
         if (CPU_ISSET(i, &original)) {
             selected = i;
             break;
@@ -88,7 +88,7 @@ int main(void)
     CPU_SET(selected, &expected);
     check(sched_setaffinity(0, sizeof(expected), &expected) == 0,
           "limit test process affinity");
-    uintptr_t cpu_mask = (uintptr_t)UINT64_C(1) << selected;
+    uintptr_t cpu_mask = (uintptr_t)UINT64_C(1);
     uintptr_t process_mask = 0, system_mask = 0;
     nt_SetLastError(0x1440u);
     check(nt_GetProcessAffinityMask(UINTPTR_MAX, &process_mask, &system_mask) &&

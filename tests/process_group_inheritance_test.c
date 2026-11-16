@@ -41,25 +41,27 @@ int main(void)
     if (sched_getaffinity(0, sizeof(original), &original) != 0)
         return EXIT_FAILURE;
     int first = -1, secondary = -1;
+    unsigned slot = 0;
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &original))
             continue;
         if (first < 0)
             first = cpu;
-        else if (secondary < 0 && cpu / 64 != first / 64)
+        if (slot == 64)
             secondary = cpu;
+        ++slot;
     }
     if (secondary < 0) {
         puts("SKIP process group inheritance: host has one allowed Linux CPU group");
         return EXIT_SUCCESS;
     }
     struct nt_group_affinity primary = {
-        .group = (uint16_t)(first / 64),
-        .mask = (uintptr_t)UINT64_C(1) << (first % 64)
+        .group = 0,
+        .mask = (uintptr_t)UINT64_C(1)
     };
     struct nt_group_affinity other = {
-        .group = (uint16_t)(secondary / 64),
-        .mask = (uintptr_t)UINT64_C(1) << (secondary % 64)
+        .group = 1,
+        .mask = (uintptr_t)UINT64_C(1)
     };
     check(nt_SetThreadGroupAffinity(nt_GetCurrentThread(), &primary, NULL),
           "pin current thread to original primary group");

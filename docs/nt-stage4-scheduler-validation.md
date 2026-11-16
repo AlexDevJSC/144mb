@@ -174,6 +174,34 @@ ahora más acotada, pero sigue sin cerrarse.
      transversalmente al futuro problema 3 (objetos entre procesos);
      sólo se documenta la frontera en el problema 6.
 
+## Modelo compacto de grupos sobre cpuset disperso (implementación propuesta)
+
+El snapshot al arrancar enumera los procesadores Linux permitidos en orden
+ascendente y les asigna índices **guest densos** `0..N-1`, independientemente
+del identificador físico Linux. Windows `GROUP_AFFINITY`,
+`GetActiveProcessorGroupCount`, `GetActiveProcessorCount`,
+`GetCurrentProcessorNumber[Ex]`, `Get/SetThreadGroupAffinity`,
+`SetThreadAffinityMask` y la política de proceso traducen mediante
+dos tablas inmutables: `guest_ordinal → linux_cpu_id` y
+`linux_cpu_id → guest_ordinal`.
+
+Ejemplo: los 80 procesadores Linux permitidos con IDs 24–63, 72–103 y
+200–207 se presentan como 64 CPU en grupo guest 0 y 16 en grupo guest 1.
+La posición guest (grupo 1, bit 0) se traduce realmente al CPU Linux 96;
+el CPU Linux 200 se presenta como (grupo 1, bit 8). Una selección de CPU
+no anunciada tras la captura se rechaza (no se concede acceso al host).
+No se modifica SELinux ni la política de CPU del proceso ajeno.
+
+La prueba `process-group-synthetic-80cpu-test` intercepta las consultas
+y operaciones de afinidad sobre **este test exclusivamente**, comprueba
+enumeración, traducción en ambos sentidos, grupo principal y masks. Las
+pruebas de afinidad reales usan Linux CPUs permitidos pero comparan la
+numeración invitada compacta. Ello comprueba el contrato del mapeo sin
+ser una prueba de hardware físico >64 CPU. La topología fija todavía no
+gestiona hotplug, CPU Sets, NUMA ni numeración exacta de Windows sobre
+sistemas con distinta topología. No cambia por sí sola el avance de
+prioridades dinámicas, quantum o broker de hilos externos.
+
 ## Referencias técnicas, no evidencia de hardware
 
 - [Microsoft: Processor Groups](https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups)
