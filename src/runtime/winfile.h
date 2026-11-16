@@ -4,6 +4,12 @@
 
 #include "compat.h"
 
+/* Host-only, UTF-8 DOS paths (e.g. C:\\dir\\file). These are not Win32
+ * exports. The inotify consumer uses the second entrypoint AFTER external
+ * renames; it is best-effort, not an atomic interception of host writes. */
+bool nt_runtime_refresh_dos83_path(const char *path);
+bool nt_runtime_reconcile_host_rename(const char *old_path, const char *new_path);
+
 /* Start-up file HANDLE inheritance between PE children. The source FDs
  * are private duplicates, pinned until posix_spawn has duplicated them.
  * The target uses a sealed manifest and the exact guest HANDLE values. */
