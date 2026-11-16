@@ -384,6 +384,8 @@ static void check_files(void)
     BOUND(KERNEL, GetFullPathNameA);
     BOUND(KERNEL, GetLongPathNameA);
     BOUND(KERNEL, GetLongPathNameW);
+    BOUND(KERNEL, GetShortPathNameA);
+    BOUND(KERNEL, GetShortPathNameW);
     BOUND(KERNEL, GetFileAttributesA);
     BOUND(KERNEL, GetFileAttributesExA);
     BOUND(KERNEL, FindFirstFileExA);
@@ -668,6 +670,45 @@ static void check_files(void)
                               real_case_out, 128) == 0 &&
           last_error() == NT_ERROR_FILE_NOT_FOUND);
 
+
+    /* Long names acquire stable per-inode DOS aliases only on demand.
+     * The short alias must resolve to the real data, and collisions must
+     * produce distinct aliases without creating a second host file. */
+    void *alias_stream = nt_fopen("data/longfilename.txt", "wb");
+    CHECK(alias_stream && nt_fwrite("a", 1, 1, alias_stream) == 1 &&
+          nt_fclose(alias_stream) == 0);
+    alias_stream = nt_fopen("data/longfileextra.txt", "wb");
+    CHECK(alias_stream && nt_fwrite("b", 1, 1, alias_stream) == 1 &&
+          nt_fclose(alias_stream) == 0);
+    char short1[256] = {0}, short2[256] = {0}, short_again[256] = {0};
+    CHECK(nt_GetShortPathNameA("C:\\DATA\\longfilename.txt", short1,
+                                sizeof(short1)) ==
+          strlen("C:\\DATA\\LONGFI~1.TXT") &&
+          strcmp(short1, "C:\\DATA\\LONGFI~1.TXT") == 0);
+    CHECK(nt_GetShortPathNameA("C:\\DATA\\longfileextra.txt", short2,
+                                sizeof(short2)) ==
+          strlen("C:\\DATA\\LONGFI~2.TXT") &&
+          strcmp(short2, "C:\\DATA\\LONGFI~2.TXT") == 0);
+    CHECK(nt_GetShortPathNameA("C:\\DATA\\longfilename.txt", short_again,
+                                sizeof(short_again)) == strlen(short1) &&
+          strcmp(short_again, short1) == 0);
+    uintptr_t alias_handle = nt_CreateFileA(short1, UINT32_C(0x80000000),
+                                              7u, NULL, 3u, 0x80u, 0);
+    char alias_byte = 0;
+    uint32_t alias_bytes = 0;
+    CHECK(alias_handle != UINTPTR_MAX &&
+          nt_ReadFile(alias_handle, &alias_byte, 1, &alias_bytes, NULL) &&
+          alias_bytes == 1 && alias_byte == 'a' &&
+          nt_CloseHandle(alias_handle));
+    uint16_t short_wide[128] = {0};
+    CHECK(nt_GetShortPathNameW(u"C:\\data\\longfilename.txt",
+                                short_wide, 128) ==
+          strlen("C:\\DATA\\LONGFI~1.TXT") &&
+          short_wide[8] == 'L');
+    CHECK(nt_GetShortPathNameA("data/longfilename.txt", short_again, 1) ==
+          strlen(short1) + 1);
+    CHECK(nt_DeleteFileA("data/longfilename.txt") &&
+          nt_DeleteFileA("data/longfileextra.txt"));
 
     raw = nt_fopen("data/target.txt", "wb");
     CHECK(raw != NULL && nt_fclose(raw) == 0);
