@@ -94,7 +94,7 @@ nt_status NT_MS_ABI nt_NtQueryInformationProcess(uintptr_t process, uint32_t inf
         .exit_status = 259, /* STILL_ACTIVE */
         .peb_base = peb,
         .affinity_mask = affinity,
-        .base_priority = 8, /* No process priority-class setter exists yet. */
+        .base_priority = nt_runtime_current_process_base_priority(),
         .unique_process_id = (uintptr_t)getpid(),
         .inherited_from_unique_process_id = (uintptr_t)getppid()
     };
