@@ -29,7 +29,7 @@ DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
 else
 DOS83_FUSE_TARGET =
 endif
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
+RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o
@@ -102,6 +102,7 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runti
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-guest_files.o: override CPPFLAGS += $(ICU_CFLAGS)
 $(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/junctions.inc src/runtime/junction_control.inc
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-virtual_memory.o $(BUILD_DIR)/runtime-section_memory.o: src/runtime/section_memory.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/dynamic_tls.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/nt_core_information.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
