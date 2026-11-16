@@ -84,8 +84,10 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(formatted, encoding="utf-8")
     print(formatted, end="")
-    return 3 if any(value in {"INCOMPLETE", "FAILED_NO_HARDWARE_EVIDENCE"}
-                    for value in results.values()) or args.require_multigroup and not multi else 0
+    # Deliberate fail-closed: observations do not establish parity while
+    # primary-group defaults, dynamic boosts, quantum or external broker
+    # semantics remain unimplemented/unverified.
+    return 3 if results["cross_os_scheduler_parity"] != "PROVEN" else 0
 
 
 if __name__ == "__main__":
