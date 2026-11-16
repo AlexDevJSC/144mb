@@ -868,6 +868,53 @@ nt_status nt_runtime_duplicate_waitable(uintptr_t source, uint32_t access,
     return status;
 }
 
+/* Shared named objects use one broker lease per opened HANDLE. The
+ * canonical in-process entry still owns refcounting and DuplicateHandle,
+ * but signaling state and atomic consumption live in a shared memfd. */
+static nt_status broker_named_waitable(uintptr_t *handle, const char *name,
+    enum waitable_kind kind, uint32_t rights, bool inherit, bool insensitive,
+    bool create, int32_t initial, int32_t maximum, bool manual)
+{
+    struct nt_broker_request request = {
+        .magic = NT_BROKER_MAGIC, .version = NT_BROKER_VERSION,
+        .action = create ? NT_BROKER_CREATE : NT_BROKER_OPEN,
+        .kind = kind == EVENT ? NT_BROKER_EVENT : NT_BROKER_SEMAPHORE,
+        .rights = rights, .flags = (insensitive ? 2u : 0u) |
+                                 (create && manual ? 1u : 0u),
+        .initial = create ? (uint32_t)initial : 0,
+        .maximum = create ? (uint32_t)maximum : 0
+    };
+    memcpy(request.name, name, strlen(name) + 1);
+    struct nt_broker_resource broker;
+    const int result = nt_broker_acquire(&request, &broker);
+    switch (result) {
+    case NT_BROKER_CREATED: case NT_BROKER_EXISTS: break;
+    case NT_BROKER_MISSING: return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    case NT_BROKER_TYPE_MISMATCH: return NT_STATUS_OBJECT_TYPE_MISMATCH;
+    case NT_BROKER_ACCESS_DENIED: return NT_STATUS_ACCESS_DENIED;
+    case NT_BROKER_RESOURCE_ERROR: return NT_STATUS_NO_MEMORY;
+    case NT_BROKER_INVALID: return NT_STATUS_INVALID_PARAMETER;
+    default: return NT_STATUS_UNSUCCESSFUL;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = new_waitable(kind);
+    if (object) {
+        object->access = rights;
+        object->handle_flags = inherit ? 1u : 0u;
+        object->brokered = true;
+        object->broker = broker;
+        memcpy(object->object_name, name, strlen(name) + 1);
+        *handle = object->handle;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (!object) {
+        nt_broker_release(&broker);
+        return NT_STATUS_NO_MEMORY;
+    }
+    return result == NT_BROKER_EXISTS ?
+           NT_STATUS_OBJECT_NAME_EXISTS : NT_STATUS_SUCCESS;
+}
+
 nt_status NT_MS_ABI nt_NtCreateEvent(uintptr_t *handle, uint32_t access,
                                    const struct nt_object_attributes *attributes,
                                    uint32_t type, uint8_t initial_state)
