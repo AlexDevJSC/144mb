@@ -614,6 +614,51 @@ GetLastError. La consulta devuelve STATUS_BUFFER_TOO_SMALL si corresponde. La se
 avanzada requiere un contrato propio, pruebas con descriptores hostiles
 y aceptación en Fedora antes de ampliarse.
 
+## Filesystem2 P1.5 — inspección confinada de enlaces Linux (parcial)
+
+Se incorpora un primer subconjunto de **reparse points de tipo symlink**:
+`CreateFileW/A` admite `FILE_FLAG_OPEN_REPARSE_POINT` para un enlace simbólico
+**final**, exclusivamente como HANDLE de metadatos con acceso solicitado 0,
+`OPEN_EXISTING`, y sin E/S, borrado, ni apertura del destino. Los componentes
+intermedios siguen utilizando `openat2` con `RESOLVE_NO_SYMLINKS` y la raíz
+física concedida. `GetFileAttributesExW` y `FindFirstFileW` identifican el
+link tanto si Linux devuelve `ELOOP` como si abre un FD `O_PATH` al propio link.
+
+`DeviceIoControl(FSCTL_GET_REPARSE_POINT=0x000900a8)` reconoce solo HANDLEs
+abiertos explícitamente de esa forma y genera un `REPARSE_DATA_BUFFER`
+`IO_REPARSE_TAG_SYMLINK` **relativo** (`SYMLINK_FLAG_RELATIVE=1`) con
+codificación UTF-16LE y offsets comprobados. Solo publica destinos Linux
+relativos UTF-8, sin componentes `..`, `.`, vacíos, separadores Windows,
+ni nombres absolutos. Nunca muestra una ruta absoluta del anfitrión. No sigue
+el enlace al crear el HANDLE ni al consultar el destino, y las demás llamadas
+no adquieren permisos para atravesarlo. Si el buffer es corto se rechaza sin
+escribir fuera de él.
+
+**Fuera de este subconjunto:** junctions NTFS, montajes, `FSCTL_SET_REPARSE_POINT`,
+`FSCTL_DELETE_REPARSE_POINT`, creación `CreateSymbolicLink`, modificación
+atomizada de reparse points, enlaces relativos con `..`, puntos de montaje,
+handles con derechos de lectura/escritura, permisos ACL NT y cualquier
+redirección de rutas del invitado. Los enlaces a destinos absolutos de Linux
+se pueden identificar pero no leer como REPARSE_DATA_BUFFER para evitar
+filtrar las rutas del host. No se afirma equivalencia con NTFS.
+
+## Filesystem2 P1.6 — nombre largo canónico (parcial)
+
+Se incorporan `GetLongPathNameA/W` con recuperación de la escritura real de
+cada componente dentro de la raíz Linux expresamente autorizada. Se apoya
+en la misma búsqueda Unicode simple, prioriza una coincidencia exacta y
+rechaza un caso ambiguo en lugar de elegir otro archivo. La búsqueda abre
+solo descriptores de directorio confinados, sin seguir enlaces simbólicos
+intermedios, y confirma que el objeto final exista con `AT_SYMLINK_NOFOLLOW`.
+La versión W recibe UTF-16 y devuelve UTF-16, y la versión A mantiene la
+política actual de rutas ANSI/UTF-8 del runtime (no es aún ACP estricto).
+
+La resolución de alias 8.3 generados, `GetShortPathNameA/W`, persistencia
+de nombres cortos, conversión ANSI uniforme entre todas las API A,
+normalización Unicode avanzada y sincronización NTFS case-insensitive
+entre procesos Linux externos **siguen pendientes**. Esta ampliación no
+genera alias que pudieran colisionar o resolver un inodo equivocado.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de
