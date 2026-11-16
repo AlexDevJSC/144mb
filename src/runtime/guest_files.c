@@ -1036,6 +1036,23 @@ static uint32_t path_error(int error, bool parent)
     }
 }
 
+/* Windows A file entrypoints are byte strings in the process ACP (1252
+ * today), not opportunistic UTF-8. Host/internal paths and W entrypoints
+ * use UTF-8 and must bypass this converter. Keep the two contracts apart. */
+static bool file_ansi_to_utf8(const char *source, char target[PATH_MAX])
+{
+    if (!source) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    uint16_t wide[PATH_MAX];
+    if (nt_MultiByteToWideChar(nt_GetACP(), 0, source, -1,
+                                wide, PATH_MAX) == 0)
+        return false;
+    return nt_WideCharToMultiByte(65001, 0, wide, -1, target,
+                                  PATH_MAX, NULL, NULL) != 0;
+}
+
 enum {
     FILE_READ = 1, FILE_WRITE = 2, FILE_DELETE = 4, FILE_TABLE_SIZE = 256,
     HANDLE_FLAG_INHERIT = 1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 2,
@@ -2257,8 +2274,11 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
                                   const void *security, uint32_t disposition, uint32_t flags,
                                   uintptr_t template_file)
 {
-    return create_file_common(input, desired, share, security, disposition,
-                              flags, template_file, false);
+    char utf8[PATH_MAX];
+    if (!file_ansi_to_utf8(input, utf8))
+        return UINTPTR_MAX;
+    return create_file_common(utf8, desired, share, security, disposition,
+                              flags, template_file, true);
 }
 
 static int close_file(struct guest_file *file)
@@ -3061,17 +3081,20 @@ int32_t NT_MS_ABI nt_CreateDirectoryA(const char *path, const void *security)
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    return change_path(path, MAKE_DIRECTORY);
+    char utf8[PATH_MAX];
+    return file_ansi_to_utf8(path, utf8) && change_path(utf8, MAKE_DIRECTORY);
 }
 
 int32_t NT_MS_ABI nt_DeleteFileA(const char *path)
 {
-    return change_path(path, REMOVE_FILE);
+    char utf8[PATH_MAX];
+    return file_ansi_to_utf8(path, utf8) && change_path(utf8, REMOVE_FILE);
 }
 
 int32_t NT_MS_ABI nt_RemoveDirectoryA(const char *path)
 {
-    return change_path(path, REMOVE_DIRECTORY);
+    char utf8[PATH_MAX];
+    return file_ansi_to_utf8(path, utf8) && change_path(utf8, REMOVE_DIRECTORY);
 }
 
 /* Check that cross-root copy+delete will be permitted before a new
@@ -3137,7 +3160,7 @@ int32_t NT_MS_ABI nt_MoveFileA(const char *from, const char *to)
     return nt_MoveFileExA(from, to, 0);
 }
 
-int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flags)
+static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
 {
     char source[PATH_MAX], destination[PATH_MAX];
     /* MOVEFILE_REPLACE_EXISTING and MOVEFILE_COPY_ALLOWED are the
@@ -3898,25 +3921,29 @@ uintptr_t NT_MS_ABI nt_CreateFile2(const uint16_t *path, uint32_t access, uint32
 int32_t NT_MS_ABI nt_CreateDirectoryW(const uint16_t *path, const void *security)
 {
     char narrow[PATH_MAX];
-    return wide_path(path, narrow) && nt_CreateDirectoryA(narrow, security);
+    if (security) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return wide_path(path, narrow) && change_path(narrow, MAKE_DIRECTORY);
 }
 
 int32_t NT_MS_ABI nt_RemoveDirectoryW(const uint16_t *path)
 {
     char narrow[PATH_MAX];
-    return wide_path(path, narrow) && nt_RemoveDirectoryA(narrow);
+    return wide_path(path, narrow) && change_path(narrow, REMOVE_DIRECTORY);
 }
 
 int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path)
 {
     char narrow[PATH_MAX];
-    return wide_path(path, narrow) && nt_DeleteFileA(narrow);
+    return wide_path(path, narrow) && change_path(narrow, REMOVE_FILE);
 }
 
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags)
 {
     char from[PATH_MAX], to[PATH_MAX];
-    return wide_path(source, from) && wide_path(destination, to) && nt_MoveFileExA(from, to, flags);
+    return wide_path(source, from) && wide_path(destination, to) && move_file_utf8(from, to, flags);
 }
 
 int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination)
@@ -3929,7 +3956,7 @@ int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destinati
 {
     char from[PATH_MAX], to[PATH_MAX];
     return wide_path(source, from) && wide_path(destination, to) &&
-           nt_CopyFileA(from, to, fail_if_exists);
+           copy_file_common(from, to, fail_if_exists, NULL, NULL, NULL);
 }
 
 uint32_t NT_MS_ABI nt_GetLogicalDrives(void)
