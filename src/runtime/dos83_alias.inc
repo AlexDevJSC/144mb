@@ -4,6 +4,33 @@
  * no hardlinked files, no symlinks, no guarantee against Linux processes
  * allocating aliases concurrently outside this runtime's mutex. */
 #define WIN_DOS83_XATTR "user.ntnative.dos83"
+/* NTFS short names belong to directory entries, not to bare inodes. Use a
+ * separate key for each (parent directory, leaf), so Linux hardlinks and
+ * a file moved between directories do not inherit a different entry's name.
+ * Both hashes are from untrusted spellings; a collision is only a hint:
+ * caller still verifies real inode/name and rejects ambiguous aliases. */
+static bool dos83_entry_key(int parent, const char *leaf, char key[112])
+{
+    struct stat st;
+    if (fstat(parent, &st) != 0)
+        return false;
+    uint64_t hash1 = UINT64_C(0xcbf29ce484222325);
+    uint64_t hash2 = UINT64_C(0x84222325cbf29ce4);
+    for (const unsigned char *p = (const unsigned char *)leaf; *p; ++p) {
+        const uint8_t c = *p >= 'A' && *p <= 'Z' ? (uint8_t)(*p + 32) : *p;
+        hash1 = (hash1 ^ c) * UINT64_C(0x100000001b3);
+        hash2 = (hash2 ^ (uint8_t)(c ^ 0xa5u)) * UINT64_C(0x100000001b3);
+    }
+    const int n = snprintf(key, 112, "%s.%016llx.%016llx.%016llx.%016llx",
+          WIN_DOS83_XATTR, (unsigned long long)(uint64_t)st.st_dev,
+          (unsigned long long)(uint64_t)st.st_ino,
+          (unsigned long long)hash1, (unsigned long long)hash2);
+    if (n <= 0 || n >= 112) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    return true;
+}
 static ssize_t read_guest_xattr(int fd, const char *name, void *value, size_t size);
 static int write_guest_xattr(int fd, const char *name, const void *value, size_t size);
 static int open_share_registry(const struct stat *info);
@@ -48,7 +75,14 @@ static bool dos83_read_at(int parent, const char *leaf, char alias[14])
     bool ok = fstat(fd, &st) == 0 &&
               (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode));
     if (ok) {
-        const ssize_t count = read_guest_xattr(fd, WIN_DOS83_XATTR, alias, 14);
+        char key[112];
+        if (!dos83_entry_key(parent, leaf, key)) {
+            close(fd);
+            return false;
+        }
+        /* Older per-inode aliases are intentionally not used for lookups:
+         * they could refer to another hardlink or a renamed directory entry. */
+        const ssize_t count = read_guest_xattr(fd, key, alias, 14);
         ok = count >= 3 && count <= 13 && alias[count - 1] == '\0' &&
              memchr(alias, '~', (size_t)count - 1) != NULL;
         if (ok)
@@ -158,8 +192,6 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
     int error = fstat(fd, &st) != 0 ? errno : 0;
     if (!error && !(S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)))
         error = ENOTSUP;
-    if (!error && S_ISREG(st.st_mode) && st.st_nlink > 1)
-        error = ENOTSUP;
     /* Serialize assignments among cooperating NT processes through the
      * existing per-directory (dev,ino) private share-registry gate. Linux
      * processes that do not participate are intentionally outside scope. */
@@ -194,11 +226,21 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
                 break;
             }
             if (collision == 0) {
-                if (write_guest_xattr(fd, WIN_DOS83_XATTR,
-                                      alias, strlen(alias) + 1) == 0)
-                    assigned = true;
-                else
+                char key[112];
+                if (!dos83_entry_key(parent, name, key)) {
                     error = errno;
+                } else if (write_guest_xattr(fd, key, alias,
+                                              strlen(alias) + 1) == 0) {
+                    assigned = true;
+                    /* Keep the legacy attribute solely as an optional
+                     * diagnostic for single-link files. It is NOT a
+                     * lookup key and does not affect alias correctness. */
+                    if (S_ISREG(st.st_mode) && st.st_nlink == 1)
+                        (void)write_guest_xattr(fd, WIN_DOS83_XATTR,
+                                                alias, strlen(alias) + 1);
+                } else {
+                    error = errno;
+                }
                 break;
             }
         }
