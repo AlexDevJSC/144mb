@@ -97,12 +97,14 @@ int import_fixture_entry(void)
         observed.Mask != chosen.Mask || observed.Group != chosen.Group)
         return 21;
 
-    if (chosen.Group != 0) {
-        SetLastError(0);
-        if (SetThreadAffinityMask(thread, chosen.Mask) != 0 ||
-            GetLastError() != ERROR_NOT_SUPPORTED)
-            return 22; /* Legacy group-0 API must not truncate. */
-    }
+    /* Legacy SetThreadAffinityMask uses the already-selected current
+     * group of the thread, even if this is group 1 or higher. */
+    SetLastError(0x7272u);
+    if (SetThreadAffinityMask(thread, chosen.Mask) != chosen.Mask ||
+        GetLastError() != 0x7272u ||
+        !GetThreadGroupAffinity(thread, &observed) ||
+        observed.Group != chosen.Group || observed.Mask != chosen.Mask)
+        return 22;
 
     if (GetActiveProcessorGroupCount() != active_groups ||
         GetActiveProcessorCount((WORD)0xffffu) != total)
