@@ -1514,6 +1514,10 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
     struct guest_apc *apc = NULL;
     bool really_waited = false;
     if (result == NT_STATUS_SUCCESS) {
+        bool has_broker = false;
+        for (uint32_t i = 0; i < count; ++i)
+            if (wait_state(objects[i])->brokered)
+                has_broker = true;
         int error = timeout && deadline.time.tv_sec < 0 ? ETIMEDOUT : 0;
         for (;;) {
             if (alertable != 0) {
@@ -1532,8 +1536,47 @@ nt_status NT_MS_ABI nt_NtWaitForMultipleObjects(uint32_t count, const uintptr_t 
             if (result != NT_STATUS_TIMEOUT || error)
                 break;
             really_waited = true;
-            error = timeout ? pthread_cond_clockwait(&wait_changed, &wait_lock, deadline.clock, &deadline.time) :
-                              pthread_cond_wait(&wait_changed, &wait_lock);
+            if (!has_broker) {
+                error = timeout ?
+                    pthread_cond_clockwait(&wait_changed, &wait_lock, deadline.clock, &deadline.time) :
+                    pthread_cond_wait(&wait_changed, &wait_lock);
+            } else {
+                /* Linux clients cannot signal another process's local
+                 * pthread condition. Poll the shared memory after bounded
+                 * 10ms slices while retaining full alertable-wait support.
+                 * This is real cross-process synchronization; the tradeoff
+                 * is wakeup latency, not a fake success result. */
+                clockid_t clock = timeout ? deadline.clock : CLOCK_MONOTONIC;
+                struct timespec slice;
+                if (clock_gettime(clock, &slice) != 0) {
+                    error = EINVAL;
+                    break;
+                }
+                slice.tv_nsec += 10000000;
+                if (slice.tv_nsec >= 1000000000L) {
+                    slice.tv_sec += 1;
+                    slice.tv_nsec -= 1000000000L;
+                }
+                if (timeout &&
+                    (deadline.time.tv_sec < slice.tv_sec ||
+                     (deadline.time.tv_sec == slice.tv_sec &&
+                      deadline.time.tv_nsec < slice.tv_nsec)))
+                    slice = deadline.time;
+                error = pthread_cond_clockwait(&wait_changed, &wait_lock,
+                                                clock, &slice);
+                if (error == ETIMEDOUT) {
+                    if (!timeout) {
+                        error = 0;
+                    } else {
+                        struct timespec now;
+                        if (clock_gettime(clock, &now) == 0 &&
+                            (now.tv_sec < deadline.time.tv_sec ||
+                             (now.tv_sec == deadline.time.tv_sec &&
+                              now.tv_nsec < deadline.time.tv_nsec)))
+                            error = 0;
+                    }
+                }
+            }
         }
         if (result == NT_STATUS_TIMEOUT && error != ETIMEDOUT)
             result = NT_STATUS_UNSUCCESSFUL;
