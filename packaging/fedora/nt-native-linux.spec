@@ -6,6 +6,7 @@ License:        MIT
 Source0:        %{name}-%{version}.tar.gz
 ExclusiveArch:  x86_64
 Requires:       bubblewrap
+Requires:       fuse3
 Requires:       fluidsynth-libs
 
 BuildRequires:  binutils
@@ -17,6 +18,7 @@ BuildRequires:  pkgconfig(cairo)
 BuildRequires:  pkgconfig(libffi)
 BuildRequires:  pkgconfig(libcrypto)
 BuildRequires:  pkgconfig(icu-uc)
+BuildRequires:  pkgconfig(fuse3)
 BuildRequires:  pkgconfig(libvkd3d)
 BuildRequires:  pkgconfig(libvkd3d-utils)
 BuildRequires:  pkgconfig(vulkan)
@@ -49,6 +51,8 @@ incomplete and must not be represented as general Windows compatibility.
 %{_bindir}/nt-vulkan-probe
 %{_bindir}/pe-import-audit
 %{_bindir}/nt-dos83-mediator
+%{_bindir}/nt-dos83-fuse
+%{_bindir}/nt-dos83-landlock
 
 %changelog
 * Mon Nov 09 2026 nt-native-linux contributors - 0.1.0-1
