@@ -503,6 +503,7 @@ static const struct runtime_export kernel32_exports[] = {
     WIN_EXPORT(GetFileTime),
     WIN_EXPORT(GetFinalPathNameByHandleW),
     WIN_EXPORT(GetFullPathNameW),
+    WIN_EXPORT(GetLongPathNameW),
     WIN_EXPORT(GetModuleFileNameW),
     WIN_EXPORT(GetOEMCP),
     WIN_EXPORT(GetProcessHeap),
