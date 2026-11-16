@@ -25,6 +25,9 @@ struct nt_broker_thread_info {
 bool nt_broker_register_child(pid_t pid, int pidfd, uid_t uid, gid_t gid,
                               const uint8_t secret[16], uint64_t *generation);
 void nt_broker_unregister_child(pid_t pid, uint64_t generation);
+/* Host-only: rekey immediately after trusted posix_spawn, before the
+ * broker sends its startup handshake and before any guest code runs. */
+bool nt_broker_install_child_session(pid_t pid, const uint8_t secret[16]);
 
 /* Secondary guest thread life events can only be forwarded by the authenticated
  * owner via the AF_UNIX broker. task identities are pinned by /proc task
