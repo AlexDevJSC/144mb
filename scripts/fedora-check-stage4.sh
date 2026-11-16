@@ -31,14 +31,14 @@ echo "[1/4] Linux runtime, real pthreads and 48-cycle lifetime tests"
 make -j2 check
 echo "[2/4] Native Windows PE/AMD64 thread, APC, TLS and process contracts"
 SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
-  make -j2 check-pe-core-objects check-pe-apc check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity \
+  make -j2 check-pe-core-objects check-pe-apc check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-priority-boost check-pe-process-affinity \
            check-pe-native-core check-pe-teb-tls check-pe-nt-io
 
 echo "[3/4] Undefined-behavior sanitizer: process/thread and PE tests"
 SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 \
   make -j2 BUILD_DIR=build-stage4-ubsan \
        CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
-       check check-pe-core-objects check-pe-apc check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity \
+       check check-pe-core-objects check-pe-apc check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-priority-boost check-pe-process-affinity \
        check-pe-native-core check-pe-teb-tls
 
 echo "[4/4] Real Bubblewrap-isolated PE and child-process validation (no SKIP accepted)"
