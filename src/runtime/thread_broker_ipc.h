@@ -39,6 +39,7 @@ void nt_broker_server_loop(int fd,
  * endpoint inherited from the trusted launcher's posix_spawn file actions.
  * No environment variables, paths or arbitrary Linux process controls.
  * Operations fail closed on timeout/disconnect. */
+bool nt_broker_client_is_attached(void);
 bool nt_broker_client_attach(int fd);
 void nt_broker_client_detach(void);
 bool nt_broker_client_register_thread(uint32_t thread_id);
