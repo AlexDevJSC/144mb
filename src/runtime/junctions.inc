@@ -13,16 +13,21 @@
  */
 #define NT_JUNCTION_XATTR "user.ntnative.junction.v1"
 #define NT_JUNCTION_MAGIC UINT32_C(0x4a554e43)
+/* The original main implementation persisted PATH_MAX+16 target bytes.
+ * Keep that layout readable, while writing only compact xattrs on new SET.
+ * Both records have identical headers and the same documented v1 key. */
 struct nt_junction_metadata {
     uint32_t magic, version;
     uint64_t root_dev, root_inode;
-    /* A fixed PATH_MAX-sized xattr exceeds the per-inode xattr budget on
-     * some Linux filesystems (including typical 4 KiB ext4 blocks), so
-     * reserve a bounded namespace path small enough for ordinary xattrs. */
-    char target[1024]; /* canonical guest DOS path, UTF-8 */
+    char target[PATH_MAX + 16]; /* legacy v1 in-memory / on-disk shape */
 };
-_Static_assert(sizeof(struct nt_junction_metadata) <= 1536,
-               "Junction metadata must fit common Linux xattr budgets");
+struct nt_junction_compact_metadata {
+    uint32_t magic, version;
+    uint64_t root_dev, root_inode;
+    char target[1024]; /* new compact v1 on-disk shape */
+};
+_Static_assert(sizeof(struct nt_junction_compact_metadata) <= 1536,
+               "Compact junction metadata must fit common Linux xattr budgets");
 
 static bool nt_junction_abs_guest_name(const char *path)
 {
@@ -38,9 +43,15 @@ static bool nt_junction_abs_guest_name(const char *path)
 static bool nt_junction_metadata_valid(const struct nt_junction_metadata *meta,
                                        ssize_t size)
 {
-    return size == (ssize_t)sizeof(*meta) && meta->magic == NT_JUNCTION_MAGIC &&
+    /* A compact xattr is read into the larger legacy buffer. Do not search
+     * the unwritten tail for a terminator: that would accept corrupt data. */
+    const size_t target_capacity =
+        size == (ssize_t)sizeof(*meta) ? sizeof(meta->target) :
+        size == (ssize_t)sizeof(struct nt_junction_compact_metadata) ?
+            sizeof(((struct nt_junction_compact_metadata *)0)->target) : 0;
+    return target_capacity != 0 && meta->magic == NT_JUNCTION_MAGIC &&
            meta->version == 1 &&
-           memchr(meta->target, 0, sizeof(meta->target)) != NULL &&
+           memchr(meta->target, 0, target_capacity) != NULL &&
            nt_junction_abs_guest_name(meta->target);
 }
 
