@@ -1035,7 +1035,8 @@ enum {
     HANDLE_FLAG_INHERIT = 1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 2,
     CREATE_NEW = 1, CREATE_ALWAYS = 2, OPEN_EXISTING = 3, OPEN_ALWAYS = 4,
     TRUNCATE_EXISTING = 5, FILE_ATTRIBUTE_NORMAL = 0x80,
-    FILE_FLAG_OVERLAPPED = 0x40000000, FILE_FLAG_DELETE_ON_CLOSE = 0x04000000
+    FILE_FLAG_OVERLAPPED = 0x40000000, FILE_FLAG_DELETE_ON_CLOSE = 0x04000000,
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000, FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 };
 
 enum file_owner { FREE_FILE, WIN_HANDLE, CRT_DESCRIPTOR, CRT_STREAM };
@@ -1053,6 +1054,7 @@ struct guest_file {
     bool text;
     bool delete_disposition;
     bool overlapped_io;
+    bool reparse_handle; /* O_PATH handle of final symlink; never follows its target. */
     uintptr_t completion_port, completion_key;
     char *path;
 };
@@ -2082,7 +2084,10 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
         (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
-                   FILE_FLAG_DELETE_ON_CLOSE)) != 0 ||
+                   FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT |
+                   FILE_FLAG_BACKUP_SEMANTICS)) != 0 ||
+        ((flags & FILE_FLAG_BACKUP_SEMANTICS) != 0 &&
+         (flags & FILE_FLAG_OPEN_REPARSE_POINT) == 0) ||
         template_file != 0 || (attributes != NULL && attributes->descriptor != NULL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return UINTPTR_MAX;
@@ -2132,6 +2137,62 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
         return UINTPTR_MAX;
     }
+    /* OPEN_REPARSE_POINT is deliberately a metadata-only entrypoint for a
+     * final Linux symlink. Intermediate components remain forbidden by
+     * open_parent/openat2. This handle cannot read, write or follow target
+     * data and does not imply Windows reparse ACL, share or junction support. */
+    if ((flags & FILE_FLAG_OPEN_REPARSE_POINT) != 0) {
+        struct stat link_info;
+        if (fstatat(parent, leaf, &link_info, AT_SYMLINK_NOFOLLOW) == 0 &&
+            S_ISLNK(link_info.st_mode)) {
+            if (desired != 0 || disposition != OPEN_EXISTING ||
+                (flags & (FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OVERLAPPED)) != 0) {
+                close(parent);
+                free(saved_path);
+                nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+                return UINTPTR_MAX;
+            }
+            const int symlink_fd = confined_open_raw(parent, leaf, O_PATH | O_NOFOLLOW, 0);
+            const int open_error = errno;
+            close(parent);
+            if (symlink_fd < 0) {
+                free(saved_path);
+                nt_SetLastError(path_error(open_error, false));
+                return UINTPTR_MAX;
+            }
+            struct stat pinned;
+            if (fstat(symlink_fd, &pinned) != 0 || !S_ISLNK(pinned.st_mode)) {
+                close(symlink_fd);
+                free(saved_path);
+                nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+                return UINTPTR_MAX;
+            }
+            uintptr_t link_handle = UINTPTR_MAX;
+            pthread_mutex_lock(&file_lock);
+            struct guest_file *link_slot = new_file();
+            if (link_slot != NULL && next_handle <= UINTPTR_MAX - 16) {
+                link_handle = next_handle;
+                next_handle += 16;
+                *link_slot = (struct guest_file){
+                    .owner = WIN_HANDLE, .handle = link_handle, .fd = symlink_fd,
+                    .share_lease_fd = -1, .share = share,
+                    .device = pinned.st_dev, .inode = pinned.st_ino,
+                    .handle_flags = attributes && attributes->inherit ?
+                                    HANDLE_FLAG_INHERIT : 0,
+                    .reparse_handle = true, .path = saved_path
+                };
+                saved_path = NULL;
+            }
+            pthread_mutex_unlock(&file_lock);
+            free(saved_path);
+            if (link_handle == UINTPTR_MAX) {
+                close(symlink_fd);
+                nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+            }
+            return link_handle;
+        }
+    }
+
     int options = write_access ? (read_access ? O_RDWR : O_WRONLY) : O_RDONLY;
     if (disposition == CREATE_NEW || disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS)
         options |= O_CREAT;
@@ -5553,6 +5614,109 @@ static struct nt_file_attribute_data reparse_attributes(const struct stat *info)
         .size_high = (uint32_t)(length >> 32),
         .size_low = (uint32_t)length
     };
+}
+
+/* FSCTL_GET_REPARSE_POINT, supported only for a final Linux symlink opened
+ * explicitly with FILE_FLAG_OPEN_REPARSE_POINT. Windows relative symlink
+ * buffer (tag 0xA000000C), not an NTFS junction or an emulated mount.
+ * Do not export absolute Linux targets or any traversing/malformed target. */
+int32_t NT_MS_ABI nt_DeviceIoControl(uintptr_t handle, uint32_t control,
+                                    const void *input, uint32_t input_size,
+                                    void *output, uint32_t output_size,
+                                    uint32_t *returned, void *overlapped)
+{
+    const uint32_t get_reparse_point = UINT32_C(0x000900a8);
+    const uint32_t symlink_tag = UINT32_C(0xa000000c);
+    if (returned)
+        *returned = 0;
+    if (control != get_reparse_point || input || input_size || overlapped) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (!returned || !output) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file = find_handle(handle);
+    const int pinned = file && file->reparse_handle ?
+                       fcntl(file->fd, F_DUPFD_CLOEXEC, 3) : -1;
+    pthread_mutex_unlock(&file_lock);
+    if (pinned < 0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    char target[PATH_MAX];
+    const ssize_t length = readlinkat(pinned, "", target, sizeof(target) - 1);
+    const int read_error = errno;
+    close(pinned);
+    if (length <= 0 || (size_t)length >= sizeof(target) - 1) {
+        nt_SetLastError(path_error(length < 0 ? read_error : ENAMETOOLONG, false));
+        return 0;
+    }
+    target[length] = '\0';
+    /* A Windows-relative reparse target must not contain a DOS/UNC root,
+     * parent traversal, empty component, control char or invalid UTF-8.
+     * Symlink targets outside the explicitly granted tree are never
+     * disclosed as absolute host paths. */
+    if (target[0] == '/' || target[0] == '\\') {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    for (const char *cursor = target; *cursor;) {
+        const char *end = strchr(cursor, '/');
+        const size_t part = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (part == 0 || (part == 1 && cursor[0] == '.') ||
+            (part == 2 && cursor[0] == '.' && cursor[1] == '.') ||
+            memchr(cursor, '\\', part) != NULL ||
+            memchr(cursor, ':', part) != NULL) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        for (size_t i = 0; i < part; ++i)
+            if ((unsigned char)cursor[i] < 0x20) {
+                nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+                return 0;
+            }
+        cursor += part;
+        if (*cursor == '/')
+            ++cursor;
+    }
+    for (char *p = target; *p; ++p)
+        if (*p == '/')
+            *p = '\\';
+    uint16_t wide[PATH_MAX];
+    const int32_t count = nt_MultiByteToWideChar(65001, 8, target, -1,
+                                                 wide, PATH_MAX);
+    if (count <= 1) {
+        nt_SetLastError(NT_ERROR_NO_UNICODE_TRANSLATION);
+        return 0;
+    }
+    const size_t bytes = ((size_t)count - 1) * sizeof(uint16_t);
+    const size_t total = 20 + 2 * bytes;
+    if (bytes > UINT16_MAX / 2 || total > UINT16_MAX + 8) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (output_size < total) {
+        nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    unsigned char *p = output;
+    memset(p, 0, total);
+    security_le32(p, symlink_tag);
+    security_le16(p + 4, (uint16_t)(total - 8));
+    security_le16(p + 8, 0); /* SubstituteNameOffset */
+    security_le16(p + 10, (uint16_t)bytes);
+    security_le16(p + 12, (uint16_t)bytes); /* PrintNameOffset */
+    security_le16(p + 14, (uint16_t)bytes);
+    security_le32(p + 16, 1u); /* SYMLINK_FLAG_RELATIVE */
+    for (size_t i = 0; i < bytes / 2; ++i) {
+        security_le16(p + 20 + 2 * i, wide[i]);
+        security_le16(p + 20 + bytes + 2 * i, wide[i]);
+    }
+    *returned = (uint32_t)total;
+    return 1;
 }
 
 int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
