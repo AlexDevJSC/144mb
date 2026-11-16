@@ -4567,14 +4567,14 @@ int32_t NT_MS_ABI nt_GetFileSecurityA(const char *path, uint32_t information,
                                       void *descriptor, uint32_t size, uint32_t *needed)
 {
     uint16_t wide[PATH_MAX];
-    return utf8_guest_to_wide(path, wide) &&
+    return acp_path_to_wide(path, wide) &&
            nt_GetFileSecurityW(wide, information, descriptor, size, needed);
 }
 
 uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path)
 {
     uint16_t wide[PATH_MAX];
-    return utf8_guest_to_wide(path, wide) ?
+    return acp_path_to_wide(path, wide) ?
            nt_GetFileAttributesW(wide) : UINT32_MAX;
 }
 
@@ -4582,14 +4582,14 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
                                          struct nt_file_attribute_data *info)
 {
     uint16_t wide[PATH_MAX];
-    return utf8_guest_to_wide(path, wide) &&
+    return acp_path_to_wide(path, wide) &&
            nt_GetFileAttributesExW(wide, level, info);
 }
 
 /* Only the meaningful native equivalents of NORMAL and READONLY can be
  * changed here. DIRECTORY, SYSTEM, HIDDEN and NTFS attributes are not
  * Linux chmod flags and must never be silently claimed as supported. */
-int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
+static int32_t set_file_attributes_common(const char *input, uint32_t attributes)
 {
     if (attributes == 0 || (attributes & ~(WIN_READONLY | WIN_EXTENDED | WIN_NORMAL)) ||
         ((attributes & WIN_NORMAL) && attributes != WIN_NORMAL)) {
@@ -4647,10 +4647,18 @@ int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
     return result == 0;
 }
 
+int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
+{
+    char utf8[PATH_MAX];
+    return acp_path_to_utf8(input, utf8) &&
+           set_file_attributes_common(utf8, attributes);
+}
+
 int32_t NT_MS_ABI nt_SetFileAttributesW(const uint16_t *input, uint32_t attributes)
 {
     char narrow[PATH_MAX];
-    return wide_path(input, narrow) && nt_SetFileAttributesA(narrow, attributes);
+    return wide_path(input, narrow) &&
+           set_file_attributes_common(narrow, attributes);
 }
 
 uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer)
