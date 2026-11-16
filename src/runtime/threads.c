@@ -3,6 +3,7 @@
 #include "sync.h"
 #include "child_process.h"
 #include "thread_broker_registry.h"
+#include "thread_broker_ipc.h"
 #include "nt_services.h"
 #include "nt_core_information.h"
 #include "winbase.h"
@@ -11,6 +12,8 @@
 #include <errno.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <fcntl.h>
+#include <sys/socket.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sched.h>
@@ -1543,6 +1546,61 @@ bool nt_runtime_watch_child(pid_t pid, int status_fd, int start_fd,
     pthread_mutex_unlock(&wait_lock);
     pthread_attr_destroy(&attr);
     return error == 0;
+}
+
+/* Only the trusted CreateProcess launcher can activate cross-PE IPC.
+ * The existing watch path preserves child lifetime and read-only primary
+ * thread aliases. The server retains its own pidfd and socket until EOF. */
+bool nt_runtime_watch_child_broker(pid_t pid, int status_fd, int start_fd,
+                                   int broker_fd, const uint8_t secret[16],
+                                   struct nt_process_information *info)
+{
+    if (!nt_runtime_watch_child(pid, status_fd, start_fd, info)) {
+        if (broker_fd >= 0)
+            close(broker_fd);
+        return false;
+    }
+    if (broker_fd < 0)
+        return true; /* trusted native tests / legacy launchers */
+    if (secret == NULL || !nt_broker_install_child_session(pid, secret)) {
+        close(broker_fd);
+        return false;
+    }
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *process = find_waitable(info->process);
+    int pinned = -1;
+    if (process != NULL && process->kind == PROCESS) {
+        const struct waitable *canonical = wait_state(process);
+        if (canonical->owner_pid == (uint32_t)pid &&
+            canonical->pidfd >= 0 && !canonical->signaled)
+            pinned = fcntl(canonical->pidfd, F_DUPFD_CLOEXEC, 3);
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (pinned < 0) {
+        close(broker_fd);
+        return false;
+    }
+    struct nt_thread_broker_registered_peer peer = {
+        .child_pid = pid, .uid = getuid(), .gid = getgid(),
+        .child_pidfd = pinned,
+        .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION
+    };
+    memcpy(peer.secret, secret, sizeof(peer.secret));
+    nt_broker_grant_existing_sibling_queries(pid);
+    const bool started = nt_broker_server_start(broker_fd, &peer);
+    close(pinned); /* detached server owns an independent pidfd dup */
+    if (!started) {
+        close(broker_fd);
+        return false;
+    }
+    /* Once the detached service exists, it owns broker_fd even on failure.
+     * A failure to authenticate forbids CreateProcess success; the caller
+     * kills the child, while the reaper revokes every registered capability. */
+    if (!nt_broker_server_handshake(broker_fd, secret)) {
+        (void)shutdown(broker_fd, SHUT_RDWR);
+        return false;
+    }
+    return true;
 }
 
 /* Only processes launched by our trusted host have a pidfd and an
