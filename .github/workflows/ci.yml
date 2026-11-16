@@ -134,5 +134,6 @@ jobs:
           path: |
             build/stage4-windows-native.txt
             build/stage4-windows-meta.txt
+            build/stage4-windows-linux-fixture.txt
           if-no-files-found: error
           retention-days: 14
