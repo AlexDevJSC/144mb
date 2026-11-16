@@ -159,6 +159,12 @@ int32_t NT_MS_ABI nt_GetFileTime(uintptr_t handle, struct nt_file_time *created,
                                 struct nt_file_time *accessed, struct nt_file_time *written);
 int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *created,
                                 const struct nt_file_time *accessed, const struct nt_file_time *written);
+/* Narrow FSCTL_GET_REPARSE_POINT profile: explicit final symlink handle only,
+ * relative Linux targets with no traversal; never exposes arbitrary host paths. */
+int32_t NT_MS_ABI nt_DeviceIoControl(uintptr_t handle, uint32_t control,
+                                    const void *input, uint32_t input_size,
+                                    void *output, uint32_t output_size,
+                                    uint32_t *returned, void *overlapped);
 int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind, void *info, uint32_t size);
 int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, const void *info, uint32_t size);
 uint32_t NT_MS_ABI nt_GetFinalPathNameByHandleW(uintptr_t handle, uint16_t *buffer, uint32_t size, uint32_t flags);
