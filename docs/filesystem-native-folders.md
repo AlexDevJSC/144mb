@@ -659,6 +659,51 @@ normalización Unicode avanzada y sincronización NTFS case-insensitive
 entre procesos Linux externos **siguen pendientes**. Esta ampliación no
 genera alias que pudieran colisionar o resolver un inodo equivocado.
 
+## Filesystem2: enlaces, nombres 8.3 y ACP (noviembre 2026)
+
+Esta entrega amplía parcialmente P1.5 y P1.6. No equivale a NTFS completo.
+
+**Creación de enlaces seguros:** CreateSymbolicLinkA/W crea symlinks Linux para
+archivos regulares ya existentes, con destinos relativos al directorio del
+enlace, sin componentes de ascenso, rutas absolutas ni symlinks intermediarios.
+Se utiliza openat2 sin seguir enlaces y sin cambiar de montaje. Se rechaza
+SYMBOLIC_LINK_FLAG_DIRECTORY; no hay todavía junction NTFS. DeleteFileA/W
+permite borrar el propio enlace sin seguir su destino cuando no queda un
+HANDLE de metadatos del enlace abierto. FSCTL_GET_REPARSE_POINT sigue
+ofreciendo la consulta relativa previamente documentada. **Pendiente:**
+FSCTL_SET_REPARSE_POINT, FSCTL_DELETE_REPARSE_POINT, redirección de junctions,
+montaje de carpetas y reemplazo atómico de enlaces.
+
+**Alias DOS 8.3 persistentes bajo demanda:** GetShortPathNameA/W recorre
+archivos reales confinados y asigna, a nombres largos, un alias tipo
+LONGFI~1.TXT. Lo almacena en el inodo real Linux mediante el atributo
+extendido user.ntnative.dos83. Comprueba colisiones con nombres y alias
+ya asignados. El resolvedor de rutas puede reabrir estos archivos por
+el alias corto sin duplicar su contenido. FindFirstFileA/W incluye los
+alias ya persistidos en el campo alternate, sin generarlos al enumerar.
+Si no se admiten xattrs,
+la llamada falla sin inventar una ruta. **Límites:** no hay asignación
+atómica entre procesos Linux no cooperantes, ni alias por directorio para
+hardlinks, ni reconciliación completa tras renombrados entre carpetas,
+ni asignación automática para todos los directorios, ni las reglas exactas de transliteración
+de NTFS. No se declara compatibilidad 8.3 completa.
+
+**ACP en las API nuevas:** GetShortPathNameA, GetLongPathNameA y
+CreateSymbolicLinkA interpretan los bytes mediante GetACP (Windows-1252
+en el perfil actual), no mediante UTF-8 preferente. Las funciones A
+que devuelven rutas usan el mismo ACP en la salida. **Pendiente:** cambiar
+de modo seguro el resto de API A, hoy con mezcla de UTF-8 y CP1252;
+algunos wrappers W reutilizan motores A y no deben convertir dos veces.
+
+**Fedora físico:** el script
+bash scripts/fedora-filesystem-acceptance.sh --physical-confirmed
+ofrece una ejecución reproducible con logs de check, check-pe,
+check-pe-import y check-pe-isolated. Requiere ejecución MANUAL
+en Fedora x86_64 real y verificación de pruebas sin SKIP. GitHub Actions
+con contenedores Fedora/RPM no certifica la máquina física; también
+quedan pruebas con aplicaciones PE reales, concesiones D:/UNC, SELinux,
+varios procesos, cierres inesperados y reinicios.
+
 ## Límites actuales
 
 Esta implementación **no equivale todavía a NTFS**. La insensibilidad de

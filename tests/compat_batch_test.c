@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -374,6 +375,8 @@ static void check_files(void)
     BOUND(KERNEL, CopyFileW);
     BOUND(KERNEL, CopyFileExA);
     BOUND(KERNEL, CopyFileExW);
+    BOUND(KERNEL, CreateSymbolicLinkA);
+    BOUND(KERNEL, CreateSymbolicLinkW);
     BOUND(KERNEL, SetFileAttributesA);
     BOUND(KERNEL, SetFileAttributesW);
     BOUND(KERNEL, GetFinalPathNameByHandleW);
@@ -382,6 +385,8 @@ static void check_files(void)
     BOUND(KERNEL, GetFullPathNameA);
     BOUND(KERNEL, GetLongPathNameA);
     BOUND(KERNEL, GetLongPathNameW);
+    BOUND(KERNEL, GetShortPathNameA);
+    BOUND(KERNEL, GetShortPathNameW);
     BOUND(KERNEL, GetFileAttributesA);
     BOUND(KERNEL, GetFileAttributesExA);
     BOUND(KERNEL, FindFirstFileExA);
@@ -667,6 +672,77 @@ static void check_files(void)
           last_error() == NT_ERROR_FILE_NOT_FOUND);
 
 
+    /* Long names acquire stable per-inode DOS aliases only on demand.
+     * The short alias must resolve to the real data, and collisions must
+     * produce distinct aliases without creating a second host file. */
+    void *alias_stream = nt_fopen("data/longfilename.txt", "wb");
+    CHECK(alias_stream && nt_fwrite("a", 1, 1, alias_stream) == 1 &&
+          nt_fclose(alias_stream) == 0);
+    alias_stream = nt_fopen("data/longfileextra.txt", "wb");
+    CHECK(alias_stream && nt_fwrite("b", 1, 1, alias_stream) == 1 &&
+          nt_fclose(alias_stream) == 0);
+    char short1[256] = {0}, short2[256] = {0}, short_again[256] = {0};
+    CHECK(nt_GetShortPathNameA("C:\\DATA\\longfilename.txt", short1,
+                                sizeof(short1)) ==
+          strlen("C:\\DATA\\LONGFI~1.TXT") &&
+          strcmp(short1, "C:\\DATA\\LONGFI~1.TXT") == 0);
+    char host_real[512], stored_alias[14] = {0};
+    CHECK(snprintf(host_real, sizeof(host_real),
+                   "%s/data/longfilename.txt", root) > 0);
+    CHECK(getxattr(host_real, "user.ntnative.dos83", stored_alias,
+                   sizeof(stored_alias)) == (ssize_t)strlen("LONGFI~1.TXT") + 1 &&
+          strcmp(stored_alias, "LONGFI~1.TXT") == 0);
+    CHECK(nt_GetShortPathNameA("C:\\DATA\\longfileextra.txt", short2,
+                                sizeof(short2)) ==
+          strlen("C:\\DATA\\LONGFI~2.TXT") &&
+          strcmp(short2, "C:\\DATA\\LONGFI~2.TXT") == 0);
+    CHECK(nt_GetShortPathNameA("C:\\DATA\\longfilename.txt", short_again,
+                                sizeof(short_again)) == strlen(short1) &&
+          strcmp(short_again, short1) == 0);
+    uintptr_t alias_handle = nt_CreateFileA(short1, UINT32_C(0x80000000),
+                                              7u, NULL, 3u, 0x80u, 0);
+    char alias_byte = 0;
+    uint32_t alias_bytes = 0;
+    CHECK(alias_handle != UINTPTR_MAX &&
+          nt_ReadFile(alias_handle, &alias_byte, 1, &alias_bytes, NULL) &&
+          alias_bytes == 1 && alias_byte == 'a' &&
+          nt_CloseHandle(alias_handle));
+    uint16_t short_wide[128] = {0};
+    CHECK(nt_GetShortPathNameW(u"C:\\data\\longfilename.txt",
+                                short_wide, 128) ==
+          strlen("C:\\DATA\\LONGFI~1.TXT") &&
+          short_wide[8] == 'L');
+    CHECK(nt_GetShortPathNameA("data/longfilename.txt", short_again, 1) ==
+          strlen(short1) + 1);
+    struct nt_find_data_w alias_find_w = {0};
+    uintptr_t alias_search = nt_FindFirstFileW(
+        u"C:\\data\\longfilename.txt", &alias_find_w);
+    CHECK(alias_search != UINTPTR_MAX &&
+          alias_find_w.alternate[0] == 'L' &&
+          alias_find_w.alternate[6] == '~' &&
+          nt_FindClose(alias_search));
+    struct nt_find_data_a alias_find_a = {0};
+    alias_search = nt_FindFirstFileA("C:\\data\\longfilename.txt", &alias_find_a);
+    CHECK(alias_search != UINTPTR_MAX &&
+          strcmp(alias_find_a.alternate, "LONGFI~1.TXT") == 0 &&
+          nt_FindClose(alias_search));
+    CHECK(nt_DeleteFileA("data/longfilename.txt") &&
+          nt_DeleteFileA("data/longfileextra.txt"));
+    /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
+     * unlike older mixed-mode A entrypoints, no UTF-8-first guess. */
+    uintptr_t cp_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9long.txt",
+                                          UINT32_C(0x40000000),
+                                          7u, NULL, 2u, 0x80u, 0);
+    CHECK(cp_handle != UINTPTR_MAX && nt_CloseHandle(cp_handle));
+    const char cp_input[] = "C:\\data\\caf\xe9long.txt";
+    char cp_output[256] = {0};
+    CHECK(nt_GetLongPathNameA(cp_input, cp_output, sizeof(cp_output)) ==
+          strlen(cp_input) && strcmp(cp_input, cp_output) == 0);
+    CHECK(nt_GetShortPathNameA(cp_input, cp_output, sizeof(cp_output)) > 0 &&
+          strstr(cp_output, "~1.TXT") != NULL);
+    CHECK(nt_DeleteFileW(u"C:\\data\\caf\u00e9long.txt"));
+
+
     raw = nt_fopen("data/target.txt", "wb");
     CHECK(raw != NULL && nt_fclose(raw) == 0);
     /* A symlink leaf is inspectable only through an explicit no-follow
@@ -704,6 +780,26 @@ static void check_files(void)
           last_error() == NT_ERROR_NOT_SUPPORTED &&
           nt_CloseHandle(link_handle));
     CHECK(unlink(safe_link) == 0 && unlink(forbidden_link) == 0);
+    char created_link[512];
+    CHECK(snprintf(created_link, sizeof(created_link), "%s/data/api-link", root) > 0);
+    CHECK(nt_CreateSymbolicLinkW(u"C:\\data\\api-link", u"scores.txt", 0) != 0);
+    CHECK((nt_GetFileAttributesA("C:\\data\\api-link") & 0x400u) != 0);
+    link_handle = nt_CreateFileW(u"C:\\data\\api-link", 0, 7, NULL,
+                                 3u, 0x00200000u, 0);
+    CHECK(link_handle != UINTPTR_MAX &&
+          nt_DeviceIoControl(link_handle, 0x000900a8u, NULL, 0,
+                             reparse_data, sizeof(reparse_data),
+                             &reparse_bytes, NULL) &&
+          nt_CloseHandle(link_handle));
+    CHECK(!nt_CreateSymbolicLinkW(u"C:\\data\\outside", u"..\\secret", 0) &&
+          last_error() == NT_ERROR_INVALID_NAME);
+    CHECK(!nt_CreateSymbolicLinkW(u"C:\\data\\junction", u"scores.txt", 1) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
+    CHECK(!nt_CreateSymbolicLinkA("C:\\data\\again", "/etc/passwd", 0) &&
+          last_error() == NT_ERROR_INVALID_NAME);
+    CHECK(nt_DeleteFileA("C:\\data\\api-link") &&
+          nt_GetFileAttributesA("C:\\data\\scores.txt") != UINT32_MAX);
+
 
     /* CopyFileEx reuses the regular native copy and preserves its xattrs.
      * Verify Microsoft x64 callback arguments and Windows abort semantics. */

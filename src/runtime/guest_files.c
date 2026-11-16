@@ -610,6 +610,8 @@ static int confined_open_raw(int root, const char *path, int flags, unsigned int
     return (int)syscall(SYS_openat2, root, path, &how, sizeof(how));
 }
 
+#include "dos83_alias.inc"
+
 /* Exact spelling wins, including a symlink (the actual open rejects it).
  * Two differently-cased alternatives without an exact match are ambiguous. */
 static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1])
@@ -644,7 +646,11 @@ static int resolve_name(int parent, const char *asked, char actual[NAME_MAX + 1]
             error = errno;
             break;
         }
-        if (same_unicode_name(asked, entry->d_name)) {
+        char alias[14] = {0};
+        const bool short_match = strchr(asked, '~') != NULL &&
+                                 dos83_read_at(parent, entry->d_name, alias) &&
+                                 strcasecmp(asked, alias) == 0;
+        if (same_unicode_name(asked, entry->d_name) || short_match) {
             if (++matches > 1) {
                 error = EEXIST;
                 break;
@@ -2998,8 +3004,27 @@ static int32_t change_path(const char *input, enum path_operation operation)
         struct stat info;
         status = fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW);
         if (status == 0 && S_ISLNK(info.st_mode)) {
-            errno = EACCES;
-            status = -1;
+            /* DeleteFile on a final reparse symlink removes the link,
+             * never its target. A live metadata HANDLE pins the link and
+             * must be closed first; no unsupported file lease is assumed. */
+            bool opened = false;
+            for (size_t i = 0; i < FILE_TABLE_SIZE; ++i)
+                if (files[i].owner != FREE_FILE && files[i].reparse_handle &&
+                    files[i].device == info.st_dev && files[i].inode == info.st_ino)
+                    opened = true;
+            if (operation != REMOVE_FILE || opened) {
+                errno = opened ? EBUSY : EACCES;
+                status = -1;
+            } else {
+                status = unlinkat(parent, leaf, 0);
+                if (status == 0) {
+                    const int saved_error = errno;
+                    pthread_mutex_unlock(&file_lock);
+                    close(parent);
+                    errno = saved_error;
+                    return 1;
+                }
+            }
         } else if (status == 0 && operation == REMOVE_FILE &&
                    S_ISREG(info.st_mode) && (info.st_mode & 0222) == 0) {
             /* Linux allows unlinking readonly files through the parent
@@ -4175,23 +4200,147 @@ uint32_t NT_MS_ABI nt_GetLongPathNameW(const uint16_t *input, uint16_t *buffer,
     return path_result(resolved, size, buffer);
 }
 
-uint32_t NT_MS_ABI nt_GetLongPathNameA(const char *input, char *buffer,
-                                       uint32_t size)
+/* Windows file API A boundaries use the process ACP for both input and
+ * returned path bytes. The underlying guest paths are always UTF-8 and
+ * W calls preserve unambiguous UTF-16. This does not yet migrate all the
+ * older A entrypoints, whose compatibility fallback is documented. */
+static uint32_t file_path_acp_output(const uint16_t *wide, char *buffer,
+                                     uint32_t size)
 {
-    char resolved[PATH_MAX + 16];
-    if (!input || !canonical_existing_guest_path(input, resolved)) {
-        nt_SetLastError(path_error(input ? errno : EINVAL, false));
+    const int32_t required = nt_WideCharToMultiByte(nt_GetACP(), 0,
+                                                     wide, -1, NULL, 0,
+                                                     NULL, NULL);
+    if (required <= 0)
         return 0;
-    }
-    const size_t required = strlen(resolved) + 1;
-    if (size < required)
+    if (size < (uint32_t)required)
         return (uint32_t)required;
     if (!buffer) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    memcpy(buffer, resolved, required);
+    if (nt_WideCharToMultiByte(nt_GetACP(), 0, wide, -1,
+                               buffer, (int32_t)size, NULL, NULL) <= 0)
+        return 0;
     return (uint32_t)required - 1;
+}
+
+uint32_t NT_MS_ABI nt_GetLongPathNameA(const char *input, char *buffer,
+                                       uint32_t size)
+{
+    uint16_t narrow_as_wide[PATH_MAX], output[PATH_MAX + 16];
+    if (!input) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (nt_MultiByteToWideChar(nt_GetACP(), 0, input, -1,
+                                narrow_as_wide, PATH_MAX) <= 0)
+        return 0;
+    if (!nt_GetLongPathNameW(narrow_as_wide, output, PATH_MAX + 16))
+        return 0;
+    return file_path_acp_output(output, buffer, size);
+}
+
+/* Resolve each component to a native inode before allocating its
+ * persistent 8.3 alias. The xattr is attached to the original Linux file,
+ * never a copy or user-visible shortcut. Supported aliases are immediately
+ * available to the normal no-follow directory resolver. */
+static bool short_existing_guest_path(const char *input,
+                                      char output[PATH_MAX + 16])
+{
+    char dos[PATH_MAX + 16], canonical[PATH_MAX];
+    if (!canonical_existing_guest_path(input, dos) ||
+        !normalize_path(dos, canonical, true))
+        return false;
+    const char *relative = canonical[0] ? canonical : ".";
+    int directory = duplicate_root(&relative);
+    if (directory < 0)
+        return false;
+    if (strcmp(relative, ".") == 0) {
+        const bool result = copy_dos_path(canonical, output, PATH_MAX + 16);
+        close(directory);
+        return result;
+    }
+    const size_t count = strlen(canonical), suffix = strlen(relative);
+    if (suffix > count) {
+        close(directory);
+        errno = EINVAL;
+        return false;
+    }
+    char shortname[PATH_MAX];
+    size_t used = count - suffix;
+    memcpy(shortname, canonical, used);
+    const char *cursor = relative;
+    for (;;) {
+        const char *slash = strchr(cursor, '/');
+        const size_t length = slash ? (size_t)(slash - cursor) : strlen(cursor);
+        if (!length || length > NAME_MAX) {
+            close(directory);
+            errno = EINVAL;
+            return false;
+        }
+        char name[NAME_MAX + 1], alias[14] = {0};
+        memcpy(name, cursor, length);
+        name[length] = 0;
+        if (!dos83_assign_at(directory, name, alias)) {
+            const int error = errno;
+            close(directory);
+            errno = error;
+            return false;
+        }
+        const size_t alias_length = strlen(alias);
+        if (used + alias_length + 2 >= sizeof(shortname)) {
+            close(directory);
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        memcpy(shortname + used, alias, alias_length);
+        used += alias_length;
+        if (!slash) {
+            close(directory);
+            break;
+        }
+        shortname[used++] = '/';
+        int next = confined_open_raw(directory, name, O_PATH | O_DIRECTORY, 0);
+        const int error = errno;
+        close(directory);
+        if (next < 0) {
+            errno = error;
+            return false;
+        }
+        directory = next;
+        cursor = slash + 1;
+    }
+    shortname[used] = 0;
+    return copy_dos_path(shortname, output, PATH_MAX + 16);
+}
+
+uint32_t NT_MS_ABI nt_GetShortPathNameW(const uint16_t *input, uint16_t *buffer,
+                                        uint32_t size)
+{
+    char narrow[PATH_MAX], dos[PATH_MAX + 16];
+    if (!wide_path(input, narrow))
+        return 0;
+    if (!short_existing_guest_path(narrow, dos)) {
+        nt_SetLastError(path_error(errno, false));
+        return 0;
+    }
+    return path_result(dos, size, buffer);
+}
+
+uint32_t NT_MS_ABI nt_GetShortPathNameA(const char *input, char *buffer,
+                                        uint32_t size)
+{
+    uint16_t narrow_as_wide[PATH_MAX], output[PATH_MAX + 16];
+    if (!input) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (nt_MultiByteToWideChar(nt_GetACP(), 0, input, -1,
+                                narrow_as_wide, PATH_MAX) <= 0)
+        return 0;
+    if (!nt_GetShortPathNameW(narrow_as_wide, output, PATH_MAX + 16))
+        return 0;
+    return file_path_acp_output(output, buffer, size);
 }
 
 /* Forward declaration: HANDLE duplication is implemented below. */
@@ -5735,6 +5884,121 @@ static struct nt_file_attribute_data reparse_attributes(const struct stat *info)
     };
 }
 
+/* A deliberately confined CreateSymbolicLink subset. Windows reparse
+ * redirects are never allowed to expand the filesystem grant. Only a
+ * relative, already-existing regular-file target in the same granted
+ * directory tree can be linked. Directory links/junctions require a
+ * separate broker with mount and share invariants; reject rather than
+ * silently follow a Linux directory symlink as if it were a junction. */
+static bool nt_relative_link_target(const char *target)
+{
+    if (!target || !target[0] || target[0] == '/' || target[0] == '\\' ||
+        strnlen(target, PATH_MAX) >= PATH_MAX)
+        return false;
+    for (const char *cursor = target; *cursor;) {
+        const char *end = strpbrk(cursor, "/\\");
+        const size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (!length || (length == 1 && cursor[0] == '.') ||
+            (length == 2 && cursor[0] == '.' && cursor[1] == '.') ||
+            length > NAME_MAX || memchr(cursor, ':', length))
+            return false;
+        for (size_t i = 0; i < length; ++i) {
+            const unsigned char ch = (unsigned char)cursor[i];
+            if (ch < 0x20 || ch == 0x7f || strchr("<>\"|?*", ch))
+                return false;
+        }
+        if (!end)
+            break;
+        cursor = end + 1;
+        if (!*cursor)
+            return false;
+    }
+    return true;
+}
+
+int32_t NT_MS_ABI nt_CreateSymbolicLinkW(const uint16_t *link_name,
+                                          const uint16_t *target_name,
+                                          uint32_t flags)
+{
+    if ((flags & ~3u) || (flags & 1u)) { /* directory junctions not modeled */
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    char link[PATH_MAX], target[PATH_MAX], normalized[PATH_MAX];
+    if (!wide_path(link_name, link) || !wide_path(target_name, target))
+        return 0;
+    if (!nt_relative_link_target(target) || !guest_path(link, normalized)) {
+        nt_SetLastError(NT_ERROR_INVALID_NAME);
+        return 0;
+    }
+    const char *relative = normalized;
+    int root = duplicate_root(&relative);
+    if (root < 0) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    char leaf[NAME_MAX + 1];
+    const int parent = open_parent(root, relative, leaf);
+    const int parent_error = errno;
+    close(root);
+    if (parent < 0) {
+        nt_SetLastError(path_error(parent_error, true));
+        return 0;
+    }
+    /* Link targets must already be regular files, pinned through the
+     * non-following, same-mount resolver. No Linux absolute symlink
+     * target or cross-volume permission can be introduced. */
+    for (char *p = target; *p; ++p)
+        if (*p == '\\')
+            *p = '/';
+    const int target_fd = confined_open(parent, target, O_PATH, 0);
+    const int target_error = errno;
+    struct stat target_stat;
+    const bool regular = target_fd >= 0 &&
+                         fstat(target_fd, &target_stat) == 0 &&
+                         S_ISREG(target_stat.st_mode);
+    if (target_fd >= 0)
+        close(target_fd);
+    if (!regular) {
+        close(parent);
+        nt_SetLastError(path_error(target_fd < 0 ? target_error : EACCES, false));
+        return 0;
+    }
+    char existing[NAME_MAX + 1];
+    const int found = resolve_name(parent, leaf, existing);
+    if (found != 0) {
+        const int error = found < 0 ? errno : EEXIST;
+        close(parent);
+        nt_SetLastError(path_error(error, false));
+        return 0;
+    }
+    for (char *p = target; *p; ++p)
+        if (*p == '\\')
+            *p = '/';
+    const int result = symlinkat(target, parent, leaf);
+    const int error = errno;
+    close(parent);
+    if (result != 0)
+        nt_SetLastError(path_error(error, false));
+    return result == 0;
+}
+
+int32_t NT_MS_ABI nt_CreateSymbolicLinkA(const char *link_name,
+                                          const char *target_name,
+                                          uint32_t flags)
+{
+    uint16_t link[PATH_MAX], target[PATH_MAX];
+    if (!link_name || !target_name) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return nt_MultiByteToWideChar(nt_GetACP(), 0, link_name, -1,
+                                   link, PATH_MAX) > 0 &&
+           nt_MultiByteToWideChar(nt_GetACP(), 0, target_name, -1,
+                                   target, PATH_MAX) > 0 &&
+           nt_CreateSymbolicLinkW(link, target, flags);
+}
+
 /* FSCTL_GET_REPARSE_POINT, supported only for a final Linux symlink opened
  * explicitly with FILE_FLAG_OPEN_REPARSE_POINT. Windows relative symlink
  * buffer (tag 0xA000000C), not an NTFS junction or an emulated mount.
@@ -5975,8 +6239,15 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
             close(fd);
             continue;
         }
-        if (valid)
+        if (valid) {
             result.info = file_attributes(fd, &stat_info);
+            char alias[14] = {0};
+            if (dos83_read_at(dirfd(search->directory), entry->d_name, alias))
+                for (size_t i = 0; i < sizeof(result.alternate) /
+                                         sizeof(result.alternate[0]) - 1 &&
+                                   alias[i]; ++i)
+                    result.alternate[i] = (uint16_t)(unsigned char)alias[i];
+        }
         close(fd);
         if (valid) {
             *data = result;
