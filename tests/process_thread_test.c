@@ -339,6 +339,13 @@ int main(int argc, char **argv)
           "native NtOpenThread authenticates owned child process+thread pair");
     check(nt_runtime_close_waitable(native_child),
           "release native child-query alias");
+    uintptr_t untouched_native = 0x5151u;
+    const struct nt_client_id wrong_owner = {
+        (uintptr_t)child + 1u, (uintptr_t)child
+    };
+    check(nt_NtOpenThread(&untouched_native, 0x800u, NULL, &wrong_owner) ==
+          NT_STATUS_NOT_SUPPORTED && untouched_native == 0x5151u,
+          "NtOpenThread must authenticate CLIENT_ID process owner and not touch outputs");
 
     uintptr_t restricted = 0;
     check(nt_runtime_duplicate_waitable(info.process, 0x1000u, 0, 0, &restricted) ==
