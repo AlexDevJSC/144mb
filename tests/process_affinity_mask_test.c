@@ -8,6 +8,9 @@
 #include "winbase.h"
 
 #include <sched.h>
+#include <pthread.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +32,26 @@ static uint32_t NT_MS_ABI affinity_worker(void *unused)
     cpu_set_t actual;
     return sched_getaffinity(0, sizeof(actual), &actual) == 0 &&
            CPU_EQUAL(&actual, &expected) ? 0x144u : 0x1441u;
+}
+
+/* Deliberately not a runtime-owned Windows thread: the scheduler
+ * transaction must fail closed rather than alter this Linux helper. */
+static pthread_mutex_t outsider_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t outsider_cond = PTHREAD_COND_INITIALIZER;
+static bool outsider_ready, outsider_quit;
+static pid_t outsider_tid;
+
+static void *untracked_host_thread(void *unused)
+{
+    (void)unused;
+    pthread_mutex_lock(&outsider_lock);
+    outsider_tid = (pid_t)syscall(SYS_gettid);
+    outsider_ready = true;
+    pthread_cond_broadcast(&outsider_cond);
+    while (!outsider_quit)
+        pthread_cond_wait(&outsider_cond, &outsider_lock);
+    pthread_mutex_unlock(&outsider_lock);
+    return NULL;
 }
 
 int main(void)
@@ -167,6 +190,39 @@ int main(void)
         check(nt_runtime_close_waitable(worker), "close worker handle");
     }
 
+    pthread_t outsider;
+    const int guest_spoof_error = pthread_create(&outsider, NULL,
+                                                  untracked_host_thread, NULL);
+    check(guest_spoof_error == 0, "create an unregistered Linux helper pthread");
+    if (guest_spoof_error == 0) {
+        pthread_mutex_lock(&outsider_lock);
+        while (!outsider_ready)
+            pthread_cond_wait(&outsider_cond, &outsider_lock);
+        const pid_t alien_tid = outsider_tid;
+        pthread_mutex_unlock(&outsider_lock);
+        cpu_set_t outsider_before, outsider_after;
+        check(sched_getaffinity(alien_tid, sizeof(outsider_before),
+                                &outsider_before) == 0,
+              "read unregistered native helper CPU mask");
+        nt_SetLastError(0);
+        check(!nt_SetProcessAffinityMask(set_only, baseline_mask) &&
+              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED,
+              "refuse to change scheduler policy of untracked host pthread");
+        check(sched_getaffinity(alien_tid, sizeof(outsider_after),
+                                &outsider_after) == 0 &&
+              CPU_EQUAL(&outsider_before, &outsider_after),
+              "unregistered helper CPU mask was not modified");
+        nt_SetLastError(0);
+        check(!nt_SetPriorityClass(UINTPTR_MAX, 0x4000u) &&
+              nt_GetLastError() == NT_ERROR_NOT_SUPPORTED,
+              "refuse process priority class change with an unknown host TID");
+        pthread_mutex_lock(&outsider_lock);
+        outsider_quit = true;
+        pthread_cond_broadcast(&outsider_cond);
+        pthread_mutex_unlock(&outsider_lock);
+        check(pthread_join(outsider, NULL) == 0,
+              "join unregistered helper safely");
+    }
     check(nt_runtime_close_waitable(query_only) &&
           nt_runtime_close_waitable(set_only), "close permissioned process handles");
     check(sched_setaffinity(0, sizeof(original), &original) == 0,
