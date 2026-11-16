@@ -41,7 +41,7 @@ incomplete and must not be represented as general Windows compatibility.
 %make_install PREFIX=%{_prefix} BINDIR=%{_bindir}
 
 %check
-%make_build check check-pe-image
+%make_build check check-pe-image check-audio-required
 
 %files
 %license LICENSE
