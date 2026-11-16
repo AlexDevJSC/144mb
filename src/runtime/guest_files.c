@@ -4076,70 +4076,56 @@ uint32_t NT_MS_ABI nt_GetFullPathNameW(const uint16_t *path, uint32_t size, uint
     return length;
 }
 
-/* ANSI entry points are UTF-8 at this stage of the native bridge:
- * the true Windows ACP/OEM codepage model is tracked separately. */
-static bool utf8_guest_to_wide(const char *path, uint16_t result[PATH_MAX])
+/* The A path APIs decode the advertised Windows process ACP once.
+ * Host/native paths remain UTF-8; callers of W never take this route. */
+static bool file_ansi_to_wide(const char *path, uint16_t result[PATH_MAX])
 {
     if (!path) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return false;
     }
-    if (nt_MultiByteToWideChar(65001, 8, path, -1, result, PATH_MAX) != 0)
-        return true;
-    return nt_MultiByteToWideChar(nt_GetACP(), 0, path, -1, result, PATH_MAX) != 0;
+    return nt_MultiByteToWideChar(nt_GetACP(), 0, path, -1,
+                                  result, PATH_MAX) != 0;
 }
+
+/* Forward: path output conversion is shared with GetLongPathNameA. */
+static uint32_t file_path_acp_output(const uint16_t *wide, char *buffer,
+                                     uint32_t size);
 
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryA(uint32_t size, char *buffer)
 {
-    char full[PATH_MAX + 3];
-    pthread_mutex_lock(&root_lock);
-    const bool valid = copy_dos_path(guest_cwd, full, sizeof(full));
-    pthread_mutex_unlock(&root_lock);
-    if (!valid) {
-        nt_SetLastError(path_error(errno, true));
+    uint16_t path[PATH_MAX + 16];
+    if (nt_GetCurrentDirectoryW(PATH_MAX + 16, path) == 0)
         return 0;
-    }
-    const size_t required = strlen(full) + 1;
-    if (size < required)
-        return (uint32_t)required;
-    if (!buffer) {
-        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
-        return 0;
-    }
-    memcpy(buffer, full, required);
-    return (uint32_t)required - 1;
+    return file_path_acp_output(path, buffer, size);
 }
 
 int32_t NT_MS_ABI nt_SetCurrentDirectoryA(const char *path)
 {
     uint16_t wide[PATH_MAX];
-    return utf8_guest_to_wide(path, wide) && nt_SetCurrentDirectoryW(wide);
+    return file_ansi_to_wide(path, wide) && nt_SetCurrentDirectoryW(wide);
 }
 
 uint32_t NT_MS_ABI nt_GetFullPathNameA(const char *path, uint32_t size,
                                       char *buffer, char **leaf)
 {
-    char relative[PATH_MAX], full[PATH_MAX + 3];
+    uint16_t wide_path[PATH_MAX], dos[PATH_MAX + 16];
     if (leaf)
         *leaf = NULL;
-    if (!normalize_path(path, relative, true) ||
-        !copy_dos_path(relative, full, sizeof(full))) {
-        nt_SetLastError(path_error(errno, true));
+    if (!file_ansi_to_wide(path, wide_path))
+        return 0;
+    const uint32_t count = nt_GetFullPathNameW(wide_path, PATH_MAX + 16, dos, NULL);
+    if (!count || count >= PATH_MAX + 16) {
+        if (count)
+            nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
         return 0;
     }
-    const size_t required = strlen(full) + 1;
-    if (size < required)
-        return (uint32_t)required;
-    if (!buffer) {
-        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
-        return 0;
+    const uint32_t bytes = file_path_acp_output(dos, buffer, size);
+    if (bytes && bytes < size && leaf && buffer) {
+        char *base = strrchr(buffer, '\\');
+        *leaf = base && base[1] != 0 ? base + 1 : NULL;
     }
-    memcpy(buffer, full, required);
-    if (leaf && relative[0] != '\0') {
-        char *slash = strrchr(buffer, '\\');
-        *leaf = slash ? slash + 1 : NULL;
-    }
-    return (uint32_t)required - 1;
+    return bytes;
 }
 
 /* GetLongPathName performs an actual case-insensitive, component-by-
@@ -4586,14 +4572,14 @@ int32_t NT_MS_ABI nt_GetFileSecurityA(const char *path, uint32_t information,
                                       void *descriptor, uint32_t size, uint32_t *needed)
 {
     uint16_t wide[PATH_MAX];
-    return utf8_guest_to_wide(path, wide) &&
+    return file_ansi_to_wide(path, wide) &&
            nt_GetFileSecurityW(wide, information, descriptor, size, needed);
 }
 
 uint32_t NT_MS_ABI nt_GetFileAttributesA(const char *path)
 {
     uint16_t wide[PATH_MAX];
-    return utf8_guest_to_wide(path, wide) ?
+    return file_ansi_to_wide(path, wide) ?
            nt_GetFileAttributesW(wide) : UINT32_MAX;
 }
 
@@ -4601,14 +4587,14 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
                                          struct nt_file_attribute_data *info)
 {
     uint16_t wide[PATH_MAX];
-    return utf8_guest_to_wide(path, wide) &&
+    return file_ansi_to_wide(path, wide) &&
            nt_GetFileAttributesExW(wide, level, info);
 }
 
 /* Only the meaningful native equivalents of NORMAL and READONLY can be
  * changed here. DIRECTORY, SYSTEM, HIDDEN and NTFS attributes are not
  * Linux chmod flags and must never be silently claimed as supported. */
-int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
+static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
 {
     if (attributes == 0 || (attributes & ~(WIN_READONLY | WIN_EXTENDED | WIN_NORMAL)) ||
         ((attributes & WIN_NORMAL) && attributes != WIN_NORMAL)) {
@@ -4666,10 +4652,16 @@ int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
     return result == 0;
 }
 
+int32_t NT_MS_ABI nt_SetFileAttributesA(const char *input, uint32_t attributes)
+{
+    char utf8[PATH_MAX];
+    return file_ansi_to_utf8(input, utf8) && set_file_attributes_utf8(utf8, attributes);
+}
+
 int32_t NT_MS_ABI nt_SetFileAttributesW(const uint16_t *input, uint32_t attributes)
 {
     char narrow[PATH_MAX];
-    return wide_path(input, narrow) && nt_SetFileAttributesA(narrow, attributes);
+    return wide_path(input, narrow) && set_file_attributes_utf8(narrow, attributes);
 }
 
 uint32_t NT_MS_ABI nt_GetTempPathA(uint32_t size, char *buffer)
