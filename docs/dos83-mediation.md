@@ -43,7 +43,7 @@ La herramienta necesita permiso de lectura, búsqueda y atributos extendidos sob
 - La cola de inotify no es un journal durable. `--scan` repara visibilidad y alias faltantes, **no** reconstruye un par origen/destino cuyo historial se haya perdido ni garantiza limpieza de todos los metadatos huérfanos.
 - La preparación previa de xattrs no es una transacción de almacenamiento atómica junto con `renameat2`. Una caída entre operaciones puede dejar atributos de staging obsoletos en el inodo, aunque la búsqueda no debería considerarlos válidos para nombres ausentes. No se afirma recuperación idéntica a NTFS después de una interrupción eléctrica.
 - Los alias y sus reglas Unicode/8.3 no se han contrastado exhaustivamente con versiones reales de Windows. `ntfs3` no se usa como dependencia obligatoria.
-- **Mediación transparente de absolutamente todos los procesos Linux** exigiría prohibir el acceso directo al directorio inferior y exponer exclusivamente un sistema de archivos mediador (por ejemplo, FUSE), o una solución de kernel con una política equivalente. No se implementa aquí porque esos eran los requisitos del nivel 3, no de los niveles 1 y 2 solicitados.
+- **P2.3 opcional:** existe ya un prototipo [FUSE3 + Landlock](dos83-p2-3-fuse.md) para programas que sólo pueden escribir a través de la vista mediada. Landlock exige ABI >=3 y afecta al proceso lanzado y a sus descendientes; otros programas Linux no confinados siguen pudiendo escribir en el backing. El modo fuerte debe validarse en Fedora físico y con control global de permisos del árbol inferior antes de declararse universal.
 
 ## Pruebas
 
