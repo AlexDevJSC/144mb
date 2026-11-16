@@ -380,6 +380,8 @@ static void check_files(void)
     BOUND(KERNEL, GetCurrentDirectoryA);
     BOUND(KERNEL, SetCurrentDirectoryA);
     BOUND(KERNEL, GetFullPathNameA);
+    BOUND(KERNEL, GetLongPathNameA);
+    BOUND(KERNEL, GetLongPathNameW);
     BOUND(KERNEL, GetFileAttributesA);
     BOUND(KERNEL, GetFileAttributesExA);
     BOUND(KERNEL, FindFirstFileExA);
