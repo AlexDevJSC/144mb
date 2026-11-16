@@ -99,6 +99,10 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
 uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask);
 int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority);
 int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle);
+int32_t NT_MS_ABI nt_GetThreadPriorityBoost(uintptr_t handle, int32_t *disabled);
+int32_t NT_MS_ABI nt_SetThreadPriorityBoost(uintptr_t handle, int32_t disabled);
+int32_t NT_MS_ABI nt_GetProcessPriorityBoost(uintptr_t handle, int32_t *disabled);
+int32_t NT_MS_ABI nt_SetProcessPriorityBoost(uintptr_t handle, int32_t disabled);
 uint32_t NT_MS_ABI nt_GetPriorityClass(uintptr_t process);
 int32_t NT_MS_ABI nt_SetPriorityClass(uintptr_t process, uint32_t priority_class);
 int32_t nt_runtime_current_process_base_priority(void);
