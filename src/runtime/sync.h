@@ -88,6 +88,9 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
 uintptr_t NT_MS_ABI nt_SetThreadAffinityMask(uintptr_t handle, uintptr_t mask);
 int32_t NT_MS_ABI nt_SetThreadPriority(uintptr_t handle, int32_t priority);
 int32_t NT_MS_ABI nt_GetThreadPriority(uintptr_t handle);
+uint32_t NT_MS_ABI nt_GetPriorityClass(uintptr_t process);
+int32_t NT_MS_ABI nt_SetPriorityClass(uintptr_t process, uint32_t priority_class);
+int32_t nt_runtime_current_process_base_priority(void);
 int32_t NT_MS_ABI nt_GetThreadTimes(uintptr_t handle, struct nt_file_time *created,
     struct nt_file_time *exited, struct nt_file_time *kernel, struct nt_file_time *user);
 int32_t NT_MS_ABI nt_GetProcessTimes(uintptr_t handle, struct nt_file_time *created,
