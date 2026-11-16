@@ -110,6 +110,37 @@ int main(void)
     CHECK(nt_OpenFileMappingW(4, 0, name) == 0 &&
           nt_GetLastError() == NT_ERROR_FILE_NOT_FOUND);
 
+    /* The same backend is now reachable through ntdll Nt/Zw imports.
+     * NTDLL returns NTSTATUS, not a Win32 BOOL, and preserves LastError. */
+    CHECK(nt_runtime_resolve("ntdll.dll", "NtCreateSection") ==
+          (nt_guest_proc)nt_NtCreateSection);
+    CHECK(nt_runtime_resolve("ntdll.dll", "ZwMapViewOfSection") ==
+          (nt_guest_proc)nt_NtMapViewOfSection);
+    const int64_t length = 65536;
+    uintptr_t section = 0;
+    nt_SetLastError(7007);
+    CHECK(nt_NtCreateSection(&section, 6, NULL, &length, 4,
+                             0x08000000u, 0) == NT_STATUS_SUCCESS && section);
+    CHECK(nt_GetLastError() == 7007);
+    void *native_view = NULL;
+    size_t native_length = 0;
+    CHECK(nt_NtMapViewOfSection(section, nt_GetCurrentProcess(), &native_view,
+                                0, 0, NULL, &native_length, 1, 0, 4) ==
+          NT_STATUS_SUCCESS);
+    CHECK(native_view != NULL && native_length == 65536 &&
+          nt_GetLastError() == 7007);
+    memset(native_view, 0xA5, 32);
+    unsigned char *mixed_view = nt_MapViewOfFile(section, 4, 0, 0, 4096);
+    CHECK(mixed_view && mixed_view[0] == 0xA5 &&
+          mixed_view[31] == 0xA5);
+    CHECK(nt_UnmapViewOfFile(mixed_view));
+    CHECK(nt_NtMapViewOfSection(section, 0, &native_view, 0, 0,
+                                NULL, &native_length, 1, 0, 2) ==
+          NT_STATUS_NOT_SUPPORTED);
+    CHECK(nt_NtUnmapViewOfSection(nt_GetCurrentProcess(), native_view) ==
+          NT_STATUS_SUCCESS && nt_GetLastError() == 7007);
+    CHECK(nt_CloseHandle(section));
+
     /* A name stays alive only while an object handle or view exists. */
     uintptr_t only = nt_CreateFileMappingW(UINTPTR_MAX, NULL, 2, 0, 4096, u"readonly");
     CHECK(only != 0);
