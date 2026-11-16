@@ -2819,7 +2819,7 @@ int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
  * destination must not be moved out of the guarded name. This uses the
  * same private registry but is not a transaction with external Linux
  * writers, which remain outside the NT guest's namespace protocol. */
-static int check_inode_not_pending(const struct stat *info, const char *path)
+static int check_inode_not_pending(const struct stat *info)
 {
     if (!S_ISREG(info->st_mode))
         return 0;
@@ -3138,7 +3138,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
         } else if (file_blocks_delete(&info)) {
             errno = EBUSY;
             status = -1;
-        } else if (check_inode_not_pending(&info, source) != 0) {
+        } else if (check_inode_not_pending(&info) != 0) {
             status = -1;
         } else {
             struct stat target;
@@ -3151,7 +3151,7 @@ int32_t NT_MS_ABI nt_MoveFileExA(const char *from, const char *to, uint32_t flag
                 errno = EBUSY;
                 status = -1;
             } else if (exists == 0 && (flags & 1u) != 0 &&
-                       check_inode_not_pending(&target, destination) != 0) {
+                       check_inode_not_pending(&target) != 0) {
                 status = -1;
             } else if (exists < 0 && errno != ENOENT) {
                 status = -1;
