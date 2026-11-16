@@ -2381,6 +2381,14 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
         return 0;
     }
+    /* Do not issue a syscall when part of the requested group mask lies
+     * outside the startup sandbox CPU set. Linux may otherwise silently
+     * intersect it and force a best-effort rollback. */
+    if (desired->group >= processor_group_count ||
+        (desired->mask & ~processor_group_masks[desired->group]) != 0) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
     cpu_set_t target;
     CPU_ZERO(&target);
     for (unsigned int bit = 0; bit < 64; ++bit)
@@ -2432,12 +2440,14 @@ int32_t NT_MS_ABI nt_SetThreadGroupAffinity(uintptr_t handle,
     return 1;
 }
 
-/* A Win64 SetThreadAffinityMask operates on one 64-bit processor group.
- * Do not silently truncate a Linux cpuset that has CPU IDs outside group 0.
- * We intentionally do not invent a Windows processor-group scheduler.
- * The Linux kernel owns the actual placement; no virtual affinity cache. */
+/* Legacy SetThreadAffinityMask is relative to the current processor group
+ * of the target thread, not unconditionally to Linux CPUs 0..63. Once a
+ * thread has an unambiguous group affinity (typically after an explicit
+ * SetThreadGroupAffinity), this preserves its group and changes only the
+ * group-local 64-bit KAFFINITY. A host cpuset spanning multiple groups
+ * cannot yield an honest previous KAFFINITY: reject it without mutation. */
 static nt_status set_guest_thread_affinity(uintptr_t handle, uintptr_t requested,
-                                           uintptr_t *previous)
+                                            uintptr_t *previous)
 {
     ensure_processor_groups();
     if (requested == 0)
@@ -2464,40 +2474,43 @@ static nt_status set_guest_thread_affinity(uintptr_t handle, uintptr_t requested
         if (err != 0)
             result = err == ESRCH ? NT_STATUS_THREAD_IS_TERMINATING : NT_STATUS_UNSUCCESSFUL;
         else {
-            uintptr_t old = 0;
-            bool outside_group = false;
-            for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
-                if (!CPU_ISSET(cpu, &before))
-                    continue;
-                if (cpu >= 64)
-                    outside_group = true;
-                else
-                    old |= (uintptr_t)UINT64_C(1) << cpu;
-            }
-            if (outside_group)
-                result = NT_STATUS_NOT_SUPPORTED;
-            else {
-                CPU_ZERO(&wanted);
-                for (int cpu = 0; cpu < 64; ++cpu)
-                    if (requested & ((uintptr_t)UINT64_C(1) << cpu))
-                        CPU_SET(cpu, &wanted);
-                err = pthread_setaffinity_np(host, sizeof(wanted), &wanted);
-                if (err == EPERM || err == EACCES)
-                    result = NT_STATUS_ACCESS_DENIED;
-                else if (err == ESRCH)
-                    result = NT_STATUS_THREAD_IS_TERMINATING;
-                else if (err != 0)
+            struct nt_group_affinity old_group = {0};
+            result = group_from_host_affinity(&before, &old_group);
+            if (result == NT_STATUS_SUCCESS) {
+                const uint16_t group = old_group.group;
+                /* Validate against the sandbox's startup CPU entitlement.
+                 * This avoids silently accepting an intersected Linux mask,
+                 * including on non-contiguous host CPU sets. */
+                if (group >= processor_group_count ||
+                    (requested & ~processor_group_masks[group]) != 0)
                     result = NT_STATUS_INVALID_PARAMETER;
-                else if (pthread_getaffinity_np(host, sizeof(after), &after) != 0) {
-                    (void)pthread_setaffinity_np(host, sizeof(before), &before);
-                    result = NT_STATUS_UNSUCCESSFUL;
-                } else if (!CPU_EQUAL(&after, &wanted)) {
-                    /* sched_setaffinity may intersect the requested mask
-                     * with cgroup restrictions. Reject partial success. */
-                    (void)pthread_setaffinity_np(host, sizeof(before), &before);
-                    result = NT_STATUS_INVALID_PARAMETER;
-                } else if (previous != NULL)
-                    *previous = old;
+                else {
+                    CPU_ZERO(&wanted);
+                    for (int bit = 0; bit < 64; ++bit)
+                        if (requested & ((uintptr_t)UINT64_C(1) << bit))
+                            CPU_SET((int)group * 64 + bit, &wanted);
+                    err = pthread_setaffinity_np(host, sizeof(wanted), &wanted);
+                    if (err == EPERM || err == EACCES)
+                        result = NT_STATUS_ACCESS_DENIED;
+                    else if (err == ESRCH)
+                        result = NT_STATUS_THREAD_IS_TERMINATING;
+                    else if (err != 0)
+                        result = NT_STATUS_INVALID_PARAMETER;
+                    else if (pthread_getaffinity_np(host, sizeof(after), &after) != 0 ||
+                             !CPU_EQUAL(&after, &wanted)) {
+                        /* Host cpuset can change between snapshot and
+                         * commit. Roll back rather than report a partial
+                         * or different affinity as successful. */
+                        cpu_set_t restored;
+                        if (pthread_setaffinity_np(host, sizeof(before), &before) != 0 ||
+                            pthread_getaffinity_np(host, sizeof(restored), &restored) != 0 ||
+                            !CPU_EQUAL(&before, &restored))
+                            result = NT_STATUS_UNSUCCESSFUL;
+                        else
+                            result = NT_STATUS_INVALID_PARAMETER;
+                    } else if (previous != NULL)
+                        *previous = old_group.mask;
+                }
             }
         }
     }

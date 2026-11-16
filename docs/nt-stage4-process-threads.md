@@ -25,7 +25,7 @@ Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-ord
 | Prioridades de hilos | `SetThreadPriority`, `GetThreadPriority` | Mapeo explícito de las siete prioridades Win32 admitidas a valores `nice` Linux por TID. La modificación requiere derechos `THREAD_SET_INFORMATION` y capacidad real del kernel: elevar prioridad puede devolver `ACCESS_DENIED`. Los valores `nice` no representables no se clasifican arbitrariamente. No se afirma equivalencia de prioridades dinámicas Windows ni de clases de prioridad del proceso. |
 | Tiempos de proceso e hilo | `GetThreadTimes`, `GetProcessTimes` | FILETIME de creación y terminación, contabilidad de CPU de usuario/kernel desde `getrusage(RUSAGE_THREAD/SELF)`, `wait4` para hijos propios y `/proc` para hilos aún ejecutándose. Rechaza handles sin permisos, procesos ajenos, y consultas no disponibles en el entorno Linux. Los tiempos de creación del hijo parten de la inscripción en el runtime, no del instante exacto de `fork`/`exec`. |
 | Información nativa de proceso | `NtQueryInformationProcess(ProcessBasicInformation)` | La máscara `KAFFINITY` ya no es el valor ficticio `1`: se consulta mediante el puente real de afinidad Linux para el proceso actual, conservando `LastError` de NT. Ante CPUs fuera del grupo 0 (índices 64+) devuelve explícitamente `STATUS_NOT_SUPPORTED` en vez de truncar o inventar la máscara. La prioridad base de proceso permanece en el perfil normal sin clases configurables. |
-| Afinidad real de CPU | `SetThreadAffinityMask`, `NtSetInformationThread` (clase `ThreadAffinityMask` 4), `GetProcessAffinityMask` | Mapeo directo al conjunto de CPU Linux del hilo o proceso actual, comprobación de derechos, estado y máscara solicitada; los resultados reflejan la afinidad aplicada por el kernel. Perfil AMD64 limitado a grupo 0 con CPUs Linux 0–63: si la afinidad original contiene CPUs superiores, devuelve `NOT_SUPPORTED` sin truncarla. No se simulan grupos Windows adicionales. |
+| Afinidad real de CPU | `SetThreadAffinityMask`, `NtSetInformationThread` (clase `ThreadAffinityMask` 4), `GetProcessAffinityMask` | Mapeo directo al conjunto de CPU Linux del hilo o proceso actual, comprobación de derechos, estado y máscara solicitada; los resultados reflejan la afinidad aplicada por el kernel. La máscara tradicional de hilo de 64 bits es relativa al grupo actual del hilo, si este tiene un único grupo verificable en el kernel; si su cpuset cubre varios grupos, devuelve `NOT_SUPPORTED` sin inventar una máscara anterior. `GetProcessAffinityMask` permanece limitado a política monogrupo 0. No se simulan grupos Windows adicionales. |
 | APC, FLS y esperas | `QueueUserAPC`, `NtQueueApcThread`, `NtTestAlert`, `SleepEx`, `WaitFor*Ex`, `Fls*`, `Tls*` | Subconjuntos ya presentes: colas acotadas, despacho en el hilo de destino durante esperas alertables, independencia por hilo y liberación de recursos al finalizar |
 
 ### Límites intencionados y no negociables
@@ -310,6 +310,36 @@ prioridades dinámicas y quantum, acceso autenticado a hilos externos
 sin violar aislamiento, política de processor groups Windows, tests
 con un host real que disponga de CPUs en más de un grupo y comparativa
 de semántica en Windows. No se pasa todavía al problema 5.
+
+#### Extensión de afinidad heredada relativa al grupo (16-11-2026)
+
+La implementación de `SetThreadAffinityMask` y la clase nativa
+`NtSetInformationThread(ThreadAffinityMask=4)` ya no presupone que
+la máscara local de 64 bits identifica siempre CPUs Linux 0–63.
+Primero consulta el cpuset del **hilo de destino**; solo cuando está
+contenido completamente en un grupo Windows representable, interpreta
+los 64 bits respecto de ese grupo, conserva su pertenencia y verifica
+el resultado exacto mediante `pthread_getaffinity_np`.
+
+Si el hilo aún puede ejecutarse en más de un grupo, devuelve
+`NOT_SUPPORTED` **sin tocar la afinidad**: no se inventa un grupo
+principal. Se rechazan máscaras vacías, CPUs no autorizadas por el
+cpuset de arranque o llamadas con HANDLE sin derechos. También
+`SetThreadGroupAffinity` valida el límite del cpuset antes de
+solicitar cambios al planificador, reduciendo la necesidad de rollback.
+Las carreras con cambios de cpuset externos siguen siendo un límite
+conservador con restauración de mejor esfuerzo.
+
+Regresión host: `tests/thread_group_affinity_test.c` comprueba
+la máscara heredada y la nativa en el grupo real del hilo, lectura
+Linux exacta, errores sin mutación y restauración de cpuset.
+Regresión PE AMD64: `tests/pe/thread_group_affinity_fixture.c`
+comprueba que una máscara heredada **no cambia de grupo** tras
+`SetThreadGroupAffinity`. El camino positivo con grupo mayor que
+cero solo puede afirmarse como ejecutado si el anfitrión de pruebas
+dispone de dicho grupo; CI con un solo grupo no demuestra ese caso.
+**No se atribuye equivalencia completa a la política de grupos de
+Windows ni se cierra todavía el problema 6.**
 
 ### Subtarea 6.2 — Clases de prioridad de proceso verificadas por Linux (16-11-2026)
 
