@@ -22,7 +22,8 @@ jobs:
           persist-credentials: false
       - name: Check stage-4 Fedora acceptance script syntax
         run: |
-          bash -n scripts/fedora-check-stage4.sh scripts/fedora-stage4-multigroup-acceptance.sh scripts/fedora-p2-3-acceptance.sh scripts/dos83-fuse-confined.sh
+          bash -n scripts/fedora-check-stage4.sh scripts/fedora-stage4-multigroup-acceptance.sh scripts/fedora-p2-3-acceptance.sh scripts/fedora-qa-environment.sh scripts/dos83-fuse-confined.sh
+          bash scripts/fedora-qa-environment.sh --help >/dev/null
           python3 -m py_compile scripts/compare-stage4-scheduler.py scripts/compare-stage4-quantum.py
           python3 -m unittest discover -s tests -p 'test_compare_stage4_quantum.py'
       - name: Install Linux build and desktop test dependencies
@@ -50,6 +51,12 @@ jobs:
           # Permission only for this disposable guest process; no host TIDs.
           sudo prlimit --nice=40:40 -- env NT_NATIVE_EXPERIMENTAL_BOOST=1 \
             NT_REQUIRE_POSITIVE_BOOST=1 ./build/dynamic-priority-boost-test
+      - name: Prove reversible nonroot priority transitions with delegated RLIMIT_NICE
+        run: |
+          # Raise only the disposable test's resource limit, then drop
+          # privileges before running any code from this checkout.
+          sudo prlimit --nice=40:40 -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups --             env NT_REQUIRE_POSITIVE_MULTITHREAD_PRIORITY=1 ./build/process-priority-multithread-test
+          sudo prlimit --nice=40:40 -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups --             env NT_NATIVE_EXPERIMENTAL_BOOST=1 NT_REQUIRE_POSITIVE_BOOST=1 ./build/dynamic-priority-boost-test
       - name: Observe one-CPU scheduler fairness and first-run latency on Linux
         run: make check-stage4-quantum
       - name: Preserve Linux quantum observation (not NT parity)
