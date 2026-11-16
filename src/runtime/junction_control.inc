@@ -5,7 +5,8 @@
  * restricted to an already granted root with a physical target directory.
  */
 enum { NT_FSCTL_SET_REPARSE = 0x000900a4, NT_FSCTL_GET_REPARSE = 0x000900a8,
-       NT_FSCTL_DELETE_REPARSE = 0x000900ac, NT_REPARSE_TAG_MOUNT = 0xa0000003 };
+       NT_FSCTL_DELETE_REPARSE = 0x000900ac };
+#define NT_REPARSE_TAG_MOUNT UINT32_C(0xa0000003)
 
 static uint16_t nt_reparse_u16(const uint8_t *p)
 {
