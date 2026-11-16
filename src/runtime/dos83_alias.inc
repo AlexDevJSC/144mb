@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /* Included after confined_open_raw and before resolve_name.
- * Lazy DOS 8.3 aliases: persistent on native Linux inodes. Restricted:
- * no hardlinked files, no symlinks, no guarantee against Linux processes
- * allocating aliases concurrently outside this runtime's mutex. */
+ * Lazy DOS 8.3 aliases are keyed by native Linux directory ENTRY and
+ * stored as xattrs on the pinned inode. Hardlinks have distinct keys.
+ * External Linux renames do not atomically transfer those keys; callers
+ * must revalidate the directory entry and must never follow stale aliases. */
 #define WIN_DOS83_XATTR "user.ntnative.dos83"
 /* NTFS short names belong to directory entries, not to bare inodes. Use a
  * separate key for each (parent directory, leaf), so Linux hardlinks and
@@ -92,6 +93,14 @@ static bool dos83_read_at(int parent, const char *leaf, char alias[14])
                     ok = false;
                     break;
                 }
+    }
+    /* A non-cooperating Linux writer may replace/rename this leaf during
+     * the xattr read. Never return metadata for an unlinked pinned inode
+     * as though it belonged to the newly observed directory entry. */
+    if (ok) {
+        struct stat current;
+        ok = fstatat(parent, leaf, &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+             current.st_dev == st.st_dev && current.st_ino == st.st_ino;
     }
     close(fd);
     return ok;
@@ -246,6 +255,16 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
         }
         if (!assigned && !error)
             error = ENOSPC;
+    }
+    /* flock coordinates only NT participants, not arbitrary host renames.
+     * Detect replacement before success, rather than silently returning
+     * an alias bound to a directory entry that no longer exists. A later
+     * host mutation remains an explicit interoperability limitation. */
+    if (!error) {
+        struct stat current;
+        if (fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) != 0 ||
+            current.st_dev != st.st_dev || current.st_ino != st.st_ino)
+            error = EBUSY;
     }
     if (gate >= 0)
         close(gate);

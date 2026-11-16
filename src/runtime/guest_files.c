@@ -322,24 +322,13 @@ static bool normalize_path(const char *input, char output[PATH_MAX], bool allow_
         errno = ENAMETOOLONG;
         return false;
     }
-    /* Preserve internal UTF-8 paths, while raw CP1252 Win32 A strings
-     * that are not valid UTF-8 can still address native Linux files. */
-    char ansi_fallback[PATH_MAX];
+    /* Normalized host-side paths are UTF-8 only. Win32 A and CRT ANSI
+     * entrypoints must decode ACP *before* calling this internal resolver.
+     * Never guess a second encoding for malformed UTF-8: that can select
+     * a different object in an already-granted Linux directory. */
     if (nt_MultiByteToWideChar(65001, 8, input, -1, NULL, 0) == 0) {
-        char *converted = nt_runtime_ansi_to_utf8(input, strlen(input));
-        if (!converted) {
-            errno = ENOMEM;
-            return false;
-        }
-        const size_t length = strlen(converted);
-        if (length >= sizeof(ansi_fallback)) {
-            free(converted);
-            errno = ENAMETOOLONG;
-            return false;
-        }
-        memcpy(ansi_fallback, converted, length + 1);
-        free(converted);
-        input = ansi_fallback;
+        errno = EILSEQ;
+        return false;
     }
     /* Plain \\\\server\\share and extended \\\\?\\UNC\\server\\share
      * resolve only through an explicit descriptor-backed UNC grant. */
@@ -2075,55 +2064,10 @@ struct security_attributes {
 
 _Static_assert(sizeof(struct security_attributes) == 24, "SECURITY_ATTRIBUTES layout");
 
-/* A narrow Win32 pathname may be supplied as UTF-8 by a modern guest
- * or CP1252 by a legacy guest. Invalid UTF-8 was already converted to ACP
- * by normalize_path(). When the bytes are valid UTF-8 *and* the requested
- * existing file is absent, check the other CP1252 spelling before failing.
- *
- * Never apply this heuristic to W calls: they are unambiguously UTF-16,
- * converted to UTF-8 by wide_path(). Never guess for CREATE_NEW or other
- * mutating dispositions; this fallback cannot silently create a different
- * filename. The Linux permission checks still govern the final open. */
-static void existing_ansi_path_fallback(const char *input, char path[PATH_MAX])
-{
-    bool has_nonascii = false;
-    for (const unsigned char *p = (const unsigned char *)input; *p; ++p)
-        if (*p & 0x80u) {
-            has_nonascii = true;
-            break;
-        }
-    if (!has_nonascii || nt_MultiByteToWideChar(65001, 8, input, -1, NULL, 0) == 0)
-        return;
-
-    char *encoded = nt_runtime_ansi_to_utf8(input, strlen(input));
-    if (!encoded)
-        return;
-    char alternative[PATH_MAX];
-    const bool valid = guest_path(encoded, alternative);
-    free(encoded);
-    if (!valid || strcmp(path, alternative) == 0)
-        return;
-
-    char dos_name[PATH_MAX];
-    bool exists = false;
-    const bool primary_checked =
-        nt_runtime_check_guest_file(path, dos_name, sizeof(dos_name), &exists);
-    if (primary_checked && exists)
-        return;
-    /* Never bypass an inaccessible existing object or an invalid guest
-     * path by interpreting the same bytes using a different encoding. */
-    if (!primary_checked && errno != ENOENT && errno != ENOTDIR)
-        return;
-    bool alternate_exists = false;
-    if (nt_runtime_check_guest_file(alternative, dos_name, sizeof(dos_name),
-                                    &alternate_exists) && alternate_exists)
-        memcpy(path, alternative, strlen(alternative) + 1);
-}
-
 static uintptr_t create_file_common(const char *input, uint32_t desired,
                                     uint32_t share, const void *security,
                                     uint32_t disposition, uint32_t flags,
-                                    uintptr_t template_file, bool from_wide)
+                                    uintptr_t template_file)
 {
     const uint32_t generic_read = UINT32_C(0x80000000), generic_write = UINT32_C(0x40000000);
     const struct security_attributes *attributes = security;
@@ -2161,13 +2105,6 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     if (!guest_path(input, path)) {
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
-    }
-    if (!from_wide && disposition == OPEN_EXISTING) {
-        /* A successful Win32 operation must not leak GetLastError from
-         * the optional encoding probe into the calling thread. */
-        const uint32_t saved_error = nt_GetLastError();
-        existing_ansi_path_fallback(input, path);
-        nt_SetLastError(saved_error);
     }
     const char *resolved = path;
     const int root = duplicate_root(&resolved);
@@ -2362,7 +2299,7 @@ uintptr_t NT_MS_ABI nt_CreateFileA(const char *input, uint32_t desired, uint32_t
     if (!file_ansi_to_utf8(input, utf8))
         return UINTPTR_MAX;
     return create_file_common(utf8, desired, share, security, disposition,
-                              flags, template_file, true);
+                              flags, template_file);
 }
 
 static int close_file(struct guest_file *file)
@@ -3624,7 +3561,20 @@ void *NT_MS_ABI nt_fopen(const char *input, const char *mode)
         errno = EINVAL;
         return NULL;
     }
-    if (!guest_path(input, path))
+    /* CRT fopen uses the same process ACP as Win32 A, not opportunistic
+     * UTF-8. The native resolver receives only validated UTF-8. */
+    char utf8[PATH_MAX];
+    if (!input) {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (!file_ansi_to_utf8(input, utf8)) {
+        const uint32_t error = nt_GetLastError();
+        errno = error == NT_ERROR_INSUFFICIENT_BUFFER ? ENAMETOOLONG :
+                error == NT_ERROR_INVALID_PARAMETER ? EINVAL : EILSEQ;
+        return NULL;
+    }
+    if (!guest_path(utf8, path))
         return NULL;
     const char *resolved = path;
     const int root = duplicate_root(&resolved);
@@ -3889,7 +3839,7 @@ uintptr_t NT_MS_ABI nt_CreateFileW(const uint16_t *path, uint32_t access, uint32
     char narrow[PATH_MAX];
     return wide_path(path, narrow) ?
            create_file_common(narrow, access, share, security, disposition,
-                              flags, template_file, true) : UINTPTR_MAX;
+                              flags, template_file) : UINTPTR_MAX;
 }
 
 _Static_assert(sizeof(struct nt_io_status_block) == 16 &&
@@ -4314,8 +4264,8 @@ uint32_t NT_MS_ABI nt_GetLongPathNameW(const uint16_t *input, uint16_t *buffer,
 
 /* Windows file API A boundaries use the process ACP for both input and
  * returned path bytes. The underlying guest paths are always UTF-8 and
- * W calls preserve unambiguous UTF-16. This does not yet migrate all the
- * older A entrypoints, whose compatibility fallback is documented. */
+ * W calls preserve unambiguous UTF-16. The CRT fopen boundary now follows
+ * the same explicit ACP rule. */
 static uint32_t file_path_acp_output(const uint16_t *wide, char *buffer,
                                      uint32_t size)
 {
@@ -5412,7 +5362,7 @@ static int32_t copy_file_common(const char *source, const char *destination,
     const uint32_t generic_read = UINT32_C(0x80000000);
     const uint32_t generic_write = UINT32_C(0x40000000);
     const uintptr_t from = create_file_common(source, generic_read, FILE_READ, NULL,
-                                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0, true);
+                                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
     if (from == UINTPTR_MAX)
         return 0;
     /* Capture source metadata before reading: a copy must not lose the
@@ -5431,7 +5381,7 @@ static int32_t copy_file_common(const char *source, const char *destination,
 
     const uintptr_t to = create_file_common(destination, generic_write, 0, NULL,
                                            fail_if_exists ? CREATE_NEW : OPEN_ALWAYS,
-                                           FILE_ATTRIBUTE_NORMAL, 0, true);
+                                           FILE_ATTRIBUTE_NORMAL, 0);
     if (to == UINTPTR_MAX) {
         const uint32_t error = nt_GetLastError();
         nt_CloseHandle(from);

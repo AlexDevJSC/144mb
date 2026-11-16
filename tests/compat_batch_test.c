@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -467,9 +468,9 @@ static void check_files(void)
           (nt_GetFileAttributesA(cp1252_directory) & 0x10u) != 0 &&
           nt_RemoveDirectoryA(cp1252_directory) != 0);
     CHECK(nt_CreateDirectoryA("C:\\data", NULL) != 0);
-    /* For direct A calls, try UTF-8 first and use CP1252 only when the
-     * UTF-8 file is absent. A W call is UTF-16 and MUST NOT be reinterpreted
-     * as CP1252 when the requested Unicode name is missing. */
+    /* Win32 A and CRT fopen always interpret bytes as the process ACP,
+     * even when those bytes also form a valid UTF-8 sequence. A W call
+     * must not guess an alternate CP1252 spelling either. */
     char utf8_native[512], acp_native[512];
     CHECK(snprintf(utf8_native, sizeof(utf8_native), "%s/data/caf\xc3\xa9.txt", root) > 0);
     CHECK(snprintf(acp_native, sizeof(acp_native), "%s/data/caf\xc3\x83\xc2\xa9.txt", root) > 0);
@@ -485,6 +486,10 @@ static void check_files(void)
     CHECK(ansi_handle != UINTPTR_MAX &&
           nt_ReadFile(ansi_handle, &selected, 1, &received, NULL) &&
           received == 1 && selected == 'A' && nt_CloseHandle(ansi_handle));
+    /* CRT fopen is an ANSI API too: it must select the CP1252 file. */
+    void *ansi_stream = nt_fopen(ambiguous_a, "rb");
+    CHECK(ansi_stream != NULL && nt_fread(&selected, 1, 1, ansi_stream) == 1 &&
+          selected == 'A' && nt_fclose(ansi_stream) == 0);
     /* An explicit W lookup still resolves the distinct true Unicode file. */
     uintptr_t unicode_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9.txt",
         UINT32_C(0x80000000), 7u, NULL, 3u, 0x80u, 0);
@@ -622,10 +627,10 @@ static void check_files(void)
     CHECK(nt_SetFileAttributesW(u"C:\\éTAGE", 1u | 2u) != 0 &&
           (nt_GetFileAttributesW(u"C:\\Étage") & (1u | 2u | 0x10u)) ==
           (1u | 2u | 0x10u));
-    void *international = nt_fopen("C:\\Étage\\Résumé.TXT", "wb");
+    void *international = nt_fopen("C:\\\xC9tage\\R\xE9sum\xE9.TXT", "wb");
     CHECK(international != NULL && nt_fwrite("ok", 1, 2, international) == 2 &&
           nt_fclose(international) == 0);
-    international = nt_fopen("c:\\étage\\résumé.txt", "rb");
+    international = nt_fopen("c:\\\xE9tage\\r\xE9sum\xE9.txt", "rb");
     char international_bytes[2];
     CHECK(international != NULL &&
           nt_fread(international_bytes, 1, 2, international) == 2 &&
@@ -741,7 +746,7 @@ static void check_files(void)
           last_error() == NT_ERROR_FILE_NOT_FOUND);
 
 
-    /* Long names acquire stable per-inode DOS aliases only on demand.
+    /* Long names acquire per-directory-entry DOS aliases on demand.
      * The short alias must resolve to the real data, and collisions must
      * produce distinct aliases without creating a second host file. */
     void *alias_stream = nt_fopen("data/longfilename.txt", "wb");
@@ -841,6 +846,56 @@ static void check_files(void)
     CHECK(remaining_hardlink != UINTPTR_MAX && nt_CloseHandle(remaining_hardlink) &&
           nt_DeleteFileA("C:\\data\\sub83\\longfilename.txt") &&
           nt_RemoveDirectoryA("C:\\data\\sub83"));
+    /* A native Linux rename does not atomically carry the entry-specific
+     * xattr key. It must invalidate the former DOS alias instead of
+     * resolving an unrelated inode or resurrecting a stale name. */
+    void *externally_moved = nt_fopen("data/externalOriginalName.txt", "wb");
+    CHECK(externally_moved && nt_fwrite("x", 1, 1, externally_moved) == 1 &&
+          nt_fclose(externally_moved) == 0);
+    char stale_alias[256], fresh_alias[256];
+    CHECK(nt_GetShortPathNameA("C:\\data\\externalOriginalName.txt",
+                                stale_alias, sizeof(stale_alias)) > 0);
+    char external_old[512], external_new[512];
+    CHECK(snprintf(external_old, sizeof(external_old),
+                   "%s/data/externalOriginalName.txt", root) > 0 &&
+          snprintf(external_new, sizeof(external_new),
+                   "%s/data/hostRenamedFile.txt", root) > 0 &&
+          rename(external_old, external_new) == 0);
+    CHECK(nt_CreateFileA(stale_alias, UINT32_C(0x80000000), 7u, NULL,
+                         3u, 0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_GetShortPathNameA("C:\\data\\hostRenamedFile.txt",
+                                fresh_alias, sizeof(fresh_alias)) > 0 &&
+          strcmp(stale_alias, fresh_alias) != 0);
+    uintptr_t host_moved = nt_CreateFileA(fresh_alias, UINT32_C(0x80000000),
+                                           7u, NULL, 3u, 0x80u, 0);
+    CHECK(host_moved != UINTPTR_MAX && nt_CloseHandle(host_moved) &&
+          nt_DeleteFileA("C:\\data\\hostRenamedFile.txt"));
+
+    /* Concurrent aliases from separate NT processes coordinate through
+     * the per-directory flock registry, even with the same DOS stem. */
+    void *fork_a = nt_fopen("data/concurrentAlphaLong.txt", "wb");
+    CHECK(fork_a && nt_fclose(fork_a) == 0);
+    void *fork_b = nt_fopen("data/concurrentBetaLong.txt", "wb");
+    CHECK(fork_b && nt_fclose(fork_b) == 0);
+    pid_t alias_child = fork();
+    CHECK(alias_child >= 0);
+    if (alias_child == 0) {
+        char child_short[256];
+        _exit(nt_GetShortPathNameA("C:\\data\\concurrentAlphaLong.txt",
+                                    child_short, sizeof(child_short)) > 0 ? 0 : 1);
+    }
+    char parent_short[256], child_short[256];
+    CHECK(nt_GetShortPathNameA("C:\\data\\concurrentBetaLong.txt",
+                                parent_short, sizeof(parent_short)) > 0);
+    int child_exit = 0;
+    CHECK(waitpid(alias_child, &child_exit, 0) == alias_child &&
+          WIFEXITED(child_exit) && WEXITSTATUS(child_exit) == 0);
+    CHECK(nt_GetShortPathNameA("C:\\data\\concurrentAlphaLong.txt",
+                                child_short, sizeof(child_short)) > 0 &&
+          strcmp(child_short, parent_short) != 0);
+    CHECK(nt_DeleteFileA("C:\\data\\concurrentAlphaLong.txt") &&
+          nt_DeleteFileA("C:\\data\\concurrentBetaLong.txt"));
+
     /* The new A APIs must use CP1252 even when 0xE9 is not UTF-8:
      * unlike older mixed-mode A entrypoints, no UTF-8-first guess. */
     uintptr_t cp_handle = nt_CreateFileW(u"C:\\data\\caf\u00e9long.txt",
@@ -932,6 +987,25 @@ static void check_files(void)
     uint32_t junction_data_size = test_mount_reparse(junction_input,
                                                      u"C:\\data\\junction-target");
     uint32_t junction_returned = 999;
+    /* An externally renamed entry must not make an old reparse HANDLE
+     * mutate a replacement symlink or a different physical directory. */
+    char entry_native[512], parked_native[512];
+    CHECK(snprintf(entry_native, sizeof(entry_native),
+                   "%s/data/junction-entry", root) > 0 &&
+          snprintf(parked_native, sizeof(parked_native),
+                   "%s/data/junction-parked", root) > 0);
+    CHECK(rename(entry_native, parked_native) == 0 &&
+          symlink("junction-target", entry_native) == 0);
+    CHECK(!nt_DeviceIoControl(junction, 0x000900a4u,
+                              junction_input, junction_data_size,
+                              NULL, 0, &junction_returned, NULL));
+    /* openat2 may report ENOTDIR for O_DIRECTORY|O_NOFOLLOW on a symlink,
+     * or ELOOP on another kernel. Both must reject the replacement. */
+    CHECK(last_error() == NT_ERROR_ACCESS_DENIED ||
+          last_error() == NT_ERROR_PATH_NOT_FOUND);
+    CHECK(unlink(entry_native) == 0 &&
+          rename(parked_native, entry_native) == 0);
+
     const int32_t set_junction_ok = nt_DeviceIoControl(junction, 0x000900a4u,
                                      junction_input, junction_data_size,
                                      NULL, 0, &junction_returned, NULL);
@@ -1013,6 +1087,30 @@ static void check_files(void)
               errno == ENOTSUP);
         fprintf(stderr, "SKIP legacy large junction xattr (filesystem limit)\n");
     }
+    /* Malformed xattrs must never redirect into a guessed directory.
+     * DELETE must still be able to clear the bad marker for recovery. */
+    struct {
+        uint32_t magic, version;
+        uint64_t root_dev, root_inode;
+        char target[1024];
+    } corrupt_mount = {
+        .magic = UINT32_C(0x4a554e43), .version = 1,
+        .root_dev = (uint64_t)legacy_grant.st_dev,
+        .root_inode = (uint64_t)legacy_grant.st_ino
+    };
+    memset(corrupt_mount.target, 'X', sizeof(corrupt_mount.target));
+    CHECK(setxattr(legacy_directory, "user.ntnative.junction.v1",
+                   &corrupt_mount, sizeof(corrupt_mount), 0) == 0);
+    CHECK(!nt_DeviceIoControl(junction, 0x000900a8u, NULL, 0,
+                              junction_output, sizeof(junction_output),
+                              &junction_returned, NULL) &&
+          last_error() == NT_ERROR_NOT_SUPPORTED);
+    CHECK(nt_CreateFileW(u"C:\\data\\junction-entry\\payload.bin",
+                         UINT32_C(0x80000000), 7u, NULL, 3u,
+                         0x80u, 0) == UINTPTR_MAX);
+    CHECK(nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
+                             sizeof(remove_mount), NULL, 0,
+                             &junction_returned, NULL));
     CHECK(nt_CloseHandle(junction) &&
           (nt_GetFileAttributesW(u"C:\\data\\junction-entry") & 0x400u) == 0);
     CHECK(nt_CreateFileW(u"C:\\data\\junction-entry\\payload.bin",
