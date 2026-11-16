@@ -34,6 +34,7 @@ static bool dos83_entry_key(int parent, const char *leaf, char key[112])
 }
 static ssize_t read_guest_xattr(int fd, const char *name, void *value, size_t size);
 static int write_guest_xattr(int fd, const char *name, const void *value, size_t size);
+static int clear_guest_xattr(int fd, const char *name);
 static int open_share_registry(const struct stat *info);
 static pthread_mutex_t dos83_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -148,7 +149,8 @@ static void dos83_make(const char *name, unsigned int ordinal, char alias[14])
     alias[result] = 0;
 }
 
-static int dos83_collision(int parent, const char *owner, const char *alias)
+static int dos83_collision_except(int parent, const char *owner,
+                                  const char *ignore, const char *alias)
 {
     const int fd = confined_open_raw(parent, ".", O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0)
@@ -170,7 +172,8 @@ static int dos83_collision(int parent, const char *owner, const char *alias)
             break;
         }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
-            !strcmp(entry->d_name, owner))
+            !strcmp(entry->d_name, owner) ||
+            (ignore && !strcmp(entry->d_name, ignore)))
             continue;
         char previous[14] = {0};
         if (same_unicode_name(alias, entry->d_name) ||
@@ -185,6 +188,11 @@ static int dos83_collision(int parent, const char *owner, const char *alias)
     if (found < 0)
         errno = error;
     return found;
+}
+
+static int dos83_collision(int parent, const char *owner, const char *alias)
+{
+    return dos83_collision_except(parent, owner, NULL, alias);
 }
 
 static bool dos83_assign_at(int parent, const char *name, char alias[14])
@@ -275,4 +283,294 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
         return false;
     }
     return true;
+}
+
+
+/* Directory-level gate shared between Win32 and the host reconciliation
+ * endpoint. Lock (dev,ino) in canonical order to avoid ABBA deadlocks. */
+static bool dos83_lock_pair(int source_parent, int dest_parent,
+                            int *gate_a, int *gate_b, bool *same_dir)
+{
+    struct stat source, dest;
+    *gate_a = -1;
+    *gate_b = -1;
+    if (fstat(source_parent, &source) != 0 ||
+        fstat(dest_parent, &dest) != 0)
+        return false;
+    *same_dir = source.st_dev == dest.st_dev && source.st_ino == dest.st_ino;
+    int source_gate = open_share_registry(&source);
+    if (source_gate < 0)
+        return false;
+    int dest_gate = *same_dir ? -1 : open_share_registry(&dest);
+    if (!*same_dir && dest_gate < 0) {
+        int error = errno;
+        close(source_gate);
+        errno = error;
+        return false;
+    }
+    if (!*same_dir &&
+        ((uint64_t)source.st_dev > (uint64_t)dest.st_dev ||
+         (source.st_dev == dest.st_dev &&
+          (uint64_t)source.st_ino > (uint64_t)dest.st_ino))) {
+        *gate_a = dest_gate;
+        *gate_b = source_gate;
+    } else {
+        *gate_a = source_gate;
+        *gate_b = dest_gate;
+    }
+    if (flock(*gate_a, LOCK_EX) != 0 ||
+        (*gate_b >= 0 && flock(*gate_b, LOCK_EX) != 0)) {
+        int error = errno;
+        if (*gate_b >= 0)
+            close(*gate_b);
+        close(*gate_a);
+        *gate_a = -1;
+        *gate_b = -1;
+        errno = error;
+        return false;
+    }
+    return true;
+}
+
+/* Cooperating rename transaction. Stage the new xattr on the pinned
+ * source inode BEFORE renameat2: if the syscall commits, the new entry
+ * immediately has its alias. Release locks only after cleanup/rollback.
+ * Linux writers which bypass the broker remain outside atomic guarantees. */
+struct dos83_move_txn {
+    int source_fd, victim_fd, gate_a, gate_b;
+    char source_key[112], dest_key[112], old_dest[14];
+    ssize_t old_dest_size;
+    bool staged, has_source_alias;
+};
+
+static void dos83_move_end(struct dos83_move_txn *txn, bool committed)
+{
+    const int saved_errno = errno;
+    if (txn->source_fd >= 0) {
+        if (txn->staged) {
+            if (committed) {
+                if (strcmp(txn->source_key, txn->dest_key) != 0)
+                    (void)clear_guest_xattr(txn->source_fd, txn->source_key);
+            } else if (txn->old_dest_size > 0) {
+                (void)write_guest_xattr(txn->source_fd, txn->dest_key,
+                                       txn->old_dest, (size_t)txn->old_dest_size);
+            } else {
+                (void)clear_guest_xattr(txn->source_fd, txn->dest_key);
+            }
+        }
+        close(txn->source_fd);
+    }
+    if (txn->victim_fd >= 0) {
+        if (committed)
+            (void)clear_guest_xattr(txn->victim_fd, txn->dest_key);
+        close(txn->victim_fd);
+    }
+    if (txn->gate_b >= 0)
+        close(txn->gate_b);
+    if (txn->gate_a >= 0)
+        close(txn->gate_a);
+    pthread_mutex_unlock(&dos83_lock);
+    errno = saved_errno;
+}
+
+/* Both parents are already pinned and the caller holds its file-lock.
+ * The same gate order is used by concurrent NT rename workers, including
+ * opposite-direction moves. Return a locked transaction to be finished
+ * on success OR failure of the following renameat2 call. */
+static bool dos83_move_begin(int source_parent, const char *source_leaf,
+                             int dest_parent, const char *dest_leaf,
+                             const struct stat *expected_source,
+                             bool replacing,
+                             struct dos83_move_txn *txn)
+{
+    *txn = (struct dos83_move_txn){
+        .source_fd = -1, .victim_fd = -1, .gate_a = -1,
+        .gate_b = -1, .old_dest_size = -1
+    };
+    pthread_mutex_lock(&dos83_lock);
+    bool same_dir = false;
+    int error = dos83_lock_pair(source_parent, dest_parent, &txn->gate_a,
+                                &txn->gate_b, &same_dir) ? 0 : errno;
+    if (!error) {
+        txn->source_fd = confined_open_raw(source_parent, source_leaf,
+                                           O_PATH | O_NOFOLLOW, 0);
+        if (txn->source_fd < 0)
+            error = errno;
+    }
+    struct stat pinned;
+    if (!error && (fstat(txn->source_fd, &pinned) != 0 ||
+                   pinned.st_dev != expected_source->st_dev ||
+                   pinned.st_ino != expected_source->st_ino))
+        error = EBUSY;
+    if (!error && (!dos83_entry_key(source_parent, source_leaf,
+                                   txn->source_key) ||
+                   !dos83_entry_key(dest_parent, dest_leaf, txn->dest_key)))
+        error = errno;
+    if (!error && replacing) {
+        txn->victim_fd = confined_open_raw(dest_parent, dest_leaf,
+                                           O_PATH | O_NOFOLLOW, 0);
+        if (txn->victim_fd < 0)
+            error = errno;
+        else {
+            struct stat victim;
+            if (fstat(txn->victim_fd, &victim) != 0 ||
+                (victim.st_dev == pinned.st_dev &&
+                 victim.st_ino == pinned.st_ino))
+                error = EBUSY;
+        }
+    }
+    char alias[14] = {0};
+    if (!error) {
+        const ssize_t count = read_guest_xattr(txn->source_fd,
+                                                txn->source_key, alias,
+                                                sizeof(alias));
+        txn->has_source_alias = count >= 3 && count <= 13 &&
+                                alias[count - 1] == '\0' &&
+                                memchr(alias, '~', (size_t)count - 1);
+    }
+    if (!error && txn->has_source_alias &&
+        strcmp(txn->source_key, txn->dest_key) != 0) {
+        const char *ignore = same_dir ? source_leaf : NULL;
+        int collision = dos83_collision_except(dest_parent, dest_leaf,
+                                                ignore, alias);
+        if (collision < 0)
+            error = errno;
+        if (!error && collision != 0) {
+            bool allocated = false;
+            for (unsigned int n = 1; n < 1000000; ++n) {
+                dos83_make(dest_leaf, n, alias);
+                collision = dos83_collision_except(dest_parent, dest_leaf,
+                                                    ignore, alias);
+                if (collision < 0) {
+                    error = errno;
+                    break;
+                }
+                if (!collision) {
+                    allocated = true;
+                    break;
+                }
+            }
+            if (!allocated && !error)
+                error = ENOSPC;
+        }
+        if (!error) {
+            txn->old_dest_size = read_guest_xattr(txn->source_fd, txn->dest_key,
+                                                  txn->old_dest,
+                                                  sizeof(txn->old_dest));
+            if (txn->old_dest_size < 0 &&
+                errno != ENODATA)
+                error = errno;
+            if (!error && write_guest_xattr(txn->source_fd, txn->dest_key,
+                                             alias, strlen(alias) + 1) != 0)
+                error = errno;
+            if (!error)
+                txn->staged = true;
+        }
+    }
+    if (error) {
+        errno = error;
+        dos83_move_end(txn, false);
+        return false;
+    }
+    return true;
+}
+
+
+/* Apply a paired inotify MOVED_FROM/MOVED_TO event AFTER an external
+ * rename. This is reconciliation, NOT atomic mediation of native Linux
+ * operations. If a matching old per-entry key survived on the moved
+ * inode, migrate its short alias only when unique at the destination.
+ * Ambiguous or changed paths fail closed; normal short-name allocation
+ * can then occur on a later Win32 lookup. */
+static bool dos83_adopt_host_move(int source_parent, const char *old_leaf,
+                                 int dest_parent, const char *new_leaf)
+{
+    bool same_dir = false;
+    int gate_a = -1, gate_b = -1;
+    pthread_mutex_lock(&dos83_lock);
+    bool ok = dos83_lock_pair(source_parent, dest_parent, &gate_a,
+                              &gate_b, &same_dir);
+    int error = ok ? 0 : errno;
+    int pinned = -1;
+    if (!error) {
+        struct stat former;
+        if (fstatat(source_parent, old_leaf, &former,
+                    AT_SYMLINK_NOFOLLOW) == 0)
+            error = EBUSY; /* Source name was reused: do not guess. */
+        else if (errno != ENOENT)
+            error = errno;
+    }
+    if (!error) {
+        pinned = confined_open_raw(dest_parent, new_leaf,
+                                   O_PATH | O_NOFOLLOW, 0);
+        if (pinned < 0)
+            error = errno;
+    }
+    struct stat entry;
+    if (!error && (fstat(pinned, &entry) != 0 ||
+                   !(S_ISREG(entry.st_mode) || S_ISDIR(entry.st_mode))))
+        error = EACCES;
+    char source_key[112], dest_key[112], alias[14] = {0};
+    if (!error &&
+        (!dos83_entry_key(source_parent, old_leaf, source_key) ||
+         !dos83_entry_key(dest_parent, new_leaf, dest_key)))
+        error = errno;
+    if (!error && strcmp(source_key, dest_key) != 0) {
+        const ssize_t count = read_guest_xattr(pinned, source_key,
+                                               alias, sizeof(alias));
+        if (count < 3 || count > 13 || alias[count - 1] != '\0' ||
+            !memchr(alias, '~', (size_t)count - 1))
+            error = ENODATA;
+        for (ssize_t i = 0; !error && i < count - 1; ++i)
+            if (!dos83_char((unsigned char)alias[i]) &&
+                alias[i] != '.' && alias[i] != '~')
+                error = EINVAL;
+        if (!error) {
+            char existing[14] = {0};
+            if (!dos83_read_at(dest_parent, new_leaf, existing)) {
+                int conflict = dos83_collision_except(dest_parent, new_leaf,
+                                                       NULL, alias);
+                if (conflict < 0)
+                    error = errno;
+                if (!error && conflict != 0) {
+                    bool found = false;
+                    for (unsigned int n = 1; n < 1000000; ++n) {
+                        dos83_make(new_leaf, n, alias);
+                        conflict = dos83_collision_except(dest_parent,
+                                                           new_leaf, NULL, alias);
+                        if (conflict < 0) {
+                            error = errno;
+                            break;
+                        }
+                        if (conflict == 0) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found && !error)
+                        error = ENOSPC;
+                }
+                if (!error && write_guest_xattr(pinned, dest_key,
+                                                alias, strlen(alias) + 1) != 0)
+                    error = errno;
+            }
+            if (!error && clear_guest_xattr(pinned, source_key) != 0)
+                error = errno;
+        }
+    }
+    if (!error && pinned >= 0) {
+        struct stat current;
+        if (fstatat(dest_parent, new_leaf, &current, AT_SYMLINK_NOFOLLOW) != 0 ||
+            current.st_dev != entry.st_dev || current.st_ino != entry.st_ino)
+            error = EBUSY;
+    }
+    if (pinned >= 0)
+        close(pinned);
+    if (gate_b >= 0)
+        close(gate_b);
+    if (gate_a >= 0)
+        close(gate_a);
+    pthread_mutex_unlock(&dos83_lock);
+    errno = error;
+    return error == 0;
 }

@@ -757,6 +757,85 @@ static int confined_open(int root, const char *path, int flags, unsigned int mod
     return fd;
 }
 
+/* Host-only entrypoints: enforce the same granted-root descriptor
+ * confinement as Win32 APIs. The watcher passes UTF-8 DOS paths; it must
+ * never feed arbitrary absolute Linux paths through these functions. */
+bool nt_runtime_refresh_dos83_path(const char *input)
+{
+    char normalized[PATH_MAX], leaf[NAME_MAX + 1], alias[14];
+    if (!guest_path(input, normalized))
+        return false;
+    const char *relative = normalized;
+    int root = duplicate_root(&relative);
+    if (root < 0)
+        return false;
+    int parent = open_parent(root, relative, leaf);
+    const int opened_error = errno;
+    close(root);
+    if (parent < 0) {
+        errno = opened_error;
+        return false;
+    }
+    bool ok = dos83_assign_at(parent, leaf, alias);
+    const int saved = errno;
+    close(parent);
+    errno = saved;
+    return ok;
+}
+
+bool nt_runtime_reconcile_host_rename(const char *old_path,
+                                      const char *new_path)
+{
+    char old_normal[PATH_MAX], new_normal[PATH_MAX];
+    if (!guest_path(old_path, old_normal) ||
+        !guest_path(new_path, new_normal))
+        return false;
+    const char *from = old_normal, *to = new_normal;
+    int source_root = duplicate_root(&from);
+    if (source_root < 0)
+        return false;
+    int dest_root = duplicate_root(&to);
+    if (dest_root < 0) {
+        const int error = errno;
+        close(source_root);
+        errno = error;
+        return false;
+    }
+    struct stat source_grant, dest_grant;
+    bool same_grant = fstat(source_root, &source_grant) == 0 &&
+                      fstat(dest_root, &dest_grant) == 0 &&
+                      source_grant.st_dev == dest_grant.st_dev &&
+                      source_grant.st_ino == dest_grant.st_ino;
+    if (!same_grant) {
+        close(source_root);
+        close(dest_root);
+        errno = EXDEV;
+        return false;
+    }
+    char source_leaf[NAME_MAX + 1], dest_leaf[NAME_MAX + 1];
+    int source_parent = open_parent(source_root, from, source_leaf);
+    const int source_error = errno;
+    int dest_parent = open_parent(dest_root, to, dest_leaf);
+    const int dest_error = errno;
+    close(source_root);
+    close(dest_root);
+    if (source_parent < 0 || dest_parent < 0) {
+        if (source_parent >= 0)
+            close(source_parent);
+        if (dest_parent >= 0)
+            close(dest_parent);
+        errno = source_parent < 0 ? source_error : dest_error;
+        return false;
+    }
+    const bool ok = dos83_adopt_host_move(source_parent, source_leaf,
+                                          dest_parent, dest_leaf);
+    const int error = errno;
+    close(source_parent);
+    close(dest_parent);
+    errno = error;
+    return ok;
+}
+
 static int open_regular(int root, const char *path, int flags, bool *created)
 {
     *created = false;
@@ -3312,13 +3391,49 @@ static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
                     if (!prepare_renamed_paths(source, destination, updated)) {
                         status = -1;
                     } else {
-                        status = (int)syscall(SYS_renameat2, source_parent, source_leaf,
+                        /* A rename between distinct hardlinks of one inode
+                         * succeeds as a Linux no-op. Do not move the entry
+                         * alias or update open HANDLE paths in that case. */
+                        const bool hardlink_noop = exists == 0 &&
+                            info.st_dev == target.st_dev &&
+                            info.st_ino == target.st_ino &&
+                            strcmp(source_leaf, rename_leaf) != 0 &&
+                            strcmp(rename_leaf, destination_leaf) == 0;
+                        if (hardlink_noop) {
+                            status = 0;
+                            finish_renamed_paths(updated, false);
+                        } else {
+                            struct dos83_move_txn transaction;
+                            const bool replacing = exists == 0 &&
+                                (info.st_dev != target.st_dev ||
+                                 info.st_ino != target.st_ino);
+                            if (!dos83_move_begin(source_parent, source_leaf,
+                                                  destination_parent, rename_leaf,
+                                                  &info, replacing, &transaction)) {
+                                status = -1;
+                            } else {
+                                struct stat current;
+                                if (fstatat(source_parent, source_leaf, &current,
+                                            AT_SYMLINK_NOFOLLOW) != 0 ||
+                                    current.st_dev != info.st_dev ||
+                                    current.st_ino != info.st_ino) {
+                                    errno = EBUSY;
+                                    status = -1;
+                                } else {
+                                    status = (int)syscall(SYS_renameat2,
+                                              source_parent, source_leaf,
                                               destination_parent, rename_leaf,
                                               (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
+                                }
+                                const int rename_error = errno;
+                                dos83_move_end(&transaction, status == 0);
+                                errno = rename_error;
+                            }
+                            const int rename_error = errno;
+                            finish_renamed_paths(updated, status == 0);
+                            errno = rename_error;
+                        }
                     }
-                    const int rename_error = errno;
-                    finish_renamed_paths(updated, status == 0);
-                    errno = rename_error;
                 }
                 const int rename_error = errno;
                 if (target_guard >= 0)

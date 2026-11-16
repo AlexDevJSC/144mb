@@ -14,7 +14,9 @@ Estado: implementación incremental en la rama `feature/filesystem3-acp-dos83-re
 - Las identidades cortas pertenecen a cada entrada de directorio: clave formada con el directorio físico y el nombre de la entrada, persistida en el xattr del inodo sin crear archivos Windows auxiliares.
 - Un hardlink en otro directorio recibe su alias independiente. Las asignaciones entre procesos de este runtime utilizan un bloqueo cooperativo por directorio.
 - Antes de devolver un alias, se compara de nuevo `dev/ino` con la entrada física. Se rechazan cambios detectados durante la operación.
-- **Límite:** un renombrado hecho por un programa Linux que no coopera no puede mover atómicamente el xattr asociado al nombre. El antiguo alias deja de resolverse para la entrada movida; el nuevo nombre puede obtener otro alias. No se garantiza estabilidad histórica, equivalencia con las reglas de Windows para idiomas internacionales, ni exclusión frente a procesos Linux ajenos al runtime.
+- **Mediación P2 añadida:** los renombrados Win32 dentro de un mismo grant preparan el alias del destino antes de `renameat2`, bloquean ambos directorios en orden canónico y confirman/revierten el xattr tras la operación. El alias se conserva si no colisiona; las rutas anteriores no deben resolver un archivo distinto.
+- **Reconciliación Linux:** `nt-dos83-mediator --watch` sigue eventos inotify (parejas con cookie) y migra alias de forma eventual; `--scan` regenera alias ausentes. `--move` proporciona un camino mediado explícito para herramientas del anfitrión. Véase [protocolo y límites P2](dos83-mediation.md).
+- **Límite:** los procesos Linux que omiten la mediación pueden renombrar antes del evento y desbordar la cola de inotify. No hay atomicidad universal ni journal durable frente a fallos de energía, ni paridad demostrada con reglas de NTFS.
 
 ## P3 — Junctions y formato persistente
 
