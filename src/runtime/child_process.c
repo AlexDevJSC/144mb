@@ -463,8 +463,8 @@ int32_t NT_MS_ABI nt_CreateProcessW(const uint16_t *application, const uint16_t 
         broker_fd >= 0 ? broker_secret : NULL, info);
     memset(broker_secret, 0, sizeof(broker_secret));
     if (!registered) {
-        if (broker_fd >= 0)
-            close(broker_fd);
+        /* watcher consumed broker_fd on both success and failure; never
+         * close a descriptor already owned by its detached server. */
         close(status_fd);
         if (start_fd >= 0)
             close(start_fd);
