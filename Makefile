@@ -422,6 +422,12 @@ check-dos83-all-grants: $(BUILD_DIR)/nt-dos83-mediator
 
 check: check-dos83-all-grants
 
+.PHONY: check-dos83-bad-source
+check-dos83-bad-source: $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_bad_source.py "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-dos83-bad-source
+
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/user_folders.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=fdatasync $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
