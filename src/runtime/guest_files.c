@@ -1388,22 +1388,20 @@ static bool set_share_pending(int gate, const struct stat *file, const char *pat
     do {
         written = pwrite(gate, &staged, sizeof(staged), SHARE_PENDING_OFFSET);
     } while (written < 0 && errno == EINTR);
-    if (written != (ssize_t)sizeof(staged) || fsync(gate) != 0) {
-        if (written >= 0)
-            errno = EIO;
-        return false;
-    }
+    if (written != (ssize_t)sizeof(staged))
+        return wal_poison(written < 0 ? errno : EIO);
+    if (fsync(gate) != 0)
+        return wal_poison(errno);
     const uint32_t pending = 1;
     do {
         written = pwrite(gate, &pending, sizeof(pending),
                          SHARE_PENDING_OFFSET + offsetof(struct share_pending_record, pending));
     } while (written < 0 && errno == EINTR);
-    if (written != (ssize_t)sizeof(pending)) {
-        if (written >= 0)
-            errno = EIO;
-        return false;
-    }
-    return fsync(gate) == 0;
+    if (written != (ssize_t)sizeof(pending))
+        return wal_poison(written < 0 ? errno : EIO);
+    if (fsync(gate) != 0)
+        return wal_poison(errno);
+    return true;
 }
 
 static bool clear_share_pending(int gate)
@@ -1414,12 +1412,11 @@ static bool clear_share_pending(int gate)
         written = pwrite(gate, &zero, sizeof(zero),
                          SHARE_PENDING_OFFSET + offsetof(struct share_pending_record, pending));
     } while (written < 0 && errno == EINTR);
-    if (written != (ssize_t)sizeof(zero)) {
-        if (written >= 0)
-            errno = EIO;
-        return false;
-    }
-    return fsync(gate) == 0;
+    if (written != (ssize_t)sizeof(zero))
+        return wal_poison(written < 0 ? errno : EIO);
+    if (fsync(gate) != 0)
+        return wal_poison(errno);
+    return true;
 }
 
 static bool share_registry_has_leases(int gate, bool *active)
