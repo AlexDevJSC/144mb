@@ -395,7 +395,13 @@ static bool wal_recover_root(int root)
                             char actual[14] = {0};
                             const ssize_t n = read_guest_xattr(pinned,
                                                      dest_key, actual, sizeof(actual));
-                            if (n <= 0 || strcmp(record.alias, actual) != 0) {
+                            const size_t wanted = strnlen(record.alias,
+                                                            sizeof(record.alias)) + 1;
+                            if (wanted > sizeof(record.alias) ||
+                                n != (ssize_t)wanted ||
+                                memcmp(record.alias, actual, wanted) != 0) {
+                                /* A damaged/unterminated xattr is not
+                                 * evidence of the staged short identity. */
                                 errno = EUCLEAN;
                                 ok = false;
                             } else if (strcmp(source_key, dest_key) != 0 &&
