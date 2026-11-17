@@ -1,9 +1,11 @@
 # FileSystem4/P4 — aislamiento del backing con identidad de servicio
 
-Estado: investigación de contrato y auditoría de sólo lectura.
-No existe todavía un servicio de almacenamiento separado, ni reglas
-SELinux instaladas, ni una garantía universal de mediación. Una vista
-FUSE por sí sola no revoca rutas/FDs directos de otros procesos.
+Estado: existe una implementación opt-in de UID de servicio separado
+para clientes POSIX mediante FUSE, con socket Unix autenticado y backing
+privado (véase filesystem4-dedicated-storage-service.md). No se han instalado
+reglas SELinux ni verificado físicamente el montaje Fedora; tampoco existe
+todavía el adaptador IPC de handles del runtime PE. Por tanto NO hay garantía
+universal para todos los clientes Windows/Linux.
 
 ## Condición que falta
 
@@ -18,7 +20,7 @@ resolvería la situación: pe-isolated-run necesita manipular C: y el
 registro OFD. Cambiar solamente el propietario rompería funcionalidad
 o forzaría de nuevo permisos amplios inseguros.
 
-## Arquitectura propuesta, no implementada
+## Arquitectura completa prevista: implantación parcial
 
 1. Proceso de almacenamiento de confianza como UID dedicado, con backing
    privado (0700, sin grupo común con clientes). Administrador configura
@@ -60,7 +62,7 @@ demostrar reglas de servicio, etiquetas SELinux, ni negación real a otro
 UID sólo leyendo stat/mountinfo. No se debe interpretar su salida como
 certificación de un servicio inexistente. No realiza cambios de estado.
 
-## Hitos de implementación futura
+## Hitos pendientes tras el servicio Linux
 
 A. Especificación binaria IPC versionada, estado de sesión, control de
 capacidad y pruebas de autenticación adversaria.
