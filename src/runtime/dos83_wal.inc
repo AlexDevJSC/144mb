@@ -463,6 +463,10 @@ static bool wal_recover_root(int root)
                             ok = false;
                         } else {
                             close(victim_fd);
+                            /* Recovery itself is crashable: repeating replay
+                             * after this fsync must not lose the old victim
+                             * alias or trust an unrelated inode. */
+                            dos83_test_crash("replay-after-victim-restore");
                         }
                     }
                     if (ok && record.staged) {
@@ -495,6 +499,8 @@ static bool wal_recover_root(int root)
                     }
                     if (ok)
                         ok = wal_sync_pinned(pinned, S_ISDIR(at_dest ? b.st_mode : a.st_mode));
+                    if (ok && record.staged)
+                        dos83_test_crash("replay-after-source-restore");
                     close(pinned);
                 }
                 if (ok)
