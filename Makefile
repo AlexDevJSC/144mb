@@ -65,7 +65,7 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
                     -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 .DEFAULT_GOAL := all
-.PHONY: check-pe-lstrcmp check-audio-required check-pe-preflight check-pe-priority-boost all check check-object-broker check-dos83-mediator check-dos83-fuse check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
+.PHONY: check-fs-supervisor check-pe-lstrcmp check-audio-required check-pe-preflight check-pe-priority-boost all check check-object-broker check-dos83-mediator check-dos83-fuse check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(BUILD_DIR)/nt-object-broker $(DOS83_FUSE_TARGET)
 
 $(BUILD_DIR):
@@ -291,6 +291,11 @@ check-dos83-fuse: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-landlock $(BU
 
 check: check-dos83-fuse
 endif
+
+check-fs-supervisor:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_supervisor.py'
+
+check: check-fs-supervisor
 
 $(BUILD_DIR)/nt-dos83-mediator: src/tools/dos83_mediator.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
@@ -767,6 +772,7 @@ install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/
 	install -D -m 0755 "$(BUILD_DIR)/pe-import-audit" "$(DESTDIR)$(BINDIR)/pe-import-audit"
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-mediator" "$(DESTDIR)$(BINDIR)/nt-dos83-mediator"
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-landlock" "$(DESTDIR)$(BINDIR)/nt-dos83-landlock"
+	install -D -m 0755 scripts/nt-fs-supervisor.py "$(DESTDIR)$(BINDIR)/nt-fs-supervisor"
 	install -D -m 0755 "$(BUILD_DIR)/nt-object-broker" "$(DESTDIR)$(BINDIR)/nt-object-broker"
 ifneq ($(strip $(FUSE3_LIBS)),)
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-fuse" "$(DESTDIR)$(BINDIR)/nt-dos83-fuse"

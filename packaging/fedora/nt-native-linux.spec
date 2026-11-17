@@ -7,10 +7,12 @@ Source0:        %{name}-%{version}.tar.gz
 ExclusiveArch:  x86_64
 Requires:       bubblewrap
 Requires:       fuse3
+Requires:       python3
 Requires:       fluidsynth-libs
 
 BuildRequires:  binutils
 BuildRequires:  gcc
+BuildRequires:  python3
 BuildRequires:  make
 BuildRequires:  pkgconfig(sdl2)
 BuildRequires:  pkgconfig(SDL2_image)
@@ -55,6 +57,7 @@ incomplete and must not be represented as general Windows compatibility.
 %{_bindir}/nt-dos83-mediator
 %{_bindir}/nt-dos83-fuse
 %{_bindir}/nt-dos83-landlock
+%{_bindir}/nt-fs-supervisor
 %{_bindir}/nt-object-broker
 
 %changelog

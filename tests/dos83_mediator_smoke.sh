@@ -62,4 +62,20 @@ fi
 kill "$watcher"
 wait "$watcher"
 watcher=""
+# Explicit NT-compatible opt-in is rooted, refuses directories, symlinks and
+# ../ escape paths. No operating-system-wide xattr trust is implied.
+printf 'C' > "$root/explicitNTFile.dat"
+"$tool" --root "$root" --mark 'C:/explicitNTFile.dat'
+python3 - "$root/explicitNTFile.dat" <<'PY'
+import os, sys
+assert os.getxattr(sys.argv[1], "user.ntnative.fs_compat") == b"1"
+PY
+ln -s /etc/passwd "$root/hostile-nt-link"
+if "$tool" --root "$root" --mark 'C:/hostile-nt-link' 2>/dev/null ||
+   "$tool" --root "$root" --mark 'C:/sub' 2>/dev/null ||
+   "$tool" --root "$root" --mark 'C:/../outside' 2>/dev/null; then
+    echo "FAIL NT file marker bypassed its grant" >&2
+    exit 1
+fi
+echo "PASS NT-compatible marker grant/symlink/directory/traversal denials"
 echo "PASS DOS 8.3 mediated rename, scan, and eventual inotify reconciliation"

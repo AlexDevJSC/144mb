@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -39,20 +40,113 @@
 static int lower_root = -1;
 static pthread_mutex_t namespace_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* NT-compatible files opt into the existing CreateFile OFD lease registry.
+ * A separate live lease for each FUSE FD preserves independent lifetimes. */
+struct view_file_lease {
+    int fd, lease;
+    struct view_file_lease *next;
+};
+static struct view_file_lease *view_leases;
+static pthread_mutex_t view_lease_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int view_lease_add(int fd, int lease)
+{
+    struct view_file_lease *item = malloc(sizeof(*item));
+    if (!item)
+        return -ENOMEM;
+    *item = (struct view_file_lease){.fd = fd, .lease = lease};
+    pthread_mutex_lock(&view_lease_lock);
+    item->next = view_leases;
+    view_leases = item;
+    pthread_mutex_unlock(&view_lease_lock);
+    return 0;
+}
+
+static int view_lease_take(int fd)
+{
+    int lease = -1;
+    pthread_mutex_lock(&view_lease_lock);
+    struct view_file_lease **cursor = &view_leases;
+    while (*cursor) {
+        if ((*cursor)->fd == fd) {
+            struct view_file_lease *item = *cursor;
+            *cursor = item->next;
+            lease = item->lease;
+            free(item);
+            break;
+        }
+        cursor = &(*cursor)->next;
+    }
+    pthread_mutex_unlock(&view_lease_lock);
+    return lease;
+}
+
+static bool view_lease_active(int fd)
+{
+    pthread_mutex_lock(&view_lease_lock);
+    bool active = false;
+    for (struct view_file_lease *item = view_leases; item; item = item->next)
+        if (item->fd == fd) {
+            active = true;
+            break;
+        }
+    pthread_mutex_unlock(&view_lease_lock);
+    return active;
+}
+
+/* Marked files observe the same kernel OFD byte-range locks as LockFileEx. */
+static int view_range_access(int fd, off_t offset, size_t size, bool writing)
+{
+    if (!view_lease_active(fd) || size == 0)
+        return 0;
+    if (offset < 0 || size > (size_t)INT64_MAX ||
+        (uint64_t)offset > (uint64_t)INT64_MAX - (uint64_t)size)
+        return -EINVAL;
+    struct flock request = {
+        .l_type = writing ? F_WRLCK : F_RDLCK,
+        .l_whence = SEEK_SET, .l_start = offset, .l_len = (off_t)size
+    };
+    if (fcntl(fd, F_OFD_GETLK, &request) < 0)
+        return -errno;
+    return request.l_type == F_UNLCK ? 0 : -EAGAIN;
+}
+
+
+/* Size changes on a marked file cannot bypass existing NT byte-range locks.
+ * l_len=0 queries [0, EOF) and any lock beyond the current end. */
+static int view_truncate_lock(int fd, bool marked)
+{
+    if (!marked)
+        return 0;
+    struct flock request = {
+        .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0
+    };
+    if (fcntl(fd, F_OFD_GETLK, &request) < 0)
+        return -errno;
+    return request.l_type == F_UNLCK ? 0 : -EAGAIN;
+}
+
 static const char *relpath(const char *path)
 {
-    if (!path || path[0] != '/')
+    if (!path || path[0] != '/') {
+        errno = EINVAL;
         return NULL;
+    }
+    /* Clients must not see or alter the authoritative share-lease files. */
+    static const char hidden[] = "/:ntnative-file-leases";
+    const size_t n = sizeof(hidden) - 1;
+    if (!strncmp(path, hidden, n) && (path[n] == '/' || path[n] == '\0')) {
+        errno = EACCES;
+        return NULL;
+    }
     return path[1] ? path + 1 : ".";
 }
 
 static int lower_open(const char *path, int flags, mode_t mode)
 {
     const char *relative = relpath(path);
-    if (!relative) {
-        errno = EINVAL;
+    if (!relative)
         return -1;
-    }
     const struct open_how how = {
         .flags = (uint64_t)(flags | O_CLOEXEC | O_NOFOLLOW),
         .mode = (uint64_t)((flags & O_CREAT) ? mode : 0),
@@ -66,7 +160,9 @@ static int lower_open(const char *path, int flags, mode_t mode)
 static int lower_parent(const char *path, char leaf[NAME_MAX + 1])
 {
     const char *relative = relpath(path);
-    if (!relative || (relative[0] == '.' && relative[1] == '\0')) {
+    if (!relative)
+        return -1;
+    if (relative[0] == '.' && relative[1] == '\0') {
         errno = EINVAL;
         return -1;
     }
@@ -172,9 +268,9 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
                       off_t offset, struct fuse_file_info *fi,
                       enum fuse_readdir_flags flags)
 {
-    (void)path;
-    (void)offset;
     (void)flags;
+    if (offset < 0)
+        return -EINVAL;
     int dupfd = dup((int)fi->fh);
     if (dupfd < 0)
         return -errno;
@@ -185,7 +281,10 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
         return -error;
     }
     int error = 0;
-    rewinddir(dir);
+    if (offset)
+        seekdir(dir, (long)offset);
+    else
+        rewinddir(dir);
     for (;;) {
         errno = 0;
         const struct dirent *entry = readdir(dir);
@@ -193,7 +292,15 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
             error = errno;
             break;
         }
-        if (filler(buffer, entry->d_name, NULL, 0,
+        if (!strcmp(path, "/") &&
+            !strcmp(entry->d_name, ":ntnative-file-leases"))
+            continue;
+        const long cookie = telldir(dir);
+        if (cookie < 0) {
+            error = errno ? errno : EIO;
+            break;
+        }
+        if (filler(buffer, entry->d_name, NULL, (off_t)cookie,
                    (enum fuse_fill_dir_flags)0))
             break;
     }
@@ -209,7 +316,10 @@ static int fs_releasedir(const char *path, struct fuse_file_info *fi)
 
 static int fs_open(const char *path, struct fuse_file_info *fi)
 {
-    int fd = lower_open(path, fi->flags & ~(O_CREAT | O_EXCL), 0);
+    /* Never truncate before share admission: a Windows handle can reject
+     * this write, and a rejected FUSE open must not mutate the file. */
+    const bool truncate = (fi->flags & O_TRUNC) != 0;
+    int fd = lower_open(path, fi->flags & ~(O_CREAT | O_EXCL | O_TRUNC), 0);
     if (fd < 0)
         return -errno;
     struct stat st;
@@ -217,6 +327,36 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         int error = errno ? errno : EACCES;
         close(fd);
         return -error;
+    }
+    int marked = nt_runtime_nt_file_marker(fd);
+    if (marked < 0) {
+        int error = errno;
+        close(fd);
+        return -error;
+    }
+    int lease = -1;
+    if (marked) {
+        const int mode = fi->flags & O_ACCMODE;
+        const uint32_t access = mode == O_RDONLY ? NT_FS_READ :
+            mode == O_WRONLY ? NT_FS_WRITE : NT_FS_READ | NT_FS_WRITE;
+        lease = nt_runtime_acquire_linux_nt_lease(fd, access,
+                                                  NT_FS_SHARE_ALL);
+        if (lease < 0) {
+            int error = errno;
+            close(fd);
+            return -error;
+        }
+    }
+    int error = truncate ? view_truncate_lock(fd, marked != 0) : 0;
+    if (!error && truncate && ftruncate(fd, 0) != 0)
+        error = -errno;
+    if (!error && lease >= 0)
+        error = view_lease_add(fd, lease);
+    if (error) {
+        if (lease >= 0)
+            nt_runtime_release_linux_nt_lease(&lease);
+        close(fd);
+        return error;
     }
     fi->fh = (uint64_t)fd;
     return 0;
@@ -248,6 +388,9 @@ static int fs_read(const char *path, char *buffer, size_t size,
                    off_t offset, struct fuse_file_info *fi)
 {
     (void)path;
+    int denied = view_range_access((int)fi->fh, offset, size, false);
+    if (denied)
+        return denied;
     ssize_t got = pread((int)fi->fh, buffer, size, offset);
     return got < 0 ? -errno : (int)got;
 }
@@ -256,6 +399,9 @@ static int fs_write(const char *path, const char *buffer, size_t size,
                     off_t offset, struct fuse_file_info *fi)
 {
     (void)path;
+    int denied = view_range_access((int)fi->fh, offset, size, true);
+    if (denied)
+        return denied;
     ssize_t count = pwrite((int)fi->fh, buffer, size, offset);
     return count < 0 ? -errno : (int)count;
 }
@@ -263,7 +409,11 @@ static int fs_write(const char *path, const char *buffer, size_t size,
 static int fs_release(const char *path, struct fuse_file_info *fi)
 {
     (void)path;
-    return close((int)fi->fh) == 0 ? 0 : -errno;
+    int lease = view_lease_take((int)fi->fh);
+    int result = close((int)fi->fh);
+    int error = errno;
+    nt_runtime_release_linux_nt_lease(&lease);
+    return result == 0 ? 0 : -error;
 }
 
 static int fs_flush(const char *path, struct fuse_file_info *fi)
@@ -282,15 +432,30 @@ static int fs_fsync(const char *path, int datasync, struct fuse_file_info *fi)
 
 static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 {
-    bool borrowed = fi != NULL;
+    if (size < 0)
+        return -EINVAL;
+    const bool borrowed = fi != NULL;
     int fd = borrowed ? (int)fi->fh : lower_open(path, O_WRONLY, 0);
     if (fd < 0)
         return -errno;
-    int result = ftruncate(fd, size);
-    int error = errno;
+    int lease = -1;
+    int marked = borrowed ? (view_lease_active(fd) ? 1 : 0) :
+                            nt_runtime_nt_file_marker(fd);
+    int error = marked < 0 ? -errno : 0;
+    if (!borrowed && marked > 0) {
+        lease = nt_runtime_acquire_linux_nt_lease(fd, NT_FS_WRITE,
+                                                  NT_FS_SHARE_ALL);
+        if (lease < 0)
+            error = -errno;
+    }
+    if (!error)
+        error = view_truncate_lock(fd, marked > 0);
+    if (!error && ftruncate(fd, size) != 0)
+        error = -errno;
+    nt_runtime_release_linux_nt_lease(&lease);
     if (!borrowed)
         close(fd);
-    return result == 0 ? 0 : -error;
+    return error;
 }
 
 static int fs_mkdir(const char *path, mode_t mode)
@@ -600,6 +765,101 @@ static int backend_selftest(void)
         fprintf(stderr, "FAIL: selftest alias persistence/cleanup\n");
         return 1;
     }
+    /* Deterministic compatibility matrix, even without /dev/fuse:
+     * marked Linux opens must use the exact Win32 OFD registry; failed
+     * O_TRUNC opens must not alter bytes. Unmarked files remain POSIX. */
+    const char *marked_path = "/NTCompatibleSharedFile.dat";
+    struct fuse_file_info new_file = {.flags = O_WRONLY};
+    if (fs_create(marked_path, 0600, &new_file) != 0 ||
+        fs_write(marked_path, "XYZ", 3, 0, &new_file) != 3 ||
+        fs_release(marked_path, &new_file) != 0) {
+        fprintf(stderr, "FAIL: NT compatibility fixture create\n");
+        return 1;
+    }
+    int mark_fd = lower_open(marked_path, O_RDONLY, 0);
+    if (mark_fd < 0 || fsetxattr(mark_fd, NT_FS_COMPAT_MARKER, "1", 1, 0) != 0) {
+        fprintf(stderr, "FAIL: NT compatibility fixture marker\n");
+        if (mark_fd >= 0)
+            close(mark_fd);
+        return 1;
+    }
+    close(mark_fd);
+    if (fs_getxattr(marked_path, NT_FS_COMPAT_MARKER, NULL, 0) != -ENODATA ||
+        fs_setxattr(marked_path, NT_FS_COMPAT_MARKER, "0", 1, 0) != -EACCES ||
+        lower_open("/:ntnative-file-leases", O_RDONLY, 0) >= 0) {
+        fprintf(stderr, "FAIL: trusted NT metadata exposed by FUSE\n");
+        return 1;
+    }
+    const uint32_t nt_both = UINT32_C(0x80000000) | UINT32_C(0x40000000);
+    uintptr_t nt_handle = nt_CreateFileW(u"C:\\NTCompatibleSharedFile.dat",
+                                          nt_both, NT_FS_READ, NULL, 3, 0, 0);
+    if (nt_handle == UINTPTR_MAX) {
+        fprintf(stderr, "FAIL: NT fixture handle open\n");
+        return 1;
+    }
+    struct fuse_file_info denied = {.flags = O_WRONLY | O_TRUNC};
+    struct fuse_file_info accepted = {.flags = O_RDONLY};
+    if (fs_open(marked_path, &denied) != -EBUSY ||
+        fs_open(marked_path, &accepted) != 0) {
+        fprintf(stderr, "FAIL: Win32 FILE_SHARE rejected wrong FUSE access\n");
+        return 1;
+    }
+    char contents[4] = {0};
+    if (fs_read(marked_path, contents, 3, 0, &accepted) != 3 ||
+        memcmp(contents, "XYZ", 3) != 0 ||
+        !nt_LockFile(nt_handle, 0, 0, 1, 0) ||
+        fs_read(marked_path, contents, 1, 0, &accepted) != -EAGAIN ||
+        fs_truncate(marked_path, 2, NULL) != -EBUSY ||
+        fs_truncate(marked_path, 2, &accepted) != -EAGAIN ||
+        !nt_UnlockFile(nt_handle, 0, 0, 1, 0) ||
+        fs_read(marked_path, contents, 1, 0, &accepted) != 1 ||
+        fs_release(marked_path, &accepted) != 0 ||
+        !nt_CloseHandle(nt_handle)) {
+        fprintf(stderr, "FAIL: marked file I/O locking or lifecycle\n");
+        return 1;
+    }
+    struct fuse_file_info linux_writer = {.flags = O_WRONLY};
+    if (fs_open(marked_path, &linux_writer) != 0) {
+        fprintf(stderr, "FAIL: Linux writer lease not acquired\n");
+        return 1;
+    }
+    nt_handle = nt_CreateFileW(u"C:\\NTCompatibleSharedFile.dat",
+                               UINT32_C(0x80000000), NT_FS_READ, NULL, 3, 0, 0);
+    if (nt_handle != UINTPTR_MAX) {
+        (void)nt_CloseHandle(nt_handle);
+        fprintf(stderr, "FAIL: NT open bypassed Linux FUSE writer lease\n");
+        return 1;
+    }
+    if (fs_release(marked_path, &linux_writer) != 0) {
+        fprintf(stderr, "FAIL: Linux writer release\n");
+        return 1;
+    }
+    /* A forked Linux writer dies without fs_release: its independent OFD
+     * lease must be dropped by the kernel, not by the parent supervisor. */
+    pid_t child = fork();
+    if (child == 0) {
+        struct fuse_file_info crashed = {.flags = O_WRONLY};
+        _exit(fs_open(marked_path, &crashed) == 0 ? 0 : 21);
+    }
+    int child_status = 0;
+    if (child < 0 || waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        fprintf(stderr, "FAIL: forked Linux writer lease setup\n");
+        return 1;
+    }
+    nt_handle = nt_CreateFileW(u"C:\\NTCompatibleSharedFile.dat",
+                               UINT32_C(0x80000000), NT_FS_READ, NULL, 3, 0, 0);
+    if (nt_handle == UINTPTR_MAX || !nt_CloseHandle(nt_handle)) {
+        fprintf(stderr, "FAIL: crashed Linux writer leaked OFD lease\n");
+        return 1;
+    }
+    if (fs_open(marked_path, &denied) != 0 ||
+        fs_release(marked_path, &denied) != 0 ||
+        fs_unlink(marked_path) != 0) {
+        fprintf(stderr, "FAIL: marked lease release or delete\n");
+        return 1;
+    }
+    printf("PASS NT opt-in share leases, pre-truncate denial, range locks, metadata isolation\n");
     printf("PASS FUSE callbacks, broker rename, alias persistence and confinement (mount not tested)\n");
     return 0;
 }

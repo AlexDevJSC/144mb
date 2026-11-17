@@ -52,7 +52,7 @@ dependencies=(git gcc binutils make pkgconf-pkg-config bubblewrap dejavu-sans-fo
               /usr/bin/flock /usr/bin/curl /usr/bin/sha256sum
               'pkgconfig(sdl2)' 'pkgconfig(SDL2_image)' 'pkgconfig(cairo)' 'pkgconfig(libffi)'
               'pkgconfig(libcrypto)' 'pkgconfig(libvkd3d)' 'pkgconfig(libvkd3d-utils)' 'pkgconfig(vulkan)'
-              fluidsynth-libs libstdc++ mesa-vulkan-drivers)
+              fluidsynth-libs libstdc++ mesa-vulkan-drivers fuse3 'pkgconfig(fuse3)' python3)
 missing=()
 for dependency in "${dependencies[@]}"; do
     if ! rpm -q --whatprovides "$dependency" >/dev/null 2>&1; then
@@ -68,7 +68,7 @@ root="$HOME/.local/share/nt-native-linux"
 bin="$HOME/.local/bin"
 checkout="$root/source"
 version="$root/versions/$revision"
-commands=(nt-native-probe pe-isolated-run nt-vulkan-probe pe-import-audit)
+commands=(nt-native-probe pe-isolated-run nt-vulkan-probe pe-import-audit nt-fs-supervisor nt-dos83-fuse nt-dos83-landlock nt-dos83-mediator)
 
 (
     mkdir -p -- "$root" "$bin"

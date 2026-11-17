@@ -22,6 +22,7 @@
 #include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -428,7 +429,7 @@ static bool to_wide(const char *input, uint16_t *output, size_t capacity)
 int main(int argc, char **argv)
 {
     if (argc < 4 || strcmp(argv[1], "--root") != 0) {
-        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --refresh DOS_PATH | --reconcile OLD NEW | --move OLD NEW\n", argv[0]);
+        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW\n", argv[0]);
         return 2;
     }
     if (!nt_runtime_set_file_root(argv[2])) {
@@ -455,6 +456,18 @@ int main(int argc, char **argv)
         monitor_clear(&state);
         close(state.inotify_fd);
         close(state.root);
+    } else if (argc == 5 && strcmp(argv[3], "--mark") == 0) {
+        /* Mark a pinned regular file via the authorized DOS grant, never
+         * by following arbitrary host symlinks or a caller-provided FD. */
+        const int fd = nt_runtime_open_guest_file_readonly(argv[4]);
+        if (fd < 0) {
+            result = 1;
+        } else {
+            struct stat info;
+            result = fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
+                     fsetxattr(fd, NT_FS_COMPAT_MARKER, "1", 1, 0) == 0 ? 0 : 1;
+            close(fd);
+        }
     } else if (argc == 5 && strcmp(argv[3], "--refresh") == 0) {
         result = nt_runtime_refresh_dos83_path(argv[4]) ? 0 : 1;
     } else if (argc == 6 && strcmp(argv[3], "--reconcile") == 0) {
