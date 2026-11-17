@@ -31,13 +31,23 @@ def main() -> int:
         with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
             conn.settimeout(20)
             conn.connect(args.socket)
-            raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
-                                  struct.calcsize("3i"))
-            _pid, peer_uid, _gid = struct.unpack("3i", raw)
-            if peer_uid != expected_uid or peer_uid == os.geteuid():
-                raise RuntimeError("Untrusted or same-UID storage service")
+            # Socket activation may leave SO_PEERCRED identifying PID1
+            # (the listener CREATOR). Kernel SCM_CREDENTIALS on the reply
+            # authenticates the process which ACTUALLY sent the response.
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             conn.sendall(json.dumps(request, separators=(",", ":")).encode("utf-8"))
-            response = json.loads(conn.recv(4096).decode("utf-8"))
+            payload, control, flags, _ = conn.recvmsg(
+                4096, socket.CMSG_SPACE(struct.calcsize("3i")))
+            identities = [struct.unpack("3i", data[:12])
+                          for level, kind, data in control
+                          if level == socket.SOL_SOCKET and
+                          kind == socket.SCM_CREDENTIALS and len(data) >= 12]
+            if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or
+                    len(identities) != 1 or
+                    identities[0][1] != expected_uid or
+                    identities[0][1] == os.geteuid()):
+                raise RuntimeError("Untrusted storage reply sender identity")
+            response = json.loads(payload.decode("utf-8"))
         if response.get("version") != VERSION or response.get("ok") is not True:
             raise RuntimeError(response.get("error", "Invalid storage response"))
         print(json.dumps(response, sort_keys=True))

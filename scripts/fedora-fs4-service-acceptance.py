@@ -26,12 +26,20 @@ def control(query, expected_uid):
     with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
         conn.settimeout(20)
         conn.connect(ENDPOINT)
-        peer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-        _, uid, _ = struct.unpack("3i", peer)
-        required(uid == expected_uid and uid != os.geteuid(),
-                 "SO_PEERCRED identifies independent storage owner")
+        # systemd may create the socket as root before the daemon starts.
+        # SCM_CREDENTIALS authenticates the replying daemon itself.
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
         conn.sendall(json.dumps(query).encode("utf-8"))
-        return json.loads(conn.recv(4096).decode("utf-8"))
+        payload, control, flags, _ = conn.recvmsg(4096, socket.CMSG_SPACE(12))
+        peers = [struct.unpack("3i", data[:12])
+                 for level, kind, data in control
+                 if level == socket.SOL_SOCKET and
+                 kind == socket.SCM_CREDENTIALS and len(data) >= 12]
+        required(not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) and
+                 len(peers) == 1 and peers[0][1] == expected_uid and
+                 peers[0][1] != os.geteuid(),
+                 "SCM_CREDENTIALS proves independent reply sender")
+        return json.loads(payload.decode("utf-8"))
 
 
 def main():
