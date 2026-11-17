@@ -54,6 +54,9 @@ class ServiceSupervisor(unittest.TestCase):
     def test_no_client_is_started_before_service_identity(self):
         with tempfile.TemporaryDirectory() as view:
             with mock.patch.object(supervisor.os, "geteuid", return_value=1000), \
+                 mock.patch.object(supervisor.os, "access", return_value=True), \
+                 mock.patch.object(supervisor.Path, "is_file", return_value=True), \
+                 mock.patch.object(supervisor.Path, "exists", return_value=True), \
                  mock.patch.object(supervisor, "service_attestation",
                                    side_effect=supervisor.Refused("no daemon")), \
                  mock.patch.object(supervisor.subprocess, "Popen") as start:
