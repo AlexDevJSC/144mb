@@ -16,8 +16,14 @@ disposable tree, kills that exact process by SIGKILL in four places:
 
 - after the fsync of a pending WAL, before alias changes;
 - immediately after the destination DOS 8.3 alias xattr is written;
-- immediately before renameat2;
-- immediately after a successful renameat2.
+- after staged inode fsync, immediately before the pending rename;
+- after clearing the old alias key, which occurs only after successful
+  direct SYS_renameat2;
+- after the source parent's fsync, before the WAL is cleared.
+
+The runtime calls SYS_renameat2 directly and bypasses the libc wrapper,
+so the test observes the immediately adjacent durable operations instead
+of falsely claiming to intercept that syscall itself.
 
 A **new independent process** then executes --recover. Assertions require
 the original inode and bytes to remain intact, exactly one usable per-entry
