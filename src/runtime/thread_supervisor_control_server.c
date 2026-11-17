@@ -108,7 +108,7 @@ static bool supported_flags(uint32_t flags, bool writing)
     const uint32_t base = NT_SUP_CONTEXT_AMD64;
     const uint32_t groups = writing ? NT_SUP_CONTEXT_INTEGER :
         (NT_SUP_CONTEXT_INTEGER | NT_SUP_CONTEXT_CONTROL |
-         NT_SUP_CONTEXT_SEGMENTS);
+         NT_SUP_CONTEXT_SEGMENTS | NT_SUP_CONTEXT_FLOATING_POINT);
     return (flags & base) == base && (flags & groups) != 0 &&
            (flags & ~(base | groups)) == 0;
 }
