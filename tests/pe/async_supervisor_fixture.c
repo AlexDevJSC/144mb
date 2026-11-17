@@ -4,6 +4,28 @@
  * SETREGSET and a counted resume through Win32/NTDLL exports. */
 #include <windows.h>
 #include <stdint.h>
+#include <stddef.h>
+
+/* Freestanding fixture with -nostdlib. GCC may lower CONTEXT structure
+ * copies/zero-initialization to these operations even without CRT startup.
+ * Use volatile byte writes so the optimizer cannot rediscover a recursive
+ * memset/memcpy call. Not used as runtime Windows implementations. */
+void *memset(void *out, int value, size_t size)
+{
+    volatile unsigned char *write = (volatile unsigned char *)out;
+    for (size_t i = 0; i < size; ++i)
+        write[i] = (unsigned char)value;
+    return out;
+}
+void *memcpy(void *out, const void *input, size_t size)
+{
+    volatile unsigned char *write = (volatile unsigned char *)out;
+    const volatile unsigned char *read =
+        (const volatile unsigned char *)input;
+    for (size_t i = 0; i < size; ++i)
+        write[i] = read[i];
+    return out;
+}
 
 __declspec(dllimport) LONG NTAPI NtSuspendThread(HANDLE, ULONG *);
 __declspec(dllimport) LONG NTAPI NtResumeThread(HANDLE, ULONG *);
