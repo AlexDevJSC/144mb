@@ -1533,11 +1533,19 @@ static bool finalize_share_pending_locked(int gate,
         if (!S_ISREG(actual.st_mode) ||
             (uint64_t)actual.st_dev != pending->dev ||
             (uint64_t)actual.st_ino != pending->ino) {
-            /* Unknown replacement: do not delete an unrelated inode and
-             * do not erase the durable marker on ambiguous physical state. */
+            /* Host writer bypassed the cooperative namespace and replaced
+             * this spelling. We MUST NOT delete the replacement inode. The
+             * old pending disposition no longer binds to this path: sync
+             * the observed parent first, then release its obsolete marker.
+             * Existing hardlinks to the old inode remain untouched. */
+            if (!wal_sync_pinned(parent, true)) {
+                const int cause = errno;
+                close(parent);
+                errno = cause;
+                return false;
+            }
             close(parent);
-            errno = EUCLEAN;
-            return false;
+            return clear_share_pending(gate);
         }
         int pinned = confined_open_raw(parent, leaf, O_PATH | O_NOFOLLOW, 0);
         struct stat identity;
