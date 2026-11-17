@@ -26,6 +26,12 @@ on:
       - 'src/runtime/threads.c'
       - 'include/ntnative/guest_boundary_runtime.h'
       - 'tests/guest_boundary_import_test.c'
+      - 'tests/supervisor_control_ipc_test.c'
+      - 'src/runtime/thread_supervisor_control_server.c'
+      - 'src/runtime/thread_supervisor_control_server.h'
+      - 'src/supervisor/nt_supervisor_nt_bridge.c'
+      - 'src/supervisor/nt_supervisor_nt_bridge.h'
+      - 'src/runtime/thread_broker_ipc.h'
       - '.github/workflows/thread-supervisor.yml'
   pull_request:
     paths:
@@ -53,6 +59,12 @@ on:
       - 'src/runtime/threads.c'
       - 'include/ntnative/guest_boundary_runtime.h'
       - 'tests/guest_boundary_import_test.c'
+      - 'tests/supervisor_control_ipc_test.c'
+      - 'src/runtime/thread_supervisor_control_server.c'
+      - 'src/runtime/thread_supervisor_control_server.h'
+      - 'src/supervisor/nt_supervisor_nt_bridge.c'
+      - 'src/supervisor/nt_supervisor_nt_bridge.h'
+      - 'src/runtime/thread_broker_ipc.h'
       - '.github/workflows/thread-supervisor.yml'
   workflow_dispatch:
 permissions:
@@ -77,6 +89,13 @@ jobs:
           make BUILD_DIR=build-guest-boundary-ubsan \
             CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
             check-guest-boundary
+      - name: Prove authenticated suspend, context and signal lifecycle
+        run: make -j2 check-supervisor-control-ipc
+      - name: Repeat supervisor control lifecycle with UBSan
+        run: |
+          make -j2 BUILD_DIR=build-supervisor-control-ubsan \
+            CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
+            check-supervisor-control-ipc
       - name: Prove authenticated runtime/parent supervisor IPC and generation revocation
         run: make -j2 check-supervisor-authenticated-ipc
       - name: Repeat authenticated supervisor IPC test with UBSan
