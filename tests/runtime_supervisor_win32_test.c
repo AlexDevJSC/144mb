@@ -134,10 +134,25 @@ static int NT_MS_ABI test_entry(void)
      * successful register write for unsupported groups. */
     if (nt_NtSetContextThread(thread, &integer) != NT_STATUS_NOT_SUPPORTED)
         return 29;
-    _Alignas(16) struct nt_context64 invalid = {0};
-    invalid.flags = 0x100008u; /* floating-point group is not supported */
-    if (nt_NtGetContextThread(thread, &invalid) != NT_STATUS_INVALID_PARAMETER)
+    /* Verify an actual FXSAVE image from Linux NT_PRFPREG, not a fabricated
+     * success or a copy of general registers. Windows CONTEXT.FltSave
+     * contains the 512-byte x87/XMM0-15 image and MXCSR at byte 24. */
+    _Alignas(16) struct nt_context64 fp = {0};
+    fp.flags = 0x100008u;
+    if (nt_NtGetContextThread(thread, &fp) != NT_STATUS_SUCCESS ||
+        fp.mxcsr == 0)
         return 30;
+    uint32_t saved_mxcsr = 0;
+    memcpy(&saved_mxcsr, fp.floating + 24, sizeof(saved_mxcsr));
+    if (saved_mxcsr != fp.mxcsr)
+        return 33;
+    fp.flags = 0x100008u;
+    if (nt_NtSetContextThread(thread, &fp) != NT_STATUS_NOT_SUPPORTED)
+        return 34; /* read-only x87/XMM; no fabricated Set success */
+    _Alignas(16) struct nt_context64 invalid = {0};
+    invalid.flags = 0x100010u; /* debug registers not yet supported */
+    if (nt_NtGetContextThread(thread, &invalid) != NT_STATUS_INVALID_PARAMETER)
+        return 35;
     native_previous = UINT32_MAX;
     if (nt_NtResumeThread(thread, &native_previous) != NT_STATUS_SUCCESS ||
         native_previous != 2)
