@@ -176,11 +176,36 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
     altered.r13 = context->r13;
     altered.r14 = context->r14;
     altered.r15 = context->r15;
+    /* No reported success without a second kernel-owned GETREGSET.
+     * A write can fail after an ambiguous partial mutation, or the
+     * kernel can normalise a requested register value. Both require
+     * verification before the child is ever allowed to run again. */
+    state->unsafe_register_state = true;
     struct iovec io = {.iov_base = &altered, .iov_len = sizeof(altered)};
+    const bool wrote = ptrace(PTRACE_SETREGSET, state->tracer->tid,
+                   (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
+                   io.iov_len == sizeof(altered);
+    struct user_regs_struct verified = {0};
+    if (wrote &&
+        nt_supervisor_get_registers(state->tracer, &verified) == 0 &&
+        memcmp(&verified, &altered, sizeof(altered)) == 0) {
+        state->unsafe_register_state = false;
+        return NT_STATUS_SUCCESS;
+    }
+
+    /* Best effort rollback while the same tracee is still STOPPED.
+     * The result is safe only if the *original* entire register set
+     * can be read back byte-for-byte. Otherwise the parent must
+     * terminate this exact pidfd-pinned guest, never PTRACE_DETACH. */
+    struct iovec undo = {.iov_base = &original, .iov_len = sizeof(original)};
     if (ptrace(PTRACE_SETREGSET, state->tracer->tid,
-               (void *)(uintptr_t)NT_PRSTATUS, &io) == -1)
-        return translate_ptrace_error(errno);
-    return NT_STATUS_SUCCESS;
+               (void *)(uintptr_t)NT_PRSTATUS, &undo) == 0 &&
+        undo.iov_len == sizeof(original) &&
+        nt_supervisor_get_registers(state->tracer, &verified) == 0 &&
+        memcmp(&verified, &original, sizeof(original)) == 0) {
+        state->unsafe_register_state = false;
+    }
+    return NT_STATUS_NOT_SUPPORTED;
 }
 
 nt_status nt_supervisor_nt_queue_trusted_apc(struct nt_supervisor_nt_thread *state,
