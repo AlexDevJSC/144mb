@@ -377,6 +377,17 @@ check-dos83-wal: $(BUILD_DIR)/nt-dos83-mediator
 
 check: check-dos83-wal
 
+# Only the test mediator receives this preload. Never install or ship it.
+$(BUILD_DIR)/dos83-sigkill-preload.so: tests/dos83_sigkill_preload.c | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(WARN_CFLAGS) $(CFLAGS) -fPIC -shared "$<" $(LDFLAGS) -o "$@"
+
+.PHONY: check-dos83-sigkill
+check-dos83-sigkill: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/dos83-sigkill-preload.so
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_sigkill_recovery.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/dos83-sigkill-preload.so"
+
+check: check-dos83-sigkill
+
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/user_folders.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=fdatasync $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
