@@ -373,6 +373,17 @@ check-fs4-acceptance-gates:
 
 check: check-fs-backing-audit check-fs4-acceptance-gates
 
+$(BUILD_DIR)/fs4-ntfs-probe: src/tools/fs4_ntfs_probe.c $(RUNTIME_OBJECTS) src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-fs4-ntfs-diff
+check-fs4-ntfs-diff: $(BUILD_DIR)/fs4-ntfs-probe
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_ntfs_probe_smoke.py "$(BUILD_DIR)/fs4-ntfs-probe"
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs4_ntfs_diff.py'
+
+check: check-fs4-ntfs-diff
+
 $(BUILD_DIR)/nt-dos83-mediator: src/tools/dos83_mediator.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
