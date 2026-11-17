@@ -157,11 +157,13 @@ class Security(unittest.TestCase):
                         os.setgroups([])
                         os.setgid(65534)
                         os.setuid(65534)
-                        for _ in range(2):
+                        for _ in range(3):
                             conn, _addr = listener.accept()
                             with conn:
-                                conn.recv(4096)
-                                conn.sendall(b'{"version":1,"ok":true,"mediated":true}')
+                                # First connection only probes SO_PEERCRED,
+                                # then closes. The other two request replies.
+                                if conn.recv(4096):
+                                    conn.sendall(b'{"version":1,"ok":true,"mediated":true}')
                         os._exit(0)
                     except BaseException:
                         os._exit(55)
