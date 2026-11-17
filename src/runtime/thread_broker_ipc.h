@@ -32,7 +32,7 @@ struct nt_thread_broker_reply {
  * Other RPCs preserve their 48/32-byte frames. No guest-pointer
  * dereference is performed in the supervisor. NTSTATUS travels in the
  * reply.status field as an unsigned 32-bit bit pattern. */
-#include "ntnative/guest_thread.h"
+#include "compat.h"
 struct nt_broker_context_request {
     struct nt_broker_rpc request;
     struct nt_context64 context;
