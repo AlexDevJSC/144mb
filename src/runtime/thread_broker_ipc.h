@@ -3,7 +3,8 @@
 #define NTNATIVE_THREAD_BROKER_IPC_H
 /* v4 private host protocol. It is NOT a Windows ABI or a guest-controlled
  * ability to issue Linux syscalls. Every request checks kernel credentials,
- * registered pidfd and the session token. Only query rights are supported. */
+ * registered pidfd and the session token. Thread mutations require a
+ * separate explicit HOST-only control grant and verified guest scope. */
 #include "thread_broker_registry.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -89,8 +90,8 @@ bool nt_broker_client_supervisor_probe(uint64_t capability, uint64_t *guest_rip)
  * phase, parent-trusted PE executable range and real GS/TEB verification. */
 bool nt_broker_client_supervisor_probe_guest(uint64_t capability, uint64_t *guest_rip);
 /* Host-gated control operations. Full NTSTATUS is returned on failure,
- * without writing output arguments. Only CONTROL/INTEGER/SEGMENTS reads
- * and INTEGER-only writes are implemented; unsupported groups fail. */
+ * without writing output arguments. CONTROL/INTEGER/SEGMENTS/FXSAVE
+ * reads and INTEGER-only writes are implemented; unsupported groups fail. */
 nt_status nt_broker_client_supervisor_suspend(uint64_t capability, uint32_t *previous);
 nt_status nt_broker_client_supervisor_resume(uint64_t capability, uint32_t *previous);
 nt_status nt_broker_client_supervisor_get_context(uint64_t capability,
