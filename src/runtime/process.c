@@ -228,6 +228,11 @@ bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t mod
     pthread_mutex_unlock(&guest_process_lock);
     if (!nt_guest_thread_enter_in_process(thread, module, initial, &guest.process))
         return false;
+    if (nt_guest_boundary_current_session() != NULL &&
+        !nt_guest_boundary_thread_attach((uintptr_t)nt_guest_thread_teb())) {
+        (void)nt_guest_thread_leave(thread);
+        return false;
+    }
     if (!nt_runtime_external_module_prepare_thread(thread)) {
         (void)nt_guest_thread_leave(thread);
         return false;
