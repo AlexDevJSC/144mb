@@ -1106,6 +1106,23 @@ static void check_files(void)
                               &junction_returned, NULL) &&
           last_error() == NT_ERROR_ACCESS_DENIED);
     uint8_t remove_mount[8] = {3, 0, 0, 0xa0};
+    /* Reserved bytes of the deletion header must not allow a malformed
+     * request to delete the only persistent junction marker. */
+    remove_mount[6] = 1;
+    CHECK(!nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
+                              sizeof(remove_mount), NULL, 0,
+                              &junction_returned, NULL) &&
+          last_error() == NT_ERROR_INVALID_PARAMETER);
+    CHECK(nt_DeviceIoControl(junction, 0x000900a8u, NULL, 0,
+                             junction_output, sizeof(junction_output),
+                             &junction_returned, NULL));
+    remove_mount[6] = 0;
+    remove_mount[0] = 0x0c; /* SYMLINK tag is NOT mount-point reparse. */
+    CHECK(!nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
+                              sizeof(remove_mount), NULL, 0,
+                              &junction_returned, NULL) &&
+          last_error() == NT_ERROR_INVALID_PARAMETER);
+    remove_mount[0] = 3;
     CHECK(nt_DeviceIoControl(junction, 0x000900acu, remove_mount,
                              sizeof(remove_mount), NULL, 0,
                              &junction_returned, NULL));
