@@ -429,7 +429,7 @@ static bool to_wide(const char *input, uint16_t *output, size_t capacity)
 int main(int argc, char **argv)
 {
     if (argc < 4 || strcmp(argv[1], "--root") != 0) {
-        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW | --replace OLD NEW | --sequence-move A B C D\n", argv[0]);
+        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW | --replace OLD NEW | --sequence-move A B C D | --deferred-delete PATH | --two-deferred-deletes A B\n", argv[0]);
         return 2;
     }
     if (!nt_runtime_set_file_root(argv[2])) {
@@ -495,6 +495,32 @@ int main(int argc, char **argv)
         result = to_wide(argv[4], from, PATH_MAX) &&
                  to_wide(argv[5], to, PATH_MAX) &&
                  nt_MoveFileExW(from, to, flags) ? 0 : 1;
+    } else if ((argc == 5 && strcmp(argv[3], "--deferred-delete") == 0) ||
+               (argc == 6 && strcmp(argv[3], "--two-deferred-deletes") == 0)) {
+        /* Reproduce the actual Windows deferred-delete lifecycle, not a
+         * direct POSIX unlink bypassing the share-pending registry. */
+        bool all = true;
+        for (int i = 4; i < argc; ++i) {
+            uint16_t path[PATH_MAX];
+            if (!to_wide(argv[i], path, PATH_MAX)) {
+                all = false;
+                break;
+            }
+            const uintptr_t handle = nt_CreateFileW(
+                path, UINT32_C(0x80010000), NT_FS_SHARE_ALL,
+                NULL, 3, 0, 0);
+            if (handle == UINTPTR_MAX) {
+                all = false;
+                break;
+            }
+            const bool deletion = nt_DeleteFileW(path) != 0;
+            const bool closed = nt_CloseHandle(handle) != 0;
+            fprintf(stderr, "deferred delete %d: marked=%d closed=%d\n",
+                    i - 3, deletion ? 1 : 0, closed ? 1 : 0);
+            if (!deletion || !closed)
+                all = false;
+        }
+        result = all ? 0 : 1;
     } else if (argc == 8 && strcmp(argv[3], "--sequence-move") == 0) {
         /* Exercise two mutations in one process: a failed WAL clear must
          * poison the process even if ftruncate already made the WAL appear
