@@ -3,8 +3,8 @@
 #define NT_SUPERVISOR_NT_BRIDGE_H
 
 #include "nt_thread_supervisor.h"
-#include "compat.h"
-#include "nt_services.h"
+#include "../runtime/compat.h"
+#include "../runtime/nt_services.h"
 
 /* Trusted supervisor-side NT contract adapter. This is NOT installed as
  * a Win32 export: the real runtime needs authenticated IPC for HANDLE
