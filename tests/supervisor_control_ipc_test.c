@@ -191,6 +191,23 @@ static _Noreturn void child_client(int fd, unsigned mode)
         if (nt_broker_client_supervisor_resume(capability, &previous) !=
             NT_STATUS_NOT_SUPPORTED)
             _exit(40);
+        /* Repeated seize/interrupt/GS/RIP validation/DETACH is not allowed
+         * to retain stale signal state or accumulate a hidden tracee. */
+        for (unsigned round = 0; round < 32; ++round) {
+            if (nt_broker_client_supervisor_suspend(capability, &previous) !=
+                NT_STATUS_SUCCESS || previous != 0)
+                _exit(47);
+            _Alignas(16) struct nt_context64 repeated = {0};
+            repeated.flags = 0x100003u;
+            if (nt_broker_client_supervisor_get_context(capability, &repeated) !=
+                NT_STATUS_SUCCESS ||
+                repeated.rip < (uintptr_t)control_loop_begin ||
+                repeated.rip >= (uintptr_t)control_loop_end)
+                _exit(48);
+            if (nt_broker_client_supervisor_resume(capability, &previous) !=
+                NT_STATUS_SUCCESS || previous != 1)
+                _exit(49);
+        }
     }
     atomic_store_explicit(&data->stop, 1, memory_order_release);
     for (int j = 0; j < 4000 && !atomic_load(&data->host_phase); ++j)
@@ -267,6 +284,6 @@ int main(void)
     puts("PASS authenticated control IPC: opt-in only, persistent nested "
          "suspension, real AMD64 CONTEXT GET/SET/restore, unsupported groups, "
          "queued Linux SIGUSR1 preserved, HOST-phase denial, no stale leases, "
-         "EOF during ptrace suspension resumes the worker");
+         "EOF during ptrace suspension resumes the worker, 32 attach cycles");
     return 0;
 }
