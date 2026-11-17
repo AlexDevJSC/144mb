@@ -809,6 +809,7 @@ static int backend_selftest(void)
         memcmp(contents, "XYZ", 3) != 0 ||
         !nt_LockFile(nt_handle, 0, 0, 1, 0) ||
         fs_read(marked_path, contents, 1, 0, &accepted) != -EAGAIN ||
+        fs_truncate(marked_path, 2, NULL) != -EAGAIN ||
         !nt_UnlockFile(nt_handle, 0, 0, 1, 0) ||
         fs_read(marked_path, contents, 1, 0, &accepted) != 1 ||
         fs_release(marked_path, &accepted) != 0 ||
