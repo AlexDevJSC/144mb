@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <linux/elf.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,14 +102,35 @@ int nt_supervisor_interrupt(struct nt_thread_supervisor *sup, unsigned timeout_m
         int status = 0;
         pid_t observed = waitpid(sup->tid, &status, __WALL | WNOHANG);
         if (observed == sup->tid) {
-            if (WIFSTOPPED(status) && (unsigned)status >> 16 == PTRACE_EVENT_STOP) {
-                sup->stopped = true;
-                return 0;
+            if (WIFSTOPPED(status)) {
+                sup->stopped = true; /* Even an unexpected signal-stop needs cleanup. */
+                const unsigned event = (unsigned)status >> 16;
+                if (event == PTRACE_EVENT_STOP && WSTOPSIG(status) == SIGTRAP) {
+                    sup->pending_signal = 0;
+                    return 0;
+                }
+                /* For actual signal-delivery stops retain the signal so
+                 * CONT/DETACH can deliver it to the guest exactly once. */
+                sup->pending_signal = event == 0 ? WSTOPSIG(status) : 0;
+                errno = EPROTO;
+                return -1;
             }
-            /* An unexpected signal/event is not safe to silently consume. */
-            errno = EPROTO; return -1;
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                sup->exited = true;
+                sup->seized = false;
+                errno = ESRCH;
+                return -1;
+            }
+            errno = EPROTO;
+            return -1;
         }
-        if (observed < 0) return -1;
+        if (observed < 0) {
+            if (errno == ECHILD || errno == ESRCH) {
+                sup->exited = true;
+                sup->seized = false;
+            }
+            return -1;
+        }
         if (mono_ms() >= deadline) { errno = ETIMEDOUT; return -1; }
         struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
         (void)nanosleep(&pause, NULL);
@@ -138,17 +160,23 @@ int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
 int nt_supervisor_continue(struct nt_thread_supervisor *sup)
 {
     if (!sup || !sup->seized || !sup->stopped) { errno = EINVAL; return -1; }
-    if (ptrace(PTRACE_CONT, sup->tid, NULL, NULL) == -1) return -1;
+    if (ptrace(PTRACE_CONT, sup->tid, NULL,
+               (void *)(uintptr_t)sup->pending_signal) == -1)
+        return -1;
     sup->stopped = false;
+    sup->pending_signal = 0;
     return 0;
 }
 
 int nt_supervisor_detach(struct nt_thread_supervisor *sup)
 {
     if (!sup || !sup->seized || !sup->stopped) { errno = EINVAL; return -1; }
-    if (ptrace(PTRACE_DETACH, sup->tid, NULL, NULL) == -1) return -1;
+    if (ptrace(PTRACE_DETACH, sup->tid, NULL,
+               (void *)(uintptr_t)sup->pending_signal) == -1)
+        return -1;
     sup->seized = false;
     sup->stopped = false;
+    sup->pending_signal = 0;
     return 0;
 }
 
@@ -319,6 +347,32 @@ int nt_supervisor_invoke_trusted_guest_apc(
         const struct timespec pause = {.tv_nsec = 1000000L};
         (void)nanosleep(&pause, NULL);
     }
+}
+
+int nt_supervisor_abort_child(struct nt_thread_supervisor *sup)
+{
+    if (!sup) { errno = EINVAL; return -1; }
+    if (!sup->seized || sup->exited) {
+        nt_supervisor_release(sup);
+        return 0;
+    }
+    if (!sup->stopped)
+        (void)nt_supervisor_interrupt(sup, 500);
+    if (sup->stopped && nt_supervisor_detach(sup) == 0) {
+        nt_supervisor_release(sup);
+        return 0;
+    }
+    /* The ptrace state is unknown: avoid abandoning a stopped live
+     * Linux thread. PID integers must NOT be used for a kill fallback. */
+    int result = -1;
+#if defined(SYS_pidfd_send_signal)
+    if (sup->pidfd >= 0 &&
+        syscall(SYS_pidfd_send_signal, sup->pidfd, SIGKILL, NULL, 0) == 0)
+        result = -1;
+#endif
+    nt_supervisor_release(sup);
+    errno = EPROTO;
+    return result;
 }
 
 void nt_supervisor_release(struct nt_thread_supervisor *sup)
