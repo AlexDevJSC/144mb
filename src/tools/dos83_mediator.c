@@ -429,7 +429,7 @@ static bool to_wide(const char *input, uint16_t *output, size_t capacity)
 int main(int argc, char **argv)
 {
     if (argc < 4 || strcmp(argv[1], "--root") != 0) {
-        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW\n", argv[0]);
+        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW | --replace OLD NEW\n", argv[0]);
         return 2;
     }
     if (!nt_runtime_set_file_root(argv[2])) {
@@ -487,11 +487,14 @@ int main(int argc, char **argv)
         result = nt_runtime_refresh_dos83_path(argv[4]) ? 0 : 1;
     } else if (argc == 6 && strcmp(argv[3], "--reconcile") == 0) {
         result = nt_runtime_reconcile_host_rename(argv[4], argv[5]) ? 0 : 1;
-    } else if (argc == 6 && strcmp(argv[3], "--move") == 0) {
+    } else if (argc == 6 &&
+               (strcmp(argv[3], "--move") == 0 ||
+                strcmp(argv[3], "--replace") == 0)) {
         uint16_t from[PATH_MAX], to[PATH_MAX];
+        const uint32_t flags = strcmp(argv[3], "--replace") == 0 ? 1u : 0u;
         result = to_wide(argv[4], from, PATH_MAX) &&
                  to_wide(argv[5], to, PATH_MAX) &&
-                 nt_MoveFileExW(from, to, 0) ? 0 : 1;
+                 nt_MoveFileExW(from, to, flags) ? 0 : 1;
     } else {
         fprintf(stderr, "Unsupported mode or argument count\n");
     }

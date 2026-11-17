@@ -343,8 +343,9 @@ struct dos83_move_txn {
     int source_parent, dest_parent;
     struct dos83_wal wal;
     char source_key[112], dest_key[112], old_dest[14];
-    ssize_t old_dest_size;
-    bool staged, has_source_alias, journaled;
+    ssize_t old_dest_size, victim_old_size;
+    char victim_old[14], victim_key[112];
+    bool staged, has_source_alias, journaled, victim_preclean;
 };
 
 static bool dos83_move_end(struct dos83_move_txn *txn, bool committed)
@@ -379,7 +380,29 @@ static bool dos83_move_end(struct dos83_move_txn *txn, bool committed)
             }
         }
     }
-    if (txn->victim_fd >= 0 && committed) {
+    if (txn->victim_fd >= 0 && txn->journaled &&
+        txn->victim_preclean && !committed) {
+        /* Roll back metadata staged on a hardlinked replacement victim.
+         * Check against the two states our transaction can have written;
+         * a foreign value is NOT ours to overwrite. */
+        struct dos83_wal_entry original = {
+            .victim_old_size = txn->victim_old_size > 0 ?
+                               (size_t)txn->victim_old_size : 0
+        };
+        if (original.victim_old_size)
+            memcpy(original.victim_old, txn->victim_old,
+                   original.victim_old_size);
+        struct stat st;
+        if (fstat(txn->victim_fd, &st) != 0 ||
+            !wal_restore_victim_alias(txn->victim_fd, txn->victim_key,
+                                      &original) ||
+            !wal_sync_pinned(txn->victim_fd, S_ISDIR(st.st_mode))) {
+            ok = false;
+            if (!error)
+                error = errno;
+        }
+    }
+    if (txn->victim_fd >= 0 && committed && !txn->victim_preclean) {
         struct stat st;
         if (fstat(txn->victim_fd, &st) != 0) {
             ok = false;
@@ -456,7 +479,7 @@ static bool dos83_move_begin(int root, const char *from_path,
 {
     *txn = (struct dos83_move_txn){
         .source_fd = -1, .victim_fd = -1, .gate_a = -1,
-        .gate_b = -1, .old_dest_size = -1,
+        .gate_b = -1, .old_dest_size = -1, .victim_old_size = -1,
         .source_parent = source_parent, .dest_parent = dest_parent,
         .wal = {.fd = -1, .directory = -1}
     };
@@ -496,6 +519,21 @@ static bool dos83_move_begin(int root, const char *from_path,
                 (victim.st_dev == pinned.st_dev &&
                  victim.st_ino == pinned.st_ino))
                 error = EBUSY;
+        }
+    }
+    if (!error && replacing) {
+        if (!dos83_entry_key(dest_parent, dest_leaf, txn->victim_key)) {
+            error = errno;
+        } else {
+            txn->victim_old_size = read_guest_xattr(
+                txn->victim_fd, txn->victim_key,
+                txn->victim_old, sizeof(txn->victim_old));
+            if (txn->victim_old_size < 0) {
+                if (errno != ENODATA)
+                    error = errno == ERANGE ? EUCLEAN : errno;
+                else
+                    txn->victim_old_size = 0;
+            }
         }
     }
     char alias[14] = {0};
@@ -580,12 +618,17 @@ static bool dos83_move_begin(int root, const char *from_path,
                 .victim_dev = (uint64_t)victim_st.st_dev,
                 .victim_ino = (uint64_t)victim_st.st_ino,
                 .victim = replacing,
+                .victim_preclean = replacing,
+                .victim_old_size = replacing ? (size_t)txn->victim_old_size : 0,
                 .staged = needs_staging,
                 .old_size = txn->old_dest_size > 0 ?
                             (size_t)txn->old_dest_size : 0
             };
             if (record.old_size)
                 memcpy(record.old_dest, txn->old_dest, record.old_size);
+            if (record.victim_old_size)
+                memcpy(record.victim_old, txn->victim_old,
+                       record.victim_old_size);
             memcpy(record.alias, alias_for_move, sizeof(record.alias));
             if (snprintf(record.from, sizeof(record.from), "%s", from_path) >=
                 (int)sizeof(record.from) ||
@@ -598,6 +641,22 @@ static bool dos83_move_begin(int root, const char *from_path,
                 txn->journaled = true;
                 dos83_test_crash("after-wal");
             }
+        }
+    }
+    if (!error && replacing) {
+        /* Remove victim per-entry metadata BEFORE rename, and fsync it
+         * before unlinking the last destination name. This also cleans a
+         * surviving hardlink on a completely different host directory.
+         * Replay of a pre-rename SIGKILL restores the exact old preimage. */
+        txn->victim_preclean = true;
+        struct stat victim_stat;
+        if (fstat(txn->victim_fd, &victim_stat) != 0 ||
+            clear_guest_xattr(txn->victim_fd, txn->victim_key) != 0 ||
+            !wal_sync_pinned(txn->victim_fd,
+                             S_ISDIR(victim_stat.st_mode))) {
+            error = errno;
+        } else {
+            dos83_test_crash("after-victim-cleanup");
         }
     }
     if (!error && needs_staging) {

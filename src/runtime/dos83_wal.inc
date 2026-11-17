@@ -2,9 +2,16 @@
 /* FileSystem4: one durable, fail-closed DOS 8.3 rename journal per grant.
  * This is a storage protocol, NOT an NTFS filesystem or a global Linux
  * write barrier. A new rename cannot reuse an unresolved record. */
-enum { DOS83_WAL_HEADER = 140, DOS83_WAL_CAP = DOS83_WAL_HEADER + 2 * PATH_MAX };
+/* v2 adds the replaced inode's per-entry xattr preimage. Reading v1
+ * remains mandatory: never strand a pending journal after an upgrade. */
+enum {
+    DOS83_WAL_V1_HEADER = 140,
+    DOS83_WAL_HEADER = 160,
+    DOS83_WAL_CAP = DOS83_WAL_HEADER + 2 * PATH_MAX
+};
 #define DOS83_WAL_NAME "dos83-rename-v1.wal"
-#define DOS83_WAL_MAGIC "N83WAL01"
+#define DOS83_WAL_MAGIC_V1 "N83WAL01"
+#define DOS83_WAL_MAGIC "N83WAL02"
 
 struct dos83_wal {
     int fd, directory;
@@ -13,9 +20,9 @@ struct dos83_wal_entry {
     uint64_t root_dev, root_ino, file_dev, file_ino;
     uint64_t from_dir_dev, from_dir_ino, to_dir_dev, to_dir_ino;
     uint64_t victim_dev, victim_ino;
-    bool staged, victim;
-    size_t old_size;
-    char old_dest[14], alias[14];
+    bool staged, victim, victim_preclean;
+    size_t old_size, victim_old_size;
+    char old_dest[14], alias[14], victim_old[14];
     char from[PATH_MAX], to[PATH_MAX];
 };
 
@@ -147,7 +154,10 @@ static bool wal_encode(const struct dos83_wal_entry *entry,
     const size_t to_size = strnlen(entry->to, PATH_MAX) + 1;
     if (from_size <= 1 || to_size <= 1 ||
         from_size > PATH_MAX || to_size > PATH_MAX ||
-        entry->old_size > sizeof(entry->old_dest)) {
+        entry->old_size > sizeof(entry->old_dest) ||
+        entry->victim_old_size > sizeof(entry->victim_old) ||
+        (entry->victim_preclean && !entry->victim) ||
+        (!entry->victim_preclean && entry->victim_old_size)) {
         errno = EINVAL;
         return false;
     }
@@ -162,12 +172,15 @@ static bool wal_encode(const struct dos83_wal_entry *entry,
     for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i)
         wal_put64(bytes + 16 + 8 * i, ids[i]);
     wal_put32(bytes + 96, (entry->staged ? 1u : 0u) |
-                             (entry->victim ? 2u : 0u));
+                             (entry->victim ? 2u : 0u) |
+                             (entry->victim_preclean ? 4u : 0u));
     wal_put32(bytes + 100, (uint32_t)entry->old_size);
     wal_put32(bytes + 104, (uint32_t)from_size);
     wal_put32(bytes + 108, (uint32_t)to_size);
     memcpy(bytes + 112, entry->old_dest, 14);
     memcpy(bytes + 126, entry->alias, 14);
+    memcpy(bytes + 140, entry->victim_old, sizeof(entry->victim_old));
+    wal_put32(bytes + 154, (uint32_t)entry->victim_old_size);
     memcpy(bytes + DOS83_WAL_HEADER, entry->from, from_size);
     memcpy(bytes + DOS83_WAL_HEADER + from_size, entry->to, to_size);
     *size = DOS83_WAL_HEADER + from_size + to_size;
@@ -208,7 +221,7 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
         return -1;
     if (st.st_size == 0)
         return 0;
-    if (st.st_size < DOS83_WAL_HEADER + 4 ||
+    if (st.st_size < DOS83_WAL_V1_HEADER + 4 ||
         st.st_size > DOS83_WAL_CAP) {
         errno = EUCLEAN;
         return -1;
@@ -225,20 +238,28 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
         }
         done += (size_t)got;
     }
+    const bool version2 = memcmp(bytes, DOS83_WAL_MAGIC, 8) == 0;
+    const bool version1 = memcmp(bytes, DOS83_WAL_MAGIC_V1, 8) == 0;
+    const size_t header = version2 ? DOS83_WAL_HEADER : DOS83_WAL_V1_HEADER;
     const uint32_t flags = wal_get32(bytes + 96);
     const uint32_t old_size = wal_get32(bytes + 100);
+    const uint32_t victim_old_size = version2 ? wal_get32(bytes + 154) : 0;
     const uint32_t from_size = wal_get32(bytes + 104);
     const uint32_t to_size = wal_get32(bytes + 108);
-    if (memcmp(bytes, DOS83_WAL_MAGIC, 8) != 0 ||
+    if ((!version1 && !version2) || size < header + 4 ||
         wal_get64(bytes + 8) != wal_hash(bytes + 16, size - 16) ||
-        (flags & ~3u) != 0 || old_size > 14 ||
+        (flags & (version2 ? ~7u : ~3u)) != 0 ||
+        old_size > 14 || victim_old_size > 14 ||
+        ((flags & 4u) && !(flags & 2u)) ||
+        (!(flags & 4u) && victim_old_size) ||
+        (version2 && (bytes[158] != 0 || bytes[159] != 0)) ||
         from_size < 2 || to_size < 2 ||
         from_size > PATH_MAX || to_size > PATH_MAX ||
-        (size_t)from_size + (size_t)to_size != size - DOS83_WAL_HEADER ||
-        bytes[DOS83_WAL_HEADER + from_size - 1] != '\0' ||
+        (size_t)from_size + (size_t)to_size != size - header ||
+        bytes[header + from_size - 1] != '\0' ||
         bytes[size - 1] != '\0' ||
-        memchr(bytes + DOS83_WAL_HEADER, 0, from_size - 1) ||
-        memchr(bytes + DOS83_WAL_HEADER + from_size, 0, to_size - 1)) {
+        memchr(bytes + header, 0, from_size - 1) ||
+        memchr(bytes + header + from_size, 0, to_size - 1)) {
         errno = EUCLEAN;
         return -1;
     }
@@ -254,6 +275,10 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
         *ids[i] = wal_get64(bytes + 16 + 8 * i);
     entry->staged = (flags & 1u) != 0;
     entry->victim = (flags & 2u) != 0;
+    entry->victim_preclean = (flags & 4u) != 0;
+    entry->victim_old_size = victim_old_size;
+    if (version2)
+        memcpy(entry->victim_old, bytes + 140, sizeof(entry->victim_old));
     entry->old_size = old_size;
     memcpy(entry->old_dest, bytes + 112, 14);
     memcpy(entry->alias, bytes + 126, 14);
@@ -263,9 +288,34 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
         errno = EUCLEAN;
         return -1;
     }
-    memcpy(entry->from, bytes + DOS83_WAL_HEADER, from_size);
-    memcpy(entry->to, bytes + DOS83_WAL_HEADER + from_size, to_size);
+    memcpy(entry->from, bytes + header, from_size);
+    memcpy(entry->to, bytes + header + from_size, to_size);
     return 1;
+}
+
+/* Pre-clearing a replaced inode's alias before rename makes its removal
+ * durable even when the overwritten file has hardlinks OUTSIDE this grant.
+ * On abort (source still at its old name), restore only an exact known
+ * preimage or our own absent postimage. Unknown edits fail closed. */
+static bool wal_restore_victim_alias(int victim_fd, const char *key,
+                                     const struct dos83_wal_entry *record)
+{
+    unsigned char current[14] = {0};
+    const ssize_t n = read_guest_xattr(victim_fd, key, current,
+                                       sizeof(current));
+    const bool absent = n < 0 && errno == ENODATA;
+    const bool old = record->victim_old_size > 0 &&
+                     n == (ssize_t)record->victim_old_size &&
+                     memcmp(current, record->victim_old,
+                            record->victim_old_size) == 0;
+    if (!absent && !old) {
+        errno = EUCLEAN;
+        return false;
+    }
+    if (record->victim_old_size)
+        return write_guest_xattr(victim_fd, key, record->victim_old,
+                                 record->victim_old_size) == 0;
+    return clear_guest_xattr(victim_fd, key) == 0;
 }
 
 /* A crash may happen before *or* after staging. An external writer may
@@ -390,6 +440,35 @@ static bool wal_recover_root(int root)
                     char source_key[112], dest_key[112];
                     ok = dos83_entry_key(from, from_exact, source_key) &&
                          dos83_entry_key(to, to_exact, dest_key);
+                    /* A v2 replacement pre-cleans the victim's
+                     * destination-entry xattr, even when it has hardlinks
+                     * beyond the granted root. Before rename, the victim
+                     * remains addressable and its exact old value can be
+                     * restored. After rename, no victim mutation is needed. */
+                    if (ok && at_source && record.victim_preclean) {
+                        int victim_fd = confined_open_raw(to, to_exact,
+                                                       O_PATH | O_NOFOLLOW, 0);
+                        struct stat victim_st;
+                        if (victim_fd < 0 ||
+                            fstat(victim_fd, &victim_st) != 0 ||
+                            !wal_same_inode(&victim_st, record.victim_dev,
+                                            record.victim_ino) ||
+                            !wal_restore_victim_alias(victim_fd, dest_key,
+                                                      &record) ||
+                            !wal_sync_pinned(victim_fd,
+                                             S_ISDIR(victim_st.st_mode))) {
+                            if (victim_fd >= 0)
+                                close(victim_fd);
+                            errno = EUCLEAN;
+                            ok = false;
+                        } else {
+                            close(victim_fd);
+                            /* Recovery itself is crashable: repeating replay
+                             * after this fsync must not lose the old victim
+                             * alias or trust an unrelated inode. */
+                            dos83_test_crash("replay-after-victim-restore");
+                        }
+                    }
                     if (ok && record.staged) {
                         if (at_dest) {
                             char actual[14] = {0};
@@ -420,6 +499,8 @@ static bool wal_recover_root(int root)
                     }
                     if (ok)
                         ok = wal_sync_pinned(pinned, S_ISDIR(at_dest ? b.st_mode : a.st_mode));
+                    if (ok && record.staged)
+                        dos83_test_crash("replay-after-source-restore");
                     close(pinned);
                 }
                 if (ok)
