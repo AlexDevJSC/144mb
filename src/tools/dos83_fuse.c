@@ -301,7 +301,10 @@ static int fs_releasedir(const char *path, struct fuse_file_info *fi)
 
 static int fs_open(const char *path, struct fuse_file_info *fi)
 {
-    int fd = lower_open(path, fi->flags & ~(O_CREAT | O_EXCL), 0);
+    /* Never truncate before share admission: a Windows handle can reject
+     * this write, and a rejected FUSE open must not mutate the file. */
+    const bool truncate = (fi->flags & O_TRUNC) != 0;
+    int fd = lower_open(path, fi->flags & ~(O_CREAT | O_EXCL | O_TRUNC), 0);
     if (fd < 0)
         return -errno;
     struct stat st;
@@ -309,6 +312,36 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         int error = errno ? errno : EACCES;
         close(fd);
         return -error;
+    }
+    int marked = nt_runtime_nt_file_marker(fd);
+    if (marked < 0) {
+        int error = errno;
+        close(fd);
+        return -error;
+    }
+    int lease = -1;
+    if (marked) {
+        const int mode = fi->flags & O_ACCMODE;
+        const uint32_t access = mode == O_RDONLY ? NT_FS_READ :
+            mode == O_WRONLY ? NT_FS_WRITE : NT_FS_READ | NT_FS_WRITE;
+        lease = nt_runtime_acquire_linux_nt_lease(fd, access,
+                                                  NT_FS_SHARE_ALL);
+        if (lease < 0) {
+            int error = errno;
+            close(fd);
+            return -error;
+        }
+    }
+    int error = 0;
+    if (truncate && ftruncate(fd, 0) != 0)
+        error = -errno;
+    if (!error && lease >= 0)
+        error = view_lease_add(fd, lease);
+    if (error) {
+        if (lease >= 0)
+            nt_runtime_release_linux_nt_lease(&lease);
+        close(fd);
+        return error;
     }
     fi->fh = (uint64_t)fd;
     return 0;
@@ -340,6 +373,9 @@ static int fs_read(const char *path, char *buffer, size_t size,
                    off_t offset, struct fuse_file_info *fi)
 {
     (void)path;
+    int denied = view_range_access((int)fi->fh, offset, size, false);
+    if (denied)
+        return denied;
     ssize_t got = pread((int)fi->fh, buffer, size, offset);
     return got < 0 ? -errno : (int)got;
 }
@@ -348,6 +384,9 @@ static int fs_write(const char *path, const char *buffer, size_t size,
                     off_t offset, struct fuse_file_info *fi)
 {
     (void)path;
+    int denied = view_range_access((int)fi->fh, offset, size, true);
+    if (denied)
+        return denied;
     ssize_t count = pwrite((int)fi->fh, buffer, size, offset);
     return count < 0 ? -errno : (int)count;
 }
@@ -355,7 +394,11 @@ static int fs_write(const char *path, const char *buffer, size_t size,
 static int fs_release(const char *path, struct fuse_file_info *fi)
 {
     (void)path;
-    return close((int)fi->fh) == 0 ? 0 : -errno;
+    int lease = view_lease_take((int)fi->fh);
+    int result = close((int)fi->fh);
+    int error = errno;
+    nt_runtime_release_linux_nt_lease(&lease);
+    return result == 0 ? 0 : -error;
 }
 
 static int fs_flush(const char *path, struct fuse_file_info *fi)
