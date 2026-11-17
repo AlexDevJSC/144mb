@@ -1644,6 +1644,10 @@ int nt_runtime_nt_file_marker(int fd)
     if (length < 0) {
         if (errno == ENODATA || errno == ENOTSUP)
             return 0;
+        /* A marker longer than two bytes produces ERANGE from fgetxattr.
+         * Treat this as malformed metadata, never an unmarked file. */
+        if (errno == ERANGE)
+            errno = EINVAL;
         return -1;
     }
     if (length != 1 || marker[0] != '1') {
