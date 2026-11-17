@@ -5,6 +5,7 @@
  * No guest PE instructions, ptrace, or root permissions are required. */
 #define _GNU_SOURCE
 #include "thread_broker_ipc.h"
+#include "nt_services.h"
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
