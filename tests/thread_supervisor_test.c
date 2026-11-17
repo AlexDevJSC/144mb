@@ -124,6 +124,21 @@ int main(void)
     if (nt_supervisor_interrupt(&sup, 1500) || nt_supervisor_detach(&sup)) {
         perror("FAIL detach"); goto cleanup;
     }
+    /* Re-seize the same still-live child. Release from a STOPPED state
+     * MUST detach it, not merely close pidfd and strand it forever. */
+    if (nt_supervisor_seize_child(&sup, child, tid) ||
+        nt_supervisor_interrupt(&sup, 1500)) {
+        perror("FAIL re-seize before forced release");
+        goto cleanup;
+    }
+    const uint64_t progress_before_release = atomic_load(&shared->worker_ticks);
+    nt_supervisor_release(&sup);
+    pause_ms(30);
+    if (sup.seized || sup.pidfd != -1 ||
+        atomic_load(&shared->worker_ticks) <= progress_before_release) {
+        fputs("FAIL release left a guest worker ptrace-stopped\\n", stderr);
+        goto cleanup;
+    }
     atomic_store(&shared->exit_requested, true);
     for (int i = 0; i < 300; ++i) {
         pid_t waited = waitpid(child, &wait_status, WNOHANG);
@@ -131,7 +146,7 @@ int main(void)
             if (!WIFEXITED(wait_status) || WEXITSTATUS(wait_status) != 0) {
                 fputs("FAIL child exit\n", stderr); goto cleanup_no_wait;
             }
-            puts("PASS supervisor: child-only TID, async stop, independent leader, GETREGSET/SETREGSET, resume twice, detach and clean exit");
+            puts("PASS supervisor: child-only TID, async stop, independent leader, GETREGSET/SETREGSET, resume twice, detach, forced stopped release and clean exit");
             rc = 0; goto cleanup_no_wait;
         }
         if (waited < 0) break;
