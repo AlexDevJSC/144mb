@@ -17,6 +17,14 @@ void pe_dll_graph_destroy(struct pe_dll_graph *graph);
 void pe_dll_graph_install(struct pe_dll_graph *graph);
 void pe_dll_graph_uninstall(void);
 
+struct nt_guest_code_range;
+/* Trusted pre-fork snapshot. Only implicit pinned DLL mappings qualify.
+ * Libraries subsequently loaded by guest LoadLibrary remain ineligible
+ * for asynchronous interruption, even if their pages are executable. */
+bool pe_dll_graph_snapshot_pinned_code(
+    struct pe_dll_graph *graph, struct nt_guest_code_range *out,
+    size_t capacity, size_t *count);
+
 uintptr_t pe_dll_graph_resolve(const char *module, const char *name,
                                uint16_t ordinal, void *graph);
 
