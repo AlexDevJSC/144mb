@@ -2722,6 +2722,14 @@ static bool async_context_active(uintptr_t handle)
  * The gate and its count are protected by wait_lock. */
 static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
 {
+    pthread_mutex_lock(&supervisor_gate_lock);
+    const nt_status asynchronous = async_suspend_guest_thread(handle, previous);
+    if (asynchronous == NT_STATUS_SUCCESS) {
+        pthread_mutex_unlock(&supervisor_gate_lock);
+        return NT_STATUS_SUCCESS;
+    }
+    /* If the trusted supervisor is unavailable or the target is in
+     * HOST/unsafe state, retain the preexisting cooperative protocol. */
     pthread_mutex_lock(&wait_lock);
     struct waitable *thread = find_waitable(handle);
     nt_status status = NT_STATUS_SUCCESS;
@@ -2783,6 +2791,7 @@ static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
         }
     }
     pthread_mutex_unlock(&wait_lock);
+    pthread_mutex_unlock(&supervisor_gate_lock);
     return status;
 }
 
@@ -2802,6 +2811,14 @@ nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous)
 
 static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool alert)
 {
+    pthread_mutex_lock(&supervisor_gate_lock);
+    bool handled = false;
+    const nt_status asynchronous =
+        async_resume_guest_thread(handle, previous, alert, &handled);
+    if (handled) {
+        pthread_mutex_unlock(&supervisor_gate_lock);
+        return asynchronous;
+    }
     pthread_mutex_lock(&wait_lock);
     struct waitable *thread = find_waitable(handle);
     nt_status status = NT_STATUS_SUCCESS;
@@ -2854,6 +2871,7 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool 
         }
     }
     pthread_mutex_unlock(&wait_lock);
+    pthread_mutex_unlock(&supervisor_gate_lock);
     return status;
 }
 
@@ -2899,6 +2917,23 @@ static nt_status get_guest_thread_context(uintptr_t handle, struct nt_context64 
         (requested & ~(CONTEXT_AMD64 | CONTEXT_CORE_GROUPS)) != 0)
         return NT_STATUS_INVALID_PARAMETER;
 
+    pthread_mutex_lock(&supervisor_gate_lock);
+    if (async_context_active(handle)) {
+        struct nt_broker_thread_info identity = {0};
+        uint64_t capability = 0;
+        nt_status status = NT_STATUS_NOT_SUPPORTED;
+        if (nt_runtime_supervisor_open_thread_handle(handle,
+                THREAD_GET_CONTEXT, &identity, &capability)) {
+            _Alignas(16) struct nt_context64 snapshot = {0};
+            snapshot.flags = requested;
+            status = nt_broker_client_supervisor_get_context(capability, &snapshot);
+            (void)nt_broker_client_supervisor_close(capability);
+            if (status == NT_STATUS_SUCCESS) *output = snapshot;
+        }
+        pthread_mutex_unlock(&supervisor_gate_lock);
+        return status;
+    }
+    pthread_mutex_unlock(&supervisor_gate_lock);
     pthread_mutex_lock(&wait_lock);
     struct waitable *entry = find_waitable(handle);
     nt_status result = NT_STATUS_SUCCESS;
@@ -2952,6 +2987,20 @@ nt_status NT_MS_ABI nt_NtSetContextThread(uintptr_t handle, const struct nt_cont
         return NT_STATUS_ACCESS_VIOLATION;
     if (((uintptr_t)context & 15u) != 0)
         return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&supervisor_gate_lock);
+    if (async_context_active(handle)) {
+        struct nt_broker_thread_info identity = {0};
+        uint64_t capability = 0;
+        nt_status status = NT_STATUS_NOT_SUPPORTED;
+        if (nt_runtime_supervisor_open_thread_handle(handle,
+                THREAD_SET_CONTEXT, &identity, &capability)) {
+            status = nt_broker_client_supervisor_set_context(capability, context);
+            (void)nt_broker_client_supervisor_close(capability);
+        }
+        pthread_mutex_unlock(&supervisor_gate_lock);
+        return status;
+    }
+    pthread_mutex_unlock(&supervisor_gate_lock);
     pthread_mutex_lock(&wait_lock);
     struct waitable *entry = find_waitable(handle);
     nt_status result = NT_STATUS_NOT_SUPPORTED;
