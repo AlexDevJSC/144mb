@@ -22,6 +22,7 @@
 #include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
