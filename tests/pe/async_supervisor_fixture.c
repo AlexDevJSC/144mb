@@ -54,6 +54,25 @@ int import_fixture_entry(void)
     integer.Rax = saved;
     if (NtSetContextThread(thread, &integer) != 0)
         return 17;
+    /* Exhaust the NT maximum of 127 nested suspensions without ever
+     * allowing guest instructions to advance. Each previous count must
+     * reflect the live Linux ptrace state, not a fabricated counter. */
+    for (ULONG n = 1; n < 127; ++n) {
+        ULONG old = 919;
+        if (NtSuspendThread(thread, &old) != 0 || old != n)
+            return 24;
+    }
+    previous = 919;
+    if (NtSuspendThread(thread, &previous) != (LONG)0xc000004au ||
+        previous != 919 || ticks != before)
+        return 25;
+    for (ULONG n = 127; n > 1; --n) {
+        ULONG old = 919;
+        if (NtResumeThread(thread, &old) != 0 || old != n)
+            return 26;
+    }
+    if (ticks != before)
+        return 27;
     if (SuspendThread(thread) != 1) return 18;
     if (ResumeThread(thread) != 2) return 19;
     Sleep(30);
