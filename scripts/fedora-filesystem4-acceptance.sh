@@ -130,6 +130,28 @@ check 'Integrated supervised PE/FUSE on disposable C: profile' \
       --lower "$test_state/nt-native-linux/C:" \
       --view "$test_view" --pe -- "$repo/build/nt-counter.exe"
 
+# These are the runtime's Win32 W entrypoints, not host POSIX operations.
+# Save observations before comparing with a real Windows NTFS reference.
+nt144_report="$report_dir/nt144-reference-$stamp.json"
+if ! "$repo/build/fs4-ntfs-probe" --root \
+       "$test_state/nt-native-linux/C:" > "$nt144_report"; then
+    echo 'INCOMPLETE: NT144 Win32 probe failed (inspect disposable state)' | tee -a "$report"
+    exit 3
+fi
+echo "NT144 probe: $nt144_report" | tee -a "$report"
+if [[ -n "$reference" ]]; then
+    diff_report="$report_dir/ntfs-comparison-$stamp.json"
+    set +e
+    python3 scripts/fs4_ntfs_diff.py "$reference" "$nt144_report" > "$diff_report"
+    diff_exit=$?
+    set -e
+    cat "$diff_report" | tee -a "$report"
+    if ((diff_exit != 0)); then
+        echo 'INCOMPLETE: Windows comparison has differences or unimplemented APIs' | tee -a "$report"
+        exit 3
+    fi
+fi
+
 # Do not count a critical isolation SKIP as success. Unrelated hardware
 # groups/CPU affinity SKIPs are recorded but not a filesystem failure.
 if grep -Eiq 'SKIP.*(FUSE|Landlock|Bubblewrap|sandbox|isolated|large junction xattr)' "$report"; then
