@@ -735,6 +735,77 @@ static int backend_selftest(void)
         fprintf(stderr, "FAIL: selftest alias persistence/cleanup\n");
         return 1;
     }
+    /* Deterministic compatibility matrix, even without /dev/fuse:
+     * marked Linux opens must use the exact Win32 OFD registry; failed
+     * O_TRUNC opens must not alter bytes. Unmarked files remain POSIX. */
+    const char *marked_path = "/NTCompatibleSharedFile.dat";
+    struct fuse_file_info new_file = {.flags = O_WRONLY};
+    if (fs_create(marked_path, 0600, &new_file) != 0 ||
+        fs_write(marked_path, "XYZ", 3, 0, &new_file) != 3 ||
+        fs_release(marked_path, &new_file) != 0) {
+        fprintf(stderr, "FAIL: NT compatibility fixture create\n");
+        return 1;
+    }
+    int mark_fd = lower_open(marked_path, O_RDONLY, 0);
+    if (mark_fd < 0 || fsetxattr(mark_fd, NT_FS_COMPAT_MARKER, "1", 1, 0) != 0) {
+        fprintf(stderr, "FAIL: NT compatibility fixture marker\n");
+        if (mark_fd >= 0)
+            close(mark_fd);
+        return 1;
+    }
+    close(mark_fd);
+    if (fs_getxattr(marked_path, NT_FS_COMPAT_MARKER, NULL, 0) != -ENODATA ||
+        fs_setxattr(marked_path, NT_FS_COMPAT_MARKER, "0", 1, 0) != -EACCES ||
+        lower_open("/:ntnative-file-leases", O_RDONLY, 0) >= 0) {
+        fprintf(stderr, "FAIL: trusted NT metadata exposed by FUSE\n");
+        return 1;
+    }
+    const uint32_t nt_both = UINT32_C(0x80000000) | UINT32_C(0x40000000);
+    uintptr_t nt_handle = nt_CreateFileW(u"C:\\NTCompatibleSharedFile.dat",
+                                          nt_both, NT_FS_READ, NULL, 3, 0, 0);
+    if (nt_handle == UINTPTR_MAX) {
+        fprintf(stderr, "FAIL: NT fixture handle open\n");
+        return 1;
+    }
+    struct fuse_file_info denied = {.flags = O_WRONLY | O_TRUNC};
+    struct fuse_file_info accepted = {.flags = O_RDONLY};
+    if (fs_open(marked_path, &denied) != -EBUSY ||
+        fs_open(marked_path, &accepted) != 0) {
+        fprintf(stderr, "FAIL: Win32 FILE_SHARE rejected wrong FUSE access\n");
+        return 1;
+    }
+    char contents[4] = {0};
+    if (fs_read(marked_path, contents, 3, 0, &accepted) != 3 ||
+        memcmp(contents, "XYZ", 3) != 0 ||
+        !nt_LockFile(nt_handle, 0, 0, 1, 0) ||
+        fs_read(marked_path, contents, 1, 0, &accepted) != -EAGAIN ||
+        !nt_UnlockFile(nt_handle, 0, 0, 1, 0) ||
+        fs_read(marked_path, contents, 1, 0, &accepted) != 1 ||
+        fs_release(marked_path, &accepted) != 0 ||
+        !nt_CloseHandle(nt_handle)) {
+        fprintf(stderr, "FAIL: marked file I/O locking or lifecycle\n");
+        return 1;
+    }
+    struct fuse_file_info linux_writer = {.flags = O_WRONLY};
+    if (fs_open(marked_path, &linux_writer) != 0) {
+        fprintf(stderr, "FAIL: Linux writer lease not acquired\n");
+        return 1;
+    }
+    nt_handle = nt_CreateFileW(u"C:\\NTCompatibleSharedFile.dat",
+                               UINT32_C(0x80000000), NT_FS_READ, NULL, 3, 0, 0);
+    if (nt_handle != UINTPTR_MAX) {
+        (void)nt_CloseHandle(nt_handle);
+        fprintf(stderr, "FAIL: NT open bypassed Linux FUSE writer lease\n");
+        return 1;
+    }
+    if (fs_release(marked_path, &linux_writer) != 0 ||
+        fs_open(marked_path, &denied) != 0 ||
+        fs_release(marked_path, &denied) != 0 ||
+        fs_unlink(marked_path) != 0) {
+        fprintf(stderr, "FAIL: marked lease release or delete\n");
+        return 1;
+    }
+    printf("PASS NT opt-in share leases, pre-truncate denial, range locks, metadata isolation\n");
     printf("PASS FUSE callbacks, broker rename, alias persistence and confinement (mount not tested)\n");
     return 0;
 }
