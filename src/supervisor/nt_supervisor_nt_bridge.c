@@ -186,8 +186,16 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
                    (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
                    io.iov_len == sizeof(altered);
     struct user_regs_struct verified = {0};
-    if (wrote &&
-        nt_supervisor_get_registers(state->tracer, &verified) == 0 &&
+    const bool readback = wrote &&
+        nt_supervisor_get_registers(state->tracer, &verified) == 0;
+#ifdef NT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH
+    /* Compiled ONLY into the dedicated negative-test binary, not exposed
+     * as a Windows API/environment switch or a production build flag.
+     * The kernel really received the write; simulate a corrupt readback. */
+    if (readback)
+        verified.rax ^= UINT64_C(1);
+#endif
+    if (readback &&
         memcmp(&verified, &altered, sizeof(altered)) == 0) {
         state->unsafe_register_state = false;
         return NT_STATUS_SUCCESS;
@@ -197,6 +205,7 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
      * The result is safe only if the *original* entire register set
      * can be read back byte-for-byte. Otherwise the parent must
      * terminate this exact pidfd-pinned guest, never PTRACE_DETACH. */
+#ifndef NT_SUP_TEST_FORCE_GPR_ROLLBACK_FAILURE
     struct iovec undo = {.iov_base = &original, .iov_len = sizeof(original)};
     if (ptrace(PTRACE_SETREGSET, state->tracer->tid,
                (void *)(uintptr_t)NT_PRSTATUS, &undo) == 0 &&
@@ -205,6 +214,10 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
         memcmp(&verified, &original, sizeof(original)) == 0) {
         state->unsafe_register_state = false;
     }
+#else
+    /* Separate fatal-path test: simulate both a corrupt readback and
+     * an impossible rollback. No resume is permitted after this point. */
+#endif
     return NT_STATUS_NOT_SUPPORTED;
 }
 
