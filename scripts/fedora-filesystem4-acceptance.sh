@@ -110,6 +110,26 @@ check 'Mandatory mounted FUSE+Landlock under SELinux Enforcing' \
 check 'FileSystem3 physical compatibility and PE isolation gate' \
     bash scripts/fedora-filesystem-acceptance.sh --physical-confirmed
 
+# Integrated end-to-end smoke on disposable C:, never personal saved data:
+# a REAL PE guest executes under Bubblewrap while supervisor mounts FUSE.
+test_state="$(mktemp -d /tmp/fs4-pe-state.XXXXXX)"
+test_view="$(mktemp -d /tmp/fs4-pe-view.XXXXXX)"
+cleanup_pe_fixture() {
+    if mountpoint -q "$test_view"; then
+        echo "CRITICAL: FUSE view still mounted; manual cleanup: $test_view" >&2
+        return 0
+    fi
+    rm -rf -- "$test_state" "$test_view"
+}
+trap 'cleanup_pe_fixture; rm -f -- "$scratch"' EXIT
+mkdir -p "$test_state/nt-native-linux/C:"
+chmod 0700 "$test_state/nt-native-linux" "$test_state/nt-native-linux/C:"
+check 'Integrated supervised PE/FUSE on disposable C: profile' \
+    env XDG_STATE_HOME="$test_state" \
+    python3 scripts/nt-fs-supervisor.py \
+      --lower "$test_state/nt-native-linux/C:" \
+      --view "$test_view" --pe -- "$repo/build/nt-counter.exe"
+
 # Do not count a critical isolation SKIP as success. Unrelated hardware
 # groups/CPU affinity SKIPs are recorded but not a filesystem failure.
 if grep -Eiq 'SKIP.*(FUSE|Landlock|Bubblewrap|sandbox|isolated|large junction xattr)' "$report"; then
