@@ -24,6 +24,9 @@ bool nt_runtime_reconcile_host_rename(const char *old_path, const char *new_path
 /* Host-only recovery. Replays only unambiguous, checksummed pending C:
  * rename transactions; refuses corrupt/ambiguous records (errno=EUCLEAN). */
 bool nt_runtime_recover_dos83(void);
+/* Startup preflight for C:, D:-Z:, UNC and redirected folders that have
+ * been registered in this process. A pending WAL must recover or fail. */
+bool nt_runtime_recover_all_dos83_grants(void);
 
 /* Start-up file HANDLE inheritance between PE children. The source FDs
  * are private duplicates, pinned until posix_spawn has duplicated them.

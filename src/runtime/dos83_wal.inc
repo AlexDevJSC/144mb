@@ -268,6 +268,40 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
     return 1;
 }
 
+/* A crash may happen before *or* after staging. An external writer may
+ * also touch the destination-entry xattr while the WAL is pending. Only
+ * restore the preimage if the current value is demonstrably one of the two
+ * values that our transaction could have written. Otherwise preserve the
+ * unknown value, keep the WAL and require manual reconciliation.
+ *
+ * Comparing raw bytes and lengths matters: strcmp on a short/unterminated
+ * xattr is insufficient for proof of identity. */
+static bool wal_preimage_or_staged(int pinned, const char *key,
+                                   const struct dos83_wal_entry *record)
+{
+    unsigned char current[14] = {0};
+    const ssize_t n = read_guest_xattr(pinned, key, current,
+                                      sizeof(current));
+    if (n < 0) {
+        if (errno == ENODATA && record->old_size == 0)
+            return true;
+        if (errno == ERANGE)
+            errno = EUCLEAN;
+        return false;
+    }
+    const size_t alias_len = strnlen(record->alias,
+                                    sizeof(record->alias)) + 1;
+    if (alias_len <= sizeof(record->alias) &&
+        (size_t)n == alias_len &&
+        memcmp(current, record->alias, alias_len) == 0)
+        return true;
+    if (record->old_size > 0 && (size_t)n == record->old_size &&
+        memcmp(current, record->old_dest, record->old_size) == 0)
+        return true;
+    errno = EUCLEAN;
+    return false;
+}
+
 static bool wal_same_inode(const struct stat *st, uint64_t dev, uint64_t ino)
 {
     return (uint64_t)st->st_dev == dev && (uint64_t)st->st_ino == ino;
@@ -361,12 +395,22 @@ static bool wal_recover_root(int root)
                             char actual[14] = {0};
                             const ssize_t n = read_guest_xattr(pinned,
                                                      dest_key, actual, sizeof(actual));
-                            if (n <= 0 || strcmp(record.alias, actual) != 0) {
+                            const size_t wanted = strnlen(record.alias,
+                                                            sizeof(record.alias)) + 1;
+                            if (wanted > sizeof(record.alias) ||
+                                n != (ssize_t)wanted ||
+                                memcmp(record.alias, actual, wanted) != 0) {
+                                /* A damaged/unterminated xattr is not
+                                 * evidence of the staged short identity. */
                                 errno = EUCLEAN;
                                 ok = false;
                             } else if (strcmp(source_key, dest_key) != 0 &&
                                        clear_guest_xattr(pinned, source_key) != 0)
                                 ok = false;
+                        } else if (!wal_preimage_or_staged(pinned, dest_key,
+                                                               &record)) {
+                            /* Not ours to overwrite: fail closed. */
+                            ok = false;
                         } else if (record.old_size > 0) {
                             ok = write_guest_xattr(pinned, dest_key,
                                         record.old_dest, record.old_size) == 0;
@@ -414,4 +458,100 @@ bool nt_runtime_recover_dos83(void)
     close(root);
     errno = error;
     return ok;
+}
+
+/* A drive, UNC share or redirected known-folder is an independent physical
+ * grant. Do not silently start PE execution against a pending WAL on D: or
+ * another root merely because C: was clean. Absence of the journal is fine,
+ * including for read-only grants; a present corrupt or unwritable pending
+ * record is not. This is startup preflight, NOT a runtime global write lock. */
+static bool wal_recover_if_pending(int root)
+{
+    int directory = confined_open_raw(root, ":ntnative-file-leases",
+                                       O_RDONLY | O_DIRECTORY, 0);
+    if (directory < 0)
+        return errno == ENOENT;
+    struct stat dir_info;
+    if (fstat(directory, &dir_info) != 0 ||
+        !S_ISDIR(dir_info.st_mode) ||
+        dir_info.st_uid != geteuid() ||
+        (dir_info.st_mode & 077u) != 0) {
+        int error = errno ? errno : EACCES;
+        close(directory);
+        errno = error;
+        return false;
+    }
+    int wal_file = confined_open_raw(directory, DOS83_WAL_NAME, O_RDONLY, 0);
+    const int open_error = errno;
+    close(directory);
+    if (wal_file < 0)
+        return open_error == ENOENT;
+    struct stat info;
+    const bool valid = fstat(wal_file, &info) == 0 &&
+                       S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+                       info.st_uid == geteuid() &&
+                       (info.st_mode & 077u) == 0;
+    const off_t pending = valid ? info.st_size : -1;
+    const int error = errno;
+    close(wal_file);
+    if (!valid) {
+        errno = error ? error : EACCES;
+        return false;
+    }
+    if (pending == 0)
+        return true;
+    pthread_mutex_lock(&dos83_lock);
+    const bool ok = wal_recover_root(root);
+    const int recovery_error = errno;
+    pthread_mutex_unlock(&dos83_lock);
+    errno = recovery_error;
+    return ok;
+}
+
+bool nt_runtime_recover_all_dos83_grants(void)
+{
+    enum { CAP = 1 + 26 + UNC_LIMIT + NT_USER_FOLDER_COUNT };
+    int grants[CAP];
+    size_t count = 0;
+    bool copied = true;
+    int error = 0;
+    pthread_mutex_lock(&root_lock);
+    if (drive_root < 0) {
+        copied = false;
+        error = EACCES;
+    }
+#define DOS83_WAL_DUP_GRANT(fd_) do { \
+    if (copied) { \
+        int copy_ = fcntl((fd_), F_DUPFD_CLOEXEC, 0); \
+        if (copy_ < 0) { copied = false; error = errno; } \
+        else grants[count++] = copy_; \
+    } \
+} while (0)
+    if (drive_root >= 0)
+        DOS83_WAL_DUP_GRANT(drive_root);
+    for (size_t i = 0; i < 26; ++i)
+        if (drive_roots[i].active)
+            DOS83_WAL_DUP_GRANT(drive_roots[i].fd);
+    for (size_t i = 0; i < UNC_LIMIT; ++i)
+        if (unc_roots[i].active)
+            DOS83_WAL_DUP_GRANT(unc_roots[i].fd);
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i)
+        if (folder_roots[i].active)
+            DOS83_WAL_DUP_GRANT(folder_roots[i].fd);
+#undef DOS83_WAL_DUP_GRANT
+    pthread_mutex_unlock(&root_lock);
+    if (copied) {
+        for (size_t i = 0; i < count; ++i) {
+            if (!wal_recover_if_pending(grants[i])) {
+                copied = false;
+                error = errno;
+                break;
+            }
+        }
+    }
+    for (size_t i = 0; i < count; ++i)
+        close(grants[i]);
+    if (!copied)
+        errno = error ? error : EIO;
+    return copied;
 }

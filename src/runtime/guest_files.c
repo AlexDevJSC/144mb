@@ -600,6 +600,23 @@ static int confined_open_raw(int root, const char *path, int flags, unsigned int
     return (int)syscall(SYS_openat2, root, path, &how, sizeof(how));
 }
 
+/* Crash hooks exist ONLY in a dedicated CI binary built from a separate
+ * guest_files object, never in a production PE runner or mediator. They
+ * simulate SIGKILL at durable syscall boundaries (NOT power failure). */
+#ifdef NTNATIVE_TEST_DOS83_CRASH_HOOKS
+#include <signal.h>
+static void dos83_test_crash(const char *phase)
+{
+    const char *requested = getenv("NT_DOS83_TEST_CRASH");
+    if (requested && strcmp(requested, phase) == 0) {
+        (void)raise(SIGKILL);
+        _exit(137);
+    }
+}
+#else
+#define dos83_test_crash(phase) ((void)0)
+#endif
+
 #include "dos83_alias.inc"
 
 /* Exact spelling wins, including a symlink (the actual open rejects it).
@@ -3494,6 +3511,8 @@ static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
                                               (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
                                 }
                                 const int rename_error = errno;
+                                if (status == 0)
+                                    dos83_test_crash("after-rename");
                                 if (!dos83_move_end(&transaction, status == 0)) {
                                     status = -1;
                                 } else {
@@ -6445,8 +6464,11 @@ int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
 
 uint32_t NT_MS_ABI nt_GetFileAttributesW(const uint16_t *path)
 {
-    struct nt_file_attribute_data attributes;
-    return nt_GetFileAttributesExW(path, 0, &attributes) ? attributes.attributes : UINT32_MAX;
+    /* Keep the output initialized even under aggressive LTO. A failed
+     * GetFileAttributesEx must never expose indeterminate metadata. */
+    struct nt_file_attribute_data attributes = {0};
+    return nt_GetFileAttributesExW(path, 0, &attributes) ?
+           attributes.attributes : UINT32_MAX;
 }
 
 int32_t NT_MS_ABI nt_AreFileApisANSI(void)
