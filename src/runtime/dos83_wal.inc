@@ -578,6 +578,13 @@ bool nt_runtime_recover_dos83(void)
     bool ok = wal_recover_root(root);
     int error = errno;
     pthread_mutex_unlock(&dos83_lock);
+    /* A crashed final HANDLE holder may leave a durable delete disposition
+     * but no path through which another opener could find its inode gate.
+     * Reap these records before declaring startup storage clean. */
+    if (ok && !fs4_recover_pending_deletes(root)) {
+        ok = false;
+        error = errno;
+    }
     close(root);
     errno = error;
     return ok;
@@ -671,6 +678,11 @@ bool nt_runtime_recover_all_dos83_grants(void)
                 break;
             }
         }
+    }
+    if (copied && count > 0 &&
+        !fs4_recover_pending_deletes(grants[0])) {
+        copied = false;
+        error = errno;
     }
     for (size_t i = 0; i < count; ++i)
         close(grants[i]);
