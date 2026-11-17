@@ -2364,6 +2364,10 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
 {
     const uint32_t generic_read = UINT32_C(0x80000000), generic_write = UINT32_C(0x40000000);
     const struct security_attributes *attributes = security;
+    if (disposition != OPEN_EXISTING && !wal_healthy()) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return UINTPTR_MAX;
+    }
     const bool read_access = (desired & generic_read) != 0, write_access = (desired & generic_write) != 0;
     if (disposition < CREATE_NEW || disposition > TRUNCATE_EXISTING ||
         (attributes != NULL && attributes->size != sizeof(*attributes))) {
@@ -3315,6 +3319,10 @@ enum path_operation { MAKE_DIRECTORY, REMOVE_FILE, REMOVE_DIRECTORY };
 
 static int32_t change_path(const char *input, enum path_operation operation)
 {
+    if (!wal_healthy()) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
     char path[PATH_MAX];
     if (!guest_path(input, path)) {
         nt_SetLastError(path_error(errno, true));
@@ -4981,6 +4989,10 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
  * Linux chmod flags and must never be silently claimed as supported. */
 static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
 {
+    if (!wal_healthy()) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
     if (attributes == 0 || (attributes & ~(WIN_READONLY | WIN_EXTENDED | WIN_NORMAL)) ||
         ((attributes & WIN_NORMAL) && attributes != WIN_NORMAL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
