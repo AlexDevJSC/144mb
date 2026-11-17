@@ -9,10 +9,13 @@ cannot both be demonstrated. Do not attach to or suspend foreign threads.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -33,6 +36,36 @@ def canonical_grants(lower: str, view: str) -> tuple[Path, Path]:
     if a.stat().st_dev == 0 or b.stat().st_dev == 0:
         raise Refused("Invalid root identity")
     return a, b
+
+
+def lock_session(view: Path) -> int:
+    """No two session supervisors may mount the same FUSE view concurrently."""
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or
+                   str(Path.home() / ".cache"))
+    private = runtime / "nt-fs-supervisor"
+    private.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = private.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or (
+        info.st_mode & 0o077
+    ):
+        raise Refused("Unsafe supervisor lock directory ownership/permissions")
+    token = hashlib.sha256(os.fsencode(str(view))).hexdigest()[:32]
+    lock_path = private / (token + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        data = os.fstat(fd)
+        if not stat.S_ISREG(data.st_mode) or data.st_uid != os.geteuid() or (
+            data.st_mode & 0o077
+        ):
+            raise Refused("Untrusted supervisor lock file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Refused("Another supervisor owns this NT filesystem view") from None
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def require_program(name: str) -> str:
@@ -172,7 +205,11 @@ def main(argv: list[str]) -> int:
         parser.error("A program after -- is mandatory")
     try:
         lower, view = canonical_grants(args.lower, args.view)
-        return run_session(lower, view, program)
+        lock_fd = lock_session(view)
+        try:
+            return run_session(lower, view, program)
+        finally:
+            os.close(lock_fd)
     except (Refused, OSError) as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 3
