@@ -519,7 +519,6 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
     close(channel[1]);
     if (supervisor_socket[1] >= 0)
         close(supervisor_socket[1]);
-    memset(secret, secret[0], 0); /* no-op; keep secret for handshake below */
     if (child < 0) {
         close(channel[0]);
         if (supervisor_socket[0] >= 0) close(supervisor_socket[0]);
