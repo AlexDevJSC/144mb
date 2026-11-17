@@ -74,6 +74,10 @@ int nt_supervisor_invoke_trusted_guest_apc(
  * tracee cannot safely be detached, SIGKILL is sent ONLY through the
  * pidfd pinned to this exact direct child. Returns 0 on clean detach,
  * -1 if emergency termination was required or could not be confirmed. */
+/* A failed CONTEXT rollback cannot be safely detached. Send SIGKILL to
+ * the exact process already pinned by this tracer's pidfd. Does not
+ * discard ptrace ownership; caller must reap/detach after termination. */
+int nt_supervisor_terminate_compromised_child(struct nt_thread_supervisor *sup);
 int nt_supervisor_abort_child(struct nt_thread_supervisor *sup);
 void nt_supervisor_release(struct nt_thread_supervisor *sup);
 #endif
