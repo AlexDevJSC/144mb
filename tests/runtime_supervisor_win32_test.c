@@ -109,6 +109,11 @@ static int NT_MS_ABI test_entry(void)
         context.rip >= (uintptr_t)runtime_test_guest_end ||
         context.rsp == 0)
         return 15;
+    _Alignas(16) struct nt_context64 native_context = {0};
+    native_context.flags = 0x100003u;
+    if (nt_NtGetContextThread(thread, &native_context) != NT_STATUS_SUCCESS ||
+        native_context.rip != context.rip || native_context.rsp != context.rsp)
+        return 31;
     _Alignas(16) struct nt_context64 integer = context;
     integer.flags = 0x100002u;
     const uint64_t rax = integer.rax;
@@ -119,6 +124,8 @@ static int NT_MS_ABI test_entry(void)
     if (!nt_GetThreadContext(thread, &readback) ||
         readback.rax != integer.rax) return 17;
     integer.rax = rax;
+    if (nt_NtSetContextThread(thread, &integer) != NT_STATUS_SUCCESS)
+        return 32;
     if (!nt_SetThreadContext(thread, &integer)) return 18;
     integer.flags = 0x100003u;
     if (nt_SetThreadContext(thread, &integer)) return 19;
