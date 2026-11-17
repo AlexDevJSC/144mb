@@ -31,6 +31,13 @@ static void release_state(struct supervisor_state *state)
     if (!state || !state->active) return;
     /* Requires the same broker pthread that originally called SEIZE;
      * ptrace requests are NOT transferable to another Linux thread. */
+    if (state->nt.unsafe_register_state &&
+        nt_supervisor_terminate_compromised_child(&state->tracer) != 0) {
+        /* Do NOT detach a child whose CPU register state could not be
+         * restored. Retain the traced TID until the broker exits:
+         * PTRACE_O_EXITKILL was installed at SEIZE and then kills it. */
+        return;
+    }
     (void)nt_supervisor_abort_child(&state->tracer);
     *state = (struct supervisor_state){0};
 }
@@ -139,6 +146,10 @@ nt_status nt_supervisor_control_server_call(
         return NT_STATUS_INVALID_PARAMETER;
 
     struct supervisor_state *state = find_state(owner, identity);
+    if (state && state->nt.unsafe_register_state) {
+        release_state(state);
+        return NT_STATUS_THREAD_IS_TERMINATING;
+    }
     if (!state && operation != NT_BROKER_RPC_SUP_SUSPEND)
         return NT_STATUS_NOT_SUPPORTED;
     if (!state) {
@@ -211,6 +222,8 @@ nt_status nt_supervisor_control_server_call(
     }
     case NT_BROKER_RPC_SUP_SET_CONTEXT:
         result = nt_supervisor_nt_set_context(&state->nt, input);
+        if (state->nt.unsafe_register_state)
+            release_state(state); /* PIDFD kill; never unsafe DETACH. */
         break;
     default: break;
     }
