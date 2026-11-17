@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """FileSystem4 dedicated-UID service: executable IPC/permission regressions."""
 import importlib.util
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,16 @@ spec = importlib.util.spec_from_file_location("nt_storage_service",
                                              ROOT / "scripts/nt-storage-service.py")
 service = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(service)
+
+
+@contextmanager
+def socket_pair():
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    try:
+        with server, client:
+            yield server, client
+    finally:
+        pass
 
 
 class Security(unittest.TestCase):
@@ -81,13 +92,13 @@ class Security(unittest.TestCase):
                 service.private_directory(alias, os.geteuid())
 
     def test_real_unix_kernel_peer_credentials(self):
-        with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as (server, client):
+        with socket_pair() as (server, client):
             client.sendall(b'{"version":1,"op":"status"}')
             self.assertEqual(service.peer_identity(server)[1], os.geteuid())
             service.serve_one(server, client_uid=os.geteuid(), mediator="unused",
                               backing=Path("/"), ready=True)
             self.assertTrue(json.loads(client.recv(4096))["mediated"])
-        with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as (server, client):
+        with socket_pair() as (server, client):
             # A different UID gets no data or response at all.
             service.serve_one(server, client_uid=os.geteuid() + 1,
                               mediator="unused", backing=Path("/"), ready=True)
@@ -97,7 +108,7 @@ class Security(unittest.TestCase):
 
     def test_bad_packet_rejected(self):
         for packet in (b"", b"this is not JSON", b"{" + b"a" * 5000):
-            with socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) as (server, client):
+            with socket_pair() as (server, client):
                 if packet:
                     client.sendall(packet)
                 else:
