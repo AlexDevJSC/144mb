@@ -81,7 +81,6 @@ def matrix(lower, view, mediator):
     os.setxattr(lower / f.name, "user.ntnative.fs_compat", b"invalid")
     denied(lambda: os.open(f, os.O_WRONLY | os.O_TRUNC),
            {errno.EINVAL})
-    assert f.read_bytes() == b"LONG-data" or True  # raw lower used below
     assert (lower / f.name).read_bytes() == b"LONG-data"
     os.setxattr(lower / f.name, "user.ntnative.fs_compat", b"1")
     f.unlink()
