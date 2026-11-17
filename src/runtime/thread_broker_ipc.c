@@ -311,6 +311,10 @@ void nt_broker_server_loop(int fd,
          * without mistaking a short error reply for broken transport. */
         _Alignas(16) struct nt_context64 context_response = {0};
         const pid_t requester = peer->child_pid;
+        /* Authenticate response ownership even when no target capability
+         * was resolved: rejected calls must still carry their precise
+         * negative NTSTATUS without being confused with lost transport. */
+        response.process_id = (uint32_t)requester;
         struct nt_broker_thread_info info = {0};
         uint64_t handle = 0;
         switch (request.operation) {
