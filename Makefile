@@ -532,6 +532,21 @@ $(BUILD_DIR)/pe-image-test: tests/pe/image_test.c src/pe/image.c $(PE_IMAGE_HEAD
 check-pe-image: $(BUILD_DIR)/pe-image-test
 	$(BUILD_DIR)/pe-image-test
 
+$(BUILD_DIR)/async-supervisor-fixture.exe: tests/pe/async_supervisor_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lntdll -lkernel32
+
+$(BUILD_DIR)/pe-async-supervisor-host: tests/pe/async_supervisor_host.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) \
+    $(PE_IMAGE_HEADERS) src/pe/dll_graph.h src/runtime/compat.h src/runtime/sync.h include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/pe/async_supervisor_host.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) \
+	    $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-pe-async-supervisor
+check-pe-async-supervisor: $(BUILD_DIR)/pe-async-supervisor-host $(BUILD_DIR)/async-supervisor-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 30s \
+	    $(BUILD_DIR)/pe-async-supervisor-host $(BUILD_DIR)/async-supervisor-fixture.exe
+
 $(BUILD_DIR)/pe-external-host: tests/pe/external_host.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/pe/dll_graph.h src/runtime/winbase.h src/runtime/sync.h include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
