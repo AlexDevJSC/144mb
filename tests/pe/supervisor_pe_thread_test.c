@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -65,6 +66,22 @@ static bool read_pe_fixture(const char *path, unsigned char **bytes, size_t *len
     return false;
 }
 
+/* The guest voluntarily enters this controlled Win64-ABI host import.
+ * While the host lock is held, a pause request MUST fail, even though
+ * the thread's GS still points at its guest TEB. */
+static pthread_mutex_t callback_host_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void __attribute__((ms_abi)) controlled_host_callback(struct nt_supervisor_pe_shared *shared)
+{
+    nt_guest_boundary_publish(&shared->boundary, NT_GUEST_BOUNDARY_HOST);
+    if (pthread_mutex_lock(&callback_host_lock) != 0) _exit(61);
+    atomic_store_explicit(&shared->host_call_entered, 1u, memory_order_release);
+    while (!atomic_load_explicit(&shared->host_call_release, memory_order_acquire))
+        pause_ms(1);
+    if (pthread_mutex_unlock(&callback_host_lock) != 0) _exit(62);
+    nt_guest_boundary_publish(&shared->boundary, NT_GUEST_BOUNDARY_GUEST);
+}
+
 static void *guest_worker_main(void *arg)
 {
     struct guest_worker *worker = arg;
@@ -80,7 +97,9 @@ static void *guest_worker_main(void *arg)
     if (write(worker->ready_fd, &tid, sizeof(tid)) != (ssize_t)sizeof(tid))
         _exit(54);
     close(worker->ready_fd);
+    nt_guest_boundary_publish(&worker->shared->boundary, NT_GUEST_BOUNDARY_GUEST);
     const int result = guest_entry(worker->shared);
+    nt_guest_boundary_publish(&worker->shared->boundary, NT_GUEST_BOUNDARY_FINISHED);
     atomic_store_explicit(&worker->shared->guest_exit_code, (uint32_t)result,
                           memory_order_release);
     if (!nt_guest_thread_leave(&state))
@@ -114,6 +133,14 @@ static _Noreturn void child_main(const char *path,
     atomic_store_explicit(&shared->code_end,
                           (uintptr_t)image.base + image.code_rva + image.code_size,
                           memory_order_release);
+    /* Function pointers cross this boundary only inside a trusted test:
+     * do not expose callbacks or raw Linux function addresses to PE input. */
+    void (__attribute__((ms_abi)) *callback)(struct nt_supervisor_pe_shared *) =
+        controlled_host_callback;
+    uintptr_t callback_address = 0;
+    _Static_assert(sizeof(callback) == sizeof(callback_address), "AMD64 callback pointer");
+    memcpy(&callback_address, &callback, sizeof(callback));
+    atomic_store_explicit(&shared->host_callback, callback_address, memory_order_release);
     struct guest_worker worker = {.image = &image, .shared = shared, .ready_fd = ready_fd};
     pthread_t thread;
     if (pthread_create(&thread, NULL, guest_worker_main, &worker))
@@ -140,6 +167,16 @@ static bool wait_for_guest_ticks(struct nt_supervisor_pe_shared *state, uint64_t
 {
     for (int i = 0; i < 300; ++i) {
         if (atomic_load_explicit(&state->guest_ticks, memory_order_acquire) > previous)
+            return true;
+        pause_ms(5);
+    }
+    return false;
+}
+
+static bool wait_for_value(_Atomic uint32_t *value, uint32_t expected)
+{
+    for (int i = 0; i < 300; ++i) {
+        if (atomic_load_explicit(value, memory_order_acquire) == expected)
             return true;
         pause_ms(5);
     }
@@ -187,6 +224,10 @@ int main(int argc, char **argv)
         fputs("FAIL invalid guest image/TEB/TID identity\n", stderr);
         goto cleanup;
     }
+    const struct nt_supervisor_guest_scope scope = {
+        .boundary = &shared->boundary,
+        .code_begin = begin, .code_end = end, .teb = teb
+    };
     if (nt_supervisor_seize_child(&sup, child, tid)) {
         if (errno == EPERM || errno == EACCES || errno == ENOTSUP || errno == ENOSYS) {
             fprintf(stderr, "INCOMPLETE PE ptrace denied by host policy: %s\n",
@@ -196,11 +237,11 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     for (int cycle = 0; cycle < 2; ++cycle) {
-        if (nt_supervisor_interrupt(&sup, 1500)) {
-            perror("FAIL PE interrupt"); goto cleanup;
-        }
         struct user_regs_struct original, modified, restored;
-        if (nt_supervisor_get_registers(&sup, &original)) {
+        if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &original)) {
+            perror("FAIL guarded PE interrupt"); goto cleanup;
+        }
+        if (nt_supervisor_get_guest_context(&sup, &scope, &original)) {
             perror("FAIL PE GETREGSET"); goto cleanup;
         }
         if (original.rip < begin || original.rip >= end || original.rsp == 0 ||
@@ -222,12 +263,12 @@ int main(int argc, char **argv)
             fputs("FAIL PE thread not independently stopped\n", stderr);
             goto cleanup;
         }
-        if (nt_supervisor_set_rax(&sup, UINT64_C(0x1122334455667788)) ||
+        if (nt_supervisor_set_guest_rax(&sup, &scope, UINT64_C(0x1122334455667788)) ||
             nt_supervisor_get_registers(&sup, &modified) ||
             modified.rax != UINT64_C(0x1122334455667788) ||
             modified.rip != original.rip || modified.rsp != original.rsp ||
             modified.gs_base != original.gs_base ||
-            nt_supervisor_set_rax(&sup, original.rax) ||
+            nt_supervisor_set_guest_rax(&sup, &scope, original.rax) ||
             nt_supervisor_get_registers(&sup, &restored) ||
             restored.rax != original.rax) {
             fputs("FAIL PE context SETREGSET/restore\n", stderr);
@@ -239,7 +280,44 @@ int main(int argc, char **argv)
             goto cleanup;
         }
     }
-    if (nt_supervisor_interrupt(&sup, 1500) ||
+    /* The same PE transitions into a native callback that holds a Linux
+     * mutex. A raw ptrace stop could strand it; the guest gate must
+     * reject, automatically resume, and not report successful suspension.
+     * The second attempt forges the phase to GUEST: actual RIP must still
+     * independently reject the host callback. */
+    atomic_store_explicit(&shared->request_host_call, 1u, memory_order_release);
+    if (!wait_for_value(&shared->host_call_entered, 1u) ||
+        !wait_for_value(&shared->boundary.phase, NT_GUEST_BOUNDARY_HOST)) {
+        fputs("FAIL controlled PE did not enter host critical section\\n", stderr);
+        goto cleanup;
+    }
+    struct user_regs_struct rejected = {0};
+    errno = 0;
+    if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &rejected) != -1 ||
+        errno != EBUSY || sup.stopped) {
+        fputs("FAIL host-locked thread was accepted as guest-safe\\n", stderr);
+        goto cleanup;
+    }
+    atomic_store_explicit(&shared->boundary.phase, NT_GUEST_BOUNDARY_GUEST,
+                          memory_order_release);
+    errno = 0;
+    if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &rejected) != -1 ||
+        errno != EBUSY || sup.stopped) {
+        fputs("FAIL forged phase bypassed host RIP check\\n", stderr);
+        goto cleanup;
+    }
+    nt_guest_boundary_publish(&shared->boundary, NT_GUEST_BOUNDARY_HOST);
+    atomic_store_explicit(&shared->host_call_release, 1u, memory_order_release);
+    if (!wait_for_value(&shared->boundary.phase, NT_GUEST_BOUNDARY_GUEST)) {
+        fputs("FAIL host callback did not return to PE\\n", stderr);
+        goto cleanup;
+    }
+    const uint64_t after_callback = atomic_load(&shared->guest_ticks);
+    if (!wait_for_guest_ticks(shared, after_callback)) {
+        fputs("FAIL PE did not progress after host critical boundary\\n", stderr);
+        goto cleanup;
+    }
+    if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &rejected) ||
         nt_supervisor_detach(&sup)) {
         perror("FAIL PE detach"); goto cleanup;
     }
@@ -252,8 +330,9 @@ int main(int argc, char **argv)
                 fputs("FAIL PE guest did not return cleanly\n", stderr);
                 goto finished;
             }
-            puts("PASS supervisor PE32+: actual guest RIP, GS/TEB, independent stop, "
-                 "AMD64 GET/SETREGSET, twice resume, detach and clean return");
+            puts("PASS supervisor PE32+: guest-only RIP/GS boundary, real async stop, "
+                 "AMD64 GET/SETREGSET, host-mutex rejection, forged-phase rejection, "
+                 "resume, detach and clean return");
             rc = 0;
             goto finished;
         }
