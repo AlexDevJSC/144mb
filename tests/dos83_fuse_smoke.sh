@@ -109,6 +109,7 @@ aliases = [alias(os.path.join(os.path.dirname(backing), "parallel",
 assert len(set(aliases)) == len(aliases), aliases
 print("PASS P2.3 real FUSE rename, create, xattr isolation, symlink denial and concurrent Linux writers")
 PY
+python3 tests/dos83_contract_matrix.py "$tmp/lower" "$tmp/view" "$mediator"
 # Stronger perimeter: even a Linux program that knows the lower path
 # must be unable to rename, create or truncate it after the Landlock policy.
 if "$landlock" --probe >/dev/null 2>&1; then
