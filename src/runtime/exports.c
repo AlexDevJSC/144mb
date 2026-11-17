@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "ntnative/counter.h"
+#include "ntnative/guest_boundary_runtime.h"
 #include "compat.h"
 #include "desktop.h"
 #include "desktop_resources.h"
@@ -1093,7 +1094,7 @@ static nt_guest_proc find_export(size_t module, const char *name)
     if (module < MODULE_COUNT) {
         for (size_t i = 0; i < modules[module].count; ++i) {
             if (strcmp(name, modules[module].exports[i].name) == 0)
-                return modules[module].exports[i].target;
+                return nt_guest_boundary_wrap_import(modules[module].exports[i].target);
         }
     }
     return NULL;
@@ -1111,7 +1112,7 @@ static nt_guest_proc find_ordinal(size_t module, unsigned int ordinal)
     if (module < MODULE_COUNT && ordinal != 0) {
         for (size_t i = 0; i < modules[module].count; ++i) {
             if (ordinal == modules[module].exports[i].ordinal)
-                return modules[module].exports[i].target;
+                return nt_guest_boundary_wrap_import(modules[module].exports[i].target);
         }
     }
     return NULL;
