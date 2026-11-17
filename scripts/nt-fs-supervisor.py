@@ -26,6 +26,20 @@ class Refused(RuntimeError):
     pass
 
 
+class SessionTerminated(Exception):
+    def __init__(self, signum: int):
+        super().__init__(f"Session termination signal {signum}")
+        self.signum = signum
+
+
+def handle_termination(signum: int, _frame: object) -> None:
+    # A second termination request must not interrupt the finally block
+    # responsible for stopping guests and unmounting FUSE.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    raise SessionTerminated(signum)
+
+
 def canonical_grants(lower: str, view: str) -> tuple[Path, Path]:
     for raw in (lower, view):
         if not Path(raw).is_dir():
@@ -81,22 +95,38 @@ def mounted(view: Path, mountpoint: str) -> bool:
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
-def stop_group(proc: subprocess.Popen[bytes] | None) -> None:
-    if proc is None or proc.poll() is not None:
-        return
-    # start_new_session=True makes this process the leader of its own group.
+def group_exists(pgid: int) -> bool:
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(pgid, 0)
     except ProcessLookupError:
+        return False
+    return True
+
+
+def stop_group(proc: subprocess.Popen[bytes] | None) -> None:
+    if proc is None:
         return
+    # The launcher is a session leader, but its background children can
+    # remain in that group after the leader has exited and been reaped.
+    # Waiting for the leader alone therefore does not clean up the session.
+    pgid = proc.pid
     try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    else:
+        deadline = time.monotonic() + 1.0
+        while group_exists(pgid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # Always escalate if the group remains, even when its leader exited
+        # earlier or a descendant ignored SIGTERM.
+        if group_exists(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    if proc.poll() is None:
         proc.wait(timeout=2.0)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
 
 
 def run_session(lower: Path, view: Path, program: list[str]) -> int:
@@ -202,16 +232,27 @@ def main(argv: list[str]) -> int:
     program = args.program[1:] if args.program[:1] == ["--"] else args.program
     if not program:
         parser.error("A program after -- is mandatory")
+    old_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGTERM, signal.SIGHUP)
+    }
     try:
+        for signum in old_handlers:
+            signal.signal(signum, handle_termination)
         lower, view = canonical_grants(args.lower, args.view)
         lock_fd = lock_session(view)
         try:
             return run_session(lower, view, program)
         finally:
             os.close(lock_fd)
+    except SessionTerminated as interrupted:
+        return 128 + interrupted.signum
     except (Refused, OSError) as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 3
+    finally:
+        for signum, handler in old_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":
