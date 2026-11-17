@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "thread_broker_ipc.h"
+#include "../supervisor/nt_thread_supervisor.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -11,6 +12,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <signal.h>
 #include <unistd.h>
 
 _Static_assert(sizeof(struct nt_broker_rpc) == 48, "private RPC layout");
@@ -166,6 +169,49 @@ static bool receive_authenticated_rpc(int fd,
     return true;
 }
 
+/* Optional proof that the authenticated control-plane reaches a REAL
+ * external Linux thread supervisor. The original tracee always resumes,
+ * and this is disabled for production unless the trusted parent grants the
+ * explicit server-side test flag; no PE code can set that grant by RPC.
+ * Never use a TID until the child-owned generation-pinned registry has
+ * resolved the capability. */
+static bool supervisor_readonly_probe(const struct nt_thread_broker_registered_peer *peer,
+                                      const struct nt_broker_thread_info *identity,
+                                      uint64_t *guest_rip)
+{
+    if (!peer || !identity || !guest_rip ||
+        identity->guest_process_id != (uint32_t)peer->child_pid ||
+        identity->guest_thread_id == 0)
+        return false;
+    struct nt_thread_supervisor supervisor;
+    nt_supervisor_init(&supervisor);
+    bool okay = false;
+    if (nt_supervisor_seize_child(&supervisor, peer->child_pid,
+                                  (pid_t)identity->guest_thread_id))
+        return false;
+    struct user_regs_struct context;
+    if (nt_supervisor_interrupt(&supervisor, 500) == 0 &&
+        nt_supervisor_get_registers(&supervisor, &context) == 0 &&
+        context.rip != 0) {
+        *guest_rip = context.rip; /* caller returns it only on full success */
+        okay = true;
+    }
+    /* A verified detach must be possible even on a failed read. If a
+     * ptrace failure prevents it, kill ONLY the exact pidfd-pinned child
+     * rather than abandon a tracee that can remain permanently stopped. */
+    if (!supervisor.stopped && supervisor.seized)
+        (void)nt_supervisor_interrupt(&supervisor, 500);
+    if (supervisor.seized &&
+        (!supervisor.stopped || nt_supervisor_detach(&supervisor) != 0)) {
+#if defined(SYS_pidfd_send_signal)
+        (void)syscall(SYS_pidfd_send_signal, peer->child_pidfd, SIGKILL, NULL, 0);
+#endif
+        okay = false;
+    }
+    nt_supervisor_release(&supervisor);
+    return okay;
+}
+
 void nt_broker_server_loop(int fd,
     const struct nt_thread_broker_registered_peer *peer)
 {
@@ -237,12 +283,63 @@ void nt_broker_server_loop(int fd,
                 nt_broker_close_child_thread(requester, request.capability))
                 response.status = 0;
             break;
+        case NT_BROKER_RPC_SUP_OPEN:
+            /* Owner-only: never grant privileges over sibling child or
+             * arbitrary Linux TIDs, even when the request contains a
+             * valid authenticated session secret. */
+            if (request.thread_id != 0 && request.capability == 0 &&
+                nt_broker_supervisor_open_owned(requester,
+                    (pid_t)request.thread_id, request.access, &handle, &info)) {
+                response.status = 0;
+                response.capability = handle;
+                response.process_id = info.guest_process_id;
+                response.thread_id = info.guest_thread_id;
+                response.generation = info.generation;
+            }
+            break;
+        case NT_BROKER_RPC_SUP_QUERY:
+            if (request.thread_id == 0 &&
+                nt_broker_supervisor_query_owned(requester, request.capability,
+                                                  request.access, &info)) {
+                response.status = 0;
+                response.process_id = info.guest_process_id;
+                response.thread_id = info.guest_thread_id;
+                response.generation = info.generation;
+            }
+            break;
+        case NT_BROKER_RPC_SUP_CLOSE:
+            if (request.thread_id == 0 && request.access == 0 &&
+                nt_broker_supervisor_close_owned(requester, request.capability))
+                response.status = 0;
+            break;
+        case NT_BROKER_RPC_SUP_PROBE:
+            /* Optional test-only, never enabled by the guest's own RPC.
+             * Check GET_CONTEXT capability + owner + generation BEFORE
+             * making any ptrace call. No lasting suspension or writes. */
+            if (request.thread_id == 0 && request.access ==
+                    NT_BROKER_SUPERVISOR_GET_CONTEXT &&
+                (peer->allowed_access & NT_BROKER_SERVER_ENABLE_PTRACE_PROBE) != 0 &&
+                nt_broker_supervisor_query_owned(requester, request.capability,
+                                                  request.access, &info)) {
+                uint64_t instruction = 0;
+                if (supervisor_readonly_probe(peer, &info, &instruction)) {
+                    response.status = 0;
+                    response.process_id = info.guest_process_id;
+                    response.thread_id = info.guest_thread_id;
+                    response.generation = info.generation;
+                    response.capability = instruction;
+                }
+            }
+            break;
         default:
             break;
         }
         if (!send_packet(fd, &response, sizeof(response)))
             break;
     }
+    /* The channel itself is the authority, not just the integer PID.
+     * Revocation is immediate on EOF/auth failure, before child reaping. */
+    nt_broker_revoke_requester(peer->child_pid);
 }
 
 bool nt_broker_client_is_attached(void)
@@ -363,4 +460,61 @@ bool nt_broker_client_close(uint64_t capability)
 {
     return capability != 0 &&
            client_rpc(NT_BROKER_RPC_CLOSE, 0, 0, capability, NULL);
+}
+
+bool nt_broker_client_supervisor_open(uint32_t thread_id, uint32_t access,
+    struct nt_broker_thread_info *identity, uint64_t *capability)
+{
+    if (thread_id == 0 || access == 0 ||
+        (access & ~NT_BROKER_SUPERVISOR_ACCESS_MASK) != 0 ||
+        !identity || !capability)
+        return false;
+    struct nt_thread_broker_reply reply = {0};
+    if (!client_rpc(NT_BROKER_RPC_SUP_OPEN, thread_id, access, 0, &reply) ||
+        reply.capability == 0 || reply.process_id != (uint32_t)getpid() ||
+        reply.thread_id != thread_id || reply.generation == 0)
+        return false;
+    *identity = (struct nt_broker_thread_info){
+        .guest_process_id = reply.process_id,
+        .guest_thread_id = reply.thread_id,
+        .generation = reply.generation
+    };
+    *capability = reply.capability;
+    return true;
+}
+bool nt_broker_client_supervisor_query(uint64_t capability, uint32_t access,
+    struct nt_broker_thread_info *identity)
+{
+    if (capability == 0 || access == 0 ||
+        (access & ~NT_BROKER_SUPERVISOR_ACCESS_MASK) != 0 || !identity)
+        return false;
+    struct nt_thread_broker_reply reply = {0};
+    if (!client_rpc(NT_BROKER_RPC_SUP_QUERY, 0, access, capability, &reply) ||
+        reply.process_id != (uint32_t)getpid() || reply.thread_id == 0 ||
+        reply.generation == 0)
+        return false;
+    *identity = (struct nt_broker_thread_info){
+        .guest_process_id = reply.process_id,
+        .guest_thread_id = reply.thread_id,
+        .generation = reply.generation
+    };
+    return true;
+}
+bool nt_broker_client_supervisor_probe(uint64_t capability, uint64_t *guest_rip)
+{
+    if (capability == 0 || !guest_rip)
+        return false;
+    struct nt_thread_broker_reply reply = {0};
+    if (!client_rpc(NT_BROKER_RPC_SUP_PROBE, 0,
+                    NT_BROKER_SUPERVISOR_GET_CONTEXT, capability, &reply) ||
+        reply.process_id != (uint32_t)getpid() || reply.thread_id == 0 ||
+        reply.generation == 0 || reply.capability == 0)
+        return false;
+    *guest_rip = reply.capability;
+    return true;
+}
+bool nt_broker_client_supervisor_close(uint64_t capability)
+{
+    return capability != 0 &&
+        client_rpc(NT_BROKER_RPC_SUP_CLOSE, 0, 0, capability, NULL);
 }
