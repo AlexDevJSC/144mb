@@ -453,3 +453,99 @@ bool nt_runtime_recover_dos83(void)
     errno = error;
     return ok;
 }
+
+/* A drive, UNC share or redirected known-folder is an independent physical
+ * grant. Do not silently start PE execution against a pending WAL on D: or
+ * another root merely because C: was clean. Absence of the journal is fine,
+ * including for read-only grants; a present corrupt or unwritable pending
+ * record is not. This is startup preflight, NOT a runtime global write lock. */
+static bool wal_recover_if_pending(int root)
+{
+    int directory = confined_open_raw(root, ":ntnative-file-leases",
+                                       O_RDONLY | O_DIRECTORY, 0);
+    if (directory < 0)
+        return errno == ENOENT;
+    struct stat dir_info;
+    if (fstat(directory, &dir_info) != 0 ||
+        !S_ISDIR(dir_info.st_mode) ||
+        dir_info.st_uid != geteuid() ||
+        (dir_info.st_mode & 077u) != 0) {
+        int error = errno ? errno : EACCES;
+        close(directory);
+        errno = error;
+        return false;
+    }
+    int wal_file = confined_open_raw(directory, DOS83_WAL_NAME, O_RDONLY, 0);
+    const int open_error = errno;
+    close(directory);
+    if (wal_file < 0)
+        return open_error == ENOENT;
+    struct stat info;
+    const bool valid = fstat(wal_file, &info) == 0 &&
+                       S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+                       info.st_uid == geteuid() &&
+                       (info.st_mode & 077u) == 0;
+    const off_t pending = valid ? info.st_size : -1;
+    const int error = errno;
+    close(wal_file);
+    if (!valid) {
+        errno = error ? error : EACCES;
+        return false;
+    }
+    if (pending == 0)
+        return true;
+    pthread_mutex_lock(&dos83_lock);
+    const bool ok = wal_recover_root(root);
+    const int recovery_error = errno;
+    pthread_mutex_unlock(&dos83_lock);
+    errno = recovery_error;
+    return ok;
+}
+
+bool nt_runtime_recover_all_dos83_grants(void)
+{
+    enum { CAP = 1 + 26 + UNC_LIMIT + NT_USER_FOLDER_COUNT };
+    int grants[CAP];
+    size_t count = 0;
+    bool copied = true;
+    int error = 0;
+    pthread_mutex_lock(&root_lock);
+    if (drive_root < 0) {
+        copied = false;
+        error = EACCES;
+    }
+#define DOS83_WAL_DUP_GRANT(fd_) do { \
+    if (copied) { \
+        int copy_ = fcntl((fd_), F_DUPFD_CLOEXEC, 0); \
+        if (copy_ < 0) { copied = false; error = errno; } \
+        else grants[count++] = copy_; \
+    } \
+} while (0)
+    if (drive_root >= 0)
+        DOS83_WAL_DUP_GRANT(drive_root);
+    for (size_t i = 0; i < 26; ++i)
+        if (drive_roots[i].active)
+            DOS83_WAL_DUP_GRANT(drive_roots[i].fd);
+    for (size_t i = 0; i < UNC_LIMIT; ++i)
+        if (unc_roots[i].active)
+            DOS83_WAL_DUP_GRANT(unc_roots[i].fd);
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i)
+        if (folder_roots[i].active)
+            DOS83_WAL_DUP_GRANT(folder_roots[i].fd);
+#undef DOS83_WAL_DUP_GRANT
+    pthread_mutex_unlock(&root_lock);
+    if (copied) {
+        for (size_t i = 0; i < count; ++i) {
+            if (!wal_recover_if_pending(grants[i])) {
+                copied = false;
+                error = errno;
+                break;
+            }
+        }
+    }
+    for (size_t i = 0; i < count; ++i)
+        close(grants[i]);
+    if (!copied)
+        errno = error ? error : EIO;
+    return copied;
+}
