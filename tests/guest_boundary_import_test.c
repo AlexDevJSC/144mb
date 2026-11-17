@@ -139,12 +139,27 @@ int main(void)
     if (pthread_create(&second, NULL, second_thread, NULL) != 0 ||
         pthread_join(second, NULL) != 0)
         return 5;
+    nt_guest_boundary_mark_nonlocal_transfer();
+    if (!nt_guest_boundary_nonlocal_poisoned() ||
+        nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST)
+        return 8;
+    nt_guest_boundary_guest_enter();
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST)
+        return 9; /* nonlocal VEH/SEH may never reauthorise async stops */
+    nt_guest_boundary_guest_leave();
     nt_guest_boundary_thread_detach();
-    if (nt_guest_boundary_find_thread(session, (pid_t)syscall(SYS_gettid)) ||
+    if (nt_guest_boundary_nonlocal_poisoned() ||
+        nt_guest_boundary_find_thread(session, (pid_t)syscall(SYS_gettid)) ||
         atomic_load(&failures) != 0)
         return 6;
+    /* A fresh TID generation/attachment is not poisoned by the old one. */
+    if (!nt_guest_boundary_thread_attach(UINT64_C(0x66660000))) return 10;
+    nt_guest_boundary_guest_enter();
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_GUEST) return 11;
+    nt_guest_boundary_guest_leave();
+    nt_guest_boundary_thread_detach();
     if (munmap(session, sizeof(*session)) != 0) return 7;
     puts("PASS guest/host import ABI: Microsoft x64 8-argument stack, XMM float, "
-         "nested callbacks with host mutex, per-thread phases and revocation");
+         "nested callbacks with host mutex, nonlocal poison, per-thread phases and revocation");
     return 0;
 }

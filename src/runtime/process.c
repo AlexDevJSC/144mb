@@ -472,6 +472,14 @@ static int worker_status_fd = -1;
  * actual executing PE guest owns the authenticated broker and child pidfd.
  * This works for both top-level and recursively launched PE processes. */
 static bool supervisor_ipc_requested;
+static bool supervisor_thread_control_requested;
+/* Trusted-host-only opt-in for controlled PE compatibility fixtures.
+ * External PE images never receive this grant by default. */
+void nt_runtime_enable_supervisor_thread_control(void)
+{
+    supervisor_ipc_requested = true;
+    supervisor_thread_control_requested = true;
+}
 
 void nt_runtime_enable_supervisor_ipc(void)
 {
@@ -562,7 +570,9 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
             struct nt_thread_broker_registered_peer peer = {
                 .child_pid = child, .uid = getuid(), .gid = getgid(),
                 .child_pidfd = pidfd,
-                .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION,
+                .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION |
+                    (supervisor_thread_control_requested ?
+                     NT_BROKER_SERVER_ENABLE_THREAD_CONTROL : 0u),
                 .guest_session = boundary
             };
             (void)nt_guest_boundary_get_image_range(&peer.trusted_code_begin,

@@ -82,6 +82,7 @@ struct waitable {
     uint32_t suspend_count;
     /* Running guest threads can only be paused at an explicit runtime
      * alertable checkpoint, never through an asynchronous Linux signal. */
+    bool supervisor_async_suspended; /* parent-owned ptrace stop, never cooperatively resumed */
     bool cooperative_pause_requested, cooperative_pause_acknowledged;
     /* Full real AMD64 register snapshot from the target's own safe-point
      * execution, not a fabricated PC/stack or a remote ptrace operation. */
@@ -116,6 +117,9 @@ static struct waitable waitables[WAITABLE_COUNT];
 static uintptr_t next_handle = 0x76000004;
 static struct waitable *current_process_state;
 static pthread_mutex_t wait_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Serialize all asynchronous parent RPCs affecting the same NT object
+ * without blocking unrelated guest waitables on wait_lock. */
+static pthread_mutex_t supervisor_gate_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wait_changed = PTHREAD_COND_INITIALIZER;
 static _Thread_local struct waitable *running_thread;
 static _Thread_local uint32_t thread_result;
@@ -2575,12 +2579,157 @@ nt_status NT_MS_ABI nt_NtTerminateThread(uintptr_t thread, nt_status exit_code)
     return terminate_suspended_thread(thread, (uint32_t)exit_code);
 }
 
+/* Parent RPC is only authorized when the *host* explicitly enabled
+ * controlled supervision. It fails closed on HOST phase, bad GS/TEB,
+ * unsafe code, missing ptrace permissions and unsupported namespaces.
+ * No guest-controlled flag can turn it on. */
+static bool async_suspend_candidate(uintptr_t handle)
+{
+    bool eligible = false;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *object = find_waitable(handle);
+    if (object && object->kind == THREAD &&
+        (object->access & THREAD_SUSPEND_RESUME) != 0) {
+        const struct waitable *state = wait_state(object);
+        eligible = !object->remote_guest && !state->child_guest &&
+            state->owner_pid == (uint32_t)getpid() && !state->signaled &&
+            !state->terminate_at_start && state->started &&
+            state->suspend_count == 0 && !state->cooperative_pause_requested &&
+            !pthread_equal(state->host, pthread_self());
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return eligible;
+}
+
+static nt_status async_suspend_guest_thread(uintptr_t handle, uint32_t *previous)
+{
+    if (!async_suspend_candidate(handle))
+        return NT_STATUS_NOT_SUPPORTED;
+    struct nt_broker_thread_info identity = {0};
+    uint64_t capability = 0;
+    if (!nt_runtime_supervisor_open_thread_handle(handle,
+            THREAD_SUSPEND_RESUME, &identity, &capability))
+        return NT_STATUS_NOT_SUPPORTED;
+    uint32_t old_count = UINT32_MAX;
+    nt_status result = nt_broker_client_supervisor_suspend(capability, &old_count);
+    if (result == NT_STATUS_SUCCESS) {
+        bool committed = false;
+        pthread_mutex_lock(&wait_lock);
+        struct waitable *object = find_waitable(handle);
+        if (object && object->kind == THREAD &&
+            (object->access & THREAD_SUSPEND_RESUME) != 0) {
+            struct waitable *state = wait_state(object);
+            if (!state->signaled && !state->cooperative_pause_requested &&
+                state->suspend_count == 0 &&
+                state->owner_pid == identity.guest_process_id &&
+                state->thread_id == identity.guest_thread_id) {
+                state->suspend_count = 1;
+                state->supervisor_async_suspended = true;
+                committed = true;
+            }
+        }
+        pthread_mutex_unlock(&wait_lock);
+        if (!committed || old_count != 0) {
+            /* A concurrent close or thread termination cannot leave a
+             * tracee suspended without an NT object that can resume it. */
+            uint32_t ignored = UINT32_MAX;
+            (void)nt_broker_client_supervisor_resume(capability, &ignored);
+            result = NT_STATUS_NOT_SUPPORTED;
+        } else if (previous) {
+            *previous = 0;
+        }
+    }
+    (void)nt_broker_client_supervisor_close(capability);
+    return result;
+}
+
+/* Caller owns supervisor_gate_lock. Return handled=true only when a
+ * ptrace suspension has actually been committed for this thread. */
+static nt_status async_resume_guest_thread(uintptr_t handle, uint32_t *previous,
+                                            bool alert, bool *handled)
+{
+    *handled = false;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *entry = find_waitable(handle);
+    struct waitable *state = entry && entry->kind == THREAD ?
+                             wait_state(entry) : NULL;
+    if (!state || !state->supervisor_async_suspended) {
+        pthread_mutex_unlock(&wait_lock);
+        return NT_STATUS_NOT_SUPPORTED;
+    }
+    *handled = true;
+    nt_status result = NT_STATUS_SUCCESS;
+    if ((entry->access & THREAD_SUSPEND_RESUME) == 0)
+        result = NT_STATUS_ACCESS_DENIED;
+    else if (state->signaled)
+        result = NT_STATUS_THREAD_IS_TERMINATING;
+    else if (state->suspend_count == 0)
+        result = NT_STATUS_NOT_SUPPORTED;
+    if (result != NT_STATUS_SUCCESS) {
+        pthread_mutex_unlock(&wait_lock);
+        return result;
+    }
+    const uint32_t old_count = state->suspend_count;
+    if (old_count > 1) {
+        --state->suspend_count;
+        if (alert) state->alerted = true;
+        if (previous) *previous = old_count;
+        pthread_mutex_unlock(&wait_lock);
+        return NT_STATUS_SUCCESS;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    struct nt_broker_thread_info identity = {0};
+    uint64_t capability = 0;
+    if (!nt_runtime_supervisor_open_thread_handle(handle,
+            THREAD_SUSPEND_RESUME, &identity, &capability))
+        return NT_STATUS_NOT_SUPPORTED;
+    uint32_t remote_previous = UINT32_MAX;
+    result = nt_broker_client_supervisor_resume(capability, &remote_previous);
+    (void)nt_broker_client_supervisor_close(capability);
+    if (result != NT_STATUS_SUCCESS || remote_previous != 1)
+        return result == NT_STATUS_SUCCESS ? NT_STATUS_NOT_SUPPORTED : result;
+    pthread_mutex_lock(&wait_lock);
+    entry = find_waitable(handle);
+    if (entry && entry->kind == THREAD) {
+        state = wait_state(entry);
+        if (state->owner_pid == identity.guest_process_id &&
+            state->thread_id == identity.guest_thread_id &&
+            state->supervisor_async_suspended) {
+            state->supervisor_async_suspended = false;
+            state->suspend_count = 0;
+            if (alert) state->alerted = true;
+            pthread_cond_broadcast(&wait_changed);
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (previous) *previous = remote_previous;
+    return NT_STATUS_SUCCESS;
+}
+
+static bool async_context_active(uintptr_t handle)
+{
+    bool active = false;
+    pthread_mutex_lock(&wait_lock);
+    const struct waitable *entry = find_waitable(handle);
+    if (entry && entry->kind == THREAD)
+        active = wait_state((struct waitable *)entry)->supervisor_async_suspended;
+    pthread_mutex_unlock(&wait_lock);
+    return active;
+}
 /* Suspension is deliberately restricted to the startup gate. It can
  * increase the count of a thread already created suspended, but it never
  * pauses guest instructions or calls pthread signals on a running thread.
  * The gate and its count are protected by wait_lock. */
 static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
 {
+    pthread_mutex_lock(&supervisor_gate_lock);
+    const nt_status asynchronous = async_suspend_guest_thread(handle, previous);
+    if (asynchronous == NT_STATUS_SUCCESS) {
+        pthread_mutex_unlock(&supervisor_gate_lock);
+        return NT_STATUS_SUCCESS;
+    }
+    /* If the trusted supervisor is unavailable or the target is in
+     * HOST/unsafe state, retain the preexisting cooperative protocol. */
     pthread_mutex_lock(&wait_lock);
     struct waitable *thread = find_waitable(handle);
     nt_status status = NT_STATUS_SUCCESS;
@@ -2642,6 +2791,7 @@ static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
         }
     }
     pthread_mutex_unlock(&wait_lock);
+    pthread_mutex_unlock(&supervisor_gate_lock);
     return status;
 }
 
@@ -2661,6 +2811,14 @@ nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous)
 
 static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool alert)
 {
+    pthread_mutex_lock(&supervisor_gate_lock);
+    bool handled = false;
+    const nt_status asynchronous =
+        async_resume_guest_thread(handle, previous, alert, &handled);
+    if (handled) {
+        pthread_mutex_unlock(&supervisor_gate_lock);
+        return asynchronous;
+    }
     pthread_mutex_lock(&wait_lock);
     struct waitable *thread = find_waitable(handle);
     nt_status status = NT_STATUS_SUCCESS;
@@ -2713,6 +2871,7 @@ static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool 
         }
     }
     pthread_mutex_unlock(&wait_lock);
+    pthread_mutex_unlock(&supervisor_gate_lock);
     return status;
 }
 
@@ -2758,6 +2917,23 @@ static nt_status get_guest_thread_context(uintptr_t handle, struct nt_context64 
         (requested & ~(CONTEXT_AMD64 | CONTEXT_CORE_GROUPS)) != 0)
         return NT_STATUS_INVALID_PARAMETER;
 
+    pthread_mutex_lock(&supervisor_gate_lock);
+    if (async_context_active(handle)) {
+        struct nt_broker_thread_info identity = {0};
+        uint64_t capability = 0;
+        nt_status status = NT_STATUS_NOT_SUPPORTED;
+        if (nt_runtime_supervisor_open_thread_handle(handle,
+                THREAD_GET_CONTEXT, &identity, &capability)) {
+            _Alignas(16) struct nt_context64 snapshot = {0};
+            snapshot.flags = requested;
+            status = nt_broker_client_supervisor_get_context(capability, &snapshot);
+            (void)nt_broker_client_supervisor_close(capability);
+            if (status == NT_STATUS_SUCCESS) *output = snapshot;
+        }
+        pthread_mutex_unlock(&supervisor_gate_lock);
+        return status;
+    }
+    pthread_mutex_unlock(&supervisor_gate_lock);
     pthread_mutex_lock(&wait_lock);
     struct waitable *entry = find_waitable(handle);
     nt_status result = NT_STATUS_SUCCESS;
@@ -2811,6 +2987,20 @@ nt_status NT_MS_ABI nt_NtSetContextThread(uintptr_t handle, const struct nt_cont
         return NT_STATUS_ACCESS_VIOLATION;
     if (((uintptr_t)context & 15u) != 0)
         return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&supervisor_gate_lock);
+    if (async_context_active(handle)) {
+        struct nt_broker_thread_info identity = {0};
+        uint64_t capability = 0;
+        nt_status status = NT_STATUS_NOT_SUPPORTED;
+        if (nt_runtime_supervisor_open_thread_handle(handle,
+                THREAD_SET_CONTEXT, &identity, &capability)) {
+            status = nt_broker_client_supervisor_set_context(capability, context);
+            (void)nt_broker_client_supervisor_close(capability);
+        }
+        pthread_mutex_unlock(&supervisor_gate_lock);
+        return status;
+    }
+    pthread_mutex_unlock(&supervisor_gate_lock);
     pthread_mutex_lock(&wait_lock);
     struct waitable *entry = find_waitable(handle);
     nt_status result = NT_STATUS_NOT_SUPPORTED;
@@ -4409,6 +4599,9 @@ void NT_MS_ABI nt_ExitThread(uint32_t code)
 {
     if (running_thread != NULL) {
         thread_result = code;
+        /* This skips the import gate's ordinary return epilogue and may
+         * skip native frames. Never claim this thread suspendible again. */
+        nt_guest_boundary_mark_nonlocal_transfer();
         siglongjmp(thread_exit, 1);
     }
     nt_runtime_run_fls_cleanup();

@@ -19,6 +19,10 @@ struct nt_thread_supervisor {
     int pidfd;
     bool seized;
     bool stopped;
+    /* Non-PTRACE_EVENT_STOP signal observed while tracing; deliver it
+     * exactly once on CONT or DETACH, never silently suppress it. */
+    int pending_signal;
+    bool exited;
 };
 
 void nt_supervisor_init(struct nt_thread_supervisor *sup);
@@ -63,5 +67,10 @@ int nt_supervisor_invoke_trusted_guest_apc(
     const struct nt_supervisor_guest_scope *scope,
     uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
     const _Atomic uint32_t *guest_completion, unsigned timeout_ms);
+/* Cleanup used on error, EOF, stale capability or process teardown. If a
+ * tracee cannot safely be detached, SIGKILL is sent ONLY through the
+ * pidfd pinned to this exact direct child. Returns 0 on clean detach,
+ * -1 if emergency termination was required or could not be confirmed. */
+int nt_supervisor_abort_child(struct nt_thread_supervisor *sup);
 void nt_supervisor_release(struct nt_thread_supervisor *sup);
 #endif
