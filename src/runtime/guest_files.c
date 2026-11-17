@@ -802,6 +802,12 @@ bool nt_runtime_refresh_dos83_path(const char *input)
     int root = duplicate_root(&relative);
     if (root < 0)
         return false;
+    if (!wal_namespace_ready(root)) {
+        const int cause = errno;
+        close(root);
+        errno = cause;
+        return false;
+    }
     int parent = open_parent(root, relative, leaf);
     const int opened_error = errno;
     close(root);
@@ -2445,6 +2451,12 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
     }
+    if (disposition != OPEN_EXISTING && !wal_namespace_ready(root)) {
+        const int cause = errno;
+        close(root);
+        nt_SetLastError(path_error(cause ? cause : EUCLEAN, true));
+        return UINTPTR_MAX;
+    }
     char leaf[NAME_MAX + 1];
     const int parent = open_parent(root, resolved, leaf);
     const int parent_error = errno;
@@ -3418,6 +3430,12 @@ static int32_t change_path(const char *input, enum path_operation operation)
     const int root = duplicate_root(&resolved);
     if (root < 0) {
         nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    if (!wal_namespace_ready(root)) {
+        const int cause = errno;
+        close(root);
+        nt_SetLastError(path_error(cause ? cause : EUCLEAN, true));
         return 0;
     }
     char leaf[NAME_MAX + 1];
@@ -5127,6 +5145,12 @@ static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
     const int root = duplicate_root(&relative);
     if (root < 0) {
         nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    if (!wal_namespace_ready(root)) {
+        const int cause = errno;
+        close(root);
+        nt_SetLastError(path_error(cause ? cause : EUCLEAN, true));
         return 0;
     }
     const int fd = confined_open(root, relative, O_RDONLY, 0);
