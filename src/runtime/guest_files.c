@@ -3385,8 +3385,8 @@ static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
     const int source_error = errno;
     const int destination_parent = open_parent(root, resolved_destination, destination_leaf);
     const int destination_error = errno;
-    close(root);
     if (source_parent < 0 || destination_parent < 0) {
+        close(root);
         if (source_parent >= 0)
             close(source_parent);
         if (destination_parent >= 0)
@@ -3461,7 +3461,11 @@ static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
                             info.st_ino == target.st_ino &&
                             strcmp(source_leaf, rename_leaf) != 0 &&
                             strcmp(rename_leaf, destination_leaf) == 0;
-                        if (hardlink_noop) {
+                        const bool same_entry_noop =
+                            exists == 0 && info.st_dev == target.st_dev &&
+                            info.st_ino == target.st_ino &&
+                            strcmp(source_leaf, rename_leaf) == 0;
+                        if (hardlink_noop || same_entry_noop) {
                             status = 0;
                             finish_renamed_paths(updated, false);
                         } else {
@@ -3469,7 +3473,9 @@ static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
                             const bool replacing = exists == 0 &&
                                 (info.st_dev != target.st_dev ||
                                  info.st_ino != target.st_ino);
-                            if (!dos83_move_begin(source_parent, source_leaf,
+                            if (!dos83_move_begin(root, resolved_source,
+                                                  resolved_destination,
+                                                  source_parent, source_leaf,
                                                   destination_parent, rename_leaf,
                                                   &info, replacing, &transaction)) {
                                 status = -1;
@@ -3488,8 +3494,11 @@ static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
                                               (flags & 1u) == 0 ? RENAME_NOREPLACE : 0);
                                 }
                                 const int rename_error = errno;
-                                dos83_move_end(&transaction, status == 0);
-                                errno = rename_error;
+                                if (!dos83_move_end(&transaction, status == 0)) {
+                                    status = -1;
+                                } else {
+                                    errno = rename_error;
+                                }
                             }
                             const int rename_error = errno;
                             finish_renamed_paths(updated, status == 0);
@@ -3510,6 +3519,7 @@ static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
     pthread_mutex_unlock(&file_lock);
     close(source_parent);
     close(destination_parent);
+    close(root);
     if (status != 0)
         nt_SetLastError(path_error(error, false));
     return status == 0;
