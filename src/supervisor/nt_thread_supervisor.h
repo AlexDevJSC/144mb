@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/user.h>
+#include "ntnative/guest_boundary.h"
 
 /* Experimental Linux AMD64 supervisor, not a Win32 API implementation.
  * Only a direct, live child of this caller can be supervised; `tid` must
@@ -30,5 +31,37 @@ int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value);
 int nt_supervisor_continue(struct nt_thread_supervisor *sup);
 /* Detach while stopped; does not kill or wait for the child. */
 int nt_supervisor_detach(struct nt_thread_supervisor *sup);
+/* Read-only supervisor-side description: only call with a trustworthy
+ * supervisor-owned mapping of the child's boundary state. Exact TID
+ * ownership is independently checked by nt_supervisor_seize_child. */
+struct nt_supervisor_guest_scope {
+    const struct nt_guest_boundary *boundary;
+    uintptr_t code_begin, code_end, teb;
+};
+
+/* Experimental fail-closed guest stop: the target MUST be in guest code
+ * with the correct TEB, outside the host critical state. If ptrace stopped
+ * it in the host, the function immediately resumes it and returns EBUSY.
+ * No Win32 API is routed through this path until guest/host transitions
+ * can be mediated for every relevant import and callback. */
+int nt_supervisor_interrupt_guest(struct nt_thread_supervisor *sup,
+                                  const struct nt_supervisor_guest_scope *scope,
+                                  unsigned timeout_ms, struct user_regs_struct *out);
+int nt_supervisor_get_guest_context(struct nt_thread_supervisor *sup,
+                                    const struct nt_supervisor_guest_scope *scope,
+                                    struct user_regs_struct *out);
+int nt_supervisor_set_guest_rax(struct nt_thread_supervisor *sup,
+                                const struct nt_supervisor_guest_scope *scope,
+                                uint64_t value);
+/* Trusted PE-only APC proof: inject a synthetic ms_abi callback on a
+ * dedicated, already-mapped guest stack, intercept its deliberate INT3,
+ * restore kernel-supplied general registers AND full NT_X86_XSTATE, then
+ * resume at the original interrupted PE instruction. Not a general
+ * NtQueueApcThreadEx implementation. No host locks/callback nesting. */
+int nt_supervisor_invoke_trusted_guest_apc(
+    struct nt_thread_supervisor *sup,
+    const struct nt_supervisor_guest_scope *scope,
+    uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
+    const _Atomic uint32_t *guest_completion, unsigned timeout_ms);
 void nt_supervisor_release(struct nt_thread_supervisor *sup);
 #endif

@@ -152,6 +152,175 @@ int nt_supervisor_detach(struct nt_thread_supervisor *sup)
     return 0;
 }
 
+
+/* Check an already-stopped, real Linux AMD64 CPU context. The phase is a
+ * trusted boundary protocol, *not* sufficient proof on its own: verify
+ * actual RIP and GS_BASE supplied by the kernel. Do not read guest memory
+ * or take locks in the tracee while it is stopped. */
+int nt_supervisor_get_guest_context(struct nt_thread_supervisor *sup,
+                                    const struct nt_supervisor_guest_scope *scope,
+                                    struct user_regs_struct *out)
+{
+    if (!scope || !scope->boundary || !out || scope->code_begin == 0 ||
+        scope->code_end <= scope->code_begin || scope->teb == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    const uint32_t transition_before =
+        atomic_load_explicit(&scope->boundary->transition, memory_order_acquire);
+    const uint32_t phase_before =
+        atomic_load_explicit(&scope->boundary->phase, memory_order_acquire);
+    if (nt_supervisor_get_registers(sup, out))
+        return -1;
+    const uint32_t phase_after =
+        atomic_load_explicit(&scope->boundary->phase, memory_order_acquire);
+    const uint32_t transition_after =
+        atomic_load_explicit(&scope->boundary->transition, memory_order_acquire);
+    if (phase_before != NT_GUEST_BOUNDARY_GUEST ||
+        phase_after != NT_GUEST_BOUNDARY_GUEST ||
+        transition_before != transition_after ||
+        out->rip < scope->code_begin || out->rip >= scope->code_end ||
+        out->rsp == 0 || out->gs_base != scope->teb) {
+        errno = EBUSY;
+        return -1;
+    }
+    return 0;
+}
+
+int nt_supervisor_interrupt_guest(struct nt_thread_supervisor *sup,
+                                  const struct nt_supervisor_guest_scope *scope,
+                                  unsigned timeout_ms, struct user_regs_struct *out)
+{
+    if (!out || !scope || !scope->boundary) { errno = EINVAL; return -1; }
+    if (nt_supervisor_interrupt(sup, timeout_ms))
+        return -1;
+    if (nt_supervisor_get_guest_context(sup, scope, out) == 0)
+        return 0;
+    /* A host transition may hold a mutex: never report a successful
+     * suspension and never leave it stopped. Return the original failure
+     * only if PTRACE_CONT succeeds. On resume error, keep failure visible
+     * and let the caller terminate its own child, not continue unsafely. */
+    const int saved = errno;
+    if (nt_supervisor_continue(sup))
+        return -1;
+    errno = saved;
+    return -1;
+}
+
+int nt_supervisor_set_guest_rax(struct nt_thread_supervisor *sup,
+                                const struct nt_supervisor_guest_scope *scope,
+                                uint64_t value)
+{
+    struct user_regs_struct regs;
+    if (nt_supervisor_get_guest_context(sup, scope, &regs))
+        return -1;
+    return nt_supervisor_set_rax(sup, value);
+}
+
+
+/* INT3-terminated, trusted-fixture-only special APC proof. A complete
+ * register+XSTATE round trip is required: restoring integer registers
+ * alone after a callback would silently corrupt interrupted AVX code.
+ * This is not safe for arbitrary Windows images, SEH, or host callbacks;
+ * only a reviewed, import-free PE with an isolated APC stack may call it. */
+int nt_supervisor_invoke_trusted_guest_apc(
+    struct nt_thread_supervisor *sup,
+    const struct nt_supervisor_guest_scope *scope,
+    uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
+    const _Atomic uint32_t *guest_completion, unsigned timeout_ms)
+{
+    if (!sup || !sup->stopped || !scope || !guest_completion ||
+        guest_entry < scope->code_begin || guest_entry >= scope->code_end ||
+        guest_stack_top < (uintptr_t)0x10000 || timeout_ms == 0 ||
+        timeout_ms > 10000u) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct user_regs_struct original;
+    if (nt_supervisor_get_guest_context(sup, scope, &original))
+        return -1;
+    if ((original.eflags & UINT64_C(0x100)) != 0) {
+        /* Single-step/debugger nested execution is outside this contract. */
+        errno = ENOTSUP;
+        return -1;
+    }
+    const uint32_t before =
+        atomic_load_explicit(guest_completion, memory_order_acquire);
+    /* Bound state capture by 64 KiB, aligned for XSAVE. An unavailable
+     * XSTATE GET/SET is a hard failure; do not silently degrade to FPREGS. */
+    _Alignas(64) unsigned char xstate[65536];
+    struct iovec state = {.iov_base = xstate, .iov_len = sizeof(xstate)};
+    if (ptrace(PTRACE_GETREGSET, sup->tid, (void *)(uintptr_t)NT_X86_XSTATE,
+               &state) == -1)
+        return -1;
+    if (state.iov_len < 512 || state.iov_len > sizeof(xstate)) {
+        errno = EPROTO;
+        return -1;
+    }
+    struct iovec restore = {.iov_base = xstate, .iov_len = state.iov_len};
+    /* Prove that this kernel accepts restoring the full xstate BEFORE
+     * changing the guest's PC; never begin injection on partial support. */
+    if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_X86_XSTATE,
+               &restore) == -1)
+        return -1;
+
+    struct user_regs_struct inserted = original;
+    inserted.rip = (uint64_t)guest_entry;
+    /* MS x64 entry: RSP%16==8, with 32 bytes shadow space above RSP.
+     * The test owns a separate >=64-KiB mapped guest stack. */
+    inserted.rsp = ((uint64_t)guest_stack_top & ~UINT64_C(15)) - UINT64_C(72);
+    inserted.rcx = (uint64_t)guest_argument;
+    struct iovec gpr = {.iov_base = &inserted, .iov_len = sizeof(inserted)};
+    if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_PRSTATUS,
+               &gpr) == -1)
+        return -1;
+    if (nt_supervisor_continue(sup))
+        return -1;
+
+    const uint64_t deadline = mono_ms() + timeout_ms;
+    for (;;) {
+        int status = 0;
+        pid_t observed = waitpid(sup->tid, &status, __WALL | WNOHANG);
+        if (observed == sup->tid) {
+            if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP &&
+                ((unsigned)status >> 16) == 0) {
+                sup->stopped = true;
+                struct user_regs_struct trap;
+                if (nt_supervisor_get_guest_context(sup, scope, &trap))
+                    return -1;
+                if (atomic_load_explicit(guest_completion, memory_order_acquire) != before + 1) {
+                    errno = EPROTO;
+                    return -1;
+                }
+                /* INT3 has been intercepted, never deliver SIGTRAP to
+                 * the guest. Restore XSTATE before original integer regs. */
+                restore.iov_len = state.iov_len;
+                if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_X86_XSTATE,
+                           &restore) == -1)
+                    return -1;
+                gpr.iov_base = &original;
+                gpr.iov_len = sizeof(original);
+                if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_PRSTATUS,
+                           &gpr) == -1)
+                    return -1;
+                return nt_supervisor_continue(sup);
+            }
+            /* Stop from any other signal, exit or ptrace event is never
+             * interpreted as APC completion or silently suppressed. */
+            errno = EPROTO;
+            return -1;
+        }
+        if (observed < 0)
+            return -1;
+        if (mono_ms() >= deadline) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        const struct timespec pause = {.tv_nsec = 1000000L};
+        (void)nanosleep(&pause, NULL);
+    }
+}
+
 void nt_supervisor_release(struct nt_thread_supervisor *sup)
 {
     if (!sup) return;

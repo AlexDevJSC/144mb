@@ -45,7 +45,7 @@ Se ha añadido una prueba reproducible que compila un **PE32+ AMD64 auténtico c
 - El padre hace `PTRACE_DETACH` antes de pedir terminación y comprueba que el PE retorna y el proceso hijo sale sin error. El test de identidad del supervisor y las rutas de error siguen siendo independientes.
 - `make check-pe-thread-supervisor` es explícito: no se añade a `make all`, `make check`, `pe-isolated-run` ni al RPM. El workflow dedicado ejecuta el test PE con y sin UBSan.
 
-Para ejecutar ambas pruebas sobre Linux AMD64 con MinGW-w64 instalado:
+Para ejecutar ambas pruebas sobre Linux AMD64 con GCC y binutils `i386pep`:
 
 ```bash
 make check-thread-supervisor
@@ -54,11 +54,113 @@ make -j2 BUILD_DIR=build-supervisor-pe-ubsan \
   CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' check-pe-thread-supervisor
 ```
 
-El script de aceptación Fedora ahora ejecuta **ambos** tests y guarda por separado `test.log`, `pe-test.log`, los códigos individuales y `result.txt`. Requiere `gcc`, `make` y `mingw64-gcc` (paquete Fedora); **nunca** necesita `sudo` para ejecutar las pruebas, alterar políticas Yama/SELinux ni adjuntarse a un proceso ajeno.
+El script de aceptación Fedora ahora ejecuta **ambos** tests y guarda por separado `test.log`, `pe-test.log`, los códigos individuales y `result.txt`. Requiere `gcc`, `make` y `binutils` con soporte PE/COFF; **nunca** necesita `sudo` para ejecutar las pruebas, alterar políticas Yama/SELinux ni adjuntarse a un proceso ajeno.
 
 **Límite de interpretación:** esto demuestra que el supervisor detiene y restaura **código PE real en un bucle aislado y sin callbacks al host**. No prueba todavía el paso seguro a `SleepEx`/Win32, la existencia de una frontera de locks general, la propagación de señales Linux, APC especiales o `SetThreadContext` para ejecutables arbitrarios. El punto de entrada recibe una estructura de prueba por RCX, es decir, una **ABI experimental distinta del punto de entrada usual de Windows**; no se modifica la ABI pública del cargador de producción. El proceso PE de este test no se lanza mediante Bubblewrap. No certificar compatibilidad general ni Fedora físico con base en la CI.
 
 **Estado porcentual:** componente 4: 96 % → 96 % (+0 pp). Aporta evidencia nueva para la arquitectura, pero no amplía todavía las APIs Win32 disponibles en programas reales.
+
+## Etapa 3 — frontera explícita guest/host y prueba de rechazo (17-11-2026)
+
+La frontera experimental se define en `include/ntnative/guest_boundary.h` con estados
+`UNREGISTERED → GUEST → HOST → GUEST → FINISHED` y contador monotónico de
+transiciones. El estado es **asesoramiento de un host de confianza, NO protección
+contra un PE arbitrario malicioso**. La autoridad real sobre el PC/GS sigue siendo
+el kernel Linux por `PTRACE_GETREGSET`.
+
+`nt_supervisor_interrupt_guest()` suspende temporalmente un TID previamente
+registrado y sólo devuelve éxito si **simultáneamente**: (a) se confirma el
+`PTRACE_EVENT_STOP`, (b) el estado indica `GUEST` con generación estable,
+(c) `RIP` está en el rango ejecutable PE autorizado,
+(d) `GS_BASE` coincide con el TEB registrado y (e) `RSP` es no nulo.
+Un rechazo de frontera intenta `PTRACE_CONT` **antes de devolver error
+`EBUSY`**. En caso de error al reanudar, el fallo no se oculta: el
+caller sólo puede destruir su propio proceso hijo controlado.
+
+`nt_supervisor_get_guest_context()` y `nt_supervisor_set_guest_rax()`
+exigen estar detenido y pasar la misma verificación, de modo que no
+puede escribirse siquiera `RAX` en un hilo detenido en host.
+Son **interfaces del supervisor de prueba**, no implementaciones nuevas
+de `GetThreadContext`/`SetThreadContext` públicas.
+
+El fixture PE32+ entra en una callback anfitriona con ABI Win64 que
+**retiene deliberadamente un mutex pthread**. El test solicita
+detención en ese instante y exige `EBUSY`, reanudación automática
+y ausencia de bloqueo; a continuación falsea el indicador de estado
+`GUEST` y repite el intento: la verificación independiente de `RIP`
+también debe rechazarlo. Finalmente se libera el mutex, el PE vuelve
+a ejecutar código de invitado y las operaciones de contexto autorizado
+siguen funcionando. Esta prueba negativa es obligatoria y no se
+sustituye por la simple ausencia de un hang.
+
+### Validación Bubblewrap/Fedora
+
+`scripts/check-pe-thread-supervisor-bwrap.sh` ejecuta el **harness y
+el PE en el mismo namespace de usuario/PID de Bubblewrap**; el
+supervisor sigue siendo el padre directo del hilo invitado. El montaje
+de laboratorio permite sólo `/usr` y el repositorio en solo lectura,
+`/proc`/`/dev` y un `/tmp` temporal. No se monta el host `/home`,
+no se permiten redes y no se exige `CAP_SYS_PTRACE`. Es un **sandbox de
+pruebas controladas**, no reemplaza la configuración del launcher
+de producción `pe-isolated-run`.
+
+Ejecutar en Fedora KDE físico, **como usuario normal**:
+
+```bash
+sudo dnf install -y gcc make binutils bubblewrap
+git switch feature/core4-guest-host-boundary-bwrap-20261117
+make -j2 check-pe-thread-supervisor
+bash scripts/fedora-thread-supervisor-acceptance.sh
+cat build/supervisor-fedora-acceptance/result.txt
+```
+
+`sudo` sólo se muestra para la instalación de paquetes, **nunca para
+ejecutar el supervisor o alterar SELinux/Yama**. Los informes guardan
+tres estados individuales: supervisor Linux, PE32+ nativo y
+PE32+ dentro de Bubblewrap. Resultado global `PASS` requiere los
+tres códigos 0. Una restricción de `ptrace`/user namespaces da
+`INCOMPLETE`/77, y no se maquilla como éxito. Otros fallos son
+`FAIL`. La ejecución de CI en un runner Ubuntu **no certifica Fedora
+físico**, y se registra por separado.
+
+### Puerta para APC y funciones Win32 reales
+
+La arquitectura demuestra el requisito necesario para contextos de
+hilos invitados en una ventana controlada, pero faltan dependencias:
+
+1. **Mediar todas las entradas PE→API anfitriona y callbacks de host→PE**:
+   publicar `HOST` **antes** de tomar locks, y `GUEST` sólo tras
+   liberarlos; evitar la llamada a cualquier callback PE bajo locks
+   internos. Una verificación de `RIP` por sí sola es insuficiente
+   si una callback vuelve a PE con un mutex del host aún adquirido.
+   El fixture prueba únicamente la transición controlada.
+2. **Supervisor hijo real del sandbox y broker autenticado**: alojar el
+   supervisor en el mismo namespace que los hilos PE reales, con mapeo
+   TID→HANDLE/identidad generacional y comprobaciones NT de derechos.
+   No leer directamente `TID` suministrados por PE ni usar `ptrace`
+   desde un hilo del mismo proceso invitado.
+3. **`SuspendThread`/`GetThreadContext`**: añadir un backend opcional
+   que traduzca `STATUS_NOT_SUPPORTED` al fallar el gate y preserve
+   los contadores actuales, validando `CONTEXT_AMD64`, flags y vida
+   de cada HANDLE. Mantener el camino cooperativo actual como fallback.
+4. **`SetThreadContext`**: no habilitar escrituras generales hasta
+   contar con captura/restauración verificada de entero, control,
+   `RFLAGS`, SIMD/FXSAVE, TLS/GS y pruebas de flujo de retorno PE.
+   El roundtrip de `RAX` del experimento no equivale a este contrato.
+5. **APC especiales**: sólo es seguro introducir ejecución de una APC
+   fuera de esperas alertables cuando exista un trampoline AMD64 que
+   preserve **todo el contexto** (incluido XSTATE requerido), alineación
+   Microsoft x64, retorno, manejo de señales, cancelación y estados
+   de desconexión. No reutilizar la cola APC normal para simularlas.
+
+Por estos motivos **no se cambia el comportamiento de las funciones
+públicas `NtQueueApcThreadEx`, `QueueUserAPC2`,
+`SuspendThread`, `GetThreadContext` ni `SetThreadContext`** en
+esta contribución. Activarlas en producción basándose sólo en el
+prototipo aumentaría el riesgo de corrupción/lockups.
+
+**Componente 4: 96 % → 96 % (+0 pp).** La evidencia estricta de la
+frontera no equivale a paridad de APIs ni a aceptación en hardware físico.
 
 ## Riesgos todavía abiertos
 

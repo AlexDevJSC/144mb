@@ -8,6 +8,7 @@ mkdir -p "$run_dir" || exit 2
 facts="$run_dir/environment.txt"
 log="$run_dir/test.log"
 pe_log="$run_dir/pe-test.log"
+bwrap_log="$run_dir/bubblewrap-test.log"
 report="$run_dir/result.txt"
 {
   printf 'REVISION='; git rev-parse HEAD 2>/dev/null || printf 'UNAVAILABLE\n'
@@ -30,10 +31,12 @@ bash scripts/check-thread-supervisor.sh 2>&1 | tee "$log"
 native_rc=${PIPESTATUS[0]}
 make -j2 check-pe-thread-supervisor 2>&1 | tee "$pe_log"
 pe_rc=${PIPESTATUS[0]}
+bash scripts/check-pe-thread-supervisor-bwrap.sh 2>&1 | tee "$bwrap_log"
+bwrap_rc=${PIPESTATUS[0]}
 set -e
-if (( native_rc != 0 && native_rc != 77 )) || (( pe_rc != 0 && pe_rc != 77 )); then
+if (( native_rc != 0 && native_rc != 77 )) || (( pe_rc != 0 && pe_rc != 77 )) || (( bwrap_rc != 0 && bwrap_rc != 77 )); then
   result=FAIL; rc=1
-elif (( native_rc == 77 || pe_rc == 77 )); then
+elif (( native_rc == 77 || pe_rc == 77 || bwrap_rc == 77 )); then
   result=INCOMPLETE; rc=77
 else
   result=PASS; rc=0
@@ -43,8 +46,10 @@ fi
   printf 'EXIT_CODE=%s\n' "$rc"
   printf 'NATIVE_EXIT_CODE=%s\n' "$native_rc"
   printf 'PE_EXIT_CODE=%s\n' "$pe_rc"
+  printf 'BUBBLEWRAP_EXIT_CODE=%s\n' "$bwrap_rc"
   printf 'NATIVE_LOG=%s\n' "$log"
   printf 'PE_LOG=%s\n' "$pe_log"
+  printf 'BUBBLEWRAP_LOG=%s\n' "$bwrap_log"
   printf 'ENVIRONMENT=%s\n' "$facts"
 } | tee "$report"
 exit "$rc"
