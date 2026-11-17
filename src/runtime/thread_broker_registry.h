@@ -56,6 +56,27 @@ bool nt_broker_query_child_thread(pid_t requester, uint64_t opaque_handle,
                                   struct nt_broker_thread_info *info);
 bool nt_broker_close_child_thread(pid_t requester, uint64_t opaque_handle);
 
+/* Control-plane capability for a thread of the REQUESTER'S OWN guest
+ * process. This does not grant Linux PID control: target must be an
+ * existing generation-pinned registered thread or the initial child
+ * identified by its pidfd. Never grant these capabilities cross-child.
+ * The READ-only probe operation additionally needs a host-side opt-in. */
+enum {
+    NT_BROKER_SUPERVISOR_SUSPEND = 0x0002u,
+    NT_BROKER_SUPERVISOR_GET_CONTEXT = 0x0008u,
+    NT_BROKER_SUPERVISOR_SET_CONTEXT = 0x0010u,
+    NT_BROKER_SUPERVISOR_ACCESS_MASK = 0x001au
+};
+bool nt_broker_supervisor_open_owned(pid_t requester, pid_t tid, uint32_t access,
+                                      uint64_t *capability,
+                                      struct nt_broker_thread_info *identity);
+bool nt_broker_supervisor_query_owned(pid_t requester, uint64_t capability,
+                                       uint32_t required_access,
+                                       struct nt_broker_thread_info *identity);
+bool nt_broker_supervisor_close_owned(pid_t requester, uint64_t capability);
+/* Revoke all capabilities at authenticated channel EOF, not only at exit. */
+void nt_broker_revoke_requester(pid_t requester);
+
 /* Actual AF_UNIX message -> kernel peer credentials/pidfd/token ->
  * registered requester -> explicitly-granted target -> handle scoped to
  * requester PID. Reads only the signed v1 query message, no raw TID.

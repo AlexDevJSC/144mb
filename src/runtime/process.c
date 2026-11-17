@@ -1,11 +1,19 @@
 /* SPDX-License-Identifier: MIT */
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "winbase.h"
 #include "winfile.h"
 #include "child_process.h"
 #include "sync.h"
+#include "thread_broker_ipc.h"
+#include "thread_broker_auth.h"
+#include "thread_broker_registry.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -453,6 +461,16 @@ const char *const *nt_runtime_guest_argv(int *count)
 }
 
 static int worker_status_fd = -1;
+/* Trusted launcher-only opt-in. No guest PE import resolves this toggle.
+ * The existing fork is the correct topology for ptrace: parent of the
+ * actual executing PE guest owns the authenticated broker and child pidfd.
+ * This works for both top-level and recursively launched PE processes. */
+static bool supervisor_ipc_requested;
+
+void nt_runtime_enable_supervisor_ipc(void)
+{
+    supervisor_ipc_requested = true;
+}
 
 static _Noreturn void finish_worker(uint32_t code)
 {
@@ -470,16 +488,84 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
     int channel[2];
     if (pipe(channel) != 0)
         return false;
+    int supervisor_socket[2] = {-1, -1};
+    uint8_t secret[16] = {0};
+    if (supervisor_ipc_requested &&
+        (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0,
+                    supervisor_socket) != 0 ||
+         !nt_thread_broker_generate_secret(secret))) {
+        close(channel[0]);
+        close(channel[1]);
+        if (supervisor_socket[0] >= 0) close(supervisor_socket[0]);
+        if (supervisor_socket[1] >= 0) close(supervisor_socket[1]);
+        return false;
+    }
     const pid_t child = fork();
     if (child == 0) {
         close(channel[0]);
         worker_status_fd = channel[1];
+        if (supervisor_ipc_requested) {
+            close(supervisor_socket[0]);
+            /* Recursive --child runs already carry their *parent's*
+             * broker socket. Never send grandchild RPCs on that inherited
+             * endpoint: the kernel sender PID would not match its peer.
+             * Detach the inherited copy and establish a fresh direct-
+             * parent connection before executing a guest instruction. */
+            nt_broker_client_detach();
+            if (!nt_broker_client_attach(supervisor_socket[1]))
+                _Exit(EXIT_FAILURE);
+        }
         finish_worker((uint32_t)entry());
     }
     close(channel[1]);
+    if (supervisor_socket[1] >= 0)
+        close(supervisor_socket[1]);
     if (child < 0) {
         close(channel[0]);
+        if (supervisor_socket[0] >= 0) close(supervisor_socket[0]);
+        memset(secret, 0, sizeof(secret));
         return false;
+    }
+    uint64_t generation = 0;
+    int pidfd = -1;
+    bool broker_ready = !supervisor_ipc_requested;
+    if (supervisor_ipc_requested) {
+#if defined(SYS_pidfd_open)
+        pidfd = (int)syscall(SYS_pidfd_open, child, 0);
+#endif
+        if (pidfd >= 0 &&
+            nt_broker_register_child(child, pidfd, getuid(), getgid(),
+                                     secret, &generation)) {
+            struct nt_thread_broker_registered_peer peer = {
+                .child_pid = child, .uid = getuid(), .gid = getgid(),
+                .child_pidfd = pidfd,
+                .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION
+            };
+            memcpy(peer.secret, secret, sizeof(peer.secret));
+            if (nt_broker_server_start(supervisor_socket[0], &peer)) {
+                /* Detached server owns fd; send handshake from this
+                 * parent before the child is permitted to run PE code. */
+                broker_ready = nt_broker_server_handshake(supervisor_socket[0], secret);
+                if (!broker_ready)
+                    (void)shutdown(supervisor_socket[0], SHUT_RDWR);
+            } else {
+                close(supervisor_socket[0]);
+            }
+        } else {
+            close(supervisor_socket[0]);
+        }
+        memset(secret, 0, sizeof(secret));
+        if (!broker_ready) {
+            /* The failing topology has a live direct child, not a
+             * guest-supplied PID. A child that cannot authenticate is
+             * never allowed to execute arbitrary PE instructions. */
+#if defined(SYS_pidfd_send_signal)
+            if (pidfd >= 0)
+                (void)syscall(SYS_pidfd_send_signal, pidfd, SIGKILL, NULL, 0);
+            else
+#endif
+                (void)kill(child, SIGKILL);
+        }
     }
     uint32_t code;
     ssize_t length;
@@ -492,7 +578,13 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
     do {
         waited = waitpid(child, &status, 0);
     } while (waited < 0 && errno == EINTR);
-    if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0 || length != sizeof(code))
+    if (generation)
+        nt_broker_unregister_child(child, generation);
+    if (pidfd >= 0)
+        close(pidfd);
+    if (!broker_ready ||
+        waited != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0 || length != sizeof(code))
         return false;
     *exit_code = code;
     return true;

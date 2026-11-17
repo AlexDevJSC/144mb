@@ -42,6 +42,7 @@ struct broker_capability {
     int thread_slot;
     uint64_t thread_generation;
     bool active;
+    bool supervisor; /* isolated from query-only broker capabilities */
 };
 static pthread_mutex_t broker_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct registered_child children[MAX_REGISTERED_CHILDREN];
@@ -375,7 +376,7 @@ bool nt_broker_query_child_thread(pid_t requester, uint64_t opaque_handle,
     pthread_mutex_lock(&broker_lock);
     struct broker_capability *cap = find_capability_locked(opaque_handle);
     bool ok = false;
-    if (cap != NULL && cap->requester == requester &&
+    if (cap != NULL && !cap->supervisor && cap->requester == requester &&
         (required_access & ~cap->access) == 0) {
         const struct registered_child *target = &children[cap->target_slot];
         if (target->active && target->generation == cap->generation &&
@@ -409,6 +410,119 @@ bool nt_broker_close_child_thread(pid_t requester, uint64_t opaque_handle)
         cap->active = false;
     pthread_mutex_unlock(&broker_lock);
     return ok;
+}
+
+
+/* Control-plane only: no arbitrary host TID and no cross-child rights.
+ * A generation-pinned /proc task inode is revalidated on EVERY access.
+ * A newly created thread with the same integer TID cannot inherit rights
+ * from a stale capability. The owner child is independently pinned by its
+ * Linux pidfd and must have been registered by the trusted launcher. */
+static bool supervisor_rights(uint32_t access)
+{
+    return access != 0 && (access & ~NT_BROKER_SUPERVISOR_ACCESS_MASK) == 0;
+}
+bool nt_broker_supervisor_open_owned(pid_t requester, pid_t tid, uint32_t access,
+                                      uint64_t *capability,
+                                      struct nt_broker_thread_info *identity)
+{
+    if (!supervisor_rights(access) || !capability || !identity || requester <= 0 || tid <= 0)
+        return false;
+    pthread_mutex_lock(&broker_lock);
+    const int child = find_child_locked(requester);
+    int thread_slot = -1;
+    if (tid != requester) {
+        for (unsigned i = 0; i < MAX_REGISTERED_THREADS; ++i)
+            if (threads[i].active && threads[i].owner == requester &&
+                threads[i].tid == tid && live_owned_task(&threads[i])) {
+                thread_slot = (int)i;
+                break;
+            }
+    }
+    const bool permitted = active_child_locked(child) &&
+        (tid == requester || thread_slot >= 0);
+    int slot = -1;
+    if (permitted && next_handle <= UINT64_MAX - 4)
+        for (unsigned i = 0; i < MAX_BROKER_CAPABILITIES; ++i)
+            if (!capabilities[i].active) { slot = (int)i; break; }
+    if (slot >= 0) {
+        const uint64_t generation = thread_slot >= 0 ?
+            threads[thread_slot].generation : children[child].generation;
+        capabilities[slot] = (struct broker_capability){
+            .handle = next_handle, .generation = children[child].generation,
+            .requester = requester, .target_slot = (unsigned)child,
+            .thread_slot = thread_slot, .thread_generation = generation,
+            .access = access, .active = true, .supervisor = true
+        };
+        *capability = next_handle;
+        *identity = (struct nt_broker_thread_info){
+            .guest_process_id = (uint32_t)requester,
+            .guest_thread_id = (uint32_t)tid,
+            .generation = generation
+        };
+        next_handle += 4;
+    }
+    pthread_mutex_unlock(&broker_lock);
+    return slot >= 0;
+}
+
+bool nt_broker_supervisor_query_owned(pid_t requester, uint64_t capability,
+                                       uint32_t required_access,
+                                       struct nt_broker_thread_info *identity)
+{
+    if (!supervisor_rights(required_access) || !identity)
+        return false;
+    pthread_mutex_lock(&broker_lock);
+    struct broker_capability *cap = find_capability_locked(capability);
+    bool okay = cap != NULL && cap->active && cap->supervisor &&
+        cap->requester == requester &&
+        (required_access & ~cap->access) == 0 &&
+        cap->target_slot < MAX_REGISTERED_CHILDREN;
+    if (okay) {
+        const struct registered_child *child = &children[cap->target_slot];
+        okay = child->active && child->pid == requester &&
+            child->generation == cap->generation && alive_pidfd(child->pidfd);
+        if (okay && cap->thread_slot >= 0) {
+            const struct registered_thread *thread = &threads[cap->thread_slot];
+            okay = thread->active && thread->owner == requester &&
+                thread->generation == cap->thread_generation &&
+                live_owned_task(thread);
+            if (okay)
+                *identity = (struct nt_broker_thread_info){
+                    .guest_process_id = (uint32_t)requester,
+                    .guest_thread_id = (uint32_t)thread->tid,
+                    .generation = thread->generation
+                };
+        } else if (okay) {
+            *identity = (struct nt_broker_thread_info){
+                .guest_process_id = (uint32_t)requester,
+                .guest_thread_id = (uint32_t)requester,
+                .generation = child->generation
+            };
+        }
+    }
+    pthread_mutex_unlock(&broker_lock);
+    return okay;
+}
+
+bool nt_broker_supervisor_close_owned(pid_t requester, uint64_t capability)
+{
+    pthread_mutex_lock(&broker_lock);
+    struct broker_capability *cap = find_capability_locked(capability);
+    const bool okay = cap != NULL && cap->active && cap->supervisor &&
+                      cap->requester == requester;
+    if (okay)
+        cap->active = false;
+    pthread_mutex_unlock(&broker_lock);
+    return okay;
+}
+void nt_broker_revoke_requester(pid_t requester)
+{
+    pthread_mutex_lock(&broker_lock);
+    for (size_t i = 0; i < MAX_BROKER_CAPABILITIES; ++i)
+        if (capabilities[i].active && capabilities[i].requester == requester)
+            capabilities[i].active = false;
+    pthread_mutex_unlock(&broker_lock);
 }
 
 /* Wire authentication is performed independently of the trusted registry:
