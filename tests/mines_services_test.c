@@ -1196,11 +1196,17 @@ static void check_all_grant_wal_preflight(void)
     CHECK(nt_runtime_recover_all_dos83_grants());
 
     for (size_t i = 1; i < 4; ++i) {
-        char wal[768];
+        /* The real all-grant preflight does not create a journal in a
+         * clean root; materialize an intentionally bad, private fixture. */
+        char registry[640], wal[768];
+        CHECK(snprintf(registry, sizeof(registry),
+                       "%s/:ntnative-file-leases",
+                       paths[i]) < (int)sizeof(registry));
+        CHECK(mkdir(registry, 0700) == 0);
         CHECK(snprintf(wal, sizeof(wal),
-                       "%s/:ntnative-file-leases/dos83-rename-v1.wal",
-                       paths[i]) < (int)sizeof(wal));
-        int fd = open(wal, O_WRONLY | O_TRUNC | O_CLOEXEC);
+                       "%s/dos83-rename-v1.wal",
+                       registry) < (int)sizeof(wal));
+        int fd = open(wal, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
         CHECK(fd >= 0 && write(fd, "BAD", 3) == 3 && fsync(fd) == 0 &&
               close(fd) == 0);
         errno = 0;
