@@ -19,10 +19,17 @@ static bool shadow_stack_unsafe(void)
 #ifdef NT_TEST_FORCE_CET_SHSTK
     return true;
 #elif defined(SYS_arch_prctl)
+    /* libc CRT exports can legitimately inspect errno. A successful
+     * boundary check must not leave EINVAL from an older Linux kernel
+     * visible to the Windows guest as a spurious CRT failure. */
+    const int prior_errno = errno;
     unsigned long state = 0;
-    if (syscall(SYS_arch_prctl, 0x5005u, &state) == 0)
+    const long status = syscall(SYS_arch_prctl, 0x5005u, &state);
+    const int probe_errno = errno;
+    errno = prior_errno;
+    if (status == 0)
         return state != 0;
-    return errno != EINVAL && errno != ENOSYS;
+    return probe_errno != EINVAL && probe_errno != ENOSYS;
 #else
     return true;
 #endif
