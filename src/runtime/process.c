@@ -512,12 +512,13 @@ static bool install_supervised_cet_seccomp(void)
          * ABI to bypass the arch_prctl argument check. */
         BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, UINT32_C(0x40000000), 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_arch_prctl, 0, 5),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_arch_prctl, 0, 4),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  offsetof(struct seccomp_data, args[0])),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, UINT32_C(0x5005), 3, 0),
-        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, UINT32_C(0x5000), 0, 2),
-        BPF_JUMP(BPF_JMP | BPF_JGT | BPF_K, UINT32_C(0x50ff), 1, 0),
+        /* Permit the kernel-owned read-only status query only. Unknown
+         * future codes in the SHSTK namespace remain denied as well. */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, UINT32_C(0x5005), 2, 0),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, UINT32_C(0x5000), 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
     };
