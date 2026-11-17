@@ -2615,8 +2615,10 @@ static bool async_suspend_candidate(uintptr_t handle)
 /* All asynchronous nested counts must be acknowledged by the parent
  * supervisor, not fabricated by a local fallback. The parent has the
  * authoritative NT suspension count and owns ptrace for that TID. */
-static nt_status async_suspend_guest_thread(uintptr_t handle, uint32_t *previous)
+static nt_status async_suspend_guest_thread(uintptr_t handle, uint32_t *previous,
+                                            bool *attempted_remote_mutation)
 {
+    *attempted_remote_mutation = false;
     uint32_t local_count = 0;
     bool previously_suspended = false;
     pthread_mutex_lock(&wait_lock);
@@ -2641,6 +2643,10 @@ static nt_status async_suspend_guest_thread(uintptr_t handle, uint32_t *previous
             THREAD_SUSPEND_RESUME, &identity, &capability))
         return NT_STATUS_NOT_SUPPORTED;
     uint32_t remote_previous = UINT32_MAX;
+    /* Even if the client loses its ACK after the kernel stop, never
+     * fall back within this SAME call to a second cooperative suspend.
+     * The parent must first resolve the ambiguous ptrace operation. */
+    *attempted_remote_mutation = true;
     nt_status result =
         nt_broker_client_supervisor_suspend(capability, &remote_previous);
     if (result == NT_STATUS_SUCCESS) {
@@ -2761,14 +2767,16 @@ static bool async_context_active(uintptr_t handle)
 static nt_status suspend_guest_thread(uintptr_t handle, uint32_t *previous)
 {
     pthread_mutex_lock(&supervisor_gate_lock);
-    const nt_status asynchronous = async_suspend_guest_thread(handle, previous);
+    bool remote_mutation_attempted = false;
+    const nt_status asynchronous =
+        async_suspend_guest_thread(handle, previous, &remote_mutation_attempted);
     if (asynchronous == NT_STATUS_SUCCESS) {
         pthread_mutex_unlock(&supervisor_gate_lock);
         return NT_STATUS_SUCCESS;
     }
     /* A previously ptrace-stopped target may NEVER be counted locally
      * after any failed, late or missing parent ACK. */
-    if (async_context_active(handle)) {
+    if (remote_mutation_attempted || async_context_active(handle)) {
         pthread_mutex_unlock(&supervisor_gate_lock);
         return asynchronous;
     }
