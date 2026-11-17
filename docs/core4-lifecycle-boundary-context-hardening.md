@@ -169,8 +169,8 @@ terminación.
 La import gate vuelve a consultar Shadow Stack antes de su epílogo.
 Adicionalmente, **sólo en el fork con concesión HOST explícita para
 control asíncrono**, se instala un filtro seccomp obligatorio que
-rechaza `arch_prctl` de mutación SHSTK (códigos 0x5000–0x50ff,
-excepto consulta `ARCH_SHSTK_STATUS`). El filtro rechaza ABI de
+rechaza `arch_prctl` de mutación SHSTK (códigos mayores o iguales a 0x5000,
+excepto la consulta de sólo lectura `ARCH_SHSTK_STATUS`). El filtro rechaza ABI de
 syscall x32 y requiere `PR_SET_NO_NEW_PRIVS`; si no puede instalarse,
 el hijo NO ejecuta el fixture. No se desactiva el CET existente.
 
