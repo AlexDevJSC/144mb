@@ -222,8 +222,10 @@ nt_status nt_supervisor_control_server_call(
     }
     case NT_BROKER_RPC_SUP_SET_CONTEXT:
         result = nt_supervisor_nt_set_context(&state->nt, input);
-        if (state->nt.unsafe_register_state)
+        if (state->nt.unsafe_register_state) {
             release_state(state); /* PIDFD kill; never unsafe DETACH. */
+            result = NT_STATUS_THREAD_IS_TERMINATING;
+        }
         break;
     default: break;
     }
