@@ -3,7 +3,7 @@
 #include "thread_broker_ipc.h"
 #include "ntnative/guest_boundary_runtime.h"
 #include "../supervisor/nt_thread_supervisor.h"
-#include "../supervisor/nt_supervisor_nt_bridge.h"
+#include "thread_supervisor_control_server.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -19,8 +19,8 @@
 #include <signal.h>
 #include <unistd.h>
 
-_Static_assert(sizeof(struct nt_broker_rpc) == 1280, "private RPC v4 layout");
-_Static_assert(sizeof(struct nt_thread_broker_reply) == 1264, "private reply v4 layout");
+_Static_assert(sizeof(struct nt_broker_rpc) == 48, "private RPC layout");
+_Static_assert(sizeof(struct nt_thread_broker_reply) == 32, "private reply layout");
 _Static_assert(sizeof(struct nt_broker_hello) == 24, "private hello layout");
 
 static pthread_mutex_t client_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -131,7 +131,7 @@ bool nt_broker_server_handshake(int fd, const uint8_t secret[16])
 
 static bool receive_authenticated_rpc(int fd,
     const struct nt_thread_broker_registered_peer *peer,
-    struct nt_broker_rpc *out)
+    struct nt_broker_context_request *out, bool *has_context)
 {
     if (!live_child(peer) || !fd_seqpacket(fd))
         return false;
@@ -139,8 +139,8 @@ static bool receive_authenticated_rpc(int fd,
     if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) != 0 ||
         !read_ready(fd, POLLIN))
         return false;
-    struct nt_broker_rpc request = {0};
-    struct iovec body = {.iov_base = &request, .iov_len = sizeof(request)};
+    struct nt_broker_context_request packet = {0};
+    struct iovec body = {.iov_base = &packet, .iov_len = sizeof(packet)};
     union {
         struct cmsghdr align;
         char storage[CMSG_SPACE(sizeof(struct ucred))];
@@ -151,7 +151,11 @@ static bool receive_authenticated_rpc(int fd,
         .msg_controllen = sizeof(ancillary.storage)
     };
     const ssize_t read_bytes = recvmsg(fd, &message, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
-    if (read_bytes != (ssize_t)sizeof(request) ||
+    const bool extended = read_bytes == (ssize_t)sizeof(packet);
+    const struct nt_broker_rpc request = packet.request;
+    if ((read_bytes != (ssize_t)sizeof(request) && !extended) ||
+        (extended && request.operation != NT_BROKER_RPC_SUP_SET_CONTEXT) ||
+        (!extended && request.operation == NT_BROKER_RPC_SUP_SET_CONTEXT) ||
         (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0)
         return false;
     unsigned credential_count = 0;
@@ -175,7 +179,8 @@ static bool receive_authenticated_rpc(int fd,
         request.magic != NT_THREAD_BROKER_MAGIC ||
         request.version != NT_BROKER_RPC_VERSION || request.reserved != 0)
         return false;
-    *out = request;
+    *out = packet;
+    *has_context = extended;
     return true;
 }
 
@@ -274,136 +279,14 @@ static bool supervisor_guest_probe(const struct nt_thread_broker_registered_peer
     return okay;
 }
 
-/* One owner-thread (the authenticated parent broker) serializes all
- * mutation of these controls. Tracer objects are never shared with the
- * child or retained in guest memory. State is canonical PER TID, not
- * per HANDLE, exactly as Windows suspend counts are. */
-enum { MAX_SUPERVISED_THREADS = 256 };
-struct controlled_guest {
-    bool active;
-    uint32_t tid;
-    uint64_t generation;
-    struct nt_thread_supervisor tracer;
-    struct nt_supervisor_nt_thread nt;
-};
-static void release_control(struct controlled_guest *slot)
-{
-    if (!slot->active) return;
-    nt_supervisor_release(&slot->tracer);
-    *slot = (struct controlled_guest){0};
-}
-static struct controlled_guest *find_control(struct controlled_guest *controls,
-                                            uint32_t tid, uint64_t generation)
-{
-    for (unsigned i = 0; i < MAX_SUPERVISED_THREADS; ++i)
-        if (controls[i].active && controls[i].tid == tid &&
-            controls[i].generation == generation)
-            return &controls[i];
-    return NULL;
-}
-static struct controlled_guest *new_control(struct controlled_guest *controls)
-{
-    for (unsigned i = 0; i < MAX_SUPERVISED_THREADS; ++i)
-        if (!controls[i].active)
-            return &controls[i];
-    return NULL;
-}
-static nt_status create_control(struct controlled_guest *slot,
-    const struct nt_thread_broker_registered_peer *peer,
-    const struct nt_broker_thread_info *identity)
-{
-    if (!slot || !peer->guest_session || !peer->trusted_code_begin ||
-        peer->trusted_code_end <= peer->trusted_code_begin)
-        return NT_STATUS_NOT_SUPPORTED;
-    const struct nt_guest_boundary_slot *boundary =
-        nt_guest_boundary_find_thread(peer->guest_session,
-                                      (pid_t)identity->guest_thread_id);
-    if (!boundary) return NT_STATUS_NOT_SUPPORTED;
-    const uintptr_t teb = atomic_load_explicit(&boundary->teb, memory_order_acquire);
-    if (!teb) return NT_STATUS_NOT_SUPPORTED;
-    nt_supervisor_init(&slot->tracer);
-    if (nt_supervisor_seize_child(&slot->tracer, peer->child_pid,
-                                  (pid_t)identity->guest_thread_id))
-        return errno == EACCES || errno == EPERM ? NT_STATUS_ACCESS_DENIED :
-               NT_STATUS_NOT_SUPPORTED;
-    slot->tid = identity->guest_thread_id;
-    slot->generation = identity->generation;
-    slot->active = true;
-    slot->nt = (struct nt_supervisor_nt_thread){
-        .tracer = &slot->tracer,
-        .scope = {
-            .boundary = &boundary->boundary,
-            .teb = teb,
-            .code_begin = peer->trusted_code_begin,
-            .code_end = peer->trusted_code_end
-        },
-        .granted_access = NT_SUP_THREAD_SUSPEND_RESUME |
-                          NT_SUP_THREAD_GET_CONTEXT |
-                          NT_SUP_THREAD_SET_CONTEXT
-    };
-    return NT_STATUS_SUCCESS;
-}
-static nt_status operate_control(struct controlled_guest *controls,
-    const struct nt_thread_broker_registered_peer *peer,
-    const struct nt_broker_rpc *request, struct nt_thread_broker_reply *reply,
-    const struct nt_broker_thread_info *identity)
-{
-    struct controlled_guest *slot =
-        find_control(controls, identity->guest_thread_id, identity->generation);
-    switch (request->operation) {
-    case NT_BROKER_RPC_SUP_SUSPEND: {
-        if (!slot) {
-            slot = new_control(controls);
-            nt_status status = create_control(slot, peer, identity);
-            if (status != NT_STATUS_SUCCESS) return status;
-        }
-        uint32_t previous = 0;
-        nt_status status = nt_supervisor_nt_suspend_thread(&slot->nt, &previous);
-        if (status != NT_STATUS_SUCCESS && slot->nt.suspend_count == 0)
-            release_control(slot);
-        if (status == NT_STATUS_SUCCESS)
-            reply->capability = previous;
-        return status;
-    }
-    case NT_BROKER_RPC_SUP_RESUME: {
-        if (!slot || !slot->nt.suspend_count)
-            return NT_STATUS_NOT_SUPPORTED;
-        const uint32_t previous = slot->nt.suspend_count;
-        if (previous == 1) {
-            /* DETACH is a complete final resume; no stranded ptrace
-             * attachment remains once the counted suspension reaches 0. */
-            if (nt_supervisor_detach(&slot->tracer)) {
-                release_control(slot);
-                return NT_STATUS_UNSUCCESSFUL;
-            }
-            release_control(slot);
-        } else {
-            --slot->nt.suspend_count;
-        }
-        reply->capability = previous;
-        return NT_STATUS_SUCCESS;
-    }
-    case NT_BROKER_RPC_SUP_GET_CONTEXT: {
-        if (!slot || !slot->nt.suspend_count) return NT_STATUS_NOT_SUPPORTED;
-        _Alignas(16) struct nt_context64 output = {0};
-        output.flags = request->context.flags;
-        nt_status status = nt_supervisor_nt_get_context(&slot->nt, &output);
-        if (status == NT_STATUS_SUCCESS)
-            reply->context = output;
-        return status;
-    }
-    case NT_BROKER_RPC_SUP_SET_CONTEXT:
-        return !slot || !slot->nt.suspend_count ? NT_STATUS_NOT_SUPPORTED :
-               nt_supervisor_nt_set_context(&slot->nt, &request->context);
-    default: return NT_STATUS_INVALID_PARAMETER;
-    }
-}
 void nt_broker_server_loop(int fd,
     const struct nt_thread_broker_registered_peer *peer)
 {
     if (peer == NULL || !fd_seqpacket(fd))
         return;
-    struct controlled_guest controls[MAX_SUPERVISED_THREADS] = {0};
+    struct nt_supervisor_control_server *control =
+        nt_supervisor_control_server_create();
+    if (!control) return;
     for (;;) {
         if (!live_child(peer))
             break;
@@ -413,13 +296,29 @@ void nt_broker_server_loop(int fd,
             continue; /* Idle channels stay usable across arbitrary waits. */
         if (available < 0 || !(active.revents & POLLIN))
             break;
-        struct nt_broker_rpc request = {0};
-        if (!receive_authenticated_rpc(fd, peer, &request))
+        struct nt_broker_context_request authenticated = {0};
+        bool has_context = false;
+        if (!receive_authenticated_rpc(fd, peer, &authenticated, &has_context))
             break; /* Fail closed on disconnect, bad protocol or impersonation. */
+        const struct nt_broker_rpc request = authenticated.request;
         struct nt_thread_broker_reply response = {
-            .magic = NT_THREAD_BROKER_MAGIC, .status = 1
+            .magic = NT_THREAD_BROKER_MAGIC,
+            /* Control APIs must return a genuine NTSTATUS on a rejected
+             * capability, never a positive value that Windows might
+             * interpret as success or an information-level status. */
+            .status = request.operation >= NT_BROKER_RPC_SUP_SUSPEND &&
+                      request.operation <= NT_BROKER_RPC_SUP_SET_CONTEXT ?
+                      (uint32_t)NT_STATUS_ACCESS_DENIED : 1u
         };
+        /* GET_CONTEXT replies are extended even on authorization or
+         * validation failure; the client must receive the true NTSTATUS
+         * without mistaking a short error reply for broken transport. */
+        _Alignas(16) struct nt_context64 context_response = {0};
         const pid_t requester = peer->child_pid;
+        /* Authenticate response ownership even when no target capability
+         * was resolved: rejected calls must still carry their precise
+         * negative NTSTATUS without being confused with lost transport. */
+        response.process_id = (uint32_t)requester;
         struct nt_broker_thread_info info = {0};
         uint64_t handle = 0;
         switch (request.operation) {
@@ -431,6 +330,7 @@ void nt_broker_server_loop(int fd,
             break;
         case NT_BROKER_RPC_UNREGISTER:
             if (request.access == 0 && request.capability == 0) {
+                nt_supervisor_control_server_revoke_tid(control, request.thread_id);
                 nt_broker_unregister_guest_thread(requester,
                                                  (pid_t)request.thread_id);
                 response.status = 0;
@@ -541,35 +441,54 @@ void nt_broker_server_loop(int fd,
             const uint32_t rights =
                 request.operation == NT_BROKER_RPC_SUP_SUSPEND ||
                 request.operation == NT_BROKER_RPC_SUP_RESUME ?
-                NT_BROKER_SUPERVISOR_SUSPEND :
+                    NT_BROKER_SUPERVISOR_SUSPEND :
                 request.operation == NT_BROKER_RPC_SUP_GET_CONTEXT ?
-                NT_BROKER_SUPERVISOR_GET_CONTEXT :
-                NT_BROKER_SUPERVISOR_SET_CONTEXT;
-            /* No guest packet can grant this flag. The trusted loader
-             * must explicitly authorize the backend, and every request
-             * revalidates the capability's ownership and generation. */
-            if ((peer->allowed_access & NT_BROKER_SERVER_ENABLE_ASYNC_CONTEXT) &&
-                request.thread_id == 0 && request.access == rights &&
-                nt_broker_supervisor_query_owned(requester, request.capability,
-                                                  rights, &info)) {
-                response.status = (uint32_t)operate_control(
-                    controls, peer, &request, &response, &info);
-            } else {
-                response.status = (uint32_t)NT_STATUS_ACCESS_DENIED;
+                    NT_BROKER_SUPERVISOR_GET_CONTEXT :
+                    NT_BROKER_SUPERVISOR_SET_CONTEXT;
+            /* Any guest attempt to nominate a Linux TID, reuse a stale
+             * capability or submit unexpected payload is rejected. */
+            const bool shaped = request.thread_id == 0 &&
+                (request.operation == NT_BROKER_RPC_SUP_GET_CONTEXT ?
+                    request.access != 0 : request.access == 0) &&
+                (request.operation == NT_BROKER_RPC_SUP_SET_CONTEXT ?
+                    has_context : !has_context);
+            if (!shaped ||
+                !nt_broker_supervisor_query_owned(requester,
+                             request.capability, rights, &info))
+                break;
+            _Alignas(16) struct nt_context64 output = {0};
+            uint32_t previous = UINT32_MAX;
+            const nt_status status = nt_supervisor_control_server_call(
+                control, peer, &info, request.operation, request.access,
+                has_context ? &authenticated.context : NULL,
+                &output, &previous);
+            response.status = (uint32_t)status;
+            response.process_id = info.guest_process_id;
+            response.thread_id = info.guest_thread_id;
+            response.generation = info.generation;
+            if (status == NT_STATUS_SUCCESS) {
+                if (request.operation == NT_BROKER_RPC_SUP_GET_CONTEXT)
+                    context_response = output;
+                if (request.operation == NT_BROKER_RPC_SUP_SUSPEND ||
+                    request.operation == NT_BROKER_RPC_SUP_RESUME)
+                    response.capability = previous;
             }
             break;
         }
         default:
             break;
         }
-        if (!send_packet(fd, &response, sizeof(response)))
+        if (request.operation == NT_BROKER_RPC_SUP_GET_CONTEXT) {
+            const struct nt_broker_context_reply extended = {
+                .reply = response, .context = context_response
+            };
+            if (!send_packet(fd, &extended, sizeof(extended)))
+                break;
+        } else if (!send_packet(fd, &response, sizeof(response))) {
             break;
+        }
     }
-    /* Any EOF, invalid credentials, fatal protocol error or child death
-     * releases every suspended thread BEFORE revoking the session.
-     * Fail-safe ptrace cleanup never strands a stopped target. */
-    for (unsigned i = 0; i < MAX_SUPERVISED_THREADS; ++i)
-        release_control(&controls[i]);
+    nt_supervisor_control_server_destroy(control);
     /* The channel itself is the authority, not just the integer PID.
      * Revocation is immediate on EOF/auth failure, before child reaping. */
     nt_broker_revoke_requester(peer->child_pid);
@@ -620,9 +539,8 @@ void nt_broker_client_detach(void)
     pthread_mutex_unlock(&client_lock);
 }
 
-static bool client_rpc_extended(uint32_t operation, uint32_t tid, uint32_t access,
-                       uint64_t capability, const struct nt_context64 *input,
-                       struct nt_thread_broker_reply *answer)
+static bool client_rpc(uint32_t operation, uint32_t tid, uint32_t access,
+                       uint64_t capability, struct nt_thread_broker_reply *answer)
 {
     pthread_mutex_lock(&client_lock);
     bool okay = client_socket >= 0;
@@ -633,41 +551,19 @@ static bool client_rpc_extended(uint32_t operation, uint32_t tid, uint32_t acces
             .thread_id = tid, .capability = capability
         };
         memcpy(request.secret, client_secret, 16);
-        if (input != NULL) request.context = *input;
-        /* A Linux PTRACE_INTERRUPT can consume up to 1500 ms, plus
-         * scheduler jitter and protocol handling. Never time out earlier
-         * than the parent: otherwise a late success would strand a
-         * suspended guest while the client wrongly falls back. */
-        bool transport_valid =
-            send_packet(client_socket, &request, sizeof(request)) &&
-            read_ready_for(client_socket, POLLIN, 4000);
-        struct nt_thread_broker_reply response = {0};
-        if (transport_valid)
-            transport_valid = recv(client_socket, &response, sizeof(response),
-                                   MSG_DONTWAIT) == (ssize_t)sizeof(response) &&
-                              response.magic == NT_THREAD_BROKER_MAGIC;
-        if (!transport_valid) {
-            /* Treat missing/late/malformed ACK as an ambiguous mutation.
-             * Closing the only authenticated socket obliges the parent
-             * to revoke capabilities and DETACH all held ptrace threads.
-             * Never issue another request on a desynchronized stream. */
-            (void)shutdown(client_socket, SHUT_RDWR);
-            close(client_socket);
-            client_socket = -1;
-            memset(client_secret, 0, sizeof(client_secret));
+        okay = send_packet(client_socket, &request, sizeof(request)) &&
+               read_ready(client_socket, POLLIN);
+        if (okay) {
+            struct nt_thread_broker_reply response = {0};
+            okay = recv(client_socket, &response, sizeof(response), MSG_DONTWAIT) ==
+                       (ssize_t)sizeof(response) &&
+                   response.magic == NT_THREAD_BROKER_MAGIC && response.status == 0;
+            if (okay && answer != NULL)
+                *answer = response;
         }
-        if (transport_valid && answer != NULL)
-            *answer = response;
-        okay = transport_valid && response.status == 0;
     }
     pthread_mutex_unlock(&client_lock);
     return okay;
-}
-
-static bool client_rpc(uint32_t operation, uint32_t tid, uint32_t access,
-                       uint64_t capability, struct nt_thread_broker_reply *answer)
-{
-    return client_rpc_extended(operation, tid, access, capability, NULL, answer);
 }
 
 bool nt_broker_client_register_thread(uint32_t tid)
@@ -781,62 +677,94 @@ bool nt_broker_client_supervisor_probe_guest(uint64_t capability, uint64_t *gues
     *guest_rip = reply.capability;
     return true;
 }
+/* Serial client-side transport: user APC handlers cannot interleave
+ * payload packets with another worker's RPC. Never expose host errors
+ * as a fabricated Windows success status. */
+static nt_status control_rpc(uint32_t op, uint64_t cap, uint32_t flags,
+                             const struct nt_context64 *input,
+                             struct nt_context64 *output, uint32_t *previous)
+{
+    if (cap == 0) return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&client_lock);
+    nt_status result = NT_STATUS_NOT_SUPPORTED;
+    if (client_socket >= 0) {
+        struct nt_broker_context_request request = {0};
+        request.request = (struct nt_broker_rpc){
+            .magic = NT_THREAD_BROKER_MAGIC,
+            .version = NT_BROKER_RPC_VERSION,
+            .operation = op,
+            .access = flags,
+            .capability = cap
+        };
+        memcpy(request.request.secret, client_secret, sizeof(client_secret));
+        if (input != NULL)
+            request.context = *input;
+        const bool sent = input != NULL ?
+            send_packet(client_socket, &request, sizeof(request)) :
+            send_packet(client_socket, &request.request, sizeof(request.request));
+        /* Parent PTRACE_INTERRUPT can wait 1500ms plus scheduling.
+         * A timeout shorter than its stop deadline could strand a
+         * successfully suspended guest despite a missing client ACK. */
+        bool transport_valid =
+            sent && read_ready_for(client_socket, POLLIN, 4000);
+        struct nt_broker_context_reply reply = {0};
+        if (transport_valid) {
+            const size_t expected = op == NT_BROKER_RPC_SUP_GET_CONTEXT ?
+                sizeof(reply) : sizeof(reply.reply);
+            const ssize_t n = recv(client_socket, &reply, sizeof(reply), MSG_DONTWAIT);
+            transport_valid = n == (ssize_t)expected &&
+                reply.reply.magic == NT_THREAD_BROKER_MAGIC &&
+                reply.reply.process_id == (uint32_t)getpid();
+        }
+        if (!transport_valid) {
+            /* Ambiguous mutation: forcibly revoke this authenticated
+             * channel. Its parent broker must release every owned tracee.
+             * Never accept a late reply as authorization for another RPC. */
+            (void)shutdown(client_socket, SHUT_RDWR);
+            close(client_socket);
+            client_socket = -1;
+            memset(client_secret, 0, sizeof(client_secret));
+        } else {
+            result = (nt_status)reply.reply.status;
+            if (result == NT_STATUS_SUCCESS) {
+                if (output != NULL)
+                    *output = reply.context;
+                if (previous != NULL)
+                    *previous = (uint32_t)reply.reply.capability;
+            }
+        }
+    }
+    pthread_mutex_unlock(&client_lock);
+    return result;
+}
+
+nt_status nt_broker_client_supervisor_suspend(uint64_t cap, uint32_t *previous)
+{
+    return control_rpc(NT_BROKER_RPC_SUP_SUSPEND, cap, 0, NULL, NULL, previous);
+}
+nt_status nt_broker_client_supervisor_resume(uint64_t cap, uint32_t *previous)
+{
+    return control_rpc(NT_BROKER_RPC_SUP_RESUME, cap, 0, NULL, NULL, previous);
+}
+nt_status nt_broker_client_supervisor_get_context(uint64_t cap,
+                                                   struct nt_context64 *context)
+{
+    if (!context) return NT_STATUS_INVALID_PARAMETER;
+    _Alignas(16) struct nt_context64 result = {0};
+    const nt_status status = control_rpc(NT_BROKER_RPC_SUP_GET_CONTEXT,
+        cap, context->flags, NULL, &result, NULL);
+    if (status == NT_STATUS_SUCCESS)
+        *context = result;
+    return status;
+}
+nt_status nt_broker_client_supervisor_set_context(uint64_t cap,
+                                                   const struct nt_context64 *context)
+{
+    if (!context) return NT_STATUS_INVALID_PARAMETER;
+    return control_rpc(NT_BROKER_RPC_SUP_SET_CONTEXT, cap, 0, context, NULL, NULL);
+}
 bool nt_broker_client_supervisor_close(uint64_t capability)
 {
     return capability != 0 &&
         client_rpc(NT_BROKER_RPC_SUP_CLOSE, 0, 0, capability, NULL);
-}
-
-/* Win32 front-end is intentionally opt-in. On any timeout/malformed reply,
- * leave caller outputs untouched and return NOT_SUPPORTED; never claim
- * suspension or context changes without a verified server ACK. */
-static nt_status control_rpc(uint32_t operation, uint64_t capability,
-                             uint32_t access, const struct nt_context64 *input,
-                             struct nt_thread_broker_reply *response)
-{
-    if (capability == 0 || !response) return NT_STATUS_INVALID_PARAMETER;
-    *response = (struct nt_thread_broker_reply){0};
-    if (client_rpc_extended(operation, 0, access, capability, input, response))
-        return NT_STATUS_SUCCESS;
-    if (response->magic == NT_THREAD_BROKER_MAGIC &&
-        response->status != 0 && response->status != 1)
-        return (nt_status)response->status;
-    return NT_STATUS_NOT_SUPPORTED;
-}
-nt_status nt_broker_client_supervisor_suspend(uint64_t capability, uint32_t *previous)
-{
-    struct nt_thread_broker_reply reply;
-    nt_status status = control_rpc(NT_BROKER_RPC_SUP_SUSPEND, capability,
-        NT_BROKER_SUPERVISOR_SUSPEND, NULL, &reply);
-    if (status == NT_STATUS_SUCCESS && previous)
-        *previous = (uint32_t)reply.capability;
-    return status;
-}
-nt_status nt_broker_client_supervisor_resume(uint64_t capability, uint32_t *previous)
-{
-    struct nt_thread_broker_reply reply;
-    nt_status status = control_rpc(NT_BROKER_RPC_SUP_RESUME, capability,
-        NT_BROKER_SUPERVISOR_SUSPEND, NULL, &reply);
-    if (status == NT_STATUS_SUCCESS && previous)
-        *previous = (uint32_t)reply.capability;
-    return status;
-}
-nt_status nt_broker_client_supervisor_get_context(uint64_t capability,
-                                                    struct nt_context64 *context)
-{
-    if (!context) return NT_STATUS_ACCESS_VIOLATION;
-    struct nt_thread_broker_reply reply;
-    nt_status status = control_rpc(NT_BROKER_RPC_SUP_GET_CONTEXT, capability,
-        NT_BROKER_SUPERVISOR_GET_CONTEXT, context, &reply);
-    if (status == NT_STATUS_SUCCESS)
-        *context = reply.context;
-    return status;
-}
-nt_status nt_broker_client_supervisor_set_context(uint64_t capability,
-                                                    const struct nt_context64 *context)
-{
-    if (!context) return NT_STATUS_ACCESS_VIOLATION;
-    struct nt_thread_broker_reply reply;
-    return control_rpc(NT_BROKER_RPC_SUP_SET_CONTEXT, capability,
-        NT_BROKER_SUPERVISOR_SET_CONTEXT, context, &reply);
 }

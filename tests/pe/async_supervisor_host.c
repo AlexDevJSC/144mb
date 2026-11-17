@@ -133,7 +133,7 @@ int main(int argc, char **argv)
     const char *const environment[] = {"PATH=C:\\", NULL};
     nt_runtime_set_guest_environment(environment);
     nt_runtime_enable_supervisor_ipc();
-    nt_runtime_enable_supervisor_async_context();
+    nt_runtime_enable_supervisor_thread_control();
     uint32_t code = 0xff;
     const bool ran = nt_runtime_run_fixture(guest_entry, &code);
     if (!ran || code) {

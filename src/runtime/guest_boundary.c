@@ -11,6 +11,30 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+/* All CET decisions share one fail-closed policy. Test-only forced mode
+ * lives solely in a separately compiled negative test binary; neither
+ * the normal launcher nor an incoming PE RPC can switch this at runtime. */
+static bool shadow_stack_unsafe(void)
+{
+#ifdef NT_TEST_FORCE_CET_SHSTK
+    return true;
+#elif defined(SYS_arch_prctl)
+    /* libc CRT exports can legitimately inspect errno. A successful
+     * boundary check must not leave EINVAL from an older Linux kernel
+     * visible to the Windows guest as a spurious CRT failure. */
+    const int prior_errno = errno;
+    unsigned long state = 0;
+    const long status = syscall(SYS_arch_prctl, 0x5005u, &state);
+    const int probe_errno = errno;
+    errno = prior_errno;
+    if (status == 0)
+        return state != 0;
+    return probe_errno != EINVAL && probe_errno != ENOSYS;
+#else
+    return true;
+#endif
+}
+
 /* No unreviewed PE import can enable the gate or supply a mapping. */
 static _Atomic bool import_gate_enabled;
 static uintptr_t trusted_code_begin, trusted_code_end;
@@ -20,6 +44,7 @@ static _Thread_local struct nt_guest_boundary_session *current_session;
 static _Thread_local struct nt_guest_boundary_slot *current_slot;
 static _Thread_local unsigned guest_entry_depth;
 static _Thread_local unsigned host_import_depth;
+static _Thread_local bool nonlocal_poisoned;
 enum { MAX_IMPORT_NESTING = 128, MAX_GATED_TARGETS = 8192 };
 static _Thread_local uintptr_t host_return_stack[MAX_IMPORT_NESTING];
 
@@ -59,6 +84,7 @@ void nt_guest_boundary_install_child_session(struct nt_guest_boundary_session *s
     current_slot = NULL;
     guest_entry_depth = 0;
     host_import_depth = 0;
+    nonlocal_poisoned = false;
     memset(host_return_stack, 0, sizeof(host_return_stack));
 }
 struct nt_guest_boundary_session *nt_guest_boundary_current_session(void)
@@ -106,6 +132,7 @@ void nt_guest_boundary_thread_detach(void)
     current_slot = NULL;
     guest_entry_depth = 0;
     host_import_depth = 0;
+    nonlocal_poisoned = false;
 }
 static void publish_phase(enum nt_guest_boundary_phase phase)
 {
@@ -120,15 +147,19 @@ void nt_guest_boundary_guest_enter(void)
     if (guest_entry_depth == UINT32_MAX)
         _Exit(138);
     ++guest_entry_depth;
-    if (host_import_depth == 0)
+    if (shadow_stack_unsafe()) {
+        nonlocal_poisoned = true; /* never mark a CET guest safe to stop */
+        publish_phase(NT_GUEST_BOUNDARY_HOST);
+    } else if (host_import_depth == 0 && !nonlocal_poisoned) {
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
+    }
 }
 void nt_guest_boundary_guest_leave(void)
 {
     if (guest_entry_depth == 0)
         _Exit(139);
     --guest_entry_depth;
-    if (guest_entry_depth == 0 || host_import_depth != 0)
+    if (guest_entry_depth == 0 || host_import_depth != 0 || nonlocal_poisoned)
         publish_phase(NT_GUEST_BOUNDARY_HOST);
 }
 uint32_t nt_guest_boundary_current_phase(void)
@@ -142,6 +173,19 @@ uint32_t nt_guest_boundary_host_nesting(void)
 {
     return host_import_depth;
 }
+/* The only safe decision after a known exception/longjmp can bypass
+ * a previously installed trampoline return slot is to deny suspension
+ * for the remainder of this particular thread. We never fabricate a
+ * sequence of host-unlock events or a replacement call stack. */
+void nt_guest_boundary_mark_nonlocal_transfer(void)
+{
+    nonlocal_poisoned = true;
+    publish_phase(NT_GUEST_BOUNDARY_HOST);
+}
+bool nt_guest_boundary_nonlocal_poisoned(void)
+{
+    return nonlocal_poisoned;
+}
 
 /* The x86_64 assembly gate preserves the complete MS ABI argument and
  * return register set across these SysV calls. No mutex is acquired on
@@ -149,6 +193,11 @@ uint32_t nt_guest_boundary_host_nesting(void)
  * authorize a later asynchronous stop. */
 uintptr_t nt_guest_boundary_import_enter(uintptr_t target, uintptr_t return_pc)
 {
+    /* SHSTK may have become enabled AFTER imports were resolved. Our
+     * return-address-rewriting gate is not safe with a hardware shadow
+     * stack. Fail closed before installing the ordinary-stack return. */
+    if (shadow_stack_unsafe())
+        _Exit(142);
     if (host_import_depth >= MAX_IMPORT_NESTING || target == 0 || return_pc == 0)
         _Exit(140);
     host_return_stack[host_import_depth++] = return_pc;
@@ -161,7 +210,7 @@ uintptr_t nt_guest_boundary_import_leave(void)
         _Exit(141);
     const uintptr_t ret = host_return_stack[--host_import_depth];
     host_return_stack[host_import_depth] = 0;
-    if (host_import_depth == 0 && guest_entry_depth != 0)
+    if (host_import_depth == 0 && guest_entry_depth != 0 && !nonlocal_poisoned)
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
     else
         publish_phase(NT_GUEST_BOUNDARY_HOST);
@@ -179,14 +228,10 @@ nt_guest_proc nt_guest_boundary_wrap_import(nt_guest_proc target)
     /* This return-address-based gate is incompatible with userspace CET
      * shadow stacks. Fail closed instead of corrupting the hardware
      * protected return stack. Linux arch_prctl(ARCH_SHSTK_STATUS)=0x5005. */
-#if defined(SYS_arch_prctl)
-    unsigned long shstk_status = 0;
-    if (syscall(SYS_arch_prctl, 0x5005u, &shstk_status) == 0) {
-        if (shstk_status != 0) { errno = ENOTSUP; return NULL; }
-    } else if (errno != EINVAL && errno != ENOSYS) {
+    if (shadow_stack_unsafe()) {
+        errno = ENOTSUP;
         return NULL;
     }
-#endif
     uintptr_t original = 0;
     _Static_assert(sizeof(target) == sizeof(original), "AMD64 function pointer");
     memcpy(&original, &target, sizeof(original));

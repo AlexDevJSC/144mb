@@ -125,3 +125,60 @@ exigir igualmente RIP/GS y el ownership autenticado.
 CI Ubuntu no sustituye la aceptación física Fedora KDE +
 Bubblewrap bajo SELinux. El problema 4 (señales, fallos y ciclo de
 vida) y el problema 3 (APIs públicas Win32) siguen separados.
+
+
+## Segunda revisión: retornos no locales, código JIT/DLL y CET
+
+El puente no asume que un valor `GUEST` publicado antes de una
+excepción sigue siendo válido después de `siglongjmp`, SEH/VEH o
+`NtContinue`/contexto restaurado. Las rutas identificadas del
+runtime llaman `nt_guest_boundary_mark_nonlocal_transfer()` antes
+de entrar en los despachadores software de excepciones, antes de
+restaurar un contexto no local y antes de saltar desde `ExitThread`
+al epílogo de `thread_main`.
+
+Esto marca el TID como **poisoned** y publica `HOST`. Ninguna
+entrada posterior a invitado ni retorno de importación puede volver
+a publicar `GUEST` hasta que ese hilo se haya desregistrado y
+creado una nueva vinculación de TEB. El estado conservador evita
+inventar un unwinding de las pilas Linux y Windows; no constituye
+soporte universal de C++ exceptions o VEH sobre callbacks arbitrarios.
+
+Los rangos del supervisor permanecen ligados al PE principal
+verificado antes del `fork`. Las direcciones de DLL invitadas sin
+una inscripción confiable del padre y las páginas generadas
+dinámicamente, aunque sean `PROT_READ|PROT_EXEC`, **NO** se
+incluyen automáticamente. No es suficiente que la fase publicada
+sea `GUEST`: `PTRACE_GETREGSET` debe mostrar RIP dentro de la
+sección confiable y GS_BASE coherente con el TEB.
+
+`tests/supervisor_control_ipc_test.c` incluye casos negativos con
+una región distinta del rango autorizado (tipo DLL todavía no
+inscrita) y con una pequeña función realmente ejecutada desde
+una página anónima creada RW y cambiada a RX antes de saltar a ella
+(JIT W^X). Ambos deben devolver `STATUS_NOT_SUPPORTED` y el hilo
+debe continuar ejecutándose.
+
+La puerta de importación consulta `ARCH_SHSTK_STATUS` al resolver
+cada importación **y en cada entrada efectiva**, además de
+comprobarlo antes de publicar `GUEST`. Si la shadow stack está
+habilitada o la comprobación falla por un error de política no
+reconocido, el runtime rechaza el wrapper y la elegibilidad, o
+termina únicamente el proceso invitado cuando la activación se
+produjo después de resolver la IAT. No cambia SELinux, CET ni
+`arch_prctl` para forzar compatibilidad.
+
+`tests/guest_boundary_cet_test.c` compila una copia aislada de la
+política con `NT_TEST_FORCE_CET_SHSTK` (macro sólo de pruebas)
+y exige que el wrapper no exista y devuelva `ENOTSUP`, incluso
+si el runner CI no tiene hardware SHSTK.
+
+**Límite que no se debe ocultar:** el estado compartido puede ser
+alterado por código nativo invitado del mismo proceso y un PE
+malicioso podría habilitar características arquitectónicas fuera
+del control del host. Hasta que un supervisor separado pueda
+verificar estas características de forma independiente o una
+política seccomp impida su cambio, se mantiene la activación
+asíncrona sólo en fixtures expresamente autorizados por el host.
+No declarar universal la protección ni superar por inferencia
+un porcentaje de compatibilidad Windows.

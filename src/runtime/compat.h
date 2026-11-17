@@ -179,8 +179,8 @@ char *NT_MS_ABI nt_get_narrow_winmain_command_line(void);
 /* Host-launcher-only. The actual forked guest gets a private authenticated
  * parent supervisor session; no Windows PE import exposes this toggle. */
 void nt_runtime_enable_supervisor_ipc(void);
-/* Trusted host opt-in: habilita sólo el backend asíncrono protegido. */
-void nt_runtime_enable_supervisor_async_context(void);
+/* Host-only controlled fixture; not enabled by real PE launcher. */
+void nt_runtime_enable_supervisor_thread_control(void);
 bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code);
 int32_t NT_MS_ABI nt_TerminateProcess(uintptr_t process, uint32_t exit_code);
 void NT_MS_ABI nt_exit(int code);

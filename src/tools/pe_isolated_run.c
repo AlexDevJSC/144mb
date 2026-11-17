@@ -130,8 +130,20 @@ static int NT_MS_ABI guest_entry(void)
         perror("Cannot initialize secondary DOS/UNC roots");
         return 118;
     }
+    /* Known Linux folders are independent grants, just like D: and UNC.
+     * Map ALL of them before the WAL preflight. Restoring inherited NT
+     * handles or running guest code before this check could expose an
+     * unrecovered namespace under a redirected Documents/Desktop root. */
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
+        char directory[sizeof(NT_GUEST_FOLDER_MOUNTS) + 32];
+        snprintf(directory, sizeof(directory), "%s/%s", NT_GUEST_FOLDER_MOUNTS, nt_user_folders[i].name);
+        if (!nt_runtime_set_user_folder_root(i, directory) && errno != ENOENT) {
+            perror("Cannot open shared folder in sandbox");
+            return 118;
+        }
+    }
     if (!nt_runtime_recover_all_dos83_grants()) {
-        perror("DOS 8.3 WAL recovery refused on a granted drive or share");
+        perror("DOS 8.3 WAL recovery refused on a guest drive, UNC or folder");
         return 118;
     }
     if (active_child_manifest >= 0) {
@@ -143,14 +155,6 @@ static int NT_MS_ABI guest_entry(void)
         active_child_manifest = -1;
         if (!restored) {
             fputs("Refusing invalid inherited HANDLE manifest\n", stderr);
-            return 118;
-        }
-    }
-    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i) {
-        char directory[sizeof(NT_GUEST_FOLDER_MOUNTS) + 32];
-        snprintf(directory, sizeof(directory), "%s/%s", NT_GUEST_FOLDER_MOUNTS, nt_user_folders[i].name);
-        if (!nt_runtime_set_user_folder_root(i, directory) && errno != ENOENT) {
-            perror("Cannot open shared folder in sandbox");
             return 118;
         }
     }
@@ -346,13 +350,6 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
      * authenticated supervisor endpoint first, including nested PE runs.
      * The private broker is not exposed as a Windows import. */
     nt_runtime_enable_supervisor_ipc();
-    /* Experimental feature gate is a conscious host user opt-in. The
-     * broker still requires parent-owned code scope, TID generation,
-     * authenticated IPC and real RIP/GS/TEB; the environment alone never
-     * grants authority over a Linux process. */
-    const char *experimental = getenv("NT144_EXPERIMENTAL_PTRACE_THREADS");
-    if (experimental != NULL && strcmp(experimental, "1") == 0)
-        nt_runtime_enable_supervisor_async_context();
     uint32_t code = 0;
     const bool ran = nt_runtime_run_fixture(guest_entry, &code);
     pe_image_unload(&active);

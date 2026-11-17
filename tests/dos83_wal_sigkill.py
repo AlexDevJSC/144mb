@@ -13,7 +13,9 @@ import tempfile
 
 from dos83_wal_recovery import entry_key
 
-PHASES = ("after-wal", "after-staging", "after-rename", "after-cleanup")
+PHASES = ("after-wal", "after-staging", "after-rename", "after-cleanup",
+          "after-source-parent-fsync", "after-both-parents-fsync",
+          "after-wal-clear")
 CONTENT = b"DOS83 WAL original inode and bytes preserved by SIGKILL fixture"
 
 
@@ -51,7 +53,9 @@ def scenario(clean_mediator, fault_mediator, phase):
             phase, killed.returncode, killed.stderr
         )
         wal = root / ":ntnative-file-leases" / "dos83-rename-v1.wal"
-        assert wal.is_file() and wal.stat().st_size > 0, phase
+        expect_pending = phase != "after-wal-clear"
+        assert wal.is_file()
+        assert (wal.stat().st_size > 0) == expect_pending, phase
 
         # The recovery binary is the *production* mediator. A second process
         # must resolve the transaction using only durable on-disk evidence.
@@ -59,7 +63,7 @@ def scenario(clean_mediator, fault_mediator, phase):
         run(clean_mediator, root, "--recover")  # idempotent
         assert wal.stat().st_size == 0, phase
 
-        renamed = phase in ("after-rename", "after-cleanup")
+        renamed = phase not in ("after-wal", "after-staging")
         current = target if renamed else source
         missing = source if renamed else target
         assert current.read_bytes() == CONTENT, phase

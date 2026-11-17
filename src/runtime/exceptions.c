@@ -3,6 +3,7 @@
 #include "compat.h"
 #include "winbase.h"
 #include "exception_callbacks.h"
+#include "ntnative/guest_boundary_runtime.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -566,6 +567,7 @@ static _Noreturn void resume_software(const struct nt_context64 *context, struct
 {
     if (!software_code(context->rip) || !software_stack_pointer(context->rsp))
         software_failure(STATUS_INVALID_TARGET);
+    nt_guest_boundary_mark_nonlocal_transfer();
     active_software = previous;
     nt_restore_software_context(context);
 }
@@ -573,6 +575,8 @@ static _Noreturn void resume_software(const struct nt_context64 *context, struct
 _Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint32_t code, uint32_t flags,
                                              uint32_t count, const uintptr_t *arguments)
 {
+    /* VEH/SEH handlers may unwind through host import wrappers. */
+    nt_guest_boundary_mark_nonlocal_transfer();
     complete_software_capture(origin);
     const bool ready = prepare_software_stack();
     struct nt_exception_record record = {.code = code, .flags = flags & SOFTWARE_NONCONTINUABLE,
@@ -664,6 +668,7 @@ _Noreturn void nt_unwind_software_exception(struct nt_context64 *origin, uint64_
                                            struct nt_exception_record *record, uint64_t value,
                                            struct nt_context64 *output)
 {
+    nt_guest_boundary_mark_nonlocal_transfer();
     if (!prepare_software_stack())
         software_failure(STATUS_BAD_STACK);
     complete_software_capture(origin);

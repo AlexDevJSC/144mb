@@ -5,8 +5,6 @@
  * ability to issue Linux syscalls. Every request checks kernel credentials,
  * registered pidfd and the session token. Only query rights are supported. */
 #include "thread_broker_registry.h"
-#include "compat.h"
-#include "ntnative/counter.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -18,21 +16,30 @@ enum { NT_BROKER_RPC_VERSION = 4, NT_BROKER_RPC_REGISTER = 1,
        NT_BROKER_RPC_SUP_PROBE_GUEST = 10,
        NT_BROKER_RPC_SUP_SUSPEND = 11, NT_BROKER_RPC_SUP_RESUME = 12,
        NT_BROKER_RPC_SUP_GET_CONTEXT = 13, NT_BROKER_RPC_SUP_SET_CONTEXT = 14,
-       NT_BROKER_SERVER_ENABLE_ASYNC_CONTEXT = 0x20000000u,
-       NT_BROKER_SERVER_ENABLE_PTRACE_PROBE = 0x10000000u };
+       NT_BROKER_SERVER_ENABLE_PTRACE_PROBE = 0x10000000u,
+       NT_BROKER_SERVER_ENABLE_THREAD_CONTROL = 0x20000000u };
 struct nt_broker_rpc {
     uint32_t magic, version, operation, access;
     uint32_t thread_id, reserved;
     uint64_t capability;
     uint8_t secret[16];
-    /* Fixed-size v4 payload, authenticated in the same kernel-credential-
-     * checked SOCK_SEQPACKET message. For SET this is caller-supplied.
-     * For GET only flags are meaningful; never trust guest CPU state. */
-    struct nt_context64 context;
 };
 struct nt_thread_broker_reply {
     uint32_t magic, status, process_id, thread_id;
     uint64_t generation, capability;
+};
+/* Fixed 16-byte aligned CONTEXT payloads used only by SET and GET.
+ * Other RPCs preserve their 48/32-byte frames. No guest-pointer
+ * dereference is performed in the supervisor. NTSTATUS travels in the
+ * reply.status field as an unsigned 32-bit bit pattern. */
+#include "compat.h"
+#include "ntnative/counter.h"
+struct nt_broker_context_request {
+    struct nt_broker_rpc request;
+    struct nt_context64 context;
+};
+struct nt_broker_context_reply {
+    struct nt_thread_broker_reply reply;
     struct nt_context64 context;
 };
 struct nt_broker_hello {
@@ -81,14 +88,16 @@ bool nt_broker_client_supervisor_probe(uint64_t capability, uint64_t *guest_rip)
 /* Gated probe: same authenticated lease, additionally requires per-TID HOST/GUEST
  * phase, parent-trusted PE executable range and real GS/TEB verification. */
 bool nt_broker_client_supervisor_probe_guest(uint64_t capability, uint64_t *guest_rip);
-bool nt_broker_client_supervisor_close(uint64_t capability);
-/* Experimental full-state broker path: parent owns PTRACE and counted
- * suspension, child owns only a generation-checked capability. All calls
- * are guarded by host-granted policy and actual PE RIP/GS/TEB. */
+/* Host-gated control operations. Full NTSTATUS is returned on failure,
+ * without writing output arguments. Only CONTROL/INTEGER/SEGMENTS reads
+ * and INTEGER-only writes are implemented; unsupported groups fail. */
 nt_status nt_broker_client_supervisor_suspend(uint64_t capability, uint32_t *previous);
 nt_status nt_broker_client_supervisor_resume(uint64_t capability, uint32_t *previous);
-nt_status nt_broker_client_supervisor_get_context(uint64_t capability, struct nt_context64 *context);
-nt_status nt_broker_client_supervisor_set_context(uint64_t capability, const struct nt_context64 *context);
+nt_status nt_broker_client_supervisor_get_context(uint64_t capability,
+                                                   struct nt_context64 *context);
+nt_status nt_broker_client_supervisor_set_context(uint64_t capability,
+                                                   const struct nt_context64 *context);
+bool nt_broker_client_supervisor_close(uint64_t capability);
 
 
 #endif
