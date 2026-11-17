@@ -36,12 +36,27 @@ sin borrar ni reemplazar un inode que otros procesos pudieran tener abierto.
 
 ## Pruebas
 
-make check-dos83-wal crea cinco snapshots descartables de interrupción:
-antes del staging, después del staging, después de renameat2,
-registro corrupto y desaparición de ambas entradas. Verifica identidad,
-contenido, rollback, forward recovery y negativa de reutilizar el WAL.
-Son estados de disco sintetizados, NO cortes de energía reales ni SIGKILL
-sincronizado en el proceso real.
+make check-dos83-wal crea siete snapshots descartables:
+antes/después del staging, después de renameat2, WAL corrupto,
+desaparición de ambas entradas, xattr externo cambiado y xattr de destino
+sin terminador NUL. Verifica que nunca se sobrescriba una identidad que
+no coincida con la preimagen o staging registrados.
+
+make check-dos83-sigkill crea un mediador especial compilado con
+NTNATIVE_TEST_DOS83_CRASH_HOOKS, ausente de los binarios de producción.
+Este mediador recibe SIGKILL real después del WAL, del fsync del xattr
+preparado, de renameat2 o de la limpieza previa a truncar el journal.
+Otro proceso, con el mediador NORMAL, debe recuperar datos, inode,
+alias y permitir nuevos renombrados. Son pruebas de caída del PROCESO,
+no pruebas de energía ni de durabilidad física del dispositivo.
+
+make check-dos83-all-grants demuestra que un WAL legítimo en D: se
+recupera incluso con C: limpio y que un WAL corrupto en D: bloquea el
+arranque. El worker PE ejecuta ahora preflight de C:, D:-Z:, UNC y
+carpetas redirigidas registradas antes de ejecutar al invitado.
+La ausencia de WAL en una raíz concedida es admisible, incluido un
+grant de sólo lectura. No puede existir una garantía frente a cambios
+POSIX de terceros una vez concluido ese preflight.
 
 make check-dos83-mediator, make check-dos83-fuse y las suites PE siguen
 siendo obligatorias. SKIP no equivale a PASS de integración.
@@ -58,8 +73,10 @@ siendo obligatorias. SKIP no equivale a PASS de integración.
    imponer mediación a todo proceso ajeno al runtime.
 4. Los xattrs de víctimas reemplazadas con hardlinks supervivientes
    requieren una política de recolección de restos.
-5. El recovery automático inicial abarca C:. Otras unidades autorizadas
-   requieren preflight por su raíz física antes de ser utilizadas.
+5. El recovery automático comprueba las raíces registradas en el
+   arranque PE, pero no intercepta cambios externos posteriores ni protege
+   una raíz agregada por otro proceso a mitad de sesión. El journal sigue
+   cubriendo únicamente el contrato de renombrado cooperante.
 6. Aceptación pendiente en Fedora real con SELinux Enforcing, reinicios,
    SIGKILL, pérdida de montaje, escenarios simultáneos y fallos de disco
    en cada barrera; comparación de resultados frente a NTFS en Windows.
