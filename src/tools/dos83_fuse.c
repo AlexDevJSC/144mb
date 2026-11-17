@@ -627,6 +627,12 @@ static int fs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    /* An authorized FUSE client must never chmod the physical backing
+     * root from 0700 to a public mode, or change lower DAC at all.
+     * Permissions exposed by the FUSE view are intentionally not POSIX-
+     * mutable until an isolated permission mapping exists. */
+    if (service_mode)
+        return -EPERM;
     int fd = fi ? (int)fi->fh : lower_open(path, O_RDONLY, 0);
     if (fd < 0)
         return -errno;
@@ -664,7 +670,8 @@ static int fs_getxattr(const char *path, const char *name, char *value,
 {
     if (!service_authorized())
         return -EACCES;
-    if (reserved_xattr(name))
+    if (reserved_xattr(name) ||
+        (service_mode && strncmp(name, "user.", 5) != 0))
         return -ENODATA;
     int fd = lower_open(path, O_RDONLY, 0);
     if (fd < 0)
@@ -680,7 +687,8 @@ static int fs_setxattr(const char *path, const char *name, const char *value,
 {
     if (!service_authorized())
         return -EACCES;
-    if (reserved_xattr(name))
+    if (reserved_xattr(name) ||
+        (service_mode && strncmp(name, "user.", 5) != 0))
         return -EACCES;
     int fd = lower_open(path, O_RDONLY, 0);
     if (fd < 0)
@@ -738,7 +746,8 @@ static int fs_listxattr(const char *path, char *buffer, size_t capacity)
             free(names);
             return -EIO;
         }
-        if (!reserved_xattr(names + p)) {
+        if (!reserved_xattr(names + p) &&
+            (!service_mode || strncmp(names + p, "user.", 5) == 0)) {
             if (capacity && needed + n + 1 <= capacity)
                 memcpy(buffer + needed, names + p, n + 1);
             needed += n + 1;
