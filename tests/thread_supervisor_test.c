@@ -124,6 +124,7 @@ int main(void)
     if (nt_supervisor_interrupt(&sup, 1500) || nt_supervisor_detach(&sup)) {
         perror("FAIL detach"); goto cleanup;
     }
+    nt_supervisor_release(&sup); /* closes the first detached pidfd */
     /* Re-seize the same still-live child. Release from a STOPPED state
      * MUST detach it, not merely close pidfd and strand it forever. */
     if (nt_supervisor_seize_child(&sup, child, tid) ||
