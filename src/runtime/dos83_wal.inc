@@ -627,11 +627,21 @@ static bool wal_recover_if_pending(int root)
                        (info.st_mode & 077u) == 0;
     const off_t pending = valid ? info.st_size : -1;
     const int error = errno;
-    close(wal_file);
     if (!valid) {
+        close(wal_file);
         errno = error ? error : EACCES;
         return false;
     }
+    /* A fresh service/PE process cannot trust st_size==0 alone: the prior
+     * process could have truncated WAL before a failed fsync. Force the
+     * journal inode durable before treating it as empty, even in an
+     * all-grant read-only preflight that does not call wal_open(). */
+    if (fsync(wal_file) != 0) {
+        const int cause = errno;
+        close(wal_file);
+        return wal_poison(cause);
+    }
+    close(wal_file);
     if (pending == 0)
         return true;
     pthread_mutex_lock(&dos83_lock);
