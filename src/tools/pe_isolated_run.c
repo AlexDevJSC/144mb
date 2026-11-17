@@ -313,6 +313,10 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
     active_dos_path = dos_path;
     active_command = command;
     active_directory = directory;
+    /* Actual PE entry executes in a forked child: establish the parent's
+     * authenticated supervisor endpoint first, including nested PE runs.
+     * The private broker is not exposed as a Windows import. */
+    nt_runtime_enable_supervisor_ipc();
     uint32_t code = 0;
     const bool ran = nt_runtime_run_fixture(guest_entry, &code);
     pe_image_unload(&active);
