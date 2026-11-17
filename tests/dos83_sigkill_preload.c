@@ -35,6 +35,11 @@ int fsync(int fd)
             name[n] = '\0';
             if (strstr(name, "/dos83-rename-v1.wal") != NULL)
                 kill_at("after_wal_fsync");
+            if (strstr(name, "/longOriginalNameForCrashTest.txt") != NULL)
+                kill_at("after_staged_inode_fsync");
+            const size_t length = strlen(name);
+            if (length >= 5 && strcmp(name + length - 5, "/left") == 0)
+                kill_at("after_parent_fsync");
         }
     }
     return result;
@@ -63,13 +68,22 @@ int setxattr(const char *path, const char *name, const void *value,
     return result;
 }
 
-int renameat2(int olddirfd, const char *oldpath,
-              int newdirfd, const char *newpath, unsigned int flags)
+/* The runtime invokes SYS_renameat2 directly, bypassing libc renameat2.
+ * Removing the previous interception avoids a false coverage assertion.
+ * Source-alias removal happens ONLY after successful renameat2 in the
+ * mediated path; directory fsync happens after alias cleanup. */
+int fremovexattr(int fd, const char *name)
 {
-    kill_at("before_renameat2");
-    int result = (int)syscall(SYS_renameat2, olddirfd, oldpath,
-                              newdirfd, newpath, flags);
-    if (result == 0)
-        kill_at("after_renameat2");
+    int result = (int)syscall(SYS_fremovexattr, fd, name);
+    if (result == 0 && is_alias(name))
+        kill_at("after_source_alias_cleanup");
+    return result;
+}
+
+int removexattr(const char *path, const char *name)
+{
+    int result = (int)syscall(SYS_removexattr, path, name);
+    if (result == 0 && is_alias(name))
+        kill_at("after_source_alias_cleanup");
     return result;
 }
