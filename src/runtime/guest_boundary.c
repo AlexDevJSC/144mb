@@ -14,6 +14,8 @@
 /* No unreviewed PE import can enable the gate or supply a mapping. */
 static _Atomic bool import_gate_enabled;
 static uintptr_t trusted_code_begin, trusted_code_end;
+/* Written by the freshly forked child before any pthread is created. */
+static struct nt_guest_boundary_session *process_session;
 static _Thread_local struct nt_guest_boundary_session *current_session;
 static _Thread_local struct nt_guest_boundary_slot *current_slot;
 static _Thread_local unsigned guest_entry_depth;
@@ -52,6 +54,7 @@ bool nt_guest_boundary_import_gate_enabled(void)
 }
 void nt_guest_boundary_install_child_session(struct nt_guest_boundary_session *session)
 {
+    process_session = session;
     current_session = session;
     current_slot = NULL;
     guest_entry_depth = 0;
@@ -60,7 +63,7 @@ void nt_guest_boundary_install_child_session(struct nt_guest_boundary_session *s
 }
 struct nt_guest_boundary_session *nt_guest_boundary_current_session(void)
 {
-    return current_session;
+    return current_session != NULL ? current_session : process_session;
 }
 const struct nt_guest_boundary_slot *nt_guest_boundary_find_thread(
     const struct nt_guest_boundary_session *session, pid_t tid)
@@ -74,6 +77,8 @@ const struct nt_guest_boundary_slot *nt_guest_boundary_find_thread(
 }
 bool nt_guest_boundary_thread_attach(uintptr_t teb)
 {
+    if (current_session == NULL)
+        current_session = process_session;
     if (teb == 0 || current_slot != NULL || !current_session)
         return false;
     const uint32_t tid = (uint32_t)syscall(SYS_gettid);
