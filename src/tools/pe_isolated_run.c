@@ -119,13 +119,6 @@ static int NT_MS_ABI guest_entry(void)
                                                               active_child_environment : environ));
     if (!nt_runtime_set_file_root("/game"))
         return 118;
-    /* A PE must never run against an unresolved/crashed C: namespace.
-     * This uses the file broker's own root and lock, not ptrace or thread
-     * supervision; recovery refuses ambiguous inode identities. */
-    if (!nt_runtime_recover_dos83()) {
-        perror("DOS 8.3 journal recovery refused");
-        return 118;
-    }
     if (!open_secondary_grants()) {
         perror("Cannot initialize secondary DOS/UNC roots");
         return 118;
@@ -149,6 +142,13 @@ static int NT_MS_ABI guest_entry(void)
             perror("Cannot open shared folder in sandbox");
             return 118;
         }
+    }
+    /* Resolve WALs only after every explicit root is mapped, before
+     * a guest instruction, DllMain or TLS callback can touch any grant.
+     * An ambiguous journal in *any* grant aborts the whole PE. */
+    if (!nt_runtime_recover_all_dos83()) {
+        perror("DOS 8.3 journal recovery refused in a guest grant");
+        return 118;
     }
     if (active_directory) {
         uint16_t *wide = nt_runtime_utf8_to_wide(active_directory);
