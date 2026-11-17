@@ -25,7 +25,12 @@ int __attribute__((ms_abi)) supervisor_pe_entry(struct nt_supervisor_pe_shared *
     /* RIP-relative LEA survives converting an ELF .text fixture to PE
      * COFF without requiring an absolute relocation in the PE image. */
     uintptr_t callback_entry = 0;
-    __asm__ volatile ("leaq supervisor_pe_apc_callback(%%rip), %0"
+    /* A same-section symbol DIFFERENCE is resolved by the assembler
+     * before ELF->COFF conversion. Absolute ADDR32 relocations would
+     * truncate the PE's 64-bit image base. */
+    __asm__ volatile ("call 1f\\n\\t"
+                      "1: popq %0\\n\\t"
+                      "leaq supervisor_pe_apc_callback-1b(%0), %0"
                       : "=r"(callback_entry));
     atomic_store_explicit(&shared->apc_entry, callback_entry, memory_order_release);
     while (!atomic_load_explicit(&shared->stop_requested, memory_order_acquire)) {
