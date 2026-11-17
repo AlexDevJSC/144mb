@@ -72,6 +72,11 @@ def run_session(lower: Path, view: Path, program: list[str]) -> int:
     root = Path(__file__).resolve().parent.parent
     fuse = root / "build" / "nt-dos83-fuse"
     landlock = root / "build" / "nt-dos83-landlock"
+    # Accept both an in-tree build and an installed RPM/user-local setup.
+    if not fuse.is_file():
+        fuse = Path(shutil.which("nt-dos83-fuse") or str(fuse))
+    if not landlock.is_file():
+        landlock = Path(shutil.which("nt-dos83-landlock") or str(landlock))
     if not fuse.is_file() or not os.access(fuse, os.X_OK):
         raise Refused(f"Missing built FUSE backend: {fuse}")
     if not landlock.is_file() or not os.access(landlock, os.X_OK):
