@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=NT Native FileSystem4 authenticated storage control socket
+
+[Socket]
+ListenSequentialPacket=/run/ntnative-storage/control.sock
+SocketUser=root
+SocketGroup=ntnative-clients
+SocketMode=0660
+DirectoryMode=0755
+Service=ntnative-storage.service
+
+[Install]
+WantedBy=sockets.target
