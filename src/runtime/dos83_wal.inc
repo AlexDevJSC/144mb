@@ -268,6 +268,40 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
     return 1;
 }
 
+/* A crash may happen before *or* after staging. An external writer may
+ * also touch the destination-entry xattr while the WAL is pending. Only
+ * restore the preimage if the current value is demonstrably one of the two
+ * values that our transaction could have written. Otherwise preserve the
+ * unknown value, keep the WAL and require manual reconciliation.
+ *
+ * Comparing raw bytes and lengths matters: strcmp on a short/unterminated
+ * xattr is insufficient for proof of identity. */
+static bool wal_preimage_or_staged(int pinned, const char *key,
+                                   const struct dos83_wal_entry *record)
+{
+    unsigned char current[14] = {0};
+    const ssize_t n = read_guest_xattr(pinned, key, current,
+                                      sizeof(current));
+    if (n < 0) {
+        if (errno == ENODATA && record->old_size == 0)
+            return true;
+        if (errno == ERANGE)
+            errno = EUCLEAN;
+        return false;
+    }
+    const size_t alias_len = strnlen(record->alias,
+                                    sizeof(record->alias)) + 1;
+    if (alias_len <= sizeof(record->alias) &&
+        (size_t)n == alias_len &&
+        memcmp(current, record->alias, alias_len) == 0)
+        return true;
+    if (record->old_size > 0 && (size_t)n == record->old_size &&
+        memcmp(current, record->old_dest, record->old_size) == 0)
+        return true;
+    errno = EUCLEAN;
+    return false;
+}
+
 static bool wal_same_inode(const struct stat *st, uint64_t dev, uint64_t ino)
 {
     return (uint64_t)st->st_dev == dev && (uint64_t)st->st_ino == ino;
@@ -367,6 +401,10 @@ static bool wal_recover_root(int root)
                             } else if (strcmp(source_key, dest_key) != 0 &&
                                        clear_guest_xattr(pinned, source_key) != 0)
                                 ok = false;
+                        } else if (!wal_preimage_or_staged(pinned, dest_key,
+                                                               &record)) {
+                            /* Not ours to overwrite: fail closed. */
+                            ok = false;
                         } else if (record.old_size > 0) {
                             ok = write_guest_xattr(pinned, dest_key,
                                         record.old_dest, record.old_size) == 0;
