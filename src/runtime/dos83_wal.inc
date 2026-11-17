@@ -364,6 +364,54 @@ static bool wal_restore_victim_alias(int victim_fd, const char *key,
     return clear_guest_xattr(victim_fd, key) == 0;
 }
 
+/* A different process may hold an unresolved/corrupt WAL on the same
+ * physical grant. Namespace mutations other than MoveFileEx also need to
+ * reject that grant; merely checking our process-local EIO latch is not
+ * enough. This is a non-mutating admission check, never an implicit replay.
+ * Recovery itself runs explicitly at trusted startup. */
+static bool wal_namespace_ready(int root)
+{
+    if (!wal_healthy())
+        return false;
+    int directory = confined_open_raw(root, ":ntnative-file-leases",
+                                      O_RDONLY | O_DIRECTORY, 0);
+    if (directory < 0)
+        return errno == ENOENT;
+    struct stat info;
+    if (fstat(directory, &info) != 0 || !S_ISDIR(info.st_mode) ||
+        info.st_uid != geteuid() || (info.st_mode & 077u) != 0) {
+        const int cause = errno ? errno : EACCES;
+        close(directory);
+        errno = cause;
+        return false;
+    }
+    int fd = confined_open_raw(directory, DOS83_WAL_NAME, O_RDONLY, 0);
+    const int open_error = errno;
+    close(directory);
+    if (fd < 0)
+        return open_error == ENOENT;
+    bool ok = fstat(fd, &info) == 0 &&
+              S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+              info.st_uid == geteuid() && (info.st_mode & 077u) == 0;
+    const int stat_error = errno;
+    if (!ok) {
+        close(fd);
+        errno = stat_error ? stat_error : EUCLEAN;
+        return false;
+    }
+    /* Sync a possibly failed prior clear BEFORE trusting zero length. */
+    if (fsync(fd) != 0) {
+        const int cause = errno;
+        close(fd);
+        return wal_poison(cause);
+    }
+    const bool empty = info.st_size == 0;
+    close(fd);
+    if (!empty)
+        errno = EUCLEAN;
+    return empty && wal_healthy();
+}
+
 /* A crash may happen before *or* after staging. An external writer may
  * also touch the destination-entry xattr while the WAL is pending. Only
  * restore the preimage if the current value is demonstrably one of the two
