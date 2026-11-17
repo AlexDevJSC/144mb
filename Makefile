@@ -293,7 +293,7 @@ check: check-dos83-fuse
 endif
 
 check-fs-supervisor:
-	python3 -m unittest discover -s tests -p 'test_fs_supervisor.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_supervisor.py'
 
 check: check-fs-supervisor
 
