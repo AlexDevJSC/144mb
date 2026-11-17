@@ -240,7 +240,8 @@ static int32_t nt_junction_control(int pinned, uint32_t rights,
     if (control == NT_FSCTL_DELETE_REPARSE) {
         if (!input || input_size != 8 || output || output_size ||
             nt_reparse_u32(input) != NT_REPARSE_TAG_MOUNT ||
-            nt_reparse_u16((const uint8_t *)input + 4) != 0) {
+            nt_reparse_u16((const uint8_t *)input + 4) != 0 ||
+            nt_reparse_u16((const uint8_t *)input + 6) != 0) {
             close(root);
             nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
             return 0;
