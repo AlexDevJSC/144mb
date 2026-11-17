@@ -35,10 +35,11 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Install MinGW compiler for controlled PE32+ fixture
+      - name: Verify native PE32+ link tooling
         run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gcc-mingw-w64-x86-64-posix
+          cc --version | head -1
+          ld -V | grep -F i386pep
+          objcopy --version | head -1
       - name: Prove independent asynchronous stop and register roundtrip
         run: make check-thread-supervisor
       - name: Repeat with undefined-behavior sanitizer
