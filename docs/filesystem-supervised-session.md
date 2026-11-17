@@ -11,6 +11,9 @@ los procesos que inició, sin detener arbitrariamente hilos del runtime.
 `nt-fs-supervisor` abre una vista `nt-dos83-fuse` sólo para una
 sesión nueva, comprueba el montaje y Landlock ABI >=3, y ejecuta
 el comando como descendiente de `nt-dos83-landlock`.
+Mantiene un lock por vista para impedir montajes concurrentes y ejecuta
+`nt-dos83-mediator --scan` antes de abrir la sesión, rechazando
+reconciliaciones que fallan. Es una comprobación preventiva, no un WAL.
 No ejecuta el comando ante ausencia de FUSE, Landlock, montaje verificable
 ni si el montaje desaparece; detecta la muerte del daemon y finaliza
 el grupo del proceso que lanzó. El cierre desmonta la vista y detiene
@@ -59,6 +62,8 @@ El marcador sólo puede ser asignado por un operador con acceso al backing:
 nt-dos83-mediator --root "$HOME/nt-lower" --mark 'C:/datos.db'
 ```
 
+El truncado por ruta también toma el lease antes de modificar el contenido,
+además de consultar los locks NT sobre el rango de bytes.
 Los clientes de FUSE no pueden leer, enumerar ni modificar metadatos
 `user.ntnative.*`, ni acceder a `:ntnative-file-leases`.
 Marcadores malformados fallan cerrados. Para prevenir pérdida de datos
