@@ -7,6 +7,8 @@
 #include "nt_services.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <math.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -1173,8 +1175,54 @@ static void check_printing(void)
     puts("PASS default PDF printer, device settings and committed two-page print job");
 }
 
+
+/* A corrupt journal in D:, an UNC grant or a redirected user folder must
+ * abort ALL-grant startup, even if C: itself is healthy. These are separate
+ * physical roots, not a fabricated alias under the same C: directory. */
+static void check_all_grant_wal_preflight(void)
+{
+    char base[] = "/tmp/nt-fs4-grants.XXXXXX";
+    CHECK(mkdtemp(base) != NULL);
+    char paths[4][512];
+    const char *names[] = {"C", "D", "unc", "folder"};
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(snprintf(paths[i], sizeof(paths[i]), "%s/%s", base,
+                       names[i]) < (int)sizeof(paths[i]));
+        CHECK(mkdir(paths[i], 0700) == 0);
+    }
+    CHECK(nt_runtime_set_file_root(paths[0]));
+    CHECK(nt_runtime_set_drive_root('D', paths[1]));
+    CHECK(nt_runtime_set_unc_root("server", "share", paths[2]));
+    CHECK(nt_runtime_set_user_folder_root(0, paths[3]));
+    CHECK(nt_runtime_recover_all_dos83());
+
+    for (size_t i = 1; i < 4; ++i) {
+        char wal[768];
+        CHECK(snprintf(wal, sizeof(wal),
+                       "%s/:ntnative-file-leases/dos83-rename-v1.wal",
+                       paths[i]) < (int)sizeof(wal));
+        int fd = open(wal, O_WRONLY | O_TRUNC | O_CLOEXEC);
+        CHECK(fd >= 0 && write(fd, "BAD", 3) == 3 && fsync(fd) == 0 &&
+              close(fd) == 0);
+        errno = 0;
+        CHECK(!nt_runtime_recover_all_dos83() && errno == EUCLEAN);
+        /* The old C-only recovery must not be mistaken for whole-session
+         * acceptance: it does not visit these independent grants. */
+        CHECK(nt_runtime_recover_dos83());
+        fd = open(wal, O_WRONLY | O_TRUNC | O_CLOEXEC);
+        CHECK(fd >= 0 && fsync(fd) == 0 && close(fd) == 0);
+        CHECK(nt_runtime_recover_all_dos83());
+    }
+    CHECK(nt_runtime_set_file_root(NULL));
+    for (size_t i = 0; i < 4; ++i)
+        CHECK(nt_test_cleanup_share_registry(paths[i]) && rmdir(paths[i]) == 0);
+    CHECK(rmdir(base) == 0);
+    puts("PASS FileSystem4 all-grant WAL preflight: D:, UNC and mapped folder");
+}
+
 int main(void)
 {
+    check_all_grant_wal_preflight();
     check_file_handles();
     check_user_folders();
     check_explicit_drive_and_unc();
