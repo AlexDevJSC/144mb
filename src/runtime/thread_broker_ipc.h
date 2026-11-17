@@ -1,16 +1,19 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef NTNATIVE_THREAD_BROKER_IPC_H
 #define NTNATIVE_THREAD_BROKER_IPC_H
-/* v2 private host protocol. It is NOT a Windows ABI or a guest-controlled
+/* v3 private host protocol. It is NOT a Windows ABI or a guest-controlled
  * ability to issue Linux syscalls. Every request checks kernel credentials,
  * registered pidfd and the session token. Only query rights are supported. */
 #include "thread_broker_registry.h"
 #include <stdbool.h>
 #include <stdint.h>
 
-enum { NT_BROKER_RPC_VERSION = 2, NT_BROKER_RPC_REGISTER = 1,
+enum { NT_BROKER_RPC_VERSION = 3, NT_BROKER_RPC_REGISTER = 1,
        NT_BROKER_RPC_UNREGISTER = 2, NT_BROKER_RPC_OPEN = 3,
-       NT_BROKER_RPC_QUERY = 4, NT_BROKER_RPC_CLOSE = 5 };
+       NT_BROKER_RPC_QUERY = 4, NT_BROKER_RPC_CLOSE = 5,
+       NT_BROKER_RPC_SUP_OPEN = 6, NT_BROKER_RPC_SUP_QUERY = 7,
+       NT_BROKER_RPC_SUP_CLOSE = 8, NT_BROKER_RPC_SUP_PROBE = 9,
+       NT_BROKER_SERVER_ENABLE_PTRACE_PROBE = 0x10000000u };
 struct nt_broker_rpc {
     uint32_t magic, version, operation, access;
     uint32_t thread_id, reserved;
@@ -49,5 +52,22 @@ bool nt_broker_client_open(uint32_t thread_id, uint32_t access,
 bool nt_broker_client_query(uint64_t capability, uint32_t access,
                             struct nt_broker_thread_info *info);
 bool nt_broker_client_close(uint64_t capability);
+
+/* PRIVATE runtime→parent-supervisor control plane, using the existing
+ * per-message authenticated FD8. OPEN binds only to the owner's own
+ * kernel-registered thread and mints an unforgeable-in-practice opaque
+ * lease with generation. QUERY and CLOSE do not interpret raw TIDs.
+ *
+ * PROBE is a deliberately opt-in, one-shot parent ptrace GETREGSET test.
+ * The trusted parent must grant ENABLE_PTRACE_PROBE. It is not a Win32
+ * SuspendThread implementation, never persists a stopped TID, and cannot
+ * be called for another child's registered thread. */
+bool nt_broker_client_supervisor_open(uint32_t thread_id, uint32_t access,
+    struct nt_broker_thread_info *identity, uint64_t *capability);
+bool nt_broker_client_supervisor_query(uint64_t capability, uint32_t access,
+    struct nt_broker_thread_info *identity);
+bool nt_broker_client_supervisor_probe(uint64_t capability, uint64_t *guest_rip);
+bool nt_broker_client_supervisor_close(uint64_t capability);
+
 
 #endif
