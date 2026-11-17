@@ -127,6 +127,10 @@ static _Noreturn void client_main(int fd, int commands, int responses,
     if (probe_expected ? (!probed || rip == 0 || rip == UINT64_C(0xcafebabe)) :
                          (probed || rip != UINT64_C(0xcafebabe)))
         _exit(21); /* only trusted host-side flag enables ptrace probe */
+    uint64_t guarded_rip = UINT64_C(0x51515151);
+    if (nt_broker_client_supervisor_probe_guest(handle, &guarded_rip) ||
+        guarded_rip != UINT64_C(0x51515151))
+        _exit(29); /* Linux-only child has no trusted PE code scope */
 
     /* Explicit capability close and return of the old value to the pool
      * must not re-enable it (monotone handle + immutable generation). */
