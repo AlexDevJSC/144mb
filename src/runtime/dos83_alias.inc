@@ -484,9 +484,26 @@ static bool dos83_move_begin(int root, const char *from_path,
         const ssize_t count = read_guest_xattr(txn->source_fd,
                                                 txn->source_key, alias,
                                                 sizeof(alias));
-        txn->has_source_alias = count >= 3 && count <= 13 &&
-                                alias[count - 1] == '\0' &&
-                                memchr(alias, '~', (size_t)count - 1);
+        if (count < 0) {
+            /* ENODATA means no alias was ever assigned; an unreadable,
+             * oversized or unsupported attribute is NOT proof of absence. */
+            if (errno != ENODATA)
+                error = errno == ERANGE ? EUCLEAN : errno;
+        } else if (count < 3 || count > 13 ||
+                   alias[count - 1] != '\0' ||
+                   memchr(alias, '\0', (size_t)count - 1) != NULL ||
+                   memchr(alias, '~', (size_t)count - 1) == NULL) {
+            error = EUCLEAN;
+        } else {
+            txn->has_source_alias = true;
+            for (ssize_t i = 0; i < count - 1; ++i) {
+                if (!dos83_char((unsigned char)alias[i]) &&
+                    alias[i] != '.' && alias[i] != '~') {
+                    error = EUCLEAN;
+                    break;
+                }
+            }
+        }
     }
     char alias_for_move[14] = {0};
     const bool needs_staging = txn->has_source_alias &&
