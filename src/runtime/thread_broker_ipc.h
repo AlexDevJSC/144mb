@@ -1,29 +1,38 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef NTNATIVE_THREAD_BROKER_IPC_H
 #define NTNATIVE_THREAD_BROKER_IPC_H
-/* v3 private host protocol. It is NOT a Windows ABI or a guest-controlled
+/* v4 private host protocol. It is NOT a Windows ABI or a guest-controlled
  * ability to issue Linux syscalls. Every request checks kernel credentials,
  * registered pidfd and the session token. Only query rights are supported. */
 #include "thread_broker_registry.h"
+#include "compat.h"
 #include <stdbool.h>
 #include <stdint.h>
 
-enum { NT_BROKER_RPC_VERSION = 3, NT_BROKER_RPC_REGISTER = 1,
+enum { NT_BROKER_RPC_VERSION = 4, NT_BROKER_RPC_REGISTER = 1,
        NT_BROKER_RPC_UNREGISTER = 2, NT_BROKER_RPC_OPEN = 3,
        NT_BROKER_RPC_QUERY = 4, NT_BROKER_RPC_CLOSE = 5,
        NT_BROKER_RPC_SUP_OPEN = 6, NT_BROKER_RPC_SUP_QUERY = 7,
        NT_BROKER_RPC_SUP_CLOSE = 8, NT_BROKER_RPC_SUP_PROBE = 9,
        NT_BROKER_RPC_SUP_PROBE_GUEST = 10,
+       NT_BROKER_RPC_SUP_SUSPEND = 11, NT_BROKER_RPC_SUP_RESUME = 12,
+       NT_BROKER_RPC_SUP_GET_CONTEXT = 13, NT_BROKER_RPC_SUP_SET_CONTEXT = 14,
+       NT_BROKER_SERVER_ENABLE_ASYNC_CONTEXT = 0x20000000u,
        NT_BROKER_SERVER_ENABLE_PTRACE_PROBE = 0x10000000u };
 struct nt_broker_rpc {
     uint32_t magic, version, operation, access;
     uint32_t thread_id, reserved;
     uint64_t capability;
     uint8_t secret[16];
+    /* Fixed-size v4 payload, authenticated in the same kernel-credential-
+     * checked SOCK_SEQPACKET message. For SET this is caller-supplied.
+     * For GET only flags are meaningful; never trust guest CPU state. */
+    struct nt_context64 context;
 };
 struct nt_thread_broker_reply {
     uint32_t magic, status, process_id, thread_id;
     uint64_t generation, capability;
+    struct nt_context64 context;
 };
 struct nt_broker_hello {
     uint32_t magic, version;
@@ -72,6 +81,13 @@ bool nt_broker_client_supervisor_probe(uint64_t capability, uint64_t *guest_rip)
  * phase, parent-trusted PE executable range and real GS/TEB verification. */
 bool nt_broker_client_supervisor_probe_guest(uint64_t capability, uint64_t *guest_rip);
 bool nt_broker_client_supervisor_close(uint64_t capability);
+/* Experimental full-state broker path: parent owns PTRACE and counted
+ * suspension, child owns only a generation-checked capability. All calls
+ * are guarded by host-granted policy and actual PE RIP/GS/TEB. */
+nt_status nt_broker_client_supervisor_suspend(uint64_t capability, uint32_t *previous);
+nt_status nt_broker_client_supervisor_resume(uint64_t capability, uint32_t *previous);
+nt_status nt_broker_client_supervisor_get_context(uint64_t capability, struct nt_context64 *context);
+nt_status nt_broker_client_supervisor_set_context(uint64_t capability, const struct nt_context64 *context);
 
 
 #endif
