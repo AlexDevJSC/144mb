@@ -80,7 +80,7 @@ static void *guest_worker(void *argument)
     return NULL;
 }
 
-static _Noreturn void child_client(int fd, bool enabled)
+static _Noreturn void child_client(int fd, unsigned mode)
 {
     alarm(20);
     struct sigaction action = {0};
@@ -108,7 +108,7 @@ static _Noreturn void child_client(int fd, bool enabled)
         NT_STATUS_NOT_SUPPORTED)
         _exit(25); /* GET without a confirmed suspend must be rejected. */
     uint32_t previous = UINT32_MAX;
-    if (!enabled) {
+    if (mode == 0) {
         if (nt_broker_client_supervisor_suspend(capability, &previous) !=
             NT_STATUS_NOT_SUPPORTED || previous != UINT32_MAX)
             _exit(26);
@@ -125,6 +125,21 @@ static _Noreturn void child_client(int fd, bool enabled)
         sleep_ms(20);
         if (atomic_load(&data->ticks) != frozen)
             _exit(28);
+        if (mode == 2) {
+            /* Abrupt authenticated EOF while a real tracee is stopped:
+             * parent must revoke and detach without leaving a frozen TID. */
+            nt_broker_client_detach();
+            for (int j = 0; j < 4000 &&
+                 atomic_load(&data->ticks) == frozen; ++j)
+                sleep_ms(1);
+            if (atomic_load(&data->ticks) == frozen)
+                _exit(45);
+            atomic_store_explicit(&data->stop, 1, memory_order_release);
+            atomic_store_explicit(&data->finish, 1, memory_order_release);
+            if (pthread_join(worker, NULL) != 0)
+                _exit(46);
+            _exit(0);
+        }
         if (nt_broker_client_supervisor_suspend(capability, &previous) !=
             NT_STATUS_SUCCESS || previous != 1)
             _exit(29);
@@ -195,7 +210,7 @@ static _Noreturn void child_client(int fd, bool enabled)
     nt_broker_client_detach();
     _exit(0);
 }
-static int run_one(bool enabled)
+static int run_one(unsigned mode)
 {
     data = mmap(NULL, sizeof(*data), PROT_READ|PROT_WRITE,
                 MAP_SHARED|MAP_ANONYMOUS, -1, 0);
@@ -209,7 +224,7 @@ static int run_one(bool enabled)
     if (child < 0) return 3;
     if (child == 0) {
         close(sockets[0]);
-        child_client(sockets[1], enabled);
+        child_client(sockets[1], mode);
     }
     close(sockets[1]);
     int pidfd = (int)syscall(SYS_pidfd_open, child, 0);
@@ -225,7 +240,7 @@ static int run_one(bool enabled)
         .trusted_code_begin = (uintptr_t)control_loop_begin,
         .trusted_code_end = (uintptr_t)control_loop_end,
         .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION |
-            (enabled ? NT_BROKER_SERVER_ENABLE_THREAD_CONTROL : 0u)
+            (mode != 0 ? NT_BROKER_SERVER_ENABLE_THREAD_CONTROL : 0u)
     };
     memcpy(peer.secret, secret, sizeof(secret));
     /* server_main owns MAP_SHARED after start */
@@ -236,7 +251,7 @@ static int run_one(bool enabled)
     if (waitpid(child, &status, 0) != child ||
         !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         fprintf(stderr, "FAIL control ipc child exit: enabled=%d status=%d\n",
-                enabled, status);
+                mode, status);
         return 6;
     }
     nt_broker_unregister_child(child, generation);
@@ -248,9 +263,10 @@ static int run_one(bool enabled)
 int main(void)
 {
     alarm(35);
-    if (run_one(false) || run_one(true)) return 1;
+    if (run_one(0) || run_one(1) || run_one(2)) return 1;
     puts("PASS authenticated control IPC: opt-in only, persistent nested "
          "suspension, real AMD64 CONTEXT GET/SET/restore, unsupported groups, "
-         "queued Linux SIGUSR1 preserved, HOST-phase denial, no stale leases");
+         "queued Linux SIGUSR1 preserved, HOST-phase denial, no stale leases, "
+         "EOF during ptrace suspension resumes the worker");
     return 0;
 }
