@@ -76,7 +76,7 @@ static int NT_MS_ABI test_entry(void)
     atomic_store(&host_phase, 0);
     atomic_store(&finish, 0);
     uint32_t tid = 0;
-    const uintptr_t thread = nt_CreateThread(NULL, 0, test_worker,
+    uintptr_t thread = nt_CreateThread(NULL, 0, test_worker,
                                               NULL, 0, &tid);
     if (!thread || !tid) return 10;
     for (int i = 0; i < 3000 && !atomic_load(&entered); ++i)
@@ -109,6 +109,14 @@ static int NT_MS_ABI test_entry(void)
     if (nt_TerminateThread(thread, 99) ||
         nt_NtTerminateThread(thread, (nt_status)99) != NT_STATUS_NOT_SUPPORTED)
         return 36;
+    /* Close the original HANDLE with a real tracer holding two nested
+     * stops. The duplicate must retain the canonical Windows object and
+     * allow a counted final resume; closing must not free its TID state. */
+    uintptr_t alias = 0;
+    if (nt_runtime_duplicate_waitable(thread, 0, 0, 2u, &alias) !=
+            NT_STATUS_SUCCESS || alias == 0 || !nt_CloseHandle(thread))
+        return 37;
+    thread = alias;
     _Alignas(16) struct nt_context64 context = {0};
     context.flags = 0x100003u;
     if (!nt_GetThreadContext(thread, &context) ||
