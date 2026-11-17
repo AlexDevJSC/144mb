@@ -20,6 +20,7 @@ static _Thread_local struct nt_guest_boundary_session *current_session;
 static _Thread_local struct nt_guest_boundary_slot *current_slot;
 static _Thread_local unsigned guest_entry_depth;
 static _Thread_local unsigned host_import_depth;
+static _Thread_local bool nonlocal_poisoned;
 enum { MAX_IMPORT_NESTING = 128, MAX_GATED_TARGETS = 8192 };
 static _Thread_local uintptr_t host_return_stack[MAX_IMPORT_NESTING];
 
@@ -59,6 +60,7 @@ void nt_guest_boundary_install_child_session(struct nt_guest_boundary_session *s
     current_slot = NULL;
     guest_entry_depth = 0;
     host_import_depth = 0;
+    nonlocal_poisoned = false;
     memset(host_return_stack, 0, sizeof(host_return_stack));
 }
 struct nt_guest_boundary_session *nt_guest_boundary_current_session(void)
@@ -106,6 +108,7 @@ void nt_guest_boundary_thread_detach(void)
     current_slot = NULL;
     guest_entry_depth = 0;
     host_import_depth = 0;
+    nonlocal_poisoned = false;
 }
 static void publish_phase(enum nt_guest_boundary_phase phase)
 {
@@ -120,7 +123,7 @@ void nt_guest_boundary_guest_enter(void)
     if (guest_entry_depth == UINT32_MAX)
         _Exit(138);
     ++guest_entry_depth;
-    if (host_import_depth == 0)
+    if (host_import_depth == 0 && !nonlocal_poisoned)
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
 }
 void nt_guest_boundary_guest_leave(void)
@@ -128,7 +131,7 @@ void nt_guest_boundary_guest_leave(void)
     if (guest_entry_depth == 0)
         _Exit(139);
     --guest_entry_depth;
-    if (guest_entry_depth == 0 || host_import_depth != 0)
+    if (guest_entry_depth == 0 || host_import_depth != 0 || nonlocal_poisoned)
         publish_phase(NT_GUEST_BOUNDARY_HOST);
 }
 uint32_t nt_guest_boundary_current_phase(void)
@@ -142,6 +145,19 @@ uint32_t nt_guest_boundary_host_nesting(void)
 {
     return host_import_depth;
 }
+/* The only safe decision after a known exception/longjmp can bypass
+ * a previously installed trampoline return slot is to deny suspension
+ * for the remainder of this particular thread. We never fabricate a
+ * sequence of host-unlock events or a replacement call stack. */
+void nt_guest_boundary_mark_nonlocal_transfer(void)
+{
+    nonlocal_poisoned = true;
+    publish_phase(NT_GUEST_BOUNDARY_HOST);
+}
+bool nt_guest_boundary_nonlocal_poisoned(void)
+{
+    return nonlocal_poisoned;
+}
 
 /* The x86_64 assembly gate preserves the complete MS ABI argument and
  * return register set across these SysV calls. No mutex is acquired on
@@ -149,6 +165,17 @@ uint32_t nt_guest_boundary_host_nesting(void)
  * authorize a later asynchronous stop. */
 uintptr_t nt_guest_boundary_import_enter(uintptr_t target, uintptr_t return_pc)
 {
+    /* SHSTK may have become enabled AFTER imports were resolved. Our
+     * return-address-rewriting gate is not safe with a hardware shadow
+     * stack. Fail closed before installing the ordinary-stack return. */
+#if defined(SYS_arch_prctl)
+    unsigned long shstk = 0;
+    if (syscall(SYS_arch_prctl, 0x5005u, &shstk) == 0) {
+        if (shstk != 0) _Exit(142);
+    } else if (errno != EINVAL && errno != ENOSYS) {
+        _Exit(143);
+    }
+#endif
     if (host_import_depth >= MAX_IMPORT_NESTING || target == 0 || return_pc == 0)
         _Exit(140);
     host_return_stack[host_import_depth++] = return_pc;
@@ -161,7 +188,7 @@ uintptr_t nt_guest_boundary_import_leave(void)
         _Exit(141);
     const uintptr_t ret = host_return_stack[--host_import_depth];
     host_return_stack[host_import_depth] = 0;
-    if (host_import_depth == 0 && guest_entry_depth != 0)
+    if (host_import_depth == 0 && guest_entry_depth != 0 && !nonlocal_poisoned)
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
     else
         publish_phase(NT_GUEST_BOUNDARY_HOST);
