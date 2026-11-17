@@ -429,7 +429,7 @@ static bool to_wide(const char *input, uint16_t *output, size_t capacity)
 int main(int argc, char **argv)
 {
     if (argc < 4 || strcmp(argv[1], "--root") != 0) {
-        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW | --replace OLD NEW\n", argv[0]);
+        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW | --replace OLD NEW | --sequence-move A B C D\n", argv[0]);
         return 2;
     }
     if (!nt_runtime_set_file_root(argv[2])) {
@@ -495,6 +495,23 @@ int main(int argc, char **argv)
         result = to_wide(argv[4], from, PATH_MAX) &&
                  to_wide(argv[5], to, PATH_MAX) &&
                  nt_MoveFileExW(from, to, flags) ? 0 : 1;
+    } else if (argc == 8 && strcmp(argv[3], "--sequence-move") == 0) {
+        /* Exercise two mutations in one process: a failed WAL clear must
+         * poison the process even if ftruncate already made the WAL appear
+         * empty in page cache. Never stop after the first failure. */
+        uint16_t a[PATH_MAX], b[PATH_MAX], c[PATH_MAX], d[PATH_MAX];
+        if (to_wide(argv[4], a, PATH_MAX) &&
+            to_wide(argv[5], b, PATH_MAX) &&
+            to_wide(argv[6], c, PATH_MAX) &&
+            to_wide(argv[7], d, PATH_MAX)) {
+            const bool first = nt_MoveFileExW(a, b, 0) != 0;
+            const bool second = nt_MoveFileExW(c, d, 0) != 0;
+            result = first && second ? 0 : 1;
+            fprintf(stderr, "sequence: first=%d second=%d\n",
+                    first ? 1 : 0, second ? 1 : 0);
+        } else {
+            result = 1;
+        }
     } else {
         fprintf(stderr, "Unsupported mode or argument count\n");
     }
