@@ -101,17 +101,22 @@ def scenario(tool, crash_phase):
             with source.open("rb") as stream:
                 os.fsync(stream.fileno())
 
-        if crash_phase in ("after_rename", "undecidable"):
+        if crash_phase in ("after_rename", "undecidable", "tampered_dest"):
             source.rename(dest)
         if crash_phase == "undecidable":
             dest.unlink()
+        if crash_phase == "tampered_source":
+            os.setxattr(source, dest_key, b"UNKNOWN~1.TXT\x00")
+        if crash_phase == "tampered_dest":
+            os.setxattr(dest, dest_key, b"UNKNOWN~1.TXT\x00")
 
         if crash_phase == "corrupt":
             data = bytearray(journal.read_bytes())
             data[45] ^= 0x17
             journal.write_bytes(data)
 
-        expected_failure = crash_phase in ("corrupt", "undecidable")
+        expected_failure = crash_phase in (
+            "corrupt", "undecidable", "tampered_source", "tampered_dest")
         result = run(tool, root, "--recover", success=not expected_failure)
         if expected_failure:
             assert journal.stat().st_size > 0
@@ -144,7 +149,8 @@ def main():
         raise SystemExit("Usage: dos83_wal_recovery.py MEDIATOR")
     tool = str(pathlib.Path(sys.argv[1]).resolve())
     for crash_phase in ("before_staging", "after_staging",
-                        "after_rename", "corrupt", "undecidable"):
+                        "after_rename", "corrupt", "undecidable",
+                        "tampered_source", "tampered_dest"):
         scenario(tool, crash_phase)
 
 
