@@ -377,6 +377,24 @@ check-dos83-wal: $(BUILD_DIR)/nt-dos83-mediator
 
 check: check-dos83-wal
 
+# Compile crash hooks ONLY into this standalone test mediator. Production
+# runtime/PE objects do not receive the injection macro, nor a trigger
+# controllable by an untrusted guest program.
+$(BUILD_DIR)/runtime-guest_files-crash.o: src/runtime/guest_files.c src/runtime/dos83_alias.inc src/runtime/dos83_wal.inc src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(ICU_CFLAGS) $(WARN_CFLAGS) $(CFLAGS) \
+	    -DNTNATIVE_TEST_DOS83_CRASH_HOOKS -pthread -c "$<" -o "$@"
+
+$(BUILD_DIR)/nt-dos83-mediator-crash: src/tools/dos83_mediator.c $(filter-out $(BUILD_DIR)/runtime-guest_files.o,$(RUNTIME_OBJECTS)) $(BUILD_DIR)/runtime-guest_files-crash.o src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-dos83-sigkill
+check-dos83-sigkill: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_sigkill.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-sigkill
+
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/user_folders.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=fdatasync $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
