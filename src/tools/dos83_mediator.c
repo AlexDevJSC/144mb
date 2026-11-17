@@ -439,6 +439,8 @@ int main(int argc, char **argv)
     int result = 2;
     if (argc == 4 && strcmp(argv[3], "--recover") == 0) {
         result = nt_runtime_recover_dos83() ? 0 : 3;
+        if (result)
+            perror("DOS 8.3 WAL recovery refused");
     } else if (argc == 4 && strcmp(argv[3], "--watch") == 0) {
         result = nt_runtime_recover_dos83() ? run_watch(argv[2]) : 3;
     } else if (argc == 4 && strcmp(argv[3], "--scan") == 0) {
