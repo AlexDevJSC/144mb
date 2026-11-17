@@ -4,6 +4,7 @@
  * generation leases and a real external ptrace GETREGSET probe. */
 #define _GNU_SOURCE
 #include "thread_broker_ipc.h"
+#include "nt_services.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -122,6 +123,27 @@ static _Noreturn void client_main(int fd, int commands, int responses,
     if (nt_broker_client_supervisor_query(handle ^ UINT64_C(0x100), 
               NT_BROKER_SUPERVISOR_GET_CONTEXT, &query))
         _exit(20); /* guessed capability must not resolve */
+    /* Valid thread rights with no trusted HOST opt-in return
+     * NOT_SUPPORTED; missing SET_CONTEXT rights return ACCESS_DENIED.
+     * Neither failure path may touch the caller's output buffers. */
+    uint32_t denied_previous = UINT32_C(0x51515151);
+    if (nt_broker_client_supervisor_suspend(handle, &denied_previous) !=
+            NT_STATUS_NOT_SUPPORTED ||
+        denied_previous != UINT32_C(0x51515151) ||
+        nt_broker_client_supervisor_resume(handle, &denied_previous) !=
+            NT_STATUS_NOT_SUPPORTED ||
+        denied_previous != UINT32_C(0x51515151))
+        _exit(30);
+    _Alignas(16) struct nt_context64 denied_context = {0};
+    denied_context.flags = UINT32_C(0x100001);
+    denied_context.rax = UINT64_C(0x123456789abcdef0);
+    if (nt_broker_client_supervisor_get_context(handle, &denied_context) !=
+            NT_STATUS_NOT_SUPPORTED ||
+        denied_context.flags != UINT32_C(0x100001) ||
+        denied_context.rax != UINT64_C(0x123456789abcdef0) ||
+        nt_broker_client_supervisor_set_context(handle, &denied_context) !=
+            NT_STATUS_ACCESS_DENIED)
+        _exit(31);
     uint64_t rip = UINT64_C(0xcafebabe);
     const bool probed = nt_broker_client_supervisor_probe(handle, &rip);
     if (probe_expected ? (!probed || rip == 0 || rip == UINT64_C(0xcafebabe)) :

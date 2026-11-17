@@ -21,9 +21,17 @@ struct shared_state {
     _Atomic uint64_t worker_ticks;
     _Atomic uint64_t leader_ticks;
     _Atomic bool exit_requested;
+    _Atomic uint32_t signal_delivered;
 };
 struct fixture { struct shared_state *shared; int ready_fd; };
 
+static struct shared_state *signal_shared;
+static void signal_guest_usr1(int signal)
+{
+    if (signal == SIGUSR1 && signal_shared)
+        atomic_fetch_add_explicit(&signal_shared->signal_delivered, 1u,
+                                  memory_order_relaxed);
+}
 static void pause_ms(long ms)
 {
     struct timespec t = {.tv_sec = ms / 1000, .tv_nsec = ms % 1000 * 1000000};
@@ -43,6 +51,11 @@ static void *work_thread(void *arg)
 
 static _Noreturn void child_main(struct shared_state *shared, int ready_fd)
 {
+    signal_shared = shared;
+    struct sigaction action = {.sa_handler = signal_guest_usr1};
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGUSR1, &action, NULL) != 0)
+        _exit(43);
     struct fixture fixture = {.shared = shared, .ready_fd = ready_fd};
     pthread_t thread;
     if (pthread_create(&thread, NULL, work_thread, &fixture)) _exit(40);
@@ -124,6 +137,35 @@ int main(void)
     if (nt_supervisor_interrupt(&sup, 1500) || nt_supervisor_detach(&sup)) {
         perror("FAIL detach"); goto cleanup;
     }
+    nt_supervisor_release(&sup); /* closes the first detached pidfd */
+    /* Re-seize the same still-live child. Release from a STOPPED state
+     * MUST detach it, not merely close pidfd and strand it forever. */
+    if (nt_supervisor_seize_child(&sup, child, tid)) {
+        perror("FAIL re-seize before forced release");
+        goto cleanup;
+    }
+    /* Stress actual Linux signal-delivery stop racing PTRACE_INTERRUPT:
+     * the signal must not be swallowed when the tracer is released. */
+    if (syscall(SYS_tgkill, child, tid, SIGUSR1) != 0) {
+        perror("FAIL send signal to verified guest TID");
+        goto cleanup;
+    }
+    if (nt_supervisor_interrupt(&sup, 1500) != 0 && errno != EPROTO) {
+        perror("FAIL signal/interrupt race");
+        goto cleanup;
+    }
+    const uint64_t progress_before_release = atomic_load(&shared->worker_ticks);
+    nt_supervisor_release(&sup);
+    for (int i = 0; i < 60 &&
+         atomic_load(&shared->signal_delivered) == 0; ++i)
+        pause_ms(5);
+    pause_ms(30);
+    if (sup.seized || sup.pidfd != -1 ||
+        atomic_load(&shared->signal_delivered) != 1 ||
+        atomic_load(&shared->worker_ticks) <= progress_before_release) {
+        fputs("FAIL release left a guest worker ptrace-stopped\\n", stderr);
+        goto cleanup;
+    }
     atomic_store(&shared->exit_requested, true);
     for (int i = 0; i < 300; ++i) {
         pid_t waited = waitpid(child, &wait_status, WNOHANG);
@@ -131,7 +173,7 @@ int main(void)
             if (!WIFEXITED(wait_status) || WEXITSTATUS(wait_status) != 0) {
                 fputs("FAIL child exit\n", stderr); goto cleanup_no_wait;
             }
-            puts("PASS supervisor: child-only TID, async stop, independent leader, GETREGSET/SETREGSET, resume twice, detach and clean exit");
+            puts("PASS supervisor: child-only TID, async stop, independent leader, GETREGSET/SETREGSET, resume twice, detach, signal-preserving stopped release and clean exit");
             rc = 0; goto cleanup_no_wait;
         }
         if (waited < 0) break;

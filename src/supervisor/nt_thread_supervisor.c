@@ -349,35 +349,42 @@ int nt_supervisor_invoke_trusted_guest_apc(
     }
 }
 
+/* Both normal release and error cleanup obey the same rule: never
+ * discard the tracer while a live thread is still PTRACE_SEIZE'd.
+ * A raw close(pidfd) does NOT detach the thread. */
+static void nt_supervisor_reset_owned(struct nt_thread_supervisor *sup)
+{
+    if (sup->pidfd >= 0)
+        (void)close(sup->pidfd);
+    nt_supervisor_init(sup);
+}
 int nt_supervisor_abort_child(struct nt_thread_supervisor *sup)
 {
     if (!sup) { errno = EINVAL; return -1; }
     if (!sup->seized || sup->exited) {
-        nt_supervisor_release(sup);
+        nt_supervisor_reset_owned(sup);
         return 0;
     }
     if (!sup->stopped)
         (void)nt_supervisor_interrupt(sup, 500);
     if (sup->stopped && nt_supervisor_detach(sup) == 0) {
-        nt_supervisor_release(sup);
+        nt_supervisor_reset_owned(sup);
         return 0;
     }
-    /* The ptrace state is unknown: avoid abandoning a stopped live
-     * Linux thread. PID integers must NOT be used for a kill fallback. */
-    int result = -1;
+    /* If the stop state is unknown and detach cannot be verified,
+     * terminate only the direct child whose identity is pinned by pidfd.
+     * Never signal a raw potentially-recycled Linux TID/PID. */
 #if defined(SYS_pidfd_send_signal)
-    if (sup->pidfd >= 0 &&
-        syscall(SYS_pidfd_send_signal, sup->pidfd, SIGKILL, NULL, 0) == 0)
-        result = -1;
+    if (sup->pidfd >= 0)
+        (void)syscall(SYS_pidfd_send_signal, sup->pidfd, SIGKILL, NULL, 0);
 #endif
-    nt_supervisor_release(sup);
+    nt_supervisor_reset_owned(sup);
     errno = EPROTO;
-    return result;
+    return -1;
 }
 
 void nt_supervisor_release(struct nt_thread_supervisor *sup)
 {
-    if (!sup) return;
-    if (sup->pidfd >= 0) (void)close(sup->pidfd);
-    nt_supervisor_init(sup);
+    if (sup)
+        (void)nt_supervisor_abort_child(sup);
 }

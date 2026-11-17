@@ -43,11 +43,15 @@ static bool fd_seqpacket(int fd)
     return fd >= 0 && getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length) == 0 &&
            length == sizeof(type) && type == SOCK_SEQPACKET;
 }
-static bool read_ready(int fd, short events)
+static bool read_ready_for(int fd, short events, int timeout_ms)
 {
     struct pollfd p = {.fd = fd, .events = events};
-    const int n = poll(&p, 1, 1000);
+    const int n = poll(&p, 1, timeout_ms);
     return n == 1 && (p.revents & events) != 0;
+}
+static bool read_ready(int fd, short events)
+{
+    return read_ready_for(fd, events, 1000);
 }
 static bool send_packet(int fd, const void *data, size_t bytes)
 {
@@ -698,21 +702,35 @@ static nt_status control_rpc(uint32_t op, uint64_t cap, uint32_t flags,
         const bool sent = input != NULL ?
             send_packet(client_socket, &request, sizeof(request)) :
             send_packet(client_socket, &request.request, sizeof(request.request));
-        if (sent && read_ready(client_socket, POLLIN)) {
-            struct nt_broker_context_reply reply = {0};
+        /* Parent PTRACE_INTERRUPT can wait 1500ms plus scheduling.
+         * A timeout shorter than its stop deadline could strand a
+         * successfully suspended guest despite a missing client ACK. */
+        bool transport_valid =
+            sent && read_ready_for(client_socket, POLLIN, 4000);
+        struct nt_broker_context_reply reply = {0};
+        if (transport_valid) {
             const size_t expected = op == NT_BROKER_RPC_SUP_GET_CONTEXT ?
                 sizeof(reply) : sizeof(reply.reply);
             const ssize_t n = recv(client_socket, &reply, sizeof(reply), MSG_DONTWAIT);
-            if (n == (ssize_t)expected &&
+            transport_valid = n == (ssize_t)expected &&
                 reply.reply.magic == NT_THREAD_BROKER_MAGIC &&
-                reply.reply.process_id == (uint32_t)getpid()) {
-                result = (nt_status)reply.reply.status;
-                if (result == NT_STATUS_SUCCESS) {
-                    if (output != NULL)
-                        *output = reply.context;
-                    if (previous != NULL)
-                        *previous = (uint32_t)reply.reply.capability;
-                }
+                reply.reply.process_id == (uint32_t)getpid();
+        }
+        if (!transport_valid) {
+            /* Ambiguous mutation: forcibly revoke this authenticated
+             * channel. Its parent broker must release every owned tracee.
+             * Never accept a late reply as authorization for another RPC. */
+            (void)shutdown(client_socket, SHUT_RDWR);
+            close(client_socket);
+            client_socket = -1;
+            memset(client_secret, 0, sizeof(client_secret));
+        } else {
+            result = (nt_status)reply.reply.status;
+            if (result == NT_STATUS_SUCCESS) {
+                if (output != NULL)
+                    *output = reply.context;
+                if (previous != NULL)
+                    *previous = (uint32_t)reply.reply.capability;
             }
         }
     }
