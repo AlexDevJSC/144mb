@@ -79,6 +79,14 @@ static int NT_MS_ABI test_entry(void)
         if (syscall(SYS_arch_prctl, cet, 0UL) != -1 || errno != EPERM)
             return 38;
     }
+    errno = 0;
+    if (syscall(SYS_arch_prctl, 0x5100u, 0UL) != -1 || errno != EPERM)
+        return 39; /* unknown future CET extension is fail closed */
+    unsigned long query = 0;
+    errno = 0;
+    if (syscall(SYS_arch_prctl, 0x5005u, &query) == -1 &&
+        errno == EPERM)
+        return 40; /* read-only CET status remains permitted */
     atomic_store(&ticks, 0);
     atomic_store(&entered, 0);
     atomic_store(&stop, 0);
