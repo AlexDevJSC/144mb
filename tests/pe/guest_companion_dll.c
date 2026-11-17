@@ -27,3 +27,16 @@ __declspec(dllexport) int WINAPI GuestThreadEvents(void)
 {
     return (thread_attaches << 16) | thread_detaches;
 }
+
+/* This actual guest PE32+ DLL runs a leaf hot loop with no host imports,
+ * libc calls or loader-held mutex. The supervisor may stop it only when
+ * its .text range was pinned and copied to the parent before fork. */
+__declspec(dllexport) __attribute__((noinline))
+int WINAPI GuestHotLoop(volatile LONG *counter, const volatile LONG *release)
+{
+    if (!counter || !release || !process_attached)
+        return -1;
+    while (__atomic_load_n(release, __ATOMIC_RELAXED) == 0)
+        __atomic_add_fetch(counter, 1, __ATOMIC_RELAXED);
+    return 0x177;
+}
