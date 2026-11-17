@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 """Synthetic fail-closed supervisor and grant validation, no FUSE mount needed."""
 import importlib.util
+import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "nt-fs-supervisor.py"
@@ -46,6 +48,20 @@ class FileSystemSupervisorTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as error:
             MODULE.main(["--lower", "/tmp", "--view", "/tmp", "--"])
         self.assertEqual(error.exception.code, 2)
+
+    def test_two_sessions_cannot_own_same_view(self):
+        with tempfile.TemporaryDirectory() as temp:
+            view = pathlib.Path(temp) / "view"
+            view.mkdir()
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": temp}):
+                first = MODULE.lock_session(view)
+                try:
+                    with self.assertRaises(MODULE.Refused):
+                        MODULE.lock_session(view)
+                finally:
+                    os.close(first)
+                second = MODULE.lock_session(view)
+                os.close(second)
 
     def test_unverified_mount_refusal_without_executing_guest(self):
         with tempfile.TemporaryDirectory() as temp:
