@@ -357,16 +357,33 @@ static bool wal_recover_root(int root)
                     ok = dos83_entry_key(from, from_exact, source_key) &&
                          dos83_entry_key(to, to_exact, dest_key);
                     if (ok && record.staged) {
+                        /* A writer outside this protocol can have changed
+                         * the xattr while the process was dead. Do not
+                         * overwrite unexpected metadata or strcmp an
+                         * unterminated, untrusted 14-byte xattr buffer. */
+                        unsigned char actual[14] = {0};
+                        const ssize_t n = read_guest_xattr(pinned, dest_key,
+                                                            actual, sizeof(actual));
+                        const size_t alias_size = strnlen(record.alias,
+                                                         sizeof(record.alias)) + 1;
+                        const bool staged = alias_size <= sizeof(actual) &&
+                            n == (ssize_t)alias_size &&
+                            memcmp(actual, record.alias, alias_size) == 0;
+                        const bool original = record.old_size > 0 &&
+                            n == (ssize_t)record.old_size &&
+                            memcmp(actual, record.old_dest, record.old_size) == 0;
+                        const bool absent = n < 0 && errno == ENODATA;
                         if (at_dest) {
-                            char actual[14] = {0};
-                            const ssize_t n = read_guest_xattr(pinned,
-                                                     dest_key, actual, sizeof(actual));
-                            if (n <= 0 || strcmp(record.alias, actual) != 0) {
+                            if (!staged) {
                                 errno = EUCLEAN;
                                 ok = false;
                             } else if (strcmp(source_key, dest_key) != 0 &&
                                        clear_guest_xattr(pinned, source_key) != 0)
                                 ok = false;
+                        } else if (!staged && !original &&
+                                   !(record.old_size == 0 && absent)) {
+                            errno = EUCLEAN;
+                            ok = false;
                         } else if (record.old_size > 0) {
                             ok = write_guest_xattr(pinned, dest_key,
                                         record.old_dest, record.old_size) == 0;
