@@ -77,45 +77,71 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
     if (!has_right(state, NT_SUP_THREAD_GET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
     const uint32_t supported = NT_SUP_CONTEXT_CONTROL |
-                               NT_SUP_CONTEXT_INTEGER | NT_SUP_CONTEXT_SEGMENTS;
+                               NT_SUP_CONTEXT_INTEGER | NT_SUP_CONTEXT_SEGMENTS |
+                               NT_SUP_CONTEXT_FLOATING_POINT;
     if (!valid_context(context, supported)) return NT_STATUS_INVALID_PARAMETER;
     if (state->suspend_count == 0) return NT_STATUS_NOT_SUPPORTED;
     struct user_regs_struct regs;
     if (nt_supervisor_get_guest_context(state->tracer, &state->scope, &regs))
         return translate_ptrace_error(errno);
     const uint32_t flags = context->flags;
+    /* The NT_CONTEXT output is committed atomically only on complete
+     * success. A failed second GETREGSET must not leak half a snapshot
+     * into caller-owned memory. */
+    _Alignas(16) struct nt_context64 snapshot = {0};
+    snapshot.flags = flags;
     /* Windows CONTEXT x64 ABI fields, populated only for requested groups.
      * Neither debug registers nor FP/XSTATE are promised here. */
     if (flags & NT_SUP_CONTEXT_CONTROL) {
-        context->rip = regs.rip;
-        context->rsp = regs.rsp;
-        context->rbp = regs.rbp;
-        context->cs = (uint16_t)regs.cs;
-        context->ss = (uint16_t)regs.ss;
-        context->eflags = (uint32_t)regs.eflags;
+        snapshot.rip = regs.rip;
+        snapshot.rsp = regs.rsp;
+        snapshot.rbp = regs.rbp;
+        snapshot.cs = (uint16_t)regs.cs;
+        snapshot.ss = (uint16_t)regs.ss;
+        snapshot.eflags = (uint32_t)regs.eflags;
     }
     if (flags & NT_SUP_CONTEXT_INTEGER) {
-        context->rax = regs.rax;
-        context->rbx = regs.rbx;
-        context->rcx = regs.rcx;
-        context->rdx = regs.rdx;
-        context->rsi = regs.rsi;
-        context->rdi = regs.rdi;
-        context->r8 = regs.r8;
-        context->r9 = regs.r9;
-        context->r10 = regs.r10;
-        context->r11 = regs.r11;
-        context->r12 = regs.r12;
-        context->r13 = regs.r13;
-        context->r14 = regs.r14;
-        context->r15 = regs.r15;
+        snapshot.rax = regs.rax;
+        snapshot.rbx = regs.rbx;
+        snapshot.rcx = regs.rcx;
+        snapshot.rdx = regs.rdx;
+        snapshot.rsi = regs.rsi;
+        snapshot.rdi = regs.rdi;
+        snapshot.r8 = regs.r8;
+        snapshot.r9 = regs.r9;
+        snapshot.r10 = regs.r10;
+        snapshot.r11 = regs.r11;
+        snapshot.r12 = regs.r12;
+        snapshot.r13 = regs.r13;
+        snapshot.r14 = regs.r14;
+        snapshot.r15 = regs.r15;
     }
     if (flags & NT_SUP_CONTEXT_SEGMENTS) {
-        context->ds = (uint16_t)regs.ds;
-        context->es = (uint16_t)regs.es;
-        context->fs = (uint16_t)regs.fs;
-        context->gs = (uint16_t)regs.gs;
+        snapshot.ds = (uint16_t)regs.ds;
+        snapshot.es = (uint16_t)regs.es;
+        snapshot.fs = (uint16_t)regs.fs;
+        snapshot.gs = (uint16_t)regs.gs;
     }
+    if (flags & NT_SUP_CONTEXT_FLOATING_POINT) {
+        /* Linux AMD64 NT_PRFPREG is a 512-byte FXSAVE-compatible image
+         * (x87 + XMM0..XMM15 + MXCSR). CONTEXT.FltSave has the same
+         * packed 512-byte storage. This is READ ONLY: writes, AVX/YMM
+         * and extended XSTATE are deliberately not claimed. */
+        _Static_assert(sizeof(struct user_fpregs_struct) == 512,
+                       "AMD64 NT_PRFPREG FXSAVE layout");
+        _Static_assert(sizeof(snapshot.floating) == 512,
+                       "Windows AMD64 FltSave layout");
+        _Alignas(16) struct user_fpregs_struct fp = {0};
+        struct iovec fp_vector = {.iov_base = &fp, .iov_len = sizeof(fp)};
+        if (ptrace(PTRACE_GETREGSET, state->tracer->tid,
+                   (void *)(uintptr_t)NT_PRFPREG, &fp_vector) == -1)
+            return translate_ptrace_error(errno);
+        if (fp_vector.iov_len != sizeof(fp))
+            return NT_STATUS_NOT_SUPPORTED;
+        memcpy(snapshot.floating, &fp, sizeof(fp));
+        snapshot.mxcsr = fp.mxcsr;
+    }
+    *context = snapshot;
     return NT_STATUS_SUCCESS;
 }
 
