@@ -5,12 +5,14 @@ on:
       - 'src/supervisor/**'
       - 'tests/thread_supervisor_test.c'
       - 'scripts/check-thread-supervisor.sh'
+      - 'scripts/fedora-thread-supervisor-acceptance.sh'
       - '.github/workflows/thread-supervisor.yml'
   pull_request:
     paths:
       - 'src/supervisor/**'
       - 'tests/thread_supervisor_test.c'
       - 'scripts/check-thread-supervisor.sh'
+      - 'scripts/fedora-thread-supervisor-acceptance.sh'
       - '.github/workflows/thread-supervisor.yml'
   workflow_dispatch:
 permissions:
@@ -24,9 +26,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Prove independent asynchronous stop and register roundtrip
-        run: bash scripts/check-thread-supervisor.sh
+        run: make check-thread-supervisor
       - name: Repeat with undefined-behavior sanitizer
         run: |
           BUILD_DIR=build-supervisor-ubsan \
           CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
-            bash scripts/check-thread-supervisor.sh
+            make check-thread-supervisor
