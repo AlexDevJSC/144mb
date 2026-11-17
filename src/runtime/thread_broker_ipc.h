@@ -6,6 +6,7 @@
  * registered pidfd and the session token. Only query rights are supported. */
 #include "thread_broker_registry.h"
 #include "compat.h"
+#include "ntnative/counter.h"
 #include <stdbool.h>
 #include <stdint.h>
 
