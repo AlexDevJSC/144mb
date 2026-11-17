@@ -165,10 +165,13 @@ def service(backing: Path, view: Path, *, client_uid: int, client_gid: int,
     fuse, mediator, unmount = map(trusted_binary, (fuse, mediator, unmount))
     if mounted_fuse(exposed):
         raise Refused("Refusing to take over a mounted view")
-    preflight = subprocess.run([mediator, "--root", str(backing), "--scan"],
-                               capture_output=True, timeout=30, check=False)
-    if preflight.returncode:
-        raise Refused("Pending DOS8.3 WAL cannot be safely recovered")
+    # Startup recovery must resolve both DOS8.3 WAL and orphaned
+    # FILE_DELETE_PENDING markers BEFORE the FUSE view becomes visible.
+    for operation in ("--recover", "--scan"):
+        preflight = subprocess.run([mediator, "--root", str(backing), operation],
+                                   capture_output=True, timeout=30, check=False)
+        if preflight.returncode:
+            raise Refused("FileSystem4 storage preflight refused " + operation)
 
     stopped = False
     def terminate(_signal: int, _frame: object) -> None:
