@@ -683,6 +683,11 @@ static void release_waitable(struct waitable *object)
  * without preventing another independent alias from being released. */
 nt_status nt_runtime_close_waitable_status(uintptr_t handle)
 {
+    /* Closing a HANDLE during a pending async resume previously allowed
+     * the parent count to drop while the child could no longer commit
+     * the matching local count. Use the same gate order as Suspend/
+     * Resume/Get/Set: supervisor_gate_lock -> wait_lock. */
+    pthread_mutex_lock(&supervisor_gate_lock);
     pthread_mutex_lock(&wait_lock);
     struct waitable *object = find_waitable(handle);
     nt_status status = NT_STATUS_SUCCESS;
@@ -703,8 +708,9 @@ nt_status nt_runtime_close_waitable_status(uintptr_t handle)
         pthread_cond_broadcast(&wait_changed);
     }
     pthread_mutex_unlock(&wait_lock);
+    pthread_mutex_unlock(&supervisor_gate_lock);
     /* Never block wait_lock waiting for an IPC round trip; host cleanup is
-     * bounded by the broker's 1-second deadline and may fail on disconnect. */
+     * bounded by the broker's deadline and may fail on disconnect. */
     if (release_capability != 0)
         (void)nt_broker_client_close(release_capability);
     return status;
