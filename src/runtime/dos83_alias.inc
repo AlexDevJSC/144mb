@@ -40,6 +40,7 @@ static pthread_mutex_t dos83_lock = PTHREAD_MUTEX_INITIALIZER;
 /* An alias is durable only after its owner inode's metadata fsync.
  * wal_sync_pinned is defined in the versioned journal include below. */
 static bool wal_sync_pinned(int path_fd, bool directory);
+static bool wal_healthy(void);
 
 static bool dos83_char(unsigned char c)
 {
@@ -202,6 +203,8 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
 {
     if (dos83_native(name, alias))
         return true;
+    if (!wal_healthy())
+        return false;
     pthread_mutex_lock(&dos83_lock);
     int fd = confined_open_raw(parent, name, O_PATH | O_NOFOLLOW, 0);
     if (fd < 0) {
