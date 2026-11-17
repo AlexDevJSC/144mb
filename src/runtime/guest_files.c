@@ -3443,11 +3443,18 @@ static int32_t change_path(const char *input, enum path_operation operation)
             } else {
                 status = unlinkat(parent, leaf, 0);
                 if (status == 0) {
+                    dos83_test_crash("after-delete-entry");
+                    if (!wal_sync_pinned(parent, true))
+                        status = -1;
+                    else
+                        dos83_test_crash("after-delete-parent-fsync");
                     const int saved_error = errno;
                     pthread_mutex_unlock(&file_lock);
                     close(parent);
                     errno = saved_error;
-                    return 1;
+                    if (status != 0)
+                        nt_SetLastError(path_error(saved_error, false));
+                    return status == 0;
                 }
             }
         } else if (status == 0 && operation == REMOVE_FILE &&
@@ -3469,6 +3476,31 @@ static int32_t change_path(const char *input, enum path_operation operation)
             status = operation == REMOVE_FILE ?
                 remove_file_or_defer(parent, leaf, path, &info) :
                 unlinkat(parent, leaf, AT_REMOVEDIR);
+    }
+    if (status == 0 && operation == MAKE_DIRECTORY) {
+        dos83_test_crash("after-mkdir");
+        int child = confined_open_raw(parent, leaf,
+                                       O_RDONLY | O_DIRECTORY, 0);
+        if (child < 0 || !wal_sync_pinned(child, true))
+            status = -1;
+        if (child >= 0)
+            close(child);
+        if (status == 0)
+            dos83_test_crash("after-mkdir-inode-fsync");
+    }
+    if (status == 0) {
+        if (operation != MAKE_DIRECTORY) {
+            struct stat leftover;
+            if (fstatat(parent, leaf, &leftover, AT_SYMLINK_NOFOLLOW) != 0 &&
+                errno == ENOENT)
+                dos83_test_crash("after-delete-entry");
+        }
+        if (!wal_sync_pinned(parent, true))
+            status = -1;
+        else if (operation == MAKE_DIRECTORY)
+            dos83_test_crash("after-mkdir-parent-fsync");
+        else
+            dos83_test_crash("after-delete-parent-fsync");
     }
     const int error = errno;
     if (deletion_guard >= 0)
