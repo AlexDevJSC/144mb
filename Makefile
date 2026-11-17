@@ -131,7 +131,7 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/r
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-sync.o \
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-guest_files.o: override CPPFLAGS += $(ICU_CFLAGS)
-$(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/junctions.inc src/runtime/junction_control.inc
+$(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/dos83_wal.inc src/runtime/junctions.inc src/runtime/junction_control.inc
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-virtual_memory.o $(BUILD_DIR)/runtime-section_memory.o: src/runtime/section_memory.h
 $(BUILD_DIR)/runtime-section_memory.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-object_broker.o: src/runtime/object_broker.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/dynamic_tls.h
