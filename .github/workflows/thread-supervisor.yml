@@ -4,15 +4,25 @@ on:
     paths:
       - 'src/supervisor/**'
       - 'tests/thread_supervisor_test.c'
+      - 'tests/pe/supervisor_pe_*.c'
+      - 'tests/pe/supervisor_pe_shared.h'
       - 'scripts/check-thread-supervisor.sh'
       - 'scripts/fedora-thread-supervisor-acceptance.sh'
+      - 'Makefile'
+      - 'src/pe/image.c'
+      - 'src/runtime/guest_thread.c'
       - '.github/workflows/thread-supervisor.yml'
   pull_request:
     paths:
       - 'src/supervisor/**'
       - 'tests/thread_supervisor_test.c'
+      - 'tests/pe/supervisor_pe_*.c'
+      - 'tests/pe/supervisor_pe_shared.h'
       - 'scripts/check-thread-supervisor.sh'
       - 'scripts/fedora-thread-supervisor-acceptance.sh'
+      - 'Makefile'
+      - 'src/pe/image.c'
+      - 'src/runtime/guest_thread.c'
       - '.github/workflows/thread-supervisor.yml'
   workflow_dispatch:
 permissions:
@@ -25,6 +35,10 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Install MinGW compiler for controlled PE32+ fixture
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gcc-mingw-w64-x86-64-posix
       - name: Prove independent asynchronous stop and register roundtrip
         run: make check-thread-supervisor
       - name: Repeat with undefined-behavior sanitizer
@@ -32,3 +46,10 @@ jobs:
           BUILD_DIR=build-supervisor-ubsan \
           CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
             make check-thread-supervisor
+      - name: Prove real mapped PE32+ guest RIP and GS/TEB, not a Linux-only surrogate
+        run: make -j2 check-pe-thread-supervisor
+      - name: Repeat PE supervisor integration with UBSan
+        run: |
+          make -j2 BUILD_DIR=build-supervisor-pe-ubsan \
+            CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
+            check-pe-thread-supervisor
