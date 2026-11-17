@@ -40,6 +40,21 @@
 static int lower_root = -1;
 static pthread_mutex_t namespace_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Service-UID mode: the service owns backing; FUSE permits only the
+ * explicitly configured client UID. Kernel-supplied credentials (not paths
+ * or caller-provided metadata) are checked at every entry point. */
+static bool service_mode;
+static uid_t service_client_uid;
+static gid_t service_client_gid;
+static bool service_authorized(void)
+{
+    if (!service_mode)
+        return true;
+    const struct fuse_context *ctx = fuse_get_context();
+    return ctx && (ctx->uid == service_client_uid || ctx->uid == geteuid());
+}
+
+
 /* NT-compatible files opt into the existing CreateFile OFD lease registry.
  * A separate live lease for each FUSE FD preserves independent lifetimes. */
 struct view_file_lease {
@@ -245,11 +260,17 @@ static int guest_error(void)
 static int fs_getattr(const char *path, struct stat *st,
                       struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     int fd = fi && fi->fh ? (int)fi->fh : lower_open(path, O_PATH, 0);
     if (fd < 0)
         return -errno;
     int result = fstat(fd, st);
     int error = errno;
+    if (result == 0 && service_mode) {
+        st->st_uid = service_client_uid;
+        st->st_gid = service_client_gid;
+    }
     if (!fi || !fi->fh)
         close(fd);
     return result == 0 ? 0 : -error;
@@ -257,6 +278,8 @@ static int fs_getattr(const char *path, struct stat *st,
 
 static int fs_opendir(const char *path, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     int fd = lower_open(path, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0)
         return -errno;
@@ -268,6 +291,8 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
                       off_t offset, struct fuse_file_info *fi,
                       enum fuse_readdir_flags flags)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)flags;
     if (offset < 0)
         return -EINVAL;
@@ -310,12 +335,16 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
 
 static int fs_releasedir(const char *path, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)path;
     return close((int)fi->fh) == 0 ? 0 : -errno;
 }
 
 static int fs_open(const char *path, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     /* Never truncate before share admission: a Windows handle can reject
      * this write, and a rejected FUSE open must not mutate the file. */
     const bool truncate = (fi->flags & O_TRUNC) != 0;
@@ -370,6 +399,8 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
 
 static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     pthread_mutex_lock(&namespace_lock);
     /* FUSE create receives an inode mode (S_IFREG | permissions).
      * openat2 rejects file-type bits in open_how.mode with EINVAL. */
@@ -393,6 +424,8 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 static int fs_read(const char *path, char *buffer, size_t size,
                    off_t offset, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)path;
     int denied = view_range_access((int)fi->fh, offset, size, false);
     if (denied)
@@ -404,6 +437,8 @@ static int fs_read(const char *path, char *buffer, size_t size,
 static int fs_write(const char *path, const char *buffer, size_t size,
                     off_t offset, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)path;
     int denied = view_range_access((int)fi->fh, offset, size, true);
     if (denied)
@@ -414,6 +449,8 @@ static int fs_write(const char *path, const char *buffer, size_t size,
 
 static int fs_release(const char *path, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)path;
     int lease = view_lease_take((int)fi->fh);
     int result = close((int)fi->fh);
@@ -424,6 +461,8 @@ static int fs_release(const char *path, struct fuse_file_info *fi)
 
 static int fs_flush(const char *path, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)path;
     (void)fi;
     return 0;
@@ -431,6 +470,8 @@ static int fs_flush(const char *path, struct fuse_file_info *fi)
 
 static int fs_fsync(const char *path, int datasync, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)path;
     int result = datasync ? fdatasync((int)fi->fh) : fsync((int)fi->fh);
     return result == 0 ? 0 : -errno;
@@ -438,6 +479,8 @@ static int fs_fsync(const char *path, int datasync, struct fuse_file_info *fi)
 
 static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     if (size < 0)
         return -EINVAL;
     const bool borrowed = fi != NULL;
@@ -466,6 +509,8 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 
 static int fs_mkdir(const char *path, mode_t mode)
 {
+    if (!service_authorized())
+        return -EACCES;
     pthread_mutex_lock(&namespace_lock);
     char name[NAME_MAX + 1];
     int parent = lower_parent(path, name);
@@ -485,6 +530,8 @@ static int fs_mkdir(const char *path, mode_t mode)
 
 static int fs_mknod(const char *path, mode_t mode, dev_t dev)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)dev;
     if (!S_ISREG(mode))
         return -ENOTSUP;
@@ -497,6 +544,8 @@ static int fs_mknod(const char *path, mode_t mode, dev_t dev)
 
 static int fs_unlink(const char *path)
 {
+    if (!service_authorized())
+        return -EACCES;
     uint16_t wide[PATH_MAX];
     int error = guest_wide(path, wide);
     if (error)
@@ -509,6 +558,8 @@ static int fs_unlink(const char *path)
 
 static int fs_rmdir(const char *path)
 {
+    if (!service_authorized())
+        return -EACCES;
     uint16_t wide[PATH_MAX];
     int error = guest_wide(path, wide);
     if (error)
@@ -521,6 +572,8 @@ static int fs_rmdir(const char *path)
 
 static int fs_rename(const char *from, const char *to, unsigned int flags)
 {
+    if (!service_authorized())
+        return -EACCES;
     if (flags & ~(unsigned int)RENAME_NOREPLACE)
         return -ENOTSUP;
     uint16_t old[PATH_MAX], replacement[PATH_MAX];
@@ -540,6 +593,8 @@ static int fs_rename(const char *from, const char *to, unsigned int flags)
 
 static int fs_link(const char *from, const char *to)
 {
+    if (!service_authorized())
+        return -EACCES;
     pthread_mutex_lock(&namespace_lock);
     char old_name[NAME_MAX + 1], new_name[NAME_MAX + 1];
     int old_parent = lower_parent(from, old_name);
@@ -562,12 +617,16 @@ static int fs_link(const char *from, const char *to)
 
 static int fs_statfs(const char *path, struct statvfs *st)
 {
+    if (!service_authorized())
+        return -EACCES;
     (void)path;
     return fstatvfs(lower_root, st) == 0 ? 0 : -errno;
 }
 
 static int fs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     int fd = fi ? (int)fi->fh : lower_open(path, O_RDONLY, 0);
     if (fd < 0)
         return -errno;
@@ -581,6 +640,8 @@ static int fs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 static int fs_utimens(const char *path, const struct timespec times[2],
                       struct fuse_file_info *fi)
 {
+    if (!service_authorized())
+        return -EACCES;
     int fd = fi ? (int)fi->fh : lower_open(path, O_RDONLY, 0);
     if (fd < 0)
         return -errno;
@@ -601,6 +662,8 @@ static bool reserved_xattr(const char *name)
 static int fs_getxattr(const char *path, const char *name, char *value,
                        size_t size)
 {
+    if (!service_authorized())
+        return -EACCES;
     if (reserved_xattr(name))
         return -ENODATA;
     int fd = lower_open(path, O_RDONLY, 0);
@@ -615,6 +678,8 @@ static int fs_getxattr(const char *path, const char *name, char *value,
 static int fs_setxattr(const char *path, const char *name, const char *value,
                        size_t size, int flags)
 {
+    if (!service_authorized())
+        return -EACCES;
     if (reserved_xattr(name))
         return -EACCES;
     int fd = lower_open(path, O_RDONLY, 0);
@@ -628,6 +693,8 @@ static int fs_setxattr(const char *path, const char *name, const char *value,
 
 static int fs_removexattr(const char *path, const char *name)
 {
+    if (!service_authorized())
+        return -EACCES;
     if (reserved_xattr(name))
         return -EACCES;
     int fd = lower_open(path, O_RDONLY, 0);
@@ -641,6 +708,8 @@ static int fs_removexattr(const char *path, const char *name)
 
 static int fs_listxattr(const char *path, char *buffer, size_t capacity)
 {
+    if (!service_authorized())
+        return -EACCES;
     int fd = lower_open(path, O_RDONLY, 0);
     if (fd < 0)
         return -errno;
@@ -876,12 +945,30 @@ static int backend_selftest(void)
 
 int main(int argc, char **argv)
 {
-    if ((argc == 3 && !strcmp(argv[1], "--selftest")) ||
-        (argc >= 3 && strcmp(argv[1], "--selftest"))) {
-        /* Valid invocations: --selftest BACKING or BACKING MOUNT [-f]. */
-    } else {
+    /* Service client identity is explicit; a test invocation cannot
+     * accidentally enable allow_other or weaken backing permissions. */
+    if (argc == 8 && strcmp(argv[1], "--selftest") &&
+        !strcmp(argv[3], "-f") &&
+        !strcmp(argv[4], "--service-client-uid") &&
+        !strcmp(argv[6], "--service-client-gid")) {
+        char *uid_end = NULL, *gid_end = NULL;
+        errno = 0;
+        unsigned long uid = strtoul(argv[5], &uid_end, 10);
+        unsigned long gid = strtoul(argv[7], &gid_end, 10);
+        if (errno || !uid_end || *uid_end || !gid_end || *gid_end ||
+            uid == 0 || gid == 0 || uid > UINT32_MAX || gid > UINT32_MAX ||
+            geteuid() == 0 || uid == (unsigned long)geteuid()) {
+            fputs("Refusing insecure service client identity\n", stderr);
+            return 2;
+        }
+        service_mode = true;
+        service_client_uid = (uid_t)uid;
+        service_client_gid = (gid_t)gid;
+    } else if (!((argc == 3 && !strcmp(argv[1], "--selftest")) ||
+                 (argc >= 3 && argc <= 4 && strcmp(argv[1], "--selftest")))) {
         fprintf(stderr,
-                "Usage: %s --selftest BACKING | BACKING MOUNT [-f]\n",
+                "Usage: %s --selftest BACKING | BACKING MOUNT [-f] | "
+                "BACKING MOUNT -f --service-client-uid UID --service-client-gid GID\n",
                 argv[0]);
         return 2;
     }
@@ -890,6 +977,14 @@ int main(int argc, char **argv)
     if (lower_root < 0 || !nt_runtime_set_file_root(backing)) {
         perror("nt-dos83-fuse: backing");
         return 2;
+    }
+    if (service_mode) {
+        struct stat st;
+        if (fstat(lower_root, &st) != 0 || st.st_uid != geteuid() ||
+            (st.st_mode & 077u) != 0) {
+            fputs("Service backing must be private and owner-only\n", stderr);
+            return 2;
+        }
     }
     if (!strcmp(argv[1], "--selftest"))
         return backend_selftest();
@@ -912,6 +1007,8 @@ int main(int argc, char **argv)
         return 2;
     }
     char *fargv[] = { argv[0], view, "-f", "-o",
+                      service_mode ?
+                      "default_permissions,allow_other,fsname=nt-dos83,subtype=nt-dos83" :
                       "default_permissions,fsname=nt-dos83,subtype=nt-dos83", NULL };
     return fuse_main(5, fargv, &ops, NULL);
 }
