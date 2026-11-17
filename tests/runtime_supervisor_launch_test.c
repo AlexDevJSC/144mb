@@ -52,7 +52,15 @@ static int NT_MS_ABI test_guest_entry(void)
         return 13;
     struct nt_broker_thread_info identity = {0}, queried = {0};
     uint64_t capability = 0;
-    if (!nt_broker_client_supervisor_open(thread_id,
+    uintptr_t limited = nt_OpenThread(NT_BROKER_SUPERVISOR_GET_CONTEXT, 0, thread_id);
+    struct nt_broker_thread_info denied_identity = {0};
+    uint64_t denied_capability = UINT64_C(0x5151);
+    if (!limited || nt_runtime_supervisor_open_thread_handle(limited,
+            NT_BROKER_SUPERVISOR_GET_CONTEXT | NT_BROKER_SUPERVISOR_SUSPEND,
+            &denied_identity, &denied_capability) ||
+        denied_capability != UINT64_C(0x5151) || !nt_CloseHandle(limited))
+        return 18; /* real NT HANDLE access must not be amplified */
+    if (!nt_runtime_supervisor_open_thread_handle(thread,
                NT_BROKER_SUPERVISOR_GET_CONTEXT | NT_BROKER_SUPERVISOR_SUSPEND,
                &identity, &capability) ||
         identity.guest_thread_id != thread_id ||
@@ -89,6 +97,6 @@ int main(void)
     }
     puts("PASS runtime supervisor bootstrap: authentic direct-fork parent,"
          " 2 independent sessions, CreateThread registration, primary/secondary"
-         " owner leases, permissions and clean exit");
+         " owner leases, NT HANDLE rights and clean exit");
     return 0;
 }
