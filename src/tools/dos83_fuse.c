@@ -358,6 +358,12 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         close(fd);
         return error;
     }
+    /* Marked NT files must bypass the FUSE page cache: otherwise a
+     * buffered read can skip fs_read and the Win32 range-lock check. */
+    if (marked) {
+        fi->direct_io = 1;
+        fi->keep_cache = 0;
+    }
     fi->fh = (uint64_t)fd;
     return 0;
 }
@@ -802,6 +808,10 @@ static int backend_selftest(void)
     if (fs_open(marked_path, &denied) != -EBUSY ||
         fs_open(marked_path, &accepted) != 0) {
         fprintf(stderr, "FAIL: Win32 FILE_SHARE rejected wrong FUSE access\n");
+        return 1;
+    }
+    if (!accepted.direct_io) {
+        fprintf(stderr, "FAIL: marked FUSE handle can use cached I/O\n");
         return 1;
     }
     char contents[4] = {0};

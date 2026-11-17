@@ -26,6 +26,20 @@ class Refused(RuntimeError):
     pass
 
 
+class SessionTerminated(Exception):
+    def __init__(self, signum: int):
+        super().__init__(f"Session termination signal {signum}")
+        self.signum = signum
+
+
+def handle_termination(signum: int, _frame: object) -> None:
+    # A second termination request must not interrupt the finally block
+    # responsible for stopping guests and unmounting FUSE.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    raise SessionTerminated(signum)
+
+
 def canonical_grants(lower: str, view: str) -> tuple[Path, Path]:
     for raw in (lower, view):
         if not Path(raw).is_dir():
@@ -81,27 +95,80 @@ def mounted(view: Path, mountpoint: str) -> bool:
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
-def stop_group(proc: subprocess.Popen[bytes] | None) -> None:
-    if proc is None or proc.poll() is not None:
-        return
-    # start_new_session=True makes this process the leader of its own group.
+def group_exists(pgid: int) -> bool:
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(pgid, 0)
     except ProcessLookupError:
+        return False
+    return True
+
+
+def stop_group(proc: subprocess.Popen[bytes] | None) -> None:
+    if proc is None:
         return
+    # The launcher is a session leader, but its background children can
+    # remain in that group after the leader has exited and been reaped.
+    # Waiting for the leader alone therefore does not clean up the session.
+    pgid = proc.pid
     try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    else:
+        deadline = time.monotonic() + 1.0
+        while group_exists(pgid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # Always escalate if the group remains, even when its leader exited
+        # earlier or a descendant ignored SIGTERM.
+        if group_exists(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    if proc.poll() is None:
         proc.wait(timeout=2.0)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
 
 
-def run_session(lower: Path, view: Path, program: list[str]) -> int:
+def require_pe_profile(lower: Path) -> None:
+    """The existing PE launcher must mount precisely this backing as C:."""
+    home = os.environ.get("HOME")
+    state = os.environ.get("XDG_STATE_HOME")
+    if not home or not os.path.isabs(home):
+        raise Refused("PE supervision requires an absolute HOME")
+    if not state or not os.path.isabs(state):
+        state = str(Path(home) / ".local" / "state")
+    profile = Path(state) / "nt-native-linux" / "C:"
+    if profile.is_symlink() or not profile.is_dir():
+        raise Refused("Supervised PE profile C: must exist and not be a symlink")
+    info = profile.stat()
+    if info.st_uid != os.geteuid() or (info.st_mode & 0o077) != 0:
+        raise Refused("Supervised PE C: profile has unsafe ownership or mode")
+    if not profile.samefile(lower):
+        raise Refused("Supervised PE backing is not the existing launcher C: profile")
+
+
+def trusted_pe_runner() -> Path:
+    script_dir = Path(__file__).resolve().parent
+    candidates = (script_dir.parent / "build" / "pe-isolated-run",
+                  script_dir / "pe-isolated-run")
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate.resolve()
+    raise Refused("Trusted pe-isolated-run binary unavailable beside supervisor")
+
+
+def run_session(lower: Path, view: Path, program: list[str],
+                pe_mode: bool = False) -> int:
     if os.geteuid() == 0:
         raise Refused("Do not run the FileSystem session supervisor as root")
+    pe_runner = None
+    if pe_mode:
+        require_pe_profile(lower)
+        pe_runner = trusted_pe_runner()
+        if not os.access("/usr/bin/bwrap", os.X_OK):
+            raise Refused("PE supervision requires /usr/bin/bwrap")
+        if not program or not program[0].lower().endswith(".exe"):
+            raise Refused("PE mode only launches an explicit executable .exe")
     root = Path(__file__).resolve().parent.parent
     fuse = root / "build" / "nt-dos83-fuse"
     landlock = root / "build" / "nt-dos83-landlock"
@@ -172,8 +239,17 @@ def run_session(lower: Path, view: Path, program: list[str]) -> int:
             env = dict(os.environ)
             env["NT_FS_SUPERVISED"] = "1"
             env["NT_FS_VIEW"] = str(view)
-            guest = subprocess.Popen([str(landlock), "--view", str(view), "--", *program],
-                                     env=env, start_new_session=True)
+            if pe_mode:
+                # The trusted host launcher must prepare its own Bubblewrap
+                # sandbox and write to C: through the existing Win32 broker.
+                # Landlock on that host launcher would forbid C: writes.
+                # ONLY opt-in Linux clients use the separate FUSE Landlock view.
+                env["NT_FS_LOWER"] = str(lower)
+                command = [str(pe_runner), "--", *program]
+            else:
+                command = [str(landlock), "--view", str(view), "--", *program]
+            guest = subprocess.Popen(command, env=env,
+                                     start_new_session=True)
             while True:
                 status = guest.poll()
                 if status is not None:
@@ -197,21 +273,34 @@ def main(argv: list[str]) -> int:
         description="Supervise one FUSE/Landlock-protected NT file session")
     parser.add_argument("--lower", required=True, help="trusted physical backing")
     parser.add_argument("--view", required=True, help="dedicated empty mountpoint")
+    parser.add_argument("--pe", action="store_true",
+                        help="launch a trusted PE runner under its own Bubblewrap sandbox")
     parser.add_argument("program", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     program = args.program[1:] if args.program[:1] == ["--"] else args.program
     if not program:
         parser.error("A program after -- is mandatory")
+    old_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGTERM, signal.SIGHUP)
+    }
     try:
+        for signum in old_handlers:
+            signal.signal(signum, handle_termination)
         lower, view = canonical_grants(args.lower, args.view)
         lock_fd = lock_session(view)
         try:
-            return run_session(lower, view, program)
+            return run_session(lower, view, program, args.pe)
         finally:
             os.close(lock_fd)
+    except SessionTerminated as interrupted:
+        return 128 + interrupted.signum
     except (Refused, OSError) as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 3
+    finally:
+        for signum, handler in old_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

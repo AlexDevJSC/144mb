@@ -13,12 +13,17 @@ sesión nueva, comprueba el montaje y Landlock ABI >=3, y ejecuta
 el comando como descendiente de `nt-dos83-landlock`.
 Mantiene un lock por vista para impedir montajes concurrentes y ejecuta
 `nt-dos83-mediator --scan` antes de abrir la sesión, rechazando
-reconciliaciones que fallan. Es una comprobación preventiva, no un WAL.
+reconciliaciones que fallan. En la rama FileSystem4 integrada, --scan ejecuta antes la recuperación del WAL
+DOS83 de C: y rechaza estados corruptos o ambiguos. La recuperación aún
+no es una transacción global para todas las operaciones POSIX.
 No ejecuta el comando ante ausencia de FUSE, Landlock, montaje verificable
 ni si el montaje desaparece; detecta la muerte del daemon y finaliza
 el grupo del proceso que lanzó. El cierre desmonta la vista y detiene
-su propio daemon. El montaje físico y la liberación de recursos deben
-validarse en Fedora.
+su propio daemon. SIGTERM/SIGHUP activan la limpieza supervisada, que
+intenta terminar el grupo completo del invitado incluso si su proceso
+principal terminó y dejó hijos en segundo plano. No es una garantía
+contra descendientes que se cambien voluntariamente de sesión/grupo.
+El montaje físico y la liberación de recursos deben validarse en Fedora.
 
 ```bash
 make -j2 all check-fs-supervisor check-dos83-fuse
@@ -54,6 +59,12 @@ apertura NT sin permiso de compartición puede rechazar una apertura
 Linux posterior, y la apertura Linux activa puede impedir una apertura
 NT cuyo `dwShareMode` excluya su acceso. Los locks de rango mediante
 `LockFile/LockFileEx` se consultan antes de I/O FUSE en el FD marcado.
+
+Las aperturas FUSE de archivos marcados utilizan `direct_io` para impedir
+que el caché de páginas del kernel satisfaga una lectura sin llamar al
+callback que valida los bloqueos por rango. Esto puede limitar `mmap`
+sobre esos handles y no sustituye la mediación de los accesos directos
+al backing por procesos ajenos a la sesión.
 
 El marcador sólo puede ser asignado por un operador con acceso al backing:
 
