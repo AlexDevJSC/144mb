@@ -6464,8 +6464,11 @@ int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
 
 uint32_t NT_MS_ABI nt_GetFileAttributesW(const uint16_t *path)
 {
-    struct nt_file_attribute_data attributes;
-    return nt_GetFileAttributesExW(path, 0, &attributes) ? attributes.attributes : UINT32_MAX;
+    /* Keep the output initialized even under aggressive LTO. A failed
+     * GetFileAttributesEx must never expose indeterminate metadata. */
+    struct nt_file_attribute_data attributes = {0};
+    return nt_GetFileAttributesExW(path, 0, &attributes) ?
+           attributes.attributes : UINT32_MAX;
 }
 
 int32_t NT_MS_ABI nt_AreFileApisANSI(void)
