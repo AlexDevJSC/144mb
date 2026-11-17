@@ -4,3 +4,7 @@
 *.exe
 *.obj
 *.pdb
+
+# Python regression tests must not make user-managed source trees dirty.
+__pycache__/
+*.pyc
