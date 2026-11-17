@@ -88,11 +88,12 @@ $(BUILD_DIR)/supervisor-pe-fixture.exe: $(BUILD_DIR)/supervisor-pe-fixture.coff.
 	    --subsystem console --no-insert-timestamp --disable-reloc-section \
 	    --strip-all -o "$@" "$<"
 
-$(BUILD_DIR)/supervisor-pe-thread-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h include/ntnative/guest_boundary.h src/pe/image.c src/pe/image.h src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/supervisor -Itests/pe \
+$(BUILD_DIR)/supervisor-pe-thread-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h src/supervisor/nt_supervisor_nt_bridge.c src/supervisor/nt_supervisor_nt_bridge.h src/runtime/compat.h src/runtime/nt_services.h include/ntnative/guest_boundary.h src/pe/image.c src/pe/image.h src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/runtime -Isrc/supervisor -Itests/pe \
 	    $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    tests/pe/supervisor_pe_thread_test.c src/supervisor/nt_thread_supervisor.c \
-	    src/pe/image.c src/runtime/guest_thread.c -pthread $(LDLIBS) -o "$@"
+	    src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c \
+	    -pthread $(LDLIBS) -o "$@"
 
 .PHONY: check-pe-thread-supervisor
 check-pe-thread-supervisor: $(BUILD_DIR)/supervisor-pe-thread-test $(BUILD_DIR)/supervisor-pe-fixture.exe
