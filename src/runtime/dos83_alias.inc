@@ -332,52 +332,97 @@ static bool dos83_lock_pair(int source_parent, int dest_parent,
     return true;
 }
 
+#include "dos83_wal.inc"
+
 /* Cooperating rename transaction. Stage the new xattr on the pinned
  * source inode BEFORE renameat2: if the syscall commits, the new entry
  * immediately has its alias. Release locks only after cleanup/rollback.
  * Linux writers which bypass the broker remain outside atomic guarantees. */
 struct dos83_move_txn {
     int source_fd, victim_fd, gate_a, gate_b;
+    int source_parent, dest_parent;
+    struct dos83_wal wal;
     char source_key[112], dest_key[112], old_dest[14];
     ssize_t old_dest_size;
-    bool staged, has_source_alias;
+    bool staged, has_source_alias, journaled;
 };
 
-static void dos83_move_end(struct dos83_move_txn *txn, bool committed)
+static bool dos83_move_end(struct dos83_move_txn *txn, bool committed)
 {
     const int saved_errno = errno;
+    bool ok = true;
+    int error = 0;
     if (txn->source_fd >= 0) {
         if (txn->staged) {
             if (committed) {
-                if (strcmp(txn->source_key, txn->dest_key) != 0)
-                    (void)clear_guest_xattr(txn->source_fd, txn->source_key);
+                if (strcmp(txn->source_key, txn->dest_key) != 0 &&
+                    clear_guest_xattr(txn->source_fd, txn->source_key) != 0)
+                    ok = false;
             } else if (txn->old_dest_size > 0) {
-                (void)write_guest_xattr(txn->source_fd, txn->dest_key,
-                                       txn->old_dest, (size_t)txn->old_dest_size);
-            } else {
-                (void)clear_guest_xattr(txn->source_fd, txn->dest_key);
+                if (write_guest_xattr(txn->source_fd, txn->dest_key,
+                                      txn->old_dest,
+                                      (size_t)txn->old_dest_size) != 0)
+                    ok = false;
+            } else if (clear_guest_xattr(txn->source_fd,
+                                          txn->dest_key) != 0) {
+                ok = false;
+            }
+            if (!ok)
+                error = errno;
+        }
+        if (ok && txn->journaled) {
+            struct stat st;
+            if (fstat(txn->source_fd, &st) != 0 ||
+                !wal_sync_pinned(txn->source_fd, S_ISDIR(st.st_mode))) {
+                ok = false;
+                error = errno;
             }
         }
+    }
+    if (txn->victim_fd >= 0 && committed &&
+        clear_guest_xattr(txn->victim_fd, txn->dest_key) != 0) {
+        ok = false;
+        if (!error)
+            error = errno;
+    }
+    if (txn->victim_fd >= 0 && ok && committed) {
+        struct stat st;
+        if (fstat(txn->victim_fd, &st) != 0 ||
+            !wal_sync_pinned(txn->victim_fd, S_ISDIR(st.st_mode))) {
+            ok = false;
+            error = errno;
+        }
+    }
+    /* Both directory entries and xattrs must reach stable storage before
+     * clearing the replay record. A failure leaves the journal intact. */
+    if (txn->journaled && ok &&
+        (!wal_sync_pinned(txn->source_parent, true) ||
+         !wal_sync_pinned(txn->dest_parent, true) ||
+         !wal_clear(&txn->wal))) {
+        ok = false;
+        error = errno;
+    }
+    if (txn->source_fd >= 0)
         close(txn->source_fd);
-    }
-    if (txn->victim_fd >= 0) {
-        if (committed)
-            (void)clear_guest_xattr(txn->victim_fd, txn->dest_key);
+    if (txn->victim_fd >= 0)
         close(txn->victim_fd);
-    }
     if (txn->gate_b >= 0)
         close(txn->gate_b);
     if (txn->gate_a >= 0)
         close(txn->gate_a);
+    wal_close(&txn->wal);
     pthread_mutex_unlock(&dos83_lock);
-    errno = saved_errno;
+    errno = ok ? saved_errno : (error ? error : EIO);
+    return ok;
 }
 
 /* Both parents are already pinned and the caller holds its file-lock.
  * The same gate order is used by concurrent NT rename workers, including
  * opposite-direction moves. Return a locked transaction to be finished
  * on success OR failure of the following renameat2 call. */
-static bool dos83_move_begin(int source_parent, const char *source_leaf,
+static bool dos83_move_begin(int root, const char *from_path,
+                             const char *to_path,
+                             int source_parent, const char *source_leaf,
                              int dest_parent, const char *dest_leaf,
                              const struct stat *expected_source,
                              bool replacing,
@@ -385,12 +430,20 @@ static bool dos83_move_begin(int source_parent, const char *source_leaf,
 {
     *txn = (struct dos83_move_txn){
         .source_fd = -1, .victim_fd = -1, .gate_a = -1,
-        .gate_b = -1, .old_dest_size = -1
+        .gate_b = -1, .old_dest_size = -1,
+        .source_parent = source_parent, .dest_parent = dest_parent,
+        .wal = {.fd = -1, .directory = -1}
     };
     pthread_mutex_lock(&dos83_lock);
+    /* One WAL per physical grant; the global lock comes BEFORE the
+     * directory locks in both normal operation and crash recovery. */
+    int error = wal_open(root, &txn->wal) ? 0 : errno;
+    if (!error && !wal_empty(&txn->wal))
+        error = errno;
     bool same_dir = false;
-    int error = dos83_lock_pair(source_parent, dest_parent, &txn->gate_a,
-                                &txn->gate_b, &same_dir) ? 0 : errno;
+    if (!error && !dos83_lock_pair(source_parent, dest_parent,
+                         &txn->gate_a, &txn->gate_b, &same_dir))
+        error = errno;
     if (!error) {
         txn->source_fd = confined_open_raw(source_parent, source_leaf,
                                            O_PATH | O_NOFOLLOW, 0);
@@ -428,8 +481,10 @@ static bool dos83_move_begin(int source_parent, const char *source_leaf,
                                 alias[count - 1] == '\0' &&
                                 memchr(alias, '~', (size_t)count - 1);
     }
-    if (!error && txn->has_source_alias &&
-        strcmp(txn->source_key, txn->dest_key) != 0) {
+    char alias_for_move[14] = {0};
+    const bool needs_staging = txn->has_source_alias &&
+                               strcmp(txn->source_key, txn->dest_key) != 0;
+    if (!error && needs_staging) {
         const char *ignore = same_dir ? source_leaf : NULL;
         int collision = dos83_collision_except(dest_parent, dest_leaf,
                                                 ignore, alias);
@@ -454,22 +509,67 @@ static bool dos83_move_begin(int source_parent, const char *source_leaf,
                 error = ENOSPC;
         }
         if (!error) {
-            txn->old_dest_size = read_guest_xattr(txn->source_fd, txn->dest_key,
-                                                  txn->old_dest,
-                                                  sizeof(txn->old_dest));
-            if (txn->old_dest_size < 0 &&
-                errno != ENODATA)
+            txn->old_dest_size = read_guest_xattr(txn->source_fd,
+                         txn->dest_key, txn->old_dest, sizeof(txn->old_dest));
+            if (txn->old_dest_size < 0 && errno != ENODATA)
                 error = errno;
-            if (!error && write_guest_xattr(txn->source_fd, txn->dest_key,
-                                             alias, strlen(alias) + 1) != 0)
+        }
+        if (!error)
+            memcpy(alias_for_move, alias, sizeof(alias_for_move));
+    }
+    if (!error) {
+        struct stat root_st, from_st, to_st, victim_st = {0};
+        if (fstat(root, &root_st) != 0 ||
+            fstat(source_parent, &from_st) != 0 ||
+            fstat(dest_parent, &to_st) != 0 ||
+            (replacing && fstat(txn->victim_fd, &victim_st) != 0)) {
+            error = errno;
+        } else {
+            struct dos83_wal_entry record = {
+                .root_dev = (uint64_t)root_st.st_dev,
+                .root_ino = (uint64_t)root_st.st_ino,
+                .file_dev = (uint64_t)pinned.st_dev,
+                .file_ino = (uint64_t)pinned.st_ino,
+                .from_dir_dev = (uint64_t)from_st.st_dev,
+                .from_dir_ino = (uint64_t)from_st.st_ino,
+                .to_dir_dev = (uint64_t)to_st.st_dev,
+                .to_dir_ino = (uint64_t)to_st.st_ino,
+                .victim_dev = (uint64_t)victim_st.st_dev,
+                .victim_ino = (uint64_t)victim_st.st_ino,
+                .victim = replacing,
+                .staged = needs_staging,
+                .old_size = txn->old_dest_size > 0 ?
+                            (size_t)txn->old_dest_size : 0
+            };
+            if (record.old_size)
+                memcpy(record.old_dest, txn->old_dest, record.old_size);
+            memcpy(record.alias, alias_for_move, sizeof(record.alias));
+            if (snprintf(record.from, sizeof(record.from), "%s", from_path) >=
+                (int)sizeof(record.from) ||
+                snprintf(record.to, sizeof(record.to), "%s", to_path) >=
+                (int)sizeof(record.to)) {
+                error = ENAMETOOLONG;
+            } else if (!wal_write(&txn->wal, &record)) {
                 error = errno;
-            if (!error)
-                txn->staged = true;
+            } else {
+                txn->journaled = true;
+            }
         }
     }
+    if (!error && needs_staging) {
+        /* Even if setxattr partially fails, the durable log knows the
+         * pre-image, so rollback is always attempted. */
+        txn->staged = true;
+        if (write_guest_xattr(txn->source_fd, txn->dest_key,
+                              alias, strlen(alias) + 1) != 0 ||
+            !wal_sync_pinned(txn->source_fd, S_ISDIR(pinned.st_mode)))
+            error = errno;
+    }
     if (error) {
-        errno = error;
-        dos83_move_end(txn, false);
+        int cause = error;
+        if (!dos83_move_end(txn, false))
+            cause = errno;
+        errno = cause;
         return false;
     }
     return true;
