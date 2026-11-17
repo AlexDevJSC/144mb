@@ -402,12 +402,31 @@ static bool dos83_move_end(struct dos83_move_txn *txn, bool committed)
      * clearing the replay record. A failure leaves the journal intact. */
     if (txn->journaled && ok && committed)
         dos83_test_crash("after-cleanup");
-    if (txn->journaled && ok &&
-        (!wal_sync_pinned(txn->source_parent, true) ||
-         !wal_sync_pinned(txn->dest_parent, true) ||
-         !wal_clear(&txn->wal))) {
-        ok = false;
-        error = errno;
+    if (txn->journaled && ok) {
+        /* Keep the barriers explicit so the test-only mediator can die
+         * between each durable step, without changing release behavior.
+         * Recovery must be correct with a pending WAL after either
+         * directory fsync; after a synced clear it must be a no-op. */
+        if (!wal_sync_pinned(txn->source_parent, true)) {
+            ok = false;
+            error = errno;
+        } else {
+            if (committed)
+                dos83_test_crash("after-source-parent-fsync");
+            if (!wal_sync_pinned(txn->dest_parent, true)) {
+                ok = false;
+                error = errno;
+            } else {
+                if (committed)
+                    dos83_test_crash("after-both-parents-fsync");
+                if (!wal_clear(&txn->wal)) {
+                    ok = false;
+                    error = errno;
+                } else if (committed) {
+                    dos83_test_crash("after-wal-clear");
+                }
+            }
+        }
     }
     if (txn->source_fd >= 0)
         close(txn->source_fd);
