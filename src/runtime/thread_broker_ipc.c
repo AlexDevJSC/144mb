@@ -300,6 +300,10 @@ void nt_broker_server_loop(int fd,
         struct nt_thread_broker_reply response = {
             .magic = NT_THREAD_BROKER_MAGIC, .status = 1
         };
+        /* GET_CONTEXT replies are extended even on authorization or
+         * validation failure; the client must receive the true NTSTATUS
+         * without mistaking a short error reply for broken transport. */
+        _Alignas(16) struct nt_context64 context_response = {0};
         const pid_t requester = peer->child_pid;
         struct nt_broker_thread_info info = {0};
         uint64_t handle = 0;
@@ -449,17 +453,8 @@ void nt_broker_server_loop(int fd,
             response.thread_id = info.guest_thread_id;
             response.generation = info.generation;
             if (status == NT_STATUS_SUCCESS) {
-                if (request.operation == NT_BROKER_RPC_SUP_GET_CONTEXT) {
-                    struct nt_broker_context_reply reply = {
-                        .reply = response, .context = output
-                    };
-                    if (!send_packet(fd, &reply, sizeof(reply))) {
-                        nt_supervisor_control_server_destroy(control);
-                        nt_broker_revoke_requester(peer->child_pid);
-                        return;
-                    }
-                    continue;
-                }
+                if (request.operation == NT_BROKER_RPC_SUP_GET_CONTEXT)
+                    context_response = output;
                 if (request.operation == NT_BROKER_RPC_SUP_SUSPEND ||
                     request.operation == NT_BROKER_RPC_SUP_RESUME)
                     response.capability = previous;
@@ -469,8 +464,15 @@ void nt_broker_server_loop(int fd,
         default:
             break;
         }
-        if (!send_packet(fd, &response, sizeof(response)))
+        if (request.operation == NT_BROKER_RPC_SUP_GET_CONTEXT) {
+            const struct nt_broker_context_reply extended = {
+                .reply = response, .context = context_response
+            };
+            if (!send_packet(fd, &extended, sizeof(extended)))
+                break;
+        } else if (!send_packet(fd, &response, sizeof(response))) {
             break;
+        }
     }
     nt_supervisor_control_server_destroy(control);
     /* The channel itself is the authority, not just the integer PID.
