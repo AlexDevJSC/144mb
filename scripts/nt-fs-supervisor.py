@@ -78,6 +78,11 @@ def run_session(lower: Path, view: Path, program: list[str]) -> int:
         fuse = sibling / "nt-dos83-fuse"
     if not landlock.is_file():
         landlock = sibling / "nt-dos83-landlock"
+    mediator = root / "build" / "nt-dos83-mediator"
+    if not mediator.is_file():
+        mediator = sibling / "nt-dos83-mediator"
+    if not mediator.is_file():
+        mediator = Path(shutil.which("nt-dos83-mediator") or str(mediator))
     if not fuse.is_file():
         fuse = Path(shutil.which("nt-dos83-fuse") or str(fuse))
     if not landlock.is_file():
@@ -86,6 +91,8 @@ def run_session(lower: Path, view: Path, program: list[str]) -> int:
         raise Refused(f"Missing built FUSE backend: {fuse}")
     if not landlock.is_file() or not os.access(landlock, os.X_OK):
         raise Refused(f"Missing built Landlock runner: {landlock}")
+    if not mediator.is_file() or not os.access(mediator, os.X_OK):
+        raise Refused(f"Missing trusted DOS 8.3 mediator: {mediator}")
     mountpoint = require_program("mountpoint")
     fusermount = require_program("fusermount3")
     if not Path("/dev/fuse").exists():
@@ -96,6 +103,14 @@ def run_session(lower: Path, view: Path, program: list[str]) -> int:
                       stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL).returncode != 0:
         raise Refused("Landlock ABI >=3 is required, not optional")
+    # Recover any missing DOS aliases after a previous abrupt stop before
+    # launching an untrusted command. This scan is not a durable rename WAL.
+    scan = subprocess.run([str(mediator), "--root", str(lower), "--scan"],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          check=False)
+    if scan.returncode != 0:
+        raise Refused("Preflight namespace reconciliation failed: " +
+                      scan.stderr.decode("utf-8", "replace")[-1000:])
     fuse_proc: subprocess.Popen[bytes] | None = None
     guest: subprocess.Popen[bytes] | None = None
     with tempfile.TemporaryDirectory(prefix="nt-fs-supervisor-") as logs:
