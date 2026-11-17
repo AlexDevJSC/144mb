@@ -19,6 +19,10 @@ struct nt_thread_supervisor {
     int pidfd;
     bool seized;
     bool stopped;
+    /* A real signal-delivery stop must retain its signal until CONT or
+     * DETACH; PTRACE_EVENT_STOP from our own interrupt carries none. */
+    int pending_signal;
+    bool terminal;
 };
 
 void nt_supervisor_init(struct nt_thread_supervisor *sup);
@@ -29,7 +33,7 @@ int nt_supervisor_get_registers(struct nt_thread_supervisor *sup, struct user_re
 /* Limited proof of real SETREGSET. Does not change RIP/RSP or guest memory. */
 int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value);
 int nt_supervisor_continue(struct nt_thread_supervisor *sup);
-/* Detach while stopped; does not kill or wait for the child. */
+/* Detach while stopped, forwarding a pending guest signal exactly once. */
 int nt_supervisor_detach(struct nt_thread_supervisor *sup);
 /* Read-only supervisor-side description: only call with a trustworthy
  * supervisor-owned mapping of the child's boundary state. Exact TID
@@ -63,5 +67,8 @@ int nt_supervisor_invoke_trusted_guest_apc(
     const struct nt_supervisor_guest_scope *scope,
     uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
     const _Atomic uint32_t *guest_completion, unsigned timeout_ms);
+/* Release even after errors. If detaching is impossible, terminate only
+ * the verified direct child through its pidfd; never abandon a ptrace
+ * stopped thread or send a signal to an untrusted integer PID. */
 void nt_supervisor_release(struct nt_thread_supervisor *sup);
 #endif
