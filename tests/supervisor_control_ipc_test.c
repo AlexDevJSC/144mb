@@ -120,6 +120,16 @@ static _Noreturn void child_client(int fd, unsigned mode)
         sleep_ms(1);
     const uint32_t tid = atomic_load(&data->tid);
     if (!tid || !atomic_load(&data->ready)) _exit(23);
+    if (mode == 3 || mode == 4) {
+        /* Do not pass a JIT/DLL negative test merely because the target
+         * has not yet entered its untrusted executable region. Prove it
+         * has made substantial progress in that exact hot loop first. */
+        for (int j = 0; j < 4000 &&
+             atomic_load_explicit(&data->ticks, memory_order_acquire) < 1000; ++j)
+            sleep_ms(1);
+        if (atomic_load_explicit(&data->ticks, memory_order_acquire) < 1000)
+            _exit(55);
+    }
     struct nt_broker_thread_info identity = {0};
     uint64_t capability = 0;
     if (!nt_broker_client_supervisor_open(tid,
