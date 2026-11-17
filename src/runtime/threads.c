@@ -137,6 +137,32 @@ static struct async_thread_count *async_thread_empty(void)
         if (async_threads[i].count == 0) return &async_threads[i];
     return NULL;
 }
+/* Called with async_thread_lock held; uses wait_lock only for lookup.
+ * A disconnected parent must never make a still-stopped thread appear
+ * unsuspended to the original cooperative backend. */
+static bool async_handle_active_locked(uintptr_t handle)
+{
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *entry = find_waitable(handle);
+    uint32_t tid = 0;
+    if (entry && entry->kind == THREAD &&
+        (entry->access & THREAD_SUSPEND_RESUME) &&
+        wait_state(entry)->owner_pid == (uint32_t)getpid())
+        tid = wait_state(entry)->thread_id;
+    pthread_mutex_unlock(&wait_lock);
+    if (!tid) return false;
+    for (unsigned i = 0; i < 256; ++i)
+        if (async_threads[i].count && async_threads[i].tid == tid)
+            return true;
+    return false;
+}
+static bool async_handle_active(uintptr_t handle)
+{
+    pthread_mutex_lock(&async_thread_lock);
+    const bool pending = async_handle_active_locked(handle);
+    pthread_mutex_unlock(&async_thread_lock);
+    return pending;
+}
 static void async_thread_forget(uint32_t tid)
 {
     pthread_mutex_lock(&async_thread_lock);
@@ -2618,8 +2644,12 @@ static nt_status async_suspend_guest_thread(uintptr_t handle, uint32_t *previous
                                              bool *handled)
 {
     *handled = false;
-    if (!nt_broker_client_is_attached()) return NT_STATUS_NOT_SUPPORTED;
     pthread_mutex_lock(&async_thread_lock);
+    if (!nt_broker_client_is_attached()) {
+        *handled = async_handle_active_locked(handle);
+        pthread_mutex_unlock(&async_thread_lock);
+        return NT_STATUS_NOT_SUPPORTED;
+    }
     struct nt_broker_thread_info id = {0};
     uint64_t lease = 0;
     if (!nt_runtime_supervisor_open_thread_handle(
@@ -2676,12 +2706,17 @@ static nt_status async_resume_guest_thread(uintptr_t handle, uint32_t *previous,
                                             bool *handled)
 {
     *handled = false;
-    if (!nt_broker_client_is_attached()) return NT_STATUS_NOT_SUPPORTED;
     pthread_mutex_lock(&async_thread_lock);
+    if (!nt_broker_client_is_attached()) {
+        *handled = async_handle_active_locked(handle);
+        pthread_mutex_unlock(&async_thread_lock);
+        return NT_STATUS_NOT_SUPPORTED;
+    }
     struct nt_broker_thread_info id = {0};
     uint64_t lease = 0;
     if (!nt_runtime_supervisor_open_thread_handle(
             handle, THREAD_SUSPEND_RESUME, &id, &lease)) {
+        *handled = async_handle_active_locked(handle);
         pthread_mutex_unlock(&async_thread_lock);
         return NT_STATUS_NOT_SUPPORTED;
     }
@@ -2713,8 +2748,12 @@ static nt_status async_get_guest_context(uintptr_t handle, struct nt_context64 *
                                          bool *handled)
 {
     *handled = false;
-    if (!nt_broker_client_is_attached()) return NT_STATUS_NOT_SUPPORTED;
     pthread_mutex_lock(&async_thread_lock);
+    if (!nt_broker_client_is_attached()) {
+        *handled = async_handle_active_locked(handle);
+        pthread_mutex_unlock(&async_thread_lock);
+        return NT_STATUS_NOT_SUPPORTED;
+    }
     struct nt_broker_thread_info id = {0};
     uint64_t lease = 0;
     if (!nt_runtime_supervisor_open_thread_handle(
@@ -2741,8 +2780,12 @@ static nt_status async_set_guest_context(uintptr_t handle,
                                          bool *handled)
 {
     *handled = false;
-    if (!nt_broker_client_is_attached()) return NT_STATUS_NOT_SUPPORTED;
     pthread_mutex_lock(&async_thread_lock);
+    if (!nt_broker_client_is_attached()) {
+        *handled = async_handle_active_locked(handle);
+        pthread_mutex_unlock(&async_thread_lock);
+        return NT_STATUS_NOT_SUPPORTED;
+    }
     struct nt_broker_thread_info id = {0};
     uint64_t lease = 0;
     if (!nt_runtime_supervisor_open_thread_handle(
@@ -2847,6 +2890,8 @@ nt_status NT_MS_ABI nt_NtSuspendThread(uintptr_t handle, uint32_t *previous)
 
 static nt_status resume_guest_thread(uintptr_t handle, uint32_t *previous, bool alert)
 {
+    if (alert && async_handle_active(handle))
+        return NT_STATUS_NOT_SUPPORTED; /* No fake success on async count. */
     if (!alert) {
         bool handled = false;
         nt_status async = async_resume_guest_thread(handle, previous, &handled);
