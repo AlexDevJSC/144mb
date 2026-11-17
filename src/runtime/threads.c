@@ -4599,6 +4599,9 @@ void NT_MS_ABI nt_ExitThread(uint32_t code)
 {
     if (running_thread != NULL) {
         thread_result = code;
+        /* This skips the import gate's ordinary return epilogue and may
+         * skip native frames. Never claim this thread suspendible again. */
+        nt_guest_boundary_mark_nonlocal_transfer();
         siglongjmp(thread_exit, 1);
     }
     nt_runtime_run_fls_cleanup();
