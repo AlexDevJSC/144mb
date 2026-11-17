@@ -176,6 +176,9 @@ int NT_MS_ABI nt_configure_narrow_argv(int mode);
 char *NT_MS_ABI nt_get_narrow_winmain_command_line(void);
 
 /* Call from a single-threaded test host. The child runs only an embedded fixture. */
+/* Host-launcher-only. The actual forked guest gets a private authenticated
+ * parent supervisor session; no Windows PE import exposes this toggle. */
+void nt_runtime_enable_supervisor_ipc(void);
 bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code);
 int32_t NT_MS_ABI nt_TerminateProcess(uintptr_t process, uint32_t exit_code);
 void NT_MS_ABI nt_exit(int code);
