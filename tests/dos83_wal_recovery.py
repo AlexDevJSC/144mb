@@ -92,6 +92,7 @@ def scenario(tool, crash_phase):
         record = make_record(root, source, dest, alias)
         journal = root/REGISTRY/JOURNAL
         journal.write_bytes(record)
+        os.chmod(journal, 0o600)  # Production WAL rejects world/group-readable records.
         with journal.open("rb") as stream:
             os.fsync(stream.fileno())
 
