@@ -400,6 +400,8 @@ static bool dos83_move_end(struct dos83_move_txn *txn, bool committed)
     }
     /* Both directory entries and xattrs must reach stable storage before
      * clearing the replay record. A failure leaves the journal intact. */
+    if (txn->journaled && ok && committed)
+        dos83_test_crash("after-cleanup");
     if (txn->journaled && ok &&
         (!wal_sync_pinned(txn->source_parent, true) ||
          !wal_sync_pinned(txn->dest_parent, true) ||
@@ -558,6 +560,7 @@ static bool dos83_move_begin(int root, const char *from_path,
                 error = errno;
             } else {
                 txn->journaled = true;
+                dos83_test_crash("after-wal");
             }
         }
     }
@@ -569,6 +572,8 @@ static bool dos83_move_begin(int root, const char *from_path,
                               alias, strlen(alias) + 1) != 0 ||
             !wal_sync_pinned(txn->source_fd, S_ISDIR(pinned.st_mode)))
             error = errno;
+        else
+            dos83_test_crash("after-staging");
     }
     if (error) {
         int cause = error;
