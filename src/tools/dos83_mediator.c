@@ -429,7 +429,7 @@ static bool to_wide(const char *input, uint16_t *output, size_t capacity)
 int main(int argc, char **argv)
 {
     if (argc < 4 || strcmp(argv[1], "--root") != 0) {
-        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW\n", argv[0]);
+        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW\n", argv[0]);
         return 2;
     }
     if (!nt_runtime_set_file_root(argv[2])) {
@@ -441,6 +441,13 @@ int main(int argc, char **argv)
         result = nt_runtime_recover_dos83() ? 0 : 3;
         if (result)
             perror("DOS 8.3 WAL recovery refused");
+    } else if (argc == 5 && strcmp(argv[3], "--recover-with-drive") == 0) {
+        /* Host diagnostic for the same D: preflight used by the PE worker.
+         * This deliberately requires an explicit D: directory grant. */
+        result = nt_runtime_set_drive_root('D', argv[4]) &&
+                 nt_runtime_recover_all_dos83_grants() ? 0 : 3;
+        if (result)
+            perror("DOS 8.3 WAL recovery refused on a granted drive");
     } else if (argc == 4 && strcmp(argv[3], "--watch") == 0) {
         result = nt_runtime_recover_dos83() ? run_watch(argv[2]) : 3;
     } else if (argc == 4 && strcmp(argv[3], "--scan") == 0) {
