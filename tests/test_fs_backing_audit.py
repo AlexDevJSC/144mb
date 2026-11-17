@@ -27,7 +27,11 @@ class BackingAuditTests(unittest.TestCase):
             self.assertFalse(result["protected"])
             self.assertIsNone(result["view_mount_type"])
             self.assertTrue(any("client UID owns" in x for x in result["findings"]))
-            self.assertEqual(MODULE.main(["--lower", str(lower)]), 3)
+            # Fedora RPM build tests sometimes run as root. The public
+            # CLI must refuse root, while read-only inspection remains
+            # testable with disposable directories.
+            self.assertEqual(MODULE.main(["--lower", str(lower)]),
+                             2 if os.geteuid() == 0 else 3)
 
     def test_symlink_parent_alias_and_nested_view_rejected(self):
         with tempfile.TemporaryDirectory() as base:
