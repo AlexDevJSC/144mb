@@ -346,6 +346,9 @@ static bool dos83_lock_pair(int source_parent, int dest_parent,
     return true;
 }
 
+/* Startup WAL admission also reaps durable FILE_DELETE_PENDING markers.
+ * Defined in guest_files.c after the per-inode registry helpers. */
+static bool fs4_recover_pending_deletes(int c_root);
 #include "dos83_wal.inc"
 
 /* Cooperating rename transaction. Stage the new xattr on the pinned
