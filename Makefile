@@ -297,7 +297,6 @@ $(BUILD_DIR)/supervisor-authenticated-ipc-test: tests/supervisor_authenticated_i
 .PHONY: check-supervisor-authenticated-ipc
 check-supervisor-authenticated-ipc: $(BUILD_DIR)/supervisor-authenticated-ipc-test
 	timeout 25s $(BUILD_DIR)/supervisor-authenticated-ipc-test
-	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
 
 $(BUILD_DIR)/runtime-supervisor-launch-test: tests/runtime_supervisor_launch_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/sync.h src/runtime/thread_broker_ipc.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
@@ -400,6 +399,8 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 20s $(BUILD_DIR)/thread-broker-auth-test
 	timeout 20s $(BUILD_DIR)/thread-broker-registry-test
 	timeout 20s $(BUILD_DIR)/thread-broker-ipc-test
+	timeout 25s $(BUILD_DIR)/supervisor-authenticated-ipc-test
+	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
 	timeout 25s $(BUILD_DIR)/supervisor-authenticated-ipc-test
 	timeout 20s $(BUILD_DIR)/inherited-file-test
 	timeout 30s $(BUILD_DIR)/compat-batch-test
