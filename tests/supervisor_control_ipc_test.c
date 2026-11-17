@@ -120,7 +120,7 @@ static _Noreturn void child_client(int fd, unsigned mode)
         sleep_ms(1);
     const uint32_t tid = atomic_load(&data->tid);
     if (!tid || !atomic_load(&data->ready)) _exit(23);
-    if (mode == 3 || mode == 4) {
+    if (mode == 3 || mode == 4 || mode == 5) {
         /* Do not pass a JIT/DLL negative test merely because the target
          * has not yet entered its untrusted executable region. Prove it
          * has made substantial progress in that exact hot loop first. */
@@ -196,6 +196,18 @@ static _Noreturn void child_client(int fd, unsigned mode)
             before.rip < (uintptr_t)control_loop_begin ||
             before.rip >= (uintptr_t)control_loop_end || before.rsp == 0)
             _exit(30);
+        _Alignas(16) struct nt_context64 float_context = {0};
+        float_context.flags = 0x100008u; /* x87 + XMM0..15 */
+        if (nt_broker_client_supervisor_get_context(capability, &float_context) !=
+                NT_STATUS_SUCCESS || float_context.mxcsr == 0)
+            _exit(57);
+        uint32_t backing_mxcsr = 0;
+        memcpy(&backing_mxcsr, float_context.floating + 24,
+               sizeof(backing_mxcsr));
+        if (backing_mxcsr != float_context.mxcsr ||
+            nt_broker_client_supervisor_set_context(capability, &float_context) !=
+                NT_STATUS_NOT_SUPPORTED)
+            _exit(58);
         _Alignas(16) struct nt_context64 integer = before;
         integer.flags = 0x100002u;
         const uint64_t original_rax = integer.rax;
@@ -303,13 +315,23 @@ static int run_one(unsigned mode)
         .child_pid = child, .uid = getuid(), .gid = getgid(),
         .child_pidfd = pidfd,
         .guest_session = &data->session,
-        .trusted_code_begin = mode == 3 ?
+        .trusted_code_begin = (mode == 3 || mode == 5) ?
             (uintptr_t)control_loop_end + 32 : (uintptr_t)control_loop_begin,
-        .trusted_code_end = mode == 3 ?
+        .trusted_code_end = (mode == 3 || mode == 5) ?
             (uintptr_t)control_loop_end + 64 : (uintptr_t)control_loop_end,
         .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION |
             (mode != 0 ? NT_BROKER_SERVER_ENABLE_THREAD_CONTROL : 0u)
     };
+    if (mode == 5) {
+        /* Parent independently whitelisted this pinned startup DLL-like
+         * RX range before the child executed; the main PE code range
+         * deliberately does NOT contain the worker's actual RIP. */
+        peer.trusted_startup_dll_count = 1;
+        peer.trusted_startup_dlls[0] =
+            (struct nt_guest_code_range){
+                (uintptr_t)control_loop_begin, (uintptr_t)control_loop_end
+            };
+    }
     memcpy(peer.secret, secret, sizeof(secret));
     /* server_main owns MAP_SHARED after start */
     if (!nt_broker_server_start(sockets[0], &peer) ||
@@ -332,10 +354,11 @@ int main(void)
 {
     alarm(35);
     if (run_one(0) || run_one(1) || run_one(2) ||
-        run_one(3) || run_one(4)) return 1;
+        run_one(3) || run_one(4) || run_one(5)) return 1;
     puts("PASS authenticated control IPC: opt-in only, persistent nested "
          "suspension, real AMD64 CONTEXT GET/SET/restore, unsupported groups, "
          "queued Linux SIGUSR1 preserved, HOST-phase denial, no stale leases, "
-         "EOF cleanup, 32 attach cycles, DLL-like out-of-range and real RW→RX JIT denial");
+         "EOF cleanup, 32 attach cycles, pinned startup DLL allow, "
+         "dynamic DLL and real RW→RX JIT denial, FXSAVE read-only");
     return 0;
 }

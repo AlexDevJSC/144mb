@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/user.h>
 #include "ntnative/guest_boundary.h"
+#include "ntnative/guest_boundary_runtime.h"
 
 /* Experimental Linux AMD64 supervisor, not a Win32 API implementation.
  * Only a direct, live child of this caller can be supervised; `tid` must
@@ -41,6 +42,8 @@ int nt_supervisor_detach(struct nt_thread_supervisor *sup);
 struct nt_supervisor_guest_scope {
     const struct nt_guest_boundary *boundary;
     uintptr_t code_begin, code_end, teb;
+    const struct nt_guest_code_range *additional_code;
+    size_t additional_code_count;
 };
 
 /* Experimental fail-closed guest stop: the target MUST be in guest code

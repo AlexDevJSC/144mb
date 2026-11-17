@@ -159,7 +159,37 @@ int main(void)
     nt_guest_boundary_guest_leave();
     nt_guest_boundary_thread_detach();
     if (munmap(session, sizeof(*session)) != 0) return 7;
+    /* The trusted launcher must only accept disjoint, bounded executable
+     * ranges supplied before fork. Failed updates are atomic and the
+     * prior manifest remains intact. */
+    if (!nt_guest_boundary_set_image_range(0x100000u, 0x102000u))
+        return 12;
+    const struct nt_guest_code_range startup[] = {
+        {0x200000u, 0x201000u}, {0x300000u, 0x303000u}
+    };
+    if (!nt_guest_boundary_set_startup_code_ranges(startup, 2))
+        return 13;
+    const struct nt_guest_code_range invalid[] = {
+        {0x200000u, 0x201000u}, {0x200800u, 0x202000u}
+    };
+    if (nt_guest_boundary_set_startup_code_ranges(invalid, 2))
+        return 14;
+    const struct nt_guest_code_range main_overlap[] = {
+        {0x101000u, 0x103000u}
+    };
+    if (nt_guest_boundary_set_startup_code_ranges(main_overlap, 1))
+        return 15;
+    struct nt_guest_code_range snapshot[NT_GUEST_ADDITIONAL_CODE_MAX] = {{0}};
+    size_t count = 0;
+    if (!nt_guest_boundary_get_startup_code_ranges(snapshot,
+                  NT_GUEST_ADDITIONAL_CODE_MAX, &count) ||
+        count != 2 || memcmp(startup, snapshot, sizeof(startup)) != 0)
+        return 16;
+    if (!nt_guest_boundary_set_image_range(0x400000u, 0x401000u) ||
+        !nt_guest_boundary_get_startup_code_ranges(snapshot,
+                  NT_GUEST_ADDITIONAL_CODE_MAX, &count) || count != 0)
+        return 17; /* a new PE image revokes every old DLL range */
     puts("PASS guest/host import ABI: Microsoft x64 8-argument stack, XMM float, "
-         "nested callbacks with host mutex, nonlocal poison, per-thread phases and revocation");
+         "nested callbacks with host mutex, nonlocal poison, pinned-DLL manifest, per-thread phases and revocation");
     return 0;
 }

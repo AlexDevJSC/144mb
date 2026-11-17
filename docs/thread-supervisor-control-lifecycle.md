@@ -51,7 +51,7 @@ procesos ni generaciones. La última reanudación llama
 |---|---|
 | `SuspendThread` / `NtSuspendThread` | Detención real sólo dentro de PE confiable, contador anidado y acceso THREAD_SUSPEND_RESUME |
 | `ResumeThread` / `NtResumeThread` | Cuenta anterior auténtica; último descenso desadjunta el tracer |
-| `GetThreadContext` / `NtGetContextThread` | Registros del kernel en estado detenido, grupos CONTROL, INTEGER, SEGMENTS |
+| `GetThreadContext` / `NtGetContextThread` | Registros del kernel en estado detenido, grupos CONTROL, INTEGER, SEGMENTS y FLOATING_POINT (FXSAVE de sólo lectura) |
 | `SetThreadContext` / `NtSetContextThread` | Registros enteros, comprobados y restaurables; no RIP/RSP, segmentos, debug, FP ni XSTATE |
 | `NtAlertResumeThread` | Conserva el bit de alerta en la ruta de reanudación |
 | `QueueUserAPC2` special / `NtQueueApcThreadEx` special | **NO SOPORTADO**: no se convierte engañosamente en APC normal |
@@ -130,7 +130,7 @@ No existe un denominador auditado que permita afirmar un 70 % o más de
 `SuspendThread`, `ResumeThread`, `GetThreadContext` y
 `SetThreadContext` en un fixture opt-in demuestra ese subconjunto,
 no el porcentaje de todos los comportamientos Windows posibles.
-RIP/RSP control, debug regs, XSTATE de CONTEXT, APC especiales,
+RIP/RSP control, debug regs, escrituras FP y XSTATE de CONTEXT, APC especiales,
 concurrencia arbitraria, reentrancia de señales e imágenes JIT y
 DLL sin alcance seguro quedan **fuera**.
 

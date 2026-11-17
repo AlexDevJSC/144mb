@@ -38,6 +38,8 @@ static bool shadow_stack_unsafe(void)
 /* No unreviewed PE import can enable the gate or supply a mapping. */
 static _Atomic bool import_gate_enabled;
 static uintptr_t trusted_code_begin, trusted_code_end;
+static struct nt_guest_code_range startup_code[NT_GUEST_ADDITIONAL_CODE_MAX];
+static size_t startup_code_count;
 /* Written by the freshly forked child before any pthread is created. */
 static struct nt_guest_boundary_session *process_session;
 static _Thread_local struct nt_guest_boundary_session *current_session;
@@ -62,6 +64,9 @@ bool nt_guest_boundary_set_image_range(uintptr_t begin, uintptr_t end)
     if (!begin || end <= begin) return false;
     trusted_code_begin = begin;
     trusted_code_end = end;
+    /* Replacing the executable must revoke any prior DLL grants. */
+    memset(startup_code, 0, sizeof(startup_code));
+    startup_code_count = 0;
     return true;
 }
 bool nt_guest_boundary_get_image_range(uintptr_t *begin, uintptr_t *end)
@@ -71,6 +76,43 @@ bool nt_guest_boundary_get_image_range(uintptr_t *begin, uintptr_t *end)
         return false;
     *begin = trusted_code_begin;
     *end = trusted_code_end;
+    return true;
+}
+/* Only the single-threaded trusted PE loader calls these before fork.
+ * Validation is not delegated to an untrusted IPC request. The parent
+ * copies the result into its own supervisor session. */
+bool nt_guest_boundary_set_startup_code_ranges(
+    const struct nt_guest_code_range *ranges, size_t count)
+{
+    if ((count && !ranges) || count > NT_GUEST_ADDITIONAL_CODE_MAX ||
+        !trusted_code_begin || trusted_code_end <= trusted_code_begin)
+        return false;
+    for (size_t i = 0; i < count; ++i) {
+        const struct nt_guest_code_range value = ranges[i];
+        if (!value.begin || value.end <= value.begin ||
+            !(value.end <= trusted_code_begin ||
+              value.begin >= trusted_code_end))
+            return false;
+        for (size_t j = 0; j < i; ++j)
+            if (!(value.end <= ranges[j].begin ||
+                  value.begin >= ranges[j].end))
+                return false;
+    }
+    struct nt_guest_code_range replacement[NT_GUEST_ADDITIONAL_CODE_MAX] = {{0}};
+    if (count)
+        memcpy(replacement, ranges, count * sizeof(*ranges));
+    memcpy(startup_code, replacement, sizeof(startup_code));
+    startup_code_count = count;
+    return true;
+}
+bool nt_guest_boundary_get_startup_code_ranges(
+    struct nt_guest_code_range *out, size_t capacity, size_t *count)
+{
+    if (!count || (startup_code_count && (!out || capacity < startup_code_count)))
+        return false;
+    if (startup_code_count)
+        memcpy(out, startup_code, startup_code_count * sizeof(*out));
+    *count = startup_code_count;
     return true;
 }
 bool nt_guest_boundary_import_gate_enabled(void)

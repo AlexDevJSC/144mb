@@ -59,6 +59,33 @@ static bool send_packet(int fd, const void *data, size_t bytes)
            send(fd, data, bytes, MSG_NOSIGNAL | MSG_DONTWAIT) == (ssize_t)bytes;
 }
 
+/* The protocol is SOCK_SEQPACKET, not a byte stream. Verify the *whole*
+ * reply including MSG_TRUNC; a short/long or unrelated reply must never
+ * be reinterpreted as the result of the next Windows API call. */
+static bool receive_exact_reply(int fd, void *out, size_t size, int timeout_ms)
+{
+    if (!read_ready_for(fd, POLLIN, timeout_ms))
+        return false;
+    struct iovec body = {.iov_base = out, .iov_len = size};
+    struct msghdr packet = {.msg_iov = &body, .msg_iovlen = 1};
+    const ssize_t n = recvmsg(fd, &packet, MSG_DONTWAIT);
+    return n == (ssize_t)size &&
+           (packet.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) == 0;
+}
+
+/* Caller holds client_lock. An ambiguous mutation ACK is irrevocable:
+ * detach the socket so the parent broker revokes capabilities and
+ * releases any stopped tracees on EOF. Never accept a late packet. */
+static void abandon_client_session_locked(void)
+{
+    if (client_socket >= 0) {
+        (void)shutdown(client_socket, SHUT_RDWR);
+        (void)close(client_socket);
+        client_socket = -1;
+    }
+    memset(client_secret, 0, sizeof(client_secret));
+}
+
 struct server_context {
     int fd;
     struct nt_thread_broker_registered_peer peer;
@@ -79,8 +106,22 @@ static void *server_main(void *context)
 bool nt_broker_server_start(int fd,
     const struct nt_thread_broker_registered_peer *peer)
 {
-    if (peer == NULL || !fd_seqpacket(fd) || !live_child(peer))
+    if (peer == NULL || !fd_seqpacket(fd) || !live_child(peer) ||
+        peer->trusted_startup_dll_count > NT_GUEST_ADDITIONAL_CODE_MAX)
         return false;
+    for (size_t i = 0; i < peer->trusted_startup_dll_count; ++i) {
+        const struct nt_guest_code_range range = peer->trusted_startup_dlls[i];
+        if (!range.begin || range.end <= range.begin ||
+            !(range.end <= peer->trusted_code_begin ||
+              range.begin >= peer->trusted_code_end))
+            return false;
+        for (size_t j = 0; j < i; ++j) {
+            const struct nt_guest_code_range prior =
+                peer->trusted_startup_dlls[j];
+            if (!(range.end <= prior.begin || range.begin >= prior.end))
+                return false;
+        }
+    }
     /* Must be installed BEFORE any client message can be queued, not
      * lazily by the detached recvmsg worker after a poll wakeup. */
     const int on = 1;
@@ -249,7 +290,9 @@ static bool supervisor_guest_probe(const struct nt_thread_broker_registered_peer
     const struct nt_supervisor_guest_scope scope = {
         .boundary = &slot->boundary, .teb = teb,
         .code_begin = peer->trusted_code_begin,
-        .code_end = peer->trusted_code_end
+        .code_end = peer->trusted_code_end,
+        .additional_code = peer->trusted_startup_dlls,
+        .additional_code_count = peer->trusted_startup_dll_count
     };
     struct nt_thread_supervisor sup;
     nt_supervisor_init(&sup);
@@ -543,24 +586,33 @@ static bool client_rpc(uint32_t operation, uint32_t tid, uint32_t access,
                        uint64_t capability, struct nt_thread_broker_reply *answer)
 {
     pthread_mutex_lock(&client_lock);
-    bool okay = client_socket >= 0;
-    if (okay) {
+    bool okay = false;
+    if (client_socket >= 0) {
         struct nt_broker_rpc request = {
             .magic = NT_THREAD_BROKER_MAGIC, .version = NT_BROKER_RPC_VERSION,
             .operation = operation, .access = access,
             .thread_id = tid, .capability = capability
         };
         memcpy(request.secret, client_secret, 16);
-        okay = send_packet(client_socket, &request, sizeof(request)) &&
-               read_ready(client_socket, POLLIN);
-        if (okay) {
-            struct nt_thread_broker_reply response = {0};
-            okay = recv(client_socket, &response, sizeof(response), MSG_DONTWAIT) ==
-                       (ssize_t)sizeof(response) &&
-                   response.magic == NT_THREAD_BROKER_MAGIC && response.status == 0;
-            if (okay && answer != NULL)
+        struct nt_thread_broker_reply response = {0};
+        const bool valid = send_packet(client_socket, &request, sizeof(request)) &&
+            receive_exact_reply(client_socket, &response, sizeof(response), 4000) &&
+            response.magic == NT_THREAD_BROKER_MAGIC &&
+            response.process_id != 0;
+        /* Remote QUERY/OPEN intentionally returns the *target* child's
+         * PID, not the requester's. Session identity is verified with
+         * peer credentials on attach and every parent-side request; we
+         * must not reject valid cross-process read-only queries here.
+         * The caller checks returned TID/capability and the registry
+         * enforces permission on the parent side. */
+        if (!valid) {
+            abandon_client_session_locked();
+        } else if (response.status == 0) {
+            okay = true;
+            if (answer != NULL)
                 *answer = response;
         }
+        /* A well-formed access denial leaves the channel reusable. */
     }
     pthread_mutex_unlock(&client_lock);
     return okay;
@@ -705,25 +757,15 @@ static nt_status control_rpc(uint32_t op, uint64_t cap, uint32_t flags,
         /* Parent PTRACE_INTERRUPT can wait 1500ms plus scheduling.
          * A timeout shorter than its stop deadline could strand a
          * successfully suspended guest despite a missing client ACK. */
-        bool transport_valid =
-            sent && read_ready_for(client_socket, POLLIN, 4000);
         struct nt_broker_context_reply reply = {0};
-        if (transport_valid) {
-            const size_t expected = op == NT_BROKER_RPC_SUP_GET_CONTEXT ?
-                sizeof(reply) : sizeof(reply.reply);
-            const ssize_t n = recv(client_socket, &reply, sizeof(reply), MSG_DONTWAIT);
-            transport_valid = n == (ssize_t)expected &&
-                reply.reply.magic == NT_THREAD_BROKER_MAGIC &&
-                reply.reply.process_id == (uint32_t)getpid();
-        }
+        const size_t expected = op == NT_BROKER_RPC_SUP_GET_CONTEXT ?
+            sizeof(reply) : sizeof(reply.reply);
+        const bool transport_valid =
+            sent && receive_exact_reply(client_socket, &reply, expected, 4000) &&
+            reply.reply.magic == NT_THREAD_BROKER_MAGIC &&
+            reply.reply.process_id == (uint32_t)getpid();
         if (!transport_valid) {
-            /* Ambiguous mutation: forcibly revoke this authenticated
-             * channel. Its parent broker must release every owned tracee.
-             * Never accept a late reply as authorization for another RPC. */
-            (void)shutdown(client_socket, SHUT_RDWR);
-            close(client_socket);
-            client_socket = -1;
-            memset(client_secret, 0, sizeof(client_secret));
+            abandon_client_session_locked();
         } else {
             result = (nt_status)reply.reply.status;
             if (result == NT_STATUS_SUCCESS) {

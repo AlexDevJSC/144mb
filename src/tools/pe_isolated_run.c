@@ -343,6 +343,21 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
         active_dll_graph = NULL;
         return 3;
     }
+    /* The pre-fork parent records the startup DLL .text scopes separately
+     * from the executable. This list is immutable once the guest begins.
+     * Dynamic LoadLibrary and all JIT code remain outside the safe scope. */
+    struct nt_guest_code_range startup_ranges[NT_GUEST_ADDITIONAL_CODE_MAX];
+    size_t startup_count = 0;
+    if (!pe_dll_graph_snapshot_pinned_code(active_dll_graph,
+            startup_ranges, NT_GUEST_ADDITIONAL_CODE_MAX, &startup_count) ||
+        !nt_guest_boundary_set_startup_code_ranges(startup_ranges,
+                                                   startup_count)) {
+        pe_image_unload(&active);
+        pe_dll_graph_uninstall();
+        pe_dll_graph_destroy(active_dll_graph);
+        active_dll_graph = NULL;
+        return 3;
+    }
     active_dos_path = dos_path;
     active_command = command;
     active_directory = directory;

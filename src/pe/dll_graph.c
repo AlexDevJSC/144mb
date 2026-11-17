@@ -3,6 +3,7 @@
 #include "dll_graph.h"
 #include "image.h"
 #include "ntnative/runtime.h"
+#include "ntnative/guest_boundary_runtime.h"
 #include "../runtime/winbase.h"
 
 #include <ctype.h>
@@ -483,6 +484,56 @@ static const struct nt_external_module_backend host_module_backend = {
     .thread_event = backend_thread_event,
     .prepare_thread = backend_prepare_thread
 };
+
+bool pe_dll_graph_snapshot_pinned_code(
+    struct pe_dll_graph *graph, struct nt_guest_code_range *out,
+    size_t capacity, size_t *count)
+{
+    if (!graph || !count || (!out && capacity))
+        return false;
+    /* The executable's initial IAT has already caused recursive mapping.
+     * Only pinned, completed startup loads are safe for the lifetime of
+     * this particular child; explicit LoadLibrary mappings are not. */
+    pthread_mutex_lock(&graph->lock);
+    struct nt_guest_code_range snapshot[NT_GUEST_ADDITIONAL_CODE_MAX] = {{0}};
+    size_t used = 0;
+    bool valid = true;
+    for (size_t i = 0; i < MAX_DLLS; ++i) {
+        const struct graph_module *module = &graph->modules[i];
+        if (!module->present || !module->pinned)
+            continue;
+        if (module->loading || module->image.base == NULL) {
+            valid = false;
+            break;
+        }
+        if (module->image.code_size == 0)
+            continue; /* Data/resource-only module is not executable. */
+        if (module->image.code_rva >= module->image.size ||
+            module->image.code_size >
+              module->image.size - module->image.code_rva ||
+            used == NT_GUEST_ADDITIONAL_CODE_MAX) {
+            valid = false;
+            break;
+        }
+        const uintptr_t begin =
+            (uintptr_t)module->image.base + module->image.code_rva;
+        const uintptr_t end = begin + module->image.code_size;
+        if (begin == 0 || end <= begin) {
+            valid = false;
+            break;
+        }
+        snapshot[used++] = (struct nt_guest_code_range){begin, end};
+    }
+    if (valid && used > capacity)
+        valid = false;
+    if (valid) {
+        if (used)
+            memcpy(out, snapshot, used * sizeof(*out));
+        *count = used;
+    }
+    pthread_mutex_unlock(&graph->lock);
+    return valid;
+}
 
 void pe_dll_graph_install(struct pe_dll_graph *graph)
 {

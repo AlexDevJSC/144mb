@@ -117,6 +117,12 @@ int main(int argc, char **argv)
             (uintptr_t)loaded.base + loaded.code_rva,
             (uintptr_t)loaded.base + loaded.code_rva + loaded.code_size))
         return 7;
+    struct nt_guest_code_range startup[NT_GUEST_ADDITIONAL_CODE_MAX];
+    size_t startup_count = 0;
+    if (!pe_dll_graph_snapshot_pinned_code(graph, startup,
+            NT_GUEST_ADDITIONAL_CODE_MAX, &startup_count) ||
+        !nt_guest_boundary_set_startup_code_ranges(startup, startup_count))
+        return 11; /* Same trusted pre-fork capture as production loader. */
     char temp[] = "/tmp/nt-async-supervisor-XXXXXX";
     if (!mkdtemp(temp) || !nt_runtime_set_file_root(temp) ||
         !nt_runtime_set_standard_streams(STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO) ||

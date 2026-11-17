@@ -577,8 +577,15 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
             };
             (void)nt_guest_boundary_get_image_range(&peer.trusted_code_begin,
                                                       &peer.trusted_code_end);
+            /* Direct-parent-only authority. Copies the bounded manifest
+             * before the child can modify any part of its runtime state. */
+            const bool trusted_manifest =
+                nt_guest_boundary_get_startup_code_ranges(
+                    peer.trusted_startup_dlls, NT_GUEST_ADDITIONAL_CODE_MAX,
+                    &peer.trusted_startup_dll_count);
             memcpy(peer.secret, secret, sizeof(peer.secret));
-            if (nt_broker_server_start(supervisor_socket[0], &peer)) {
+            if (trusted_manifest &&
+                nt_broker_server_start(supervisor_socket[0], &peer)) {
                 boundary = NULL; /* detached server now owns the mapping */
                 /* Detached server owns fd; send handshake from this
                  * parent before the child is permitted to run PE code. */
