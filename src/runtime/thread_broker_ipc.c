@@ -43,11 +43,15 @@ static bool fd_seqpacket(int fd)
     return fd >= 0 && getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length) == 0 &&
            length == sizeof(type) && type == SOCK_SEQPACKET;
 }
-static bool read_ready(int fd, short events)
+static bool read_ready_for(int fd, short events, int timeout_ms)
 {
     struct pollfd p = {.fd = fd, .events = events};
-    const int n = poll(&p, 1, 1000);
+    const int n = poll(&p, 1, timeout_ms);
     return n == 1 && (p.revents & events) != 0;
+}
+static bool read_ready(int fd, short events)
+{
+    return read_ready_for(fd, events, 1000);
 }
 static bool send_packet(int fd, const void *data, size_t bytes)
 {
@@ -630,17 +634,31 @@ static bool client_rpc_extended(uint32_t operation, uint32_t tid, uint32_t acces
         };
         memcpy(request.secret, client_secret, 16);
         if (input != NULL) request.context = *input;
-        okay = send_packet(client_socket, &request, sizeof(request)) &&
-               read_ready(client_socket, POLLIN);
-        if (okay) {
-            struct nt_thread_broker_reply response = {0};
-            okay = recv(client_socket, &response, sizeof(response), MSG_DONTWAIT) ==
-                       (ssize_t)sizeof(response) &&
-                   response.magic == NT_THREAD_BROKER_MAGIC;
-            if (okay && answer != NULL)
-                *answer = response;
-            okay = okay && response.status == 0;
+        /* A Linux PTRACE_INTERRUPT can consume up to 1500 ms, plus
+         * scheduler jitter and protocol handling. Never time out earlier
+         * than the parent: otherwise a late success would strand a
+         * suspended guest while the client wrongly falls back. */
+        bool transport_valid =
+            send_packet(client_socket, &request, sizeof(request)) &&
+            read_ready_for(client_socket, POLLIN, 4000);
+        struct nt_thread_broker_reply response = {0};
+        if (transport_valid)
+            transport_valid = recv(client_socket, &response, sizeof(response),
+                                   MSG_DONTWAIT) == (ssize_t)sizeof(response) &&
+                              response.magic == NT_THREAD_BROKER_MAGIC;
+        if (!transport_valid) {
+            /* Treat missing/late/malformed ACK as an ambiguous mutation.
+             * Closing the only authenticated socket obliges the parent
+             * to revoke capabilities and DETACH all held ptrace threads.
+             * Never issue another request on a desynchronized stream. */
+            (void)shutdown(client_socket, SHUT_RDWR);
+            close(client_socket);
+            client_socket = -1;
+            memset(client_secret, 0, sizeof(client_secret));
         }
+        if (transport_valid && answer != NULL)
+            *answer = response;
+        okay = transport_valid && response.status == 0;
     }
     pthread_mutex_unlock(&client_lock);
     return okay;
