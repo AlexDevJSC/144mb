@@ -105,16 +105,23 @@ def scenario(tool, crash_phase):
             source.rename(dest)
         if crash_phase == "undecidable":
             dest.unlink()
+        if crash_phase == "foreign_xattr":
+            # A noncooperating Linux writer changed metadata after staging.
+            # Recovery must not blindly overwrite it with the WAL preimage.
+            os.setxattr(source, dest_key, b"FOREIGN~7.TXT\\x00".replace(b"\\x00", b"\x00"))
 
         if crash_phase == "corrupt":
             data = bytearray(journal.read_bytes())
             data[45] ^= 0x17
             journal.write_bytes(data)
 
-        expected_failure = crash_phase in ("corrupt", "undecidable")
+        expected_failure = crash_phase in ("corrupt", "undecidable", "foreign_xattr")
         result = run(tool, root, "--recover", success=not expected_failure)
         if expected_failure:
             assert journal.stat().st_size > 0
+            if crash_phase == "foreign_xattr":
+                assert os.getxattr(source, dest_key) == b"FOREIGN~7.TXT\x00"
+                assert source.read_bytes() == b"UNCHANGED ORIGINAL BYTES"
             assert "errno" not in result.stdout.lower()
             # No new rename may reuse a WAL that was rejected.
             another = left/"anotherLongJournalSource.txt"
@@ -144,7 +151,8 @@ def main():
         raise SystemExit("Usage: dos83_wal_recovery.py MEDIATOR")
     tool = str(pathlib.Path(sys.argv[1]).resolve())
     for crash_phase in ("before_staging", "after_staging",
-                        "after_rename", "corrupt", "undecidable"):
+                        "after_rename", "corrupt", "undecidable",
+                        "foreign_xattr"):
         scenario(tool, crash_phase)
 
 
