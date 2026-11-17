@@ -27,6 +27,12 @@ on:
       - 'include/ntnative/guest_boundary_runtime.h'
       - 'tests/guest_boundary_import_test.c'
       - 'tests/supervisor_control_ipc_test.c'
+      - 'tests/thread_broker_transport_failure_test.c'
+      - 'src/pe/dll_graph.c'
+      - 'src/pe/dll_graph.h'
+      - 'tests/pe/async_supervisor_fixture.c'
+      - 'tests/pe/async_supervisor_host.c'
+      - 'scripts/check-core4-manual-hardening.sh'
       - 'src/runtime/thread_supervisor_control_server.c'
       - 'src/runtime/thread_supervisor_control_server.h'
       - 'src/supervisor/nt_supervisor_nt_bridge.c'
@@ -60,6 +66,12 @@ on:
       - 'include/ntnative/guest_boundary_runtime.h'
       - 'tests/guest_boundary_import_test.c'
       - 'tests/supervisor_control_ipc_test.c'
+      - 'tests/thread_broker_transport_failure_test.c'
+      - 'src/pe/dll_graph.c'
+      - 'src/pe/dll_graph.h'
+      - 'tests/pe/async_supervisor_fixture.c'
+      - 'tests/pe/async_supervisor_host.c'
+      - 'scripts/check-core4-manual-hardening.sh'
       - 'src/runtime/thread_supervisor_control_server.c'
       - 'src/runtime/thread_supervisor_control_server.h'
       - 'src/supervisor/nt_supervisor_nt_bridge.c'
@@ -89,6 +101,8 @@ jobs:
           make BUILD_DIR=build-guest-boundary-ubsan \
             CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
             check-guest-boundary
+      - name: Reject delayed and malformed authenticated IPC replies
+        run: make -j2 check-broker-transport-failure
       - name: Prove authenticated suspend, context and signal lifecycle
         run: make -j2 check-supervisor-control-ipc
       - name: Repeat supervisor control lifecycle with UBSan
