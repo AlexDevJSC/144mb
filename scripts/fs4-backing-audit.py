@@ -65,8 +65,8 @@ def selinux_mode() -> str:
 
 
 def inspect(backing: str, view: str | None = None) -> dict:
-    if os.geteuid() == 0:
-        raise AuditRefused("Do not audit user isolation as root")
+    # Inspection is read-only and pure enough for a root-run CI fixture.
+    # The actual command-line operator entrypoint below still refuses root.
     lower, info = inspected_dir(backing)
     report = {
         "scope": "diagnostic_only_not_accepted",
@@ -114,6 +114,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--view")
     args = parser.parse_args(argv)
     try:
+        if os.geteuid() == 0:
+            raise AuditRefused("Do not audit user isolation as root")
         report = inspect(args.lower, args.view)
     except (AuditRefused, OSError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
