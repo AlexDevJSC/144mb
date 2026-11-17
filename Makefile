@@ -460,6 +460,13 @@ check-dos83-alias-durability: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos
 
 check: check-dos83-alias-durability
 
+.PHONY: check-dos83-wal-io-failure
+check-dos83-wal-io-failure: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_io_failure.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-wal-io-failure
+
 .PHONY: check-dos83-all-grants
 check-dos83-all-grants: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_all_grants.py \
