@@ -3,13 +3,13 @@
 #define NT_SUPERVISOR_PE_SHARED_H
 #include <stdatomic.h>
 #include <stdint.h>
-#include "ntnative/guest_boundary.h"
+#include "ntnative/guest_boundary_runtime.h"
 
 /* Test-only ABI: pointers in the shared MAP_SHARED mapping are passed as
  * a special Microsoft x64 entry argument. Normal Windows EXEs have no
  * such entry-point contract. Both sides run on AMD64 (64-bit atomics). */
 struct nt_supervisor_pe_shared {
-    struct nt_guest_boundary boundary;
+    struct nt_guest_boundary_session session;
     _Atomic uintptr_t apc_entry;
     _Atomic uintptr_t apc_stack_top;
     _Atomic uint32_t apc_delivered;
