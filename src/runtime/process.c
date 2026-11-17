@@ -8,6 +8,7 @@
 #include "thread_broker_ipc.h"
 #include "thread_broker_auth.h"
 #include "thread_broker_registry.h"
+#include "ntnative/guest_boundary_runtime.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -488,6 +489,20 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
     int channel[2];
     if (pipe(channel) != 0)
         return false;
+    /* Shared before fork: the direct parent must observe each live
+     * guest TID's phase without reading a PE-controlled UNIX pointer.
+     * The detached server takes ownership after a successful start. */
+    struct nt_guest_boundary_session *boundary = NULL;
+    if (supervisor_ipc_requested) {
+        boundary = mmap(NULL, sizeof(*boundary), PROT_READ | PROT_WRITE,
+                        MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+        if (boundary == MAP_FAILED) {
+            close(channel[0]);
+            close(channel[1]);
+            return false;
+        }
+        memset(boundary, 0, sizeof(*boundary));
+    }
     int supervisor_socket[2] = {-1, -1};
     uint8_t secret[16] = {0};
     if (supervisor_ipc_requested &&
@@ -498,12 +513,14 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
         close(channel[1]);
         if (supervisor_socket[0] >= 0) close(supervisor_socket[0]);
         if (supervisor_socket[1] >= 0) close(supervisor_socket[1]);
+        if (boundary != NULL) (void)munmap(boundary, sizeof(*boundary));
         return false;
     }
     const pid_t child = fork();
     if (child == 0) {
         close(channel[0]);
         worker_status_fd = channel[1];
+        nt_guest_boundary_install_child_session(boundary);
         if (supervisor_ipc_requested) {
             close(supervisor_socket[0]);
             /* Recursive --child runs already carry their *parent's*
@@ -524,6 +541,7 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
         close(channel[0]);
         if (supervisor_socket[0] >= 0) close(supervisor_socket[0]);
         memset(secret, 0, sizeof(secret));
+        if (boundary != NULL) (void)munmap(boundary, sizeof(*boundary));
         return false;
     }
     uint64_t generation = 0;
@@ -539,10 +557,14 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
             struct nt_thread_broker_registered_peer peer = {
                 .child_pid = child, .uid = getuid(), .gid = getgid(),
                 .child_pidfd = pidfd,
-                .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION
+                .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION,
+                .guest_session = boundary
             };
+            (void)nt_guest_boundary_get_image_range(&peer.trusted_code_begin,
+                                                      &peer.trusted_code_end);
             memcpy(peer.secret, secret, sizeof(peer.secret));
             if (nt_broker_server_start(supervisor_socket[0], &peer)) {
+                boundary = NULL; /* detached server now owns the mapping */
                 /* Detached server owns fd; send handshake from this
                  * parent before the child is permitted to run PE code. */
                 broker_ready = nt_broker_server_handshake(supervisor_socket[0], secret);
@@ -555,6 +577,10 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
             close(supervisor_socket[0]);
         }
         memset(secret, 0, sizeof(secret));
+        if (boundary != NULL) {
+            (void)munmap(boundary, sizeof(*boundary));
+            boundary = NULL;
+        }
         if (!broker_ready) {
             /* The failing topology has a live direct child, not a
              * guest-supplied PID. A child that cannot authenticate is
