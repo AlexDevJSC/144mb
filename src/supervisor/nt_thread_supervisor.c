@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <linux/elf.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,7 +94,10 @@ static uint64_t mono_ms(void)
 int nt_supervisor_interrupt(struct nt_thread_supervisor *sup, unsigned timeout_ms)
 {
     if (!sup || !sup->seized) { errno = EINVAL; return -1; }
-    if (sup->stopped) return 0;
+    if (sup->stopped) {
+        if (sup->pending_signal) { errno = EPROTO; return -1; }
+        return 0;
+    }
     if (timeout_ms == 0 || timeout_ms > 10000) { errno = EINVAL; return -1; }
     if (ptrace(PTRACE_INTERRUPT, sup->tid, NULL, NULL) == -1) return -1;
     uint64_t deadline = mono_ms() + timeout_ms;
@@ -105,7 +109,16 @@ int nt_supervisor_interrupt(struct nt_thread_supervisor *sup, unsigned timeout_m
                 sup->stopped = true;
                 return 0;
             }
-            /* An unexpected signal/event is not safe to silently consume. */
+            if (WIFSTOPPED(status)) {
+                /* waitpid consumed a REAL signal-delivery stop. Keep its
+                 * signal until the eventual CONT/DETACH, never swallow it
+                 * and never report an NT guest-safe interruption. */
+                sup->stopped = true;
+                sup->pending_signal = (unsigned)status >> 16 ? 0 : WSTOPSIG(status);
+            } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                sup->terminal = true;
+                sup->seized = false;
+            }
             errno = EPROTO; return -1;
         }
         if (observed < 0) return -1;
@@ -138,17 +151,21 @@ int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
 int nt_supervisor_continue(struct nt_thread_supervisor *sup)
 {
     if (!sup || !sup->seized || !sup->stopped) { errno = EINVAL; return -1; }
-    if (ptrace(PTRACE_CONT, sup->tid, NULL, NULL) == -1) return -1;
+    if (ptrace(PTRACE_CONT, sup->tid, NULL,
+               (void *)(uintptr_t)sup->pending_signal) == -1) return -1;
     sup->stopped = false;
+    sup->pending_signal = 0;
     return 0;
 }
 
 int nt_supervisor_detach(struct nt_thread_supervisor *sup)
 {
     if (!sup || !sup->seized || !sup->stopped) { errno = EINVAL; return -1; }
-    if (ptrace(PTRACE_DETACH, sup->tid, NULL, NULL) == -1) return -1;
+    if (ptrace(PTRACE_DETACH, sup->tid, NULL,
+               (void *)(uintptr_t)sup->pending_signal) == -1) return -1;
     sup->seized = false;
     sup->stopped = false;
+    sup->pending_signal = 0;
     return 0;
 }
 
@@ -324,6 +341,22 @@ int nt_supervisor_invoke_trusted_guest_apc(
 void nt_supervisor_release(struct nt_thread_supervisor *sup)
 {
     if (!sup) return;
+    if (sup->seized) {
+        /* A caller may reach cleanup after a signal-delivery stop,
+         * timeout, protocol rejection or a failed context read. Neither
+         * closing pidfd nor returning from the caller detaches ptrace. */
+        if (!sup->stopped)
+            (void)nt_supervisor_interrupt(sup, 500);
+        if (sup->seized && sup->stopped)
+            (void)nt_supervisor_detach(sup);
+        if (sup->seized && !sup->terminal && sup->pidfd >= 0) {
+#if defined(SYS_pidfd_send_signal)
+            /* PTRACE_O_EXITKILL protects tracer death but not a live
+             * tracer that accidentally abandons a stopped child. */
+            (void)syscall(SYS_pidfd_send_signal, sup->pidfd, SIGKILL, NULL, 0);
+#endif
+        }
+    }
     if (sup->pidfd >= 0) (void)close(sup->pidfd);
     nt_supervisor_init(sup);
 }
