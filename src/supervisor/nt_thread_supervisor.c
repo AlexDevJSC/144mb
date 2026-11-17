@@ -381,6 +381,20 @@ static void nt_supervisor_reset_owned(struct nt_thread_supervisor *sup)
         (void)close(sup->pidfd);
     nt_supervisor_init(sup);
 }
+int nt_supervisor_terminate_compromised_child(struct nt_thread_supervisor *sup)
+{
+    if (!sup || !sup->seized || sup->pidfd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+#if defined(SYS_pidfd_send_signal)
+    return (int)syscall(SYS_pidfd_send_signal, sup->pidfd, SIGKILL, NULL, 0);
+#else
+    errno = ENOTSUP;
+    return -1; /* Never substitute a recyclable raw Linux PID. */
+#endif
+}
+
 int nt_supervisor_abort_child(struct nt_thread_supervisor *sup)
 {
     if (!sup) { errno = EINVAL; return -1; }
