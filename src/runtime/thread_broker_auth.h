@@ -8,6 +8,7 @@
  * object identifiers or authorize a host scheduling mutation here. */
 #include <stdint.h>
 #include <sys/types.h>
+#include "ntnative/guest_boundary_runtime.h"
 
 enum {
     NT_BROKER_QUERY_INFORMATION = 0x0040u,
@@ -38,6 +39,11 @@ struct nt_thread_broker_registered_peer {
      * NULL for legacy read-only child broker channels. */
     struct nt_guest_boundary_session *guest_session;
     uintptr_t trusted_code_begin, trusted_code_end;
+    /* Copied from the trusted parent's PE loader before fork. This list
+     * contains ONLY pinned startup DLL executable code and never PE RPC
+     * input or a pointer into mutable guest storage. */
+    struct nt_guest_code_range trusted_startup_dlls[NT_GUEST_ADDITIONAL_CODE_MAX];
+    size_t trusted_startup_dll_count;
 };
 
 enum nt_thread_broker_auth_result {
