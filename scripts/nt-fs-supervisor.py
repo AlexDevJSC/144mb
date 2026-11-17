@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
+import pwd
+import socket
+import struct
 import hashlib
 import os
 from pathlib import Path
@@ -157,6 +161,86 @@ def trusted_pe_runner() -> Path:
     raise Refused("Trusted pe-isolated-run binary unavailable beside supervisor")
 
 
+
+def service_attestation(socket_path: str, service_user: str) -> None:
+    """Authenticated control plane plus live FUSE evidence, no backing FD."""
+    try:
+        uid = pwd.getpwnam(service_user).pw_uid
+    except KeyError as exc:
+        raise Refused("Service identity not provisioned") from exc
+    if uid in (0, os.geteuid()):
+        raise Refused("The storage daemon must have its own non-root UID")
+    if not stat.S_ISSOCK(Path(socket_path).stat().st_mode):
+        raise Refused("Storage control endpoint is not a Unix socket")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
+            conn.settimeout(5.0)
+            conn.connect(socket_path)
+            peer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            _pid, actual_uid, _gid = struct.unpack("3i", peer)
+            if actual_uid != uid:
+                raise Refused("Storage daemon peer UID mismatch")
+            conn.sendall(b'{"version":1,"op":"status"}')
+            reply = json.loads(conn.recv(4096))
+            if reply.get("version") != 1 or reply.get("ok") is not True or (
+                    reply.get("mediated") is not True):
+                raise Refused("Service denied or FUSE mount unavailable")
+    except (OSError, ValueError, TimeoutError) as error:
+        raise Refused("Cannot attest storage service: " + str(error)) from error
+
+
+def run_service_view(view: Path, program: list[str],
+                     socket_path: str, service_user: str) -> int:
+    """POSIX data plane: FUSE belongs to the service UID, not the client."""
+    if os.geteuid() == 0:
+        raise Refused("Client supervisor must not run as root")
+    if not view.is_dir() or view.is_symlink():
+        raise Refused("The mounted service view must be a real directory")
+    view = view.resolve(strict=True)
+    root = Path(__file__).resolve().parent.parent
+    landlock = root / "build" / "nt-dos83-landlock"
+    if not landlock.is_file():
+        landlock = Path(__file__).resolve().parent / "nt-dos83-landlock"
+    if not landlock.is_file():
+        landlock = Path(shutil.which("nt-dos83-landlock") or str(landlock))
+    if not landlock.is_file() or not os.access(landlock, os.X_OK):
+        raise Refused("Missing mandatory Landlock client binary")
+    if not Path("/dev/fuse").exists():
+        raise Refused("/dev/fuse unavailable")
+    service_attestation(socket_path, service_user)
+    # The owner returned through FUSE must be the authorized client, not the
+    # backing's dedicated service account. Cross-check the mount with the
+    # existing Landlock runner's kernel FUSE subtype verification.
+    if view.stat().st_uid != os.geteuid():
+        raise Refused("FUSE view was not mapped to the client identity")
+    if subprocess.run([str(landlock), "--probe"], check=False,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        raise Refused("Landlock ABI >=3 required")
+    if subprocess.run([str(landlock), "--view", str(view), "--", "/bin/true"],
+                      check=False).returncode != 0:
+        raise Refused("Landlock rejected this service FUSE mount")
+    env = dict(os.environ)
+    env.pop("NT_FS_LOWER", None)
+    env["NT_FS_SUPERVISED"] = "1"
+    env["NT_FS_SERVICE"] = "1"
+    env["NT_FS_VIEW"] = str(view)
+    child = None
+    try:
+        child = subprocess.Popen([str(landlock), "--view", str(view),
+                                  "--", *program], env=env,
+                                 start_new_session=True)
+        while True:
+            status = child.poll()
+            if status is not None:
+                return 128 - status if status < 0 else status
+            # A dead/missing daemon never triggers fallback to direct lower.
+            service_attestation(socket_path, service_user)
+            time.sleep(0.25)
+    finally:
+        stop_group(child)
+
+
 def run_session(lower: Path, view: Path, program: list[str],
                 pe_mode: bool = False) -> int:
     if os.geteuid() == 0:
@@ -271,8 +355,12 @@ def run_session(lower: Path, view: Path, program: list[str],
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="Supervise one FUSE/Landlock-protected NT file session")
-    parser.add_argument("--lower", required=True, help="trusted physical backing")
-    parser.add_argument("--view", required=True, help="dedicated empty mountpoint")
+    parser.add_argument("--lower", help="trusted backing (legacy mode only)")
+    parser.add_argument("--view", required=True, help="FUSE mountpoint")
+    parser.add_argument("--service-socket",
+                        help="opt in to dedicated-UID FUSE, without any --lower grant")
+    parser.add_argument("--service-user", default="ntnative-storage",
+                        help="expected dedicated-UID service identity")
     parser.add_argument("--pe", action="store_true",
                         help="launch a trusted PE runner under its own Bubblewrap sandbox")
     parser.add_argument("program", nargs=argparse.REMAINDER)
@@ -287,6 +375,15 @@ def main(argv: list[str]) -> int:
     try:
         for signum in old_handlers:
             signal.signal(signum, handle_termination)
+        if args.service_socket:
+            if args.lower is not None:
+                raise Refused("Dedicated-UID mode must not receive a backing path")
+            if args.pe:
+                raise Refused("PE storage IPC backend not implemented; refusing direct backing")
+            return run_service_view(Path(args.view), program,
+                                    args.service_socket, args.service_user)
+        if args.lower is None:
+            raise Refused("Legacy mode requires --lower; use --service-socket otherwise")
         lower, view = canonical_grants(args.lower, args.view)
         lock_fd = lock_session(view)
         try:
