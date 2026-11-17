@@ -7,11 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 /* No unreviewed PE import can enable the gate or supply a mapping. */
 static _Atomic bool import_gate_enabled;
+static uintptr_t trusted_code_begin, trusted_code_end;
 static _Thread_local struct nt_guest_boundary_session *current_session;
 static _Thread_local struct nt_guest_boundary_slot *current_slot;
 static _Thread_local unsigned guest_entry_depth;
@@ -27,6 +29,22 @@ static pthread_mutex_t gate_lock = PTHREAD_MUTEX_INITIALIZER;
 void nt_guest_boundary_enable_import_gate(void)
 {
     atomic_store_explicit(&import_gate_enabled, true, memory_order_release);
+}
+bool nt_guest_boundary_set_image_range(uintptr_t begin, uintptr_t end)
+{
+    if (!begin || end <= begin) return false;
+    trusted_code_begin = begin;
+    trusted_code_end = end;
+    return true;
+}
+bool nt_guest_boundary_get_image_range(uintptr_t *begin, uintptr_t *end)
+{
+    if (!begin || !end || !trusted_code_begin ||
+        trusted_code_end <= trusted_code_begin)
+        return false;
+    *begin = trusted_code_begin;
+    *end = trusted_code_end;
+    return true;
 }
 bool nt_guest_boundary_import_gate_enabled(void)
 {
@@ -153,6 +171,17 @@ nt_guest_proc nt_guest_boundary_wrap_import(nt_guest_proc target)
 #else
     if (!target || !nt_guest_boundary_import_gate_enabled())
         return target;
+    /* This return-address-based gate is incompatible with userspace CET
+     * shadow stacks. Fail closed instead of corrupting the hardware
+     * protected return stack. Linux arch_prctl(ARCH_SHSTK_STATUS)=0x5005. */
+#if defined(SYS_arch_prctl)
+    unsigned long shstk_status = 0;
+    if (syscall(SYS_arch_prctl, 0x5005u, &shstk_status) == 0) {
+        if (shstk_status != 0) { errno = ENOTSUP; return NULL; }
+    } else if (errno != EINVAL && errno != ENOSYS) {
+        return NULL;
+    }
+#endif
     uintptr_t original = 0;
     _Static_assert(sizeof(target) == sizeof(original), "AMD64 function pointer");
     memcpy(&original, &target, sizeof(original));
@@ -170,7 +199,7 @@ nt_guest_proc nt_guest_boundary_wrap_import(nt_guest_proc target)
         return NULL;
     }
     const long page = sysconf(_SC_PAGESIZE);
-    if (page < 23 || page > 65536) {
+    if (page < 27 || page > 65536) {
         pthread_mutex_unlock(&gate_lock);
         return NULL;
     }
@@ -183,13 +212,15 @@ nt_guest_proc nt_guest_boundary_wrap_import(nt_guest_proc target)
     uintptr_t entry = 0;
     void (*dispatcher)(void) = nt_guest_boundary_import_entry;
     memcpy(&entry, &dispatcher, sizeof(entry));
-    /* movabs target,%r11 ; movabs gateway,%r10 ; jmp *%r10.
+    /* ENDBR64 ; movabs target,%r11 ; movabs gateway,%r10 ; jmp *%r10.
      * R10 and R11 are volatile in the Microsoft x64 ABI. Never map W+X. */
-    memory[0] = 0x49; memory[1] = 0xbb;
-    memcpy(memory + 2, &original, sizeof(original));
-    memory[10] = 0x49; memory[11] = 0xba;
-    memcpy(memory + 12, &entry, sizeof(entry));
-    memory[20] = 0x41; memory[21] = 0xff; memory[22] = 0xe2;
+    /* ENDBR64 for IBT, followed by 2x MOVABS + indirect JMP. */
+    memory[0] = 0xf3; memory[1] = 0x0f; memory[2] = 0x1e; memory[3] = 0xfa;
+    memory[4] = 0x49; memory[5] = 0xbb;
+    memcpy(memory + 6, &original, sizeof(original));
+    memory[14] = 0x49; memory[15] = 0xba;
+    memcpy(memory + 16, &entry, sizeof(entry));
+    memory[24] = 0x41; memory[25] = 0xff; memory[26] = 0xe2;
     if (mprotect(memory, (size_t)page, PROT_READ | PROT_EXEC) != 0) {
         munmap(memory, (size_t)page);
         pthread_mutex_unlock(&gate_lock);
