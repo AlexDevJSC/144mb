@@ -2254,6 +2254,56 @@ nt_status NT_MS_ABI nt_NtOpenThread(uintptr_t *handle, uint32_t access,
 }
 
 
+
+/* The missing join between a Windows HANDLE and the authenticated
+ * per-process supervisor lease. Keep wait_lock OUT of the synchronous
+ * IPC call: the parent may need to inspect the child's /proc TIDs.
+ * The HANDLE values are monotone and we revalidate them after RPC;
+ * a close/race cannot turn a stale HANDLE into another target. */
+bool nt_runtime_supervisor_open_thread_handle(uintptr_t handle, uint32_t rights,
+    struct nt_broker_thread_info *identity, uint64_t *capability)
+{
+    if (!identity || !capability || rights == 0 ||
+        (rights & ~NT_BROKER_SUPERVISOR_ACCESS_MASK) != 0)
+        return false;
+    uint32_t thread_id = 0;
+    pthread_mutex_lock(&wait_lock);
+    struct waitable *entry = find_waitable(handle);
+    if (entry != NULL && entry->kind == THREAD &&
+        (entry->access & rights) == rights) {
+        const struct waitable *state = wait_state(entry);
+        if (!entry->remote_guest && !state->child_guest &&
+            !state->signaled && state->owner_pid == (uint32_t)getpid())
+            thread_id = state->thread_id;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (thread_id == 0)
+        return false;
+    struct nt_broker_thread_info claimed = {0};
+    uint64_t lease = 0;
+    if (!nt_broker_client_supervisor_open(thread_id, rights, &claimed, &lease))
+        return false;
+    pthread_mutex_lock(&wait_lock);
+    entry = find_waitable(handle);
+    bool current = entry != NULL && entry->kind == THREAD &&
+        (entry->access & rights) == rights && !entry->remote_guest;
+    if (current) {
+        const struct waitable *state = wait_state(entry);
+        current = !state->child_guest && !state->signaled &&
+            state->owner_pid == (uint32_t)getpid() &&
+            state->thread_id == thread_id;
+    }
+    pthread_mutex_unlock(&wait_lock);
+    if (!current || claimed.guest_process_id != (uint32_t)getpid() ||
+        claimed.guest_thread_id != thread_id || claimed.generation == 0) {
+        (void)nt_broker_client_supervisor_close(lease);
+        return false;
+    }
+    *identity = claimed;
+    *capability = lease;
+    return true;
+}
+
 static void finish_thread(struct nt_guest_thread *guest, bool attached)
 {
     nt_runtime_run_fls_cleanup();
