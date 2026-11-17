@@ -481,6 +481,12 @@ check-dos83-namespace-durability: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt
 
 check: check-dos83-namespace-durability
 
+.PHONY: check-dos83-pending-wal-admission
+check-dos83-pending-wal-admission: $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_pending_wal_admission.py "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-dos83-pending-wal-admission
+
 .PHONY: check-dos83-all-grants
 check-dos83-all-grants: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_all_grants.py \
