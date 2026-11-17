@@ -120,6 +120,9 @@ static pthread_mutex_t wait_lock = PTHREAD_MUTEX_INITIALIZER;
  * backends for a single TID. Serialized across the whole guest process,
  * no wait_lock is held across parent IPC. Generation prevents Linux TID
  * reuse from inheriting a suspended thread's counters. */
+static struct waitable *find_waitable(uintptr_t handle);
+static struct waitable *wait_state(struct waitable *handle);
+
 static pthread_mutex_t async_thread_lock = PTHREAD_MUTEX_INITIALIZER;
 struct async_thread_count { uint32_t tid, count; uint64_t generation; };
 static struct async_thread_count async_threads[256];
@@ -396,9 +399,6 @@ static uintptr_t linux_group0_affinity(pthread_t host)
             mask |= (uintptr_t)UINT64_C(1) << slot;
     return mask;
 }
-
-static struct waitable *find_waitable(uintptr_t handle);
-static struct waitable *wait_state(struct waitable *handle);
 
 static struct guest_apc_queue *current_apcs(void)
 {
