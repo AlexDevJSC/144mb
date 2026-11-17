@@ -73,6 +73,24 @@ all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-i
 check-thread-supervisor:
 	BUILD_DIR="$(BUILD_DIR)" CFLAGS="$(CFLAGS)" CC="$(CC)" bash scripts/check-thread-supervisor.sh
 
+# Controlled *real* PE32+ integration, still opt-in and never shipped.
+# Uses the actual validated image loader and guest GS/TEB setup. This is
+# a dedicated fixture ABI, not general Windows executable support.
+$(BUILD_DIR)/supervisor-pe-fixture.exe: tests/pe/supervisor_pe_fixture.c tests/pe/supervisor_pe_shared.h | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
+	    -Wl,--entry,supervisor_pe_entry,--subsystem,console,--no-insert-timestamp,--disable-reloc-section,--disable-dynamicbase,--strip-all \
+	    -o "$@" "$<"
+
+$(BUILD_DIR)/supervisor-pe-thread-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h src/pe/image.c src/pe/image.h src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/supervisor -Itests/pe \
+	    $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/pe/supervisor_pe_thread_test.c src/supervisor/nt_thread_supervisor.c \
+	    src/pe/image.c src/runtime/guest_thread.c -pthread $(LDLIBS) -o "$@"
+
+.PHONY: check-pe-thread-supervisor
+check-pe-thread-supervisor: $(BUILD_DIR)/supervisor-pe-thread-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-thread-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+
 $(BUILD_DIR):
 	mkdir -p "$@"
 
