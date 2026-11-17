@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=NT Native FileSystem4 dedicated-UID FUSE storage service
+Requires=ntnative-storage.socket
+After=ntnative-storage.socket
+ConditionPathExists=/dev/fuse
+
+[Service]
+Type=simple
+User=ntnative-storage
+Group=ntnative-storage
+EnvironmentFile=/etc/ntnative-storage.conf
+StateDirectory=ntnative-storage
+StateDirectoryMode=0700
+RuntimeDirectory=ntnative-storage
+RuntimeDirectoryMode=0755
+UMask=0077
+# Mount must propagate into client namespace. Avoid PrivateMounts,
+# ProtectSystem and other service-specific mount namespaces.
+# fusermount3 commonly uses a setuid helper: do NOT set NoNewPrivileges=yes
+# until mount behaviour has been proven on the target Fedora image.
+ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/ntnative-storage/C
+ExecStartPre=/usr/bin/install -d -m 0755 /run/ntnative-storage/view
+ExecStart=/usr/bin/python3 /usr/libexec/ntnative-storage-service --backing /var/lib/ntnative-storage/C --view /run/ntnative-storage/view --client-uid ${NT_STORAGE_CLIENT_UID} --client-gid ${NT_STORAGE_CLIENT_GID} --fuse /usr/bin/nt-dos83-fuse --mediator /usr/bin/nt-dos83-mediator --unmount /usr/bin/fusermount3
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
