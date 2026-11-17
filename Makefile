@@ -364,6 +364,26 @@ check-fs-supervisor:
 
 check: check-fs-supervisor
 
+.PHONY: check-fs-backing-audit check-fs4-acceptance-gates
+check-fs-backing-audit:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_backing_audit.py'
+
+check-fs4-acceptance-gates:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs4_acceptance_gate.py'
+
+check: check-fs-backing-audit check-fs4-acceptance-gates
+
+$(BUILD_DIR)/fs4-ntfs-probe: src/tools/fs4_ntfs_probe.c $(RUNTIME_OBJECTS) src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-fs4-ntfs-diff
+check-fs4-ntfs-diff: $(BUILD_DIR)/fs4-ntfs-probe
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_ntfs_probe_smoke.py "$(BUILD_DIR)/fs4-ntfs-probe"
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs4_ntfs_diff.py'
+
+check: check-fs4-ntfs-diff
+
 $(BUILD_DIR)/nt-dos83-mediator: src/tools/dos83_mediator.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -376,6 +396,45 @@ check-dos83-wal: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_recovery.py "$(BUILD_DIR)/nt-dos83-mediator"
 
 check: check-dos83-wal
+
+.PHONY: check-fs-backing-audit check-fs4-acceptance-gates
+check-fs-backing-audit:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_backing_audit.py'
+check-fs4-acceptance-gates:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs4_acceptance_gate.py'
+
+check: check-fs-backing-audit check-fs4-acceptance-gates
+
+# Compile crash hooks ONLY into this standalone test mediator. Production
+# runtime/PE objects do not receive the injection macro, nor a trigger
+# controllable by an untrusted guest program.
+$(BUILD_DIR)/runtime-guest_files-crash.o: src/runtime/guest_files.c src/runtime/dos83_alias.inc src/runtime/dos83_wal.inc src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(ICU_CFLAGS) $(WARN_CFLAGS) $(CFLAGS) \
+	    -DNTNATIVE_TEST_DOS83_CRASH_HOOKS -pthread -c "$<" -o "$@"
+
+$(BUILD_DIR)/nt-dos83-mediator-crash: src/tools/dos83_mediator.c $(filter-out $(BUILD_DIR)/runtime-guest_files.o,$(RUNTIME_OBJECTS)) $(BUILD_DIR)/runtime-guest_files-crash.o src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-dos83-sigkill
+check-dos83-sigkill: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_sigkill.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-sigkill
+
+.PHONY: check-dos83-all-grants
+check-dos83-all-grants: $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_all_grants.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-dos83-all-grants
+
+.PHONY: check-dos83-bad-source
+check-dos83-bad-source: $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_bad_source.py "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-dos83-bad-source
 
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/user_folders.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
