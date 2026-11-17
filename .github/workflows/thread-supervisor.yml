@@ -1,0 +1,56 @@
+name: Experimental thread supervisor
+on:
+  push:
+    paths:
+      - 'src/supervisor/**'
+      - 'tests/thread_supervisor_test.c'
+      - 'tests/pe/supervisor_pe_*.c'
+      - 'tests/pe/supervisor_pe_shared.h'
+      - 'scripts/check-thread-supervisor.sh'
+      - 'scripts/fedora-thread-supervisor-acceptance.sh'
+      - 'Makefile'
+      - 'src/pe/image.c'
+      - 'src/runtime/guest_thread.c'
+      - '.github/workflows/thread-supervisor.yml'
+  pull_request:
+    paths:
+      - 'src/supervisor/**'
+      - 'tests/thread_supervisor_test.c'
+      - 'tests/pe/supervisor_pe_*.c'
+      - 'tests/pe/supervisor_pe_shared.h'
+      - 'scripts/check-thread-supervisor.sh'
+      - 'scripts/fedora-thread-supervisor-acceptance.sh'
+      - 'Makefile'
+      - 'src/pe/image.c'
+      - 'src/runtime/guest_thread.c'
+      - '.github/workflows/thread-supervisor.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  supervisor-linux-amd64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Verify native PE32+ link tooling
+        run: |
+          cc --version | head -1
+          ld -V | grep -F i386pep
+          objcopy --version | head -1
+      - name: Prove independent asynchronous stop and register roundtrip
+        run: make check-thread-supervisor
+      - name: Repeat with undefined-behavior sanitizer
+        run: |
+          BUILD_DIR=build-supervisor-ubsan \
+          CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
+            make check-thread-supervisor
+      - name: Prove real mapped PE32+ guest RIP and GS/TEB, not a Linux-only surrogate
+        run: make -j2 check-pe-thread-supervisor
+      - name: Repeat PE supervisor integration with UBSan
+        run: |
+          make -j2 BUILD_DIR=build-supervisor-pe-ubsan \
+            CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
+            check-pe-thread-supervisor

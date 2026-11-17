@@ -68,6 +68,36 @@ PE_FIXTURE_CFLAGS = -O2 -ffreestanding -nostdlib -fno-ident -fno-stack-protector
 .PHONY: check-fs-supervisor check-pe-lstrcmp check-audio-required check-pe-preflight check-pe-priority-boost all check check-object-broker check-dos83-mediator check-dos83-fuse check-pe check-pe-import check-pe-image check-pe-external check-pe-native check-pe-kernel-user check-pe-nt-io check-pe-core-objects check-pe-apc check-pe-dll-graph check-pe-native-core check-pe-named-events check-pe-veh check-pe-suspended-thread check-pe-thread-groups check-pe-priority-class check-pe-process-affinity check-pe-teb-tls check-pe-memory check-pe-displayconfig check-pe-console check-pe-graphics check-pe-shaders check-pe-wic check-pe-platform check-pe-seh check-pe-isolated check-desktop benchmark install
 all: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-import-audit $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/nt-vulkan-probe $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-landlock $(BUILD_DIR)/nt-object-broker $(DOS83_FUSE_TARGET)
 
+.PHONY: check-thread-supervisor
+# Experimental ptrace proof: separate from standard release and RPM targets.
+check-thread-supervisor:
+	BUILD_DIR="$(BUILD_DIR)" CFLAGS="$(CFLAGS)" CC="$(CC)" bash scripts/check-thread-supervisor.sh
+
+# Controlled *real* PE32+ integration, still opt-in and never shipped.
+# Uses the actual validated image loader and guest GS/TEB setup. This is
+# a dedicated fixture ABI, not general Windows executable support.
+$(BUILD_DIR)/supervisor-pe-fixture.elf.o: tests/pe/supervisor_pe_fixture.c tests/pe/supervisor_pe_shared.h | $(BUILD_DIR)
+	$(CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) -fno-pie \
+	    -fno-toplevel-reorder -fno-reorder-blocks-and-partition -c "$<" -o "$@"
+
+$(BUILD_DIR)/supervisor-pe-fixture.coff.o: $(BUILD_DIR)/supervisor-pe-fixture.elf.o
+	$(OBJCOPY) -j .text -O pe-x86-64 "$<" "$@"
+
+$(BUILD_DIR)/supervisor-pe-fixture.exe: $(BUILD_DIR)/supervisor-pe-fixture.coff.o tests/pe/fixture.ld
+	$(LD) -m i386pep -T tests/pe/fixture.ld --entry supervisor_pe_entry \
+	    --subsystem console --no-insert-timestamp --disable-reloc-section \
+	    --strip-all -o "$@" "$<"
+
+$(BUILD_DIR)/supervisor-pe-thread-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h src/pe/image.c src/pe/image.h src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/supervisor -Itests/pe \
+	    $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/pe/supervisor_pe_thread_test.c src/supervisor/nt_thread_supervisor.c \
+	    src/pe/image.c src/runtime/guest_thread.c -pthread $(LDLIBS) -o "$@"
+
+.PHONY: check-pe-thread-supervisor
+check-pe-thread-supervisor: $(BUILD_DIR)/supervisor-pe-thread-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-thread-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+
 $(BUILD_DIR):
 	mkdir -p "$@"
 
