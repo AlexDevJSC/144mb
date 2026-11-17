@@ -28,8 +28,8 @@ int __attribute__((ms_abi)) supervisor_pe_entry(struct nt_supervisor_pe_shared *
     /* A same-section symbol DIFFERENCE is resolved by the assembler
      * before ELF->COFF conversion. Absolute ADDR32 relocations would
      * truncate the PE's 64-bit image base. */
-    __asm__ volatile ("call 1f\\n\\t"
-                      "1: popq %0\\n\\t"
+    __asm__ volatile ("call 1f\n\t"
+                      "1: popq %0\n\t"
                       "leaq supervisor_pe_apc_callback-1b(%0), %0"
                       : "=r"(callback_entry));
     atomic_store_explicit(&shared->apc_entry, callback_entry, memory_order_release);
