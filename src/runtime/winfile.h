@@ -4,6 +4,17 @@
 
 #include "compat.h"
 
+/* Explicit opt-in NT-compatible inode: only the trusted lower-tree operator
+ * may set this xattr. FUSE does not expose user.ntnative.* metadata. */
+#define NT_FS_COMPAT_MARKER "user.ntnative.fs_compat"
+enum { NT_FS_READ = 1, NT_FS_WRITE = 2, NT_FS_DELETE = 4,
+       NT_FS_SHARE_ALL = NT_FS_READ | NT_FS_WRITE | NT_FS_DELETE };
+/* Host-only calls, not PE exports. Marker: 1 marked, 0 plain POSIX,
+ * -1 unusable metadata (fail closed). A lease is an independent OFD fd. */
+int nt_runtime_nt_file_marker(int fd);
+int nt_runtime_acquire_linux_nt_lease(int fd, uint32_t access, uint32_t share);
+void nt_runtime_release_linux_nt_lease(int *lease);
+
 /* Host-only, UTF-8 DOS paths (e.g. C:\\dir\\file). These are not Win32
  * exports. The inotify consumer uses the second entrypoint AFTER external
  * renames; it is best-effort, not an atomic interception of host writes. */
