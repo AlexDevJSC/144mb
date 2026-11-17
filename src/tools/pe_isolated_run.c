@@ -574,9 +574,36 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
     }
 
     const char *home = getenv("HOME");
-    const int profile = inherit_mount_descriptor(nt_open_guest_profile(getenv("XDG_STATE_HOME"), home));
-    if (profile < 0) {
+    int raw_profile = nt_open_guest_profile(getenv("XDG_STATE_HOME"), home);
+    if (raw_profile < 0) {
         perror("Cannot prepare guest profile");
+        return 2;
+    }
+    /* Tighten, never broaden, an explicit FileSystem supervisor launch:
+     * the PE's actual C: grant must be the exact inode supervised by FUSE.
+     * This is NOT authentication solely from environment variables. */
+    if (getenv("NT_FS_SUPERVISED") &&
+        strcmp(getenv("NT_FS_SUPERVISED"), "1") == 0) {
+        const char *lower = getenv("NT_FS_LOWER");
+        struct stat expected, actual;
+        const int lower_fd = lower && lower[0] == '/' ?
+            open(lower, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+        const bool consistent = lower_fd >= 0 &&
+            fstat(lower_fd, &expected) == 0 &&
+            fstat(raw_profile, &actual) == 0 &&
+            expected.st_dev == actual.st_dev &&
+            expected.st_ino == actual.st_ino;
+        if (lower_fd >= 0)
+            close(lower_fd);
+        if (!consistent) {
+            fputs("Refusing PE supervisor session: C: backing identity mismatch\n", stderr);
+            close(raw_profile);
+            return 2;
+        }
+    }
+    const int profile = inherit_mount_descriptor(raw_profile);
+    if (profile < 0) {
+        perror("Cannot prepare guest profile descriptor");
         return 2;
     }
     char profile_source[64];
