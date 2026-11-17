@@ -598,7 +598,13 @@ static bool client_rpc(uint32_t operation, uint32_t tid, uint32_t access,
         const bool valid = send_packet(client_socket, &request, sizeof(request)) &&
             receive_exact_reply(client_socket, &response, sizeof(response), 4000) &&
             response.magic == NT_THREAD_BROKER_MAGIC &&
-            response.process_id == (uint32_t)getpid();
+            response.process_id != 0;
+        /* Remote QUERY/OPEN intentionally returns the *target* child's
+         * PID, not the requester's. Session identity is verified with
+         * peer credentials on attach and every parent-side request; we
+         * must not reject valid cross-process read-only queries here.
+         * The caller checks returned TID/capability and the registry
+         * enforces permission on the parent side. */
         if (!valid) {
             abandon_client_session_locked();
         } else if (response.status == 0) {
