@@ -130,6 +130,10 @@ static int NT_MS_ABI guest_entry(void)
         perror("Cannot initialize secondary DOS/UNC roots");
         return 118;
     }
+    if (!nt_runtime_recover_all_dos83_grants()) {
+        perror("DOS 8.3 WAL recovery refused on a granted drive or share");
+        return 118;
+    }
     if (active_child_manifest >= 0) {
         const bool restored =
             nt_runtime_inherited_standard_handles(active_child_manifest,
