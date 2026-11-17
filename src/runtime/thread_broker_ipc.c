@@ -298,7 +298,13 @@ void nt_broker_server_loop(int fd,
             break; /* Fail closed on disconnect, bad protocol or impersonation. */
         const struct nt_broker_rpc request = authenticated.request;
         struct nt_thread_broker_reply response = {
-            .magic = NT_THREAD_BROKER_MAGIC, .status = 1
+            .magic = NT_THREAD_BROKER_MAGIC,
+            /* Control APIs must return a genuine NTSTATUS on a rejected
+             * capability, never a positive value that Windows might
+             * interpret as success or an information-level status. */
+            .status = request.operation >= NT_BROKER_RPC_SUP_SUSPEND &&
+                      request.operation <= NT_BROKER_RPC_SUP_SET_CONTEXT ?
+                      (uint32_t)NT_STATUS_ACCESS_DENIED : 1u
         };
         /* GET_CONTEXT replies are extended even on authorization or
          * validation failure; the client must receive the true NTSTATUS
