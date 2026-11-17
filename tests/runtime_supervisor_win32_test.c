@@ -57,6 +57,16 @@ static uint32_t NT_MS_ABI test_worker(void *ignored)
     return 0;
 }
 
+static void NT_MS_ABI never_called_user_apc(uintptr_t data)
+{
+    (void)data;
+    _Exit(69);
+}
+static void NT_MS_ABI never_called_native_apc(void *a, void *b, void *c)
+{
+    (void)a; (void)b; (void)c;
+    _Exit(70);
+}
 static int NT_MS_ABI test_entry(void)
 {
     atomic_store(&ticks, 0);
@@ -71,6 +81,12 @@ static int NT_MS_ABI test_entry(void)
     for (int i = 0; i < 3000 && !atomic_load(&entered); ++i)
         msleep(1);
     if (!atomic_load(&entered)) return 11;
+    /* Special APC delivery is not yet safe for arbitrary functions,
+     * and must NOT be reported as a successful normal APC queue. */
+    if (nt_QueueUserAPC2(never_called_user_apc, thread, 0, 1) != 0 ||
+        nt_NtQueueApcThreadEx(thread, 1, never_called_native_apc,
+                              NULL, NULL, NULL) != NT_STATUS_NOT_SUPPORTED)
+        return 27;
     /* Actual PE import API surface: no direct control-plane call here. */
     if (nt_SuspendThread(thread) != 0) return 12;
     const uint64_t frozen = atomic_load(&ticks);
