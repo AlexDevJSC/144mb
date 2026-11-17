@@ -404,6 +404,13 @@ check-dos83-sigkill: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediat
 
 check: check-dos83-sigkill
 
+.PHONY: check-dos83-all-grants
+check-dos83-all-grants: $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_all_grants.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-dos83-all-grants
+
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/user_folders.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) -Wl,--wrap=fdatasync $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
