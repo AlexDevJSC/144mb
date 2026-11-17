@@ -2,7 +2,7 @@
 /* Trusted, explicitly opt-in PE32+ integration fixture. Unlike the old
  * external host this executes the Windows entry inside the real direct
  * fork of nt_runtime_run_fixture, with an authenticated parent broker.
- * The only executable accepted is built from tests/pe/*.c in this build. */
+ * The executable is the trusted PE fixture built by this test target. */
 #define _GNU_SOURCE
 #include "image.h"
 #include "dll_graph.h"
