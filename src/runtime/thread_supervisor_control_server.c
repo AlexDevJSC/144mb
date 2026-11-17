@@ -96,7 +96,9 @@ static bool owned_guest_scope(
         .boundary = &slot->boundary,
         .teb = teb,
         .code_begin = peer->trusted_code_begin,
-        .code_end = peer->trusted_code_end
+        .code_end = peer->trusted_code_end,
+        .additional_code = peer->trusted_startup_dlls,
+        .additional_code_count = peer->trusted_startup_dll_count
     };
     return true;
 }
@@ -167,7 +169,9 @@ nt_status nt_supervisor_control_server_call(
     struct nt_supervisor_guest_scope verified;
     if (!owned_guest_scope(peer, identity, &verified) ||
         verified.boundary != state->nt.scope.boundary ||
-        verified.teb != state->nt.scope.teb) {
+        verified.teb != state->nt.scope.teb ||
+        verified.additional_code != state->nt.scope.additional_code ||
+        verified.additional_code_count != state->nt.scope.additional_code_count) {
         release_state(state);
         return NT_STATUS_THREAD_IS_TERMINATING;
     }
