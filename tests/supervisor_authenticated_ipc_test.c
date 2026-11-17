@@ -122,6 +122,27 @@ static _Noreturn void client_main(int fd, int commands, int responses,
     if (nt_broker_client_supervisor_query(handle ^ UINT64_C(0x100), 
               NT_BROKER_SUPERVISOR_GET_CONTEXT, &query))
         _exit(20); /* guessed capability must not resolve */
+    /* An authenticated channel and valid GET/SUSPEND capability alone
+     * must NOT activate async ptrace without the trusted parent policy.
+     * Every denied operation preserves caller-provided outputs. */
+    uint32_t denied_previous = UINT32_C(0x51515151);
+    if (nt_broker_client_supervisor_suspend(handle, &denied_previous) !=
+            NT_STATUS_ACCESS_DENIED ||
+        denied_previous != UINT32_C(0x51515151) ||
+        nt_broker_client_supervisor_resume(handle, &denied_previous) !=
+            NT_STATUS_ACCESS_DENIED ||
+        denied_previous != UINT32_C(0x51515151))
+        _exit(30);
+    _Alignas(16) struct nt_context64 denied_context = {0};
+    denied_context.flags = UINT32_C(0x100001);
+    denied_context.rax = UINT64_C(0x123456789abcdef0);
+    if (nt_broker_client_supervisor_get_context(handle, &denied_context) !=
+            NT_STATUS_ACCESS_DENIED ||
+        denied_context.flags != UINT32_C(0x100001) ||
+        denied_context.rax != UINT64_C(0x123456789abcdef0) ||
+        nt_broker_client_supervisor_set_context(handle, &denied_context) !=
+            NT_STATUS_ACCESS_DENIED)
+        _exit(31);
     uint64_t rip = UINT64_C(0xcafebabe);
     const bool probed = nt_broker_client_supervisor_probe(handle, &rip);
     if (probe_expected ? (!probed || rip == 0 || rip == UINT64_C(0xcafebabe)) :
