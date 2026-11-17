@@ -25,6 +25,7 @@ struct nt_thread_broker_request {
     uint8_t secret[16];
 };
 
+struct nt_guest_boundary_session;
 struct nt_thread_broker_registered_peer {
     pid_t child_pid;     /* from trusted fork/spawn, NOT guest input */
     uid_t uid;
@@ -32,6 +33,11 @@ struct nt_thread_broker_registered_peer {
     int child_pidfd;     /* stable kernel identity, must remain live */
     uint8_t secret[16];  /* from getrandom, passed over trusted startup */
     uint32_t allowed_access; /* query-only in this stage */
+    /* Optional trusted direct-parent guest boundary; not supplied by the
+     * PE RPC. Server takes ownership of the MAP_SHARED mapping on start.
+     * NULL for legacy read-only child broker channels. */
+    struct nt_guest_boundary_session *guest_session;
+    uintptr_t trusted_code_begin, trusted_code_end;
 };
 
 enum nt_thread_broker_auth_result {

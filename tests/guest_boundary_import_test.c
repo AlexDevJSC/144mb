@@ -1,0 +1,150 @@
+/* SPDX-License-Identifier: MIT */
+/* AMD64 Microsoft ABI regression for ALL PE->runtime import gates.
+ * Proves 8 argument slots, floating returns, per-thread phase,
+ * nested host import and host callback under a real Linux mutex. */
+#define _GNU_SOURCE
+#include "ntnative/guest_boundary_runtime.h"
+
+#include <math.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int failures;
+static nt_guest_proc nested_wrapper;
+
+static int __attribute__((ms_abi)) host_nested(int a, int b)
+{
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST ||
+        nt_guest_boundary_host_nesting() != 2 || a != 7 || b != 8)
+        atomic_fetch_add(&failures, 1);
+    return a * 10 + b;
+}
+
+static uint64_t __attribute__((ms_abi)) host_eight(uint64_t a, uint64_t b,
+    uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+{
+    if (pthread_mutex_lock(&runtime_lock) != 0)
+        atomic_fetch_add(&failures, 1);
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST ||
+        nt_guest_boundary_host_nesting() != 1)
+        atomic_fetch_add(&failures, 1);
+    /* A guest callback reached from inside an import, while a mutex is
+     * retained, must NEVER become suspendible just because its RIP
+     * would point at PE. Nested calls are also HOST. */
+    nt_guest_boundary_guest_enter();
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST)
+        atomic_fetch_add(&failures, 1);
+    int (__attribute__((ms_abi)) *nested)(int,int) = NULL;
+    memcpy(&nested, &nested_wrapper, sizeof(nested));
+    if (!nested || nested(7,8) != 78 ||
+        nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST ||
+        nt_guest_boundary_host_nesting() != 1)
+        atomic_fetch_add(&failures, 1);
+    nt_guest_boundary_guest_leave();
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST ||
+        pthread_mutex_unlock(&runtime_lock) != 0)
+        atomic_fetch_add(&failures, 1);
+    return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8;
+}
+
+static double __attribute__((ms_abi)) host_float(double a, double b,
+                                                   double c, double d, double e)
+{
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST ||
+        nt_guest_boundary_host_nesting() != 1)
+        atomic_fetch_add(&failures, 1);
+    return a*3.0 + b*5.0 + c*7.0 + d*11.0 + e*13.0;
+}
+
+static nt_guest_proc gate_function(void (*native)(void))
+{
+    nt_guest_proc target;
+    memcpy(&target, &native, sizeof(target));
+    return nt_guest_boundary_wrap_import(target);
+}
+
+static int test_calls(void)
+{
+    void (*native)(void) = NULL;
+    int (__attribute__((ms_abi)) *nested)(int,int) = host_nested;
+    memcpy(&native, &nested, sizeof(native));
+    nested_wrapper = gate_function(native);
+    if (!nested_wrapper) return 1;
+    uint64_t (__attribute__((ms_abi)) *eight)(uint64_t,uint64_t,uint64_t,uint64_t,
+                                               uint64_t,uint64_t,uint64_t,uint64_t) = host_eight;
+    memcpy(&native, &eight, sizeof(native));
+    nt_guest_proc wrapped_eight = gate_function(native);
+    if (!wrapped_eight) return 2;
+    double (__attribute__((ms_abi)) *floater)(double,double,double,double,double) = host_float;
+    memcpy(&native, &floater, sizeof(native));
+    nt_guest_proc wrapped_float = gate_function(native);
+    if (!wrapped_float) return 3;
+    memcpy(&eight, &wrapped_eight, sizeof(eight));
+    memcpy(&floater, &wrapped_float, sizeof(floater));
+    nt_guest_boundary_guest_enter();
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_GUEST)
+        return 4;
+    for (unsigned i = 0; i < 50; ++i) {
+        const uint64_t integer = eight(1,2,3,4,5,6,7,8);
+        const double floating = floater(1.0,2.0,3.0,4.0,5.0);
+        if (integer != 204 || fabs(floating - 143.0) > 0.00001 ||
+            nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_GUEST ||
+            nt_guest_boundary_host_nesting() != 0)
+            return 5;
+    }
+    nt_guest_boundary_guest_leave();
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST)
+        return 6;
+    return 0;
+}
+
+static void *second_thread(void *arg)
+{
+    (void)arg;
+    if (!nt_guest_boundary_thread_attach(UINT64_C(0x55550000))) {
+        atomic_fetch_add(&failures, 1);
+        return NULL;
+    }
+    if (test_calls())
+        atomic_fetch_add(&failures, 1);
+    nt_guest_boundary_thread_detach();
+    return NULL;
+}
+
+int main(void)
+{
+    struct nt_guest_boundary_session *session = mmap(NULL, sizeof(*session),
+        PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+    if (session == MAP_FAILED) return 1;
+    memset(session, 0, sizeof(*session));
+    nt_guest_boundary_enable_import_gate();
+    nt_guest_boundary_install_child_session(session);
+    if (!nt_guest_boundary_thread_attach(UINT64_C(0x44440000))) return 2;
+    const struct nt_guest_boundary_slot *slot =
+        nt_guest_boundary_find_thread(session, (pid_t)syscall(SYS_gettid));
+    if (!slot || atomic_load(&slot->teb) != UINT64_C(0x44440000)) return 3;
+    const int first = test_calls();
+    if (first) {
+        fprintf(stderr, "FAIL import boundary ABI/phase main=%d\n", first);
+        return 4;
+    }
+    pthread_t second;
+    if (pthread_create(&second, NULL, second_thread, NULL) != 0 ||
+        pthread_join(second, NULL) != 0)
+        return 5;
+    nt_guest_boundary_thread_detach();
+    if (nt_guest_boundary_find_thread(session, (pid_t)syscall(SYS_gettid)) ||
+        atomic_load(&failures) != 0)
+        return 6;
+    if (munmap(session, sizeof(*session)) != 0) return 7;
+    puts("PASS guest/host import ABI: Microsoft x64 8-argument stack, XMM float, "
+         "nested callbacks with host mutex, per-thread phases and revocation");
+    return 0;
+}

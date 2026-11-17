@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "ntnative/guest_thread.h"
+#include "ntnative/guest_boundary_runtime.h"
 
 #include <asm/prctl.h>
 #include <pthread.h>
@@ -171,6 +172,7 @@ bool nt_guest_thread_leave(struct nt_guest_thread *state)
         return false;
     if (syscall(SYS_arch_prctl, ARCH_SET_GS, state->saved_gs) != 0)
         return false;
+    nt_guest_boundary_thread_detach();
     current_teb = state->saved_teb;
     current_guest_thread = state->saved_thread;
     free(state->tls_expansion);

@@ -15,6 +15,7 @@
 #include "dxcompiler_path.h"
 #include "child_process.h"
 #include "thread_broker_ipc.h"
+#include "ntnative/guest_boundary_runtime.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -205,7 +206,9 @@ static int NT_MS_ABI guest_entry(void)
     const void *address = active.base + active.entry_rva;
     int (NT_MS_ABI *entry)(void);
     memcpy(&entry, &address, sizeof(entry));
+    nt_guest_boundary_guest_enter();
     const int status = entry();
+    nt_guest_boundary_guest_leave();
     nt_runtime_notify_tls(0); /* DLL_PROCESS_DETACH */
     pe_dll_graph_detach_all(active_dll_graph);
     nt_runtime_run_fls_cleanup();
@@ -300,6 +303,9 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
     }
     /* This call is made only after worker_ready confirmed the Linux
      * sandbox; DLLs cannot be read outside the provisioned /game root. */
+    /* Gate *all* built-in PE import function pointers before resolving
+     * the IAT, not individual hard-coded WIN32 functions. */
+    nt_guest_boundary_enable_import_gate();
     active_dll_graph = pe_dll_graph_create("/game");
     if (active_dll_graph == NULL) {
         free(bytes);
@@ -312,6 +318,18 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
     free(bytes);
     if (!loaded) {
         fprintf(stderr, "PE loader: %s\n", error);
+        pe_dll_graph_uninstall();
+        pe_dll_graph_destroy(active_dll_graph);
+        active_dll_graph = NULL;
+        return 3;
+    }
+    /* Parent-owned executable code range is inherited across fork and
+     * must match the kernel's RIP during a guarded suspension. */
+    if (!active.code_size ||
+        !nt_guest_boundary_set_image_range(
+            (uintptr_t)active.base + active.code_rva,
+            (uintptr_t)active.base + active.code_rva + active.code_size)) {
+        pe_image_unload(&active);
         pe_dll_graph_uninstall();
         pe_dll_graph_destroy(active_dll_graph);
         active_dll_graph = NULL;

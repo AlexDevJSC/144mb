@@ -29,10 +29,10 @@ DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
 else
 DOS83_FUSE_TARGET =
 endif
-RUNTIME_PARTS = exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
+RUNTIME_PARTS = guest_boundary exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry thread_broker_ipc shell console
-RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o $(BUILD_DIR)/runtime-thread-supervisor-core.o
+RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o $(BUILD_DIR)/runtime-thread-supervisor-core.o $(BUILD_DIR)/runtime-guest_boundary_import.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS) $(ICU_LIBS)
 ifneq ($(strip $(IMAGE_LIBS)),)
 RUNTIME_PARTS += wic
@@ -88,12 +88,12 @@ $(BUILD_DIR)/supervisor-pe-fixture.exe: $(BUILD_DIR)/supervisor-pe-fixture.coff.
 	    --subsystem console --no-insert-timestamp --disable-reloc-section \
 	    --strip-all -o "$@" "$<"
 
-$(BUILD_DIR)/supervisor-pe-thread-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h src/supervisor/nt_supervisor_nt_bridge.c src/supervisor/nt_supervisor_nt_bridge.h src/runtime/compat.h src/runtime/nt_services.h include/ntnative/guest_boundary.h src/pe/image.c src/pe/image.h src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
+$(BUILD_DIR)/supervisor-pe-thread-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h src/supervisor/nt_supervisor_nt_bridge.c src/supervisor/nt_supervisor_nt_bridge.h src/runtime/compat.h src/runtime/nt_services.h include/ntnative/guest_boundary.h src/pe/image.c src/pe/image.h src/runtime/guest_thread.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S include/ntnative/guest_thread.h include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/runtime -Isrc/supervisor -Itests/pe \
 	    $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    tests/pe/supervisor_pe_thread_test.c src/supervisor/nt_thread_supervisor.c \
-	    src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c \
-	    -pthread $(LDLIBS) -o "$@"
+	    src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c \
+	    src/runtime/guest_boundary_import.S -pthread $(LDLIBS) -o "$@"
 
 .PHONY: check-pe-thread-supervisor
 check-pe-thread-supervisor: $(BUILD_DIR)/supervisor-pe-thread-test $(BUILD_DIR)/supervisor-pe-fixture.exe
@@ -104,6 +104,9 @@ $(BUILD_DIR):
 
 $(BUILD_DIR)/counter.o: src/ntdll/counter.c include/ntnative/counter.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -c $< -o "$@"
+
+$(BUILD_DIR)/runtime-guest_boundary_import.o: src/runtime/guest_boundary_import.S | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -c "$<" -o "$@"
 
 $(BUILD_DIR)/runtime-thread-supervisor-core.o: src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h include/ntnative/guest_boundary.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -pthread -c "$<" -o "$@"
@@ -139,6 +142,8 @@ $(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/dos8
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-virtual_memory.o $(BUILD_DIR)/runtime-section_memory.o: src/runtime/section_memory.h
 $(BUILD_DIR)/runtime-section_memory.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-object_broker.o: src/runtime/object_broker.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/dynamic_tls.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_thread.o $(BUILD_DIR)/runtime-threads.o \
+    $(BUILD_DIR)/runtime-guest_boundary.o: include/ntnative/guest_boundary_runtime.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/nt_core_information.h
 $(BUILD_DIR)/runtime-threads.o: include/ntnative/guest_thread.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-system.o $(BUILD_DIR)/runtime-threads.o \
@@ -150,8 +155,8 @@ $(BUILD_DIR)/runtime-child_process.o: src/runtime/winbase.h src/runtime/winfile.
 $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-thread_broker_registry.o: src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h
 $(BUILD_DIR)/runtime-thread_broker_auth.o: src/runtime/thread_broker_auth.h
 $(BUILD_DIR)/runtime-thread_broker_ipc.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-child_process.o: src/runtime/thread_broker_ipc.h
-$(BUILD_DIR)/runtime-thread_broker_ipc.o: src/runtime/thread_broker_registry.h src/supervisor/nt_thread_supervisor.h include/ntnative/guest_boundary.h
-$(BUILD_DIR)/runtime-process.o: src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h
+$(BUILD_DIR)/runtime-thread_broker_ipc.o: src/runtime/thread_broker_registry.h src/supervisor/nt_thread_supervisor.h include/ntnative/guest_boundary.h include/ntnative/guest_boundary_runtime.h
+$(BUILD_DIR)/runtime-process.o: src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h include/ntnative/guest_boundary_runtime.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-shell.o: src/runtime/shell.h
 $(BUILD_DIR)/runtime-shell.o: src/runtime/child_process.h src/runtime/dialogs.h src/runtime/winfile.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-dialogs.o \
@@ -207,9 +212,10 @@ $(BUILD_DIR)/counter-test: tests/counter_test.c $(BUILD_DIR)/counter.o | $(BUILD
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) $^ \
 	    -Wl,--wrap=clock_gettime $(LDLIBS) -o "$@"
 
-$(BUILD_DIR)/guest-thread-test: tests/guest_thread_test.c src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
+$(BUILD_DIR)/guest-thread-test: tests/guest_thread_test.c src/runtime/guest_thread.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S include/ntnative/guest_thread.h include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    tests/guest_thread_test.c src/runtime/guest_thread.c -pthread $(LDLIBS) -o "$@"
+	    tests/guest_thread_test.c src/runtime/guest_thread.c src/runtime/guest_boundary.c \
+	    src/runtime/guest_boundary_import.S -pthread $(LDLIBS) -o "$@"
 
 $(BUILD_DIR)/guest-profile-test: tests/guest_profile_test.c src/tools/guest_profile.c src/tools/guest_profile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -Isrc/tools $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
@@ -286,13 +292,22 @@ $(BUILD_DIR)/thread-broker-registry-test: tests/thread_broker_registry_test.c sr
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) -pthread -o "$@"
 
-$(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
+$(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    $(filter %.c,$^) -pthread -o "$@"
+	    $(filter %.c %.S,$^) -pthread -o "$@"
 
-$(BUILD_DIR)/supervisor-authenticated-ipc-test: tests/supervisor_authenticated_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
+$(BUILD_DIR)/guest-boundary-import-test: tests/guest_boundary_import_test.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_boundary_import_test.c src/runtime/guest_boundary.c \
+	    src/runtime/guest_boundary_import.S -pthread -lm -o "$@"
+
+.PHONY: check-guest-boundary
+check-guest-boundary: $(BUILD_DIR)/guest-boundary-import-test
+	timeout 20s $(BUILD_DIR)/guest-boundary-import-test
+
+$(BUILD_DIR)/supervisor-authenticated-ipc-test: tests/supervisor_authenticated_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    $(filter %.c,$^) -pthread -o "$@"
+	    $(filter %.c %.S,$^) -pthread -o "$@"
 
 .PHONY: check-supervisor-authenticated-ipc
 check-supervisor-authenticated-ipc: $(BUILD_DIR)/supervisor-authenticated-ipc-test
@@ -305,6 +320,7 @@ $(BUILD_DIR)/runtime-supervisor-launch-test: tests/runtime_supervisor_launch_tes
 .PHONY: check-runtime-supervisor-launch
 check-runtime-supervisor-launch: $(BUILD_DIR)/runtime-supervisor-launch-test
 	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
+	timeout 20s $(BUILD_DIR)/guest-boundary-import-test
 
 $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
@@ -384,7 +400,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
-check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/inherited-file-test \
+check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/guest-boundary-import-test $(BUILD_DIR)/inherited-file-test \
        $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/section-memory-test $(BUILD_DIR)/nt-object-broker $(BUILD_DIR)/object-broker-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator

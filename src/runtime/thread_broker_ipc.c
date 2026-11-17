@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "thread_broker_ipc.h"
+#include "ntnative/guest_boundary_runtime.h"
 #include "../supervisor/nt_thread_supervisor.h"
 
 #include <errno.h>
@@ -12,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <signal.h>
 #include <unistd.h>
@@ -60,6 +62,9 @@ static void *server_main(void *context)
 {
     struct server_context *owner = context;
     nt_broker_server_loop(owner->fd, &owner->peer);
+    if (owner->peer.guest_session != NULL)
+        (void)munmap(owner->peer.guest_session,
+                     sizeof(*owner->peer.guest_session));
     close(owner->fd);
     close(owner->peer.child_pidfd);
     memset(owner->peer.secret, 0, sizeof(owner->peer.secret));
@@ -212,6 +217,58 @@ static bool supervisor_readonly_probe(const struct nt_thread_broker_registered_p
     return okay;
 }
 
+/* Always verify the kernel-owned PC/GS/TEB independently of the
+ * shared provenance. Only the original direct parent may inspect the
+ * scope. A rejected interruption is immediately resumed, then detached
+ * with an additional bounded stop. Diagnostic only, not Win32 suspend. */
+static bool supervisor_guest_probe(const struct nt_thread_broker_registered_peer *peer,
+                                    const struct nt_broker_thread_info *identity,
+                                    uint64_t *guest_rip)
+{
+    if (!peer || !identity || !guest_rip || !peer->guest_session ||
+        peer->trusted_code_begin == 0 ||
+        peer->trusted_code_end <= peer->trusted_code_begin ||
+        identity->guest_process_id != (uint32_t)peer->child_pid)
+        return false;
+    const struct nt_guest_boundary_slot *slot =
+        nt_guest_boundary_find_thread(peer->guest_session,
+                                      (pid_t)identity->guest_thread_id);
+    if (!slot) return false;
+    const uintptr_t teb = atomic_load_explicit(&slot->teb, memory_order_acquire);
+    if (teb == 0) return false;
+    const struct nt_supervisor_guest_scope scope = {
+        .boundary = &slot->boundary, .teb = teb,
+        .code_begin = peer->trusted_code_begin,
+        .code_end = peer->trusted_code_end
+    };
+    struct nt_thread_supervisor sup;
+    nt_supervisor_init(&sup);
+    if (nt_supervisor_seize_child(&sup, peer->child_pid,
+                                  (pid_t)identity->guest_thread_id))
+        return false;
+    struct user_regs_struct context = {0};
+    const bool safe = nt_supervisor_interrupt_guest(&sup, &scope, 500,
+                                                     &context) == 0;
+    bool okay = false;
+    if (safe && context.rip != 0)
+        *guest_rip = context.rip;
+    /* Even if the guest gate rejected a host critical section and already
+     * resumed, a bounded raw INTERRUPT is required for PTRACE_DETACH.
+     * Never persist a stopped tracee on a rejected diagnostic request. */
+    if (!sup.stopped)
+        (void)nt_supervisor_interrupt(&sup, 500);
+    if (sup.stopped && nt_supervisor_detach(&sup) == 0)
+        okay = safe && context.rip != 0;
+    if (sup.seized) {
+#if defined(SYS_pidfd_send_signal)
+        (void)syscall(SYS_pidfd_send_signal, peer->child_pidfd,
+                      SIGKILL, NULL, 0);
+#endif
+    }
+    nt_supervisor_release(&sup);
+    return okay;
+}
+
 void nt_broker_server_loop(int fd,
     const struct nt_thread_broker_registered_peer *peer)
 {
@@ -323,6 +380,22 @@ void nt_broker_server_loop(int fd,
                                                   request.access, &info)) {
                 uint64_t instruction = 0;
                 if (supervisor_readonly_probe(peer, &info, &instruction)) {
+                    response.status = 0;
+                    response.process_id = info.guest_process_id;
+                    response.thread_id = info.guest_thread_id;
+                    response.generation = info.generation;
+                    response.capability = instruction;
+                }
+            }
+            break;
+        case NT_BROKER_RPC_SUP_PROBE_GUEST:
+            if (request.thread_id == 0 && request.access ==
+                    NT_BROKER_SUPERVISOR_GET_CONTEXT &&
+                (peer->allowed_access & NT_BROKER_SERVER_ENABLE_PTRACE_PROBE) != 0 &&
+                nt_broker_supervisor_query_owned(requester, request.capability,
+                                                  request.access, &info)) {
+                uint64_t instruction = 0;
+                if (supervisor_guest_probe(peer, &info, &instruction)) {
                     response.status = 0;
                     response.process_id = info.guest_process_id;
                     response.thread_id = info.guest_thread_id;
@@ -506,6 +579,18 @@ bool nt_broker_client_supervisor_probe(uint64_t capability, uint64_t *guest_rip)
         return false;
     struct nt_thread_broker_reply reply = {0};
     if (!client_rpc(NT_BROKER_RPC_SUP_PROBE, 0,
+                    NT_BROKER_SUPERVISOR_GET_CONTEXT, capability, &reply) ||
+        reply.process_id != (uint32_t)getpid() || reply.thread_id == 0 ||
+        reply.generation == 0 || reply.capability == 0)
+        return false;
+    *guest_rip = reply.capability;
+    return true;
+}
+bool nt_broker_client_supervisor_probe_guest(uint64_t capability, uint64_t *guest_rip)
+{
+    if (capability == 0 || !guest_rip) return false;
+    struct nt_thread_broker_reply reply = {0};
+    if (!client_rpc(NT_BROKER_RPC_SUP_PROBE_GUEST, 0,
                     NT_BROKER_SUPERVISOR_GET_CONTEXT, capability, &reply) ||
         reply.process_id != (uint32_t)getpid() || reply.thread_id == 0 ||
         reply.generation == 0 || reply.capability == 0)

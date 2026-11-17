@@ -4,6 +4,7 @@
 #include "child_process.h"
 #include "thread_broker_registry.h"
 #include "thread_broker_ipc.h"
+#include "ntnative/guest_boundary_runtime.h"
 #include "nt_services.h"
 #include "nt_core_information.h"
 #include "object_broker.h"
@@ -2370,7 +2371,11 @@ static void *thread_main(void *context)
             attached = true;
             nt_runtime_notify_tls(2); /* DLL_THREAD_ATTACH */
         }
+        if (ready && guest.entered)
+            nt_guest_boundary_guest_enter();
         thread_result = ready ? running_thread->start(running_thread->parameter) : NT_ERROR_GEN_FAILURE;
+        if (ready && guest.entered)
+            nt_guest_boundary_guest_leave();
     }
     finish_thread(&guest, attached);
     return NULL;

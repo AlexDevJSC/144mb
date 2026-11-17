@@ -6,6 +6,7 @@
 #include "image.h"
 #include "ntnative/guest_thread.h"
 #include "nt_thread_supervisor.h"
+#include "ntnative/guest_boundary_runtime.h"
 #include "nt_supervisor_nt_bridge.h"
 #include "supervisor_pe_shared.h"
 #include <errno.h>
@@ -74,13 +75,14 @@ static pthread_mutex_t callback_host_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void __attribute__((ms_abi)) controlled_host_callback(struct nt_supervisor_pe_shared *shared)
 {
-    nt_guest_boundary_publish(&shared->boundary, NT_GUEST_BOUNDARY_HOST);
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST ||
+        nt_guest_boundary_host_nesting() == 0)
+        _exit(66);
     if (pthread_mutex_lock(&callback_host_lock) != 0) _exit(61);
     atomic_store_explicit(&shared->host_call_entered, 1u, memory_order_release);
     while (!atomic_load_explicit(&shared->host_call_release, memory_order_acquire))
         pause_ms(1);
     if (pthread_mutex_unlock(&callback_host_lock) != 0) _exit(62);
-    nt_guest_boundary_publish(&shared->boundary, NT_GUEST_BOUNDARY_GUEST);
 }
 
 static void *guest_worker_main(void *arg)
@@ -89,6 +91,8 @@ static void *guest_worker_main(void *arg)
     struct nt_guest_thread state = {0};
     if (!nt_guest_thread_enter(&state, (uintptr_t)worker->image->base))
         _exit(53);
+    if (!nt_guest_boundary_thread_attach((uintptr_t)nt_guest_thread_teb()))
+        _exit(67);
     atomic_store_explicit(&worker->shared->guest_teb,
                           (uintptr_t)nt_guest_thread_teb(), memory_order_release);
     const uintptr_t target = (uintptr_t)worker->image->base + worker->image->entry_rva;
@@ -98,9 +102,9 @@ static void *guest_worker_main(void *arg)
     if (write(worker->ready_fd, &tid, sizeof(tid)) != (ssize_t)sizeof(tid))
         _exit(54);
     close(worker->ready_fd);
-    nt_guest_boundary_publish(&worker->shared->boundary, NT_GUEST_BOUNDARY_GUEST);
+    nt_guest_boundary_guest_enter();
     const int result = guest_entry(worker->shared);
-    nt_guest_boundary_publish(&worker->shared->boundary, NT_GUEST_BOUNDARY_FINISHED);
+    nt_guest_boundary_guest_leave();
     atomic_store_explicit(&worker->shared->guest_exit_code, (uint32_t)result,
                           memory_order_release);
     if (!nt_guest_thread_leave(&state))
@@ -112,6 +116,8 @@ static _Noreturn void child_main(const char *path,
                                  struct nt_supervisor_pe_shared *shared,
                                  int ready_fd)
 {
+    nt_guest_boundary_install_child_session(&shared->session);
+    nt_guest_boundary_enable_import_gate();
     unsigned char *file = NULL;
     size_t length = 0;
     if (!read_pe_fixture(path, &file, &length)) _exit(50);
@@ -140,7 +146,12 @@ static _Noreturn void child_main(const char *path,
         controlled_host_callback;
     uintptr_t callback_address = 0;
     _Static_assert(sizeof(callback) == sizeof(callback_address), "AMD64 callback pointer");
-    memcpy(&callback_address, &callback, sizeof(callback));
+    nt_guest_proc native_callback = NULL;
+    memcpy(&native_callback, &callback, sizeof(native_callback));
+    nt_guest_proc gated_callback = nt_guest_boundary_wrap_import(native_callback);
+    if (!gated_callback)
+        _exit(68);
+    memcpy(&callback_address, &gated_callback, sizeof(gated_callback));
     atomic_store_explicit(&shared->host_callback, callback_address, memory_order_release);
     /* Alternate guard-paged stack is owned solely by the controlled
      * guest APC trampoline; never substitute the interrupted host stack. */
@@ -189,7 +200,7 @@ static bool wait_for_guest_ticks(struct nt_supervisor_pe_shared *state, uint64_t
     return false;
 }
 
-static bool wait_for_value(_Atomic uint32_t *value, uint32_t expected)
+static bool wait_for_value(const _Atomic uint32_t *value, uint32_t expected)
 {
     for (int i = 0; i < 300; ++i) {
         if (atomic_load_explicit(value, memory_order_acquire) == expected)
@@ -240,8 +251,14 @@ int main(int argc, char **argv)
         fputs("FAIL invalid guest image/TEB/TID identity\n", stderr);
         goto cleanup;
     }
+    const struct nt_guest_boundary_slot *slot =
+        nt_guest_boundary_find_thread(&shared->session, tid);
+    if (!slot || atomic_load_explicit(&slot->teb, memory_order_acquire) != teb) {
+        fputs("FAIL real runtime boundary did not register the guest TID and TEB\\n", stderr);
+        goto cleanup;
+    }
     const struct nt_supervisor_guest_scope scope = {
-        .boundary = &shared->boundary,
+        .boundary = &slot->boundary,
         .code_begin = begin, .code_end = end, .teb = teb
     };
     if (nt_supervisor_seize_child(&sup, child, tid)) {
@@ -368,7 +385,7 @@ int main(int argc, char **argv)
      * independently reject the host callback. */
     atomic_store_explicit(&shared->request_host_call, 1u, memory_order_release);
     if (!wait_for_value(&shared->host_call_entered, 1u) ||
-        !wait_for_value(&shared->boundary.phase, NT_GUEST_BOUNDARY_HOST)) {
+        !wait_for_value(&slot->boundary.phase, NT_GUEST_BOUNDARY_HOST)) {
         fputs("FAIL controlled PE did not enter host critical section\\n", stderr);
         goto cleanup;
     }
@@ -379,7 +396,7 @@ int main(int argc, char **argv)
         fputs("FAIL host-locked thread was accepted as guest-safe\\n", stderr);
         goto cleanup;
     }
-    atomic_store_explicit(&shared->boundary.phase, NT_GUEST_BOUNDARY_GUEST,
+    atomic_store_explicit(&slot->boundary.phase, NT_GUEST_BOUNDARY_GUEST,
                           memory_order_release);
     errno = 0;
     if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &rejected) != -1 ||
@@ -387,9 +404,9 @@ int main(int argc, char **argv)
         fputs("FAIL forged phase bypassed host RIP check\\n", stderr);
         goto cleanup;
     }
-    nt_guest_boundary_publish(&shared->boundary, NT_GUEST_BOUNDARY_HOST);
+    nt_guest_boundary_publish((struct nt_guest_boundary *)&slot->boundary, NT_GUEST_BOUNDARY_HOST);
     atomic_store_explicit(&shared->host_call_release, 1u, memory_order_release);
-    if (!wait_for_value(&shared->boundary.phase, NT_GUEST_BOUNDARY_GUEST)) {
+    if (!wait_for_value(&slot->boundary.phase, NT_GUEST_BOUNDARY_GUEST)) {
         fputs("FAIL host callback did not return to PE\\n", stderr);
         goto cleanup;
     }
