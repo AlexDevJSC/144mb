@@ -55,6 +55,12 @@ uint32_t NT_MS_ABI nt_QueueUserAPC(void (NT_MS_ABI *callback)(uintptr_t),
 uint32_t NT_MS_ABI nt_SleepEx(uint32_t milliseconds, int32_t alertable);
 uint32_t NT_MS_ABI nt_QueueUserAPC2(void (NT_MS_ABI *callback)(uintptr_t),
                                      uintptr_t handle, uintptr_t data, uint32_t flags);
+/* Host-only supervisor control plane: translate a real local NT HANDLE
+ * (with access rights checked) to a generation-pinned parent IPC lease.
+ * Never expose this helper through KERNEL32/NTDLL guest imports. */
+struct nt_broker_thread_info;
+bool nt_runtime_supervisor_open_thread_handle(uintptr_t handle, uint32_t rights,
+    struct nt_broker_thread_info *identity, uint64_t *capability);
 uint32_t NT_MS_ABI nt_GetThreadId(uintptr_t handle);
 uintptr_t NT_MS_ABI nt_OpenThread(uint32_t access, int32_t inherit, uint32_t thread_id);
 nt_status nt_runtime_query_thread(uintptr_t handle, uint32_t *thread_id,
