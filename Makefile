@@ -431,6 +431,7 @@ check-dos83-mediator: $(BUILD_DIR)/nt-dos83-mediator
 .PHONY: check-dos83-wal
 check-dos83-wal: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_recovery.py "$(BUILD_DIR)/nt-dos83-mediator"
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_replacement_recovery.py "$(BUILD_DIR)/nt-dos83-mediator"
 
 check: check-dos83-wal
 
