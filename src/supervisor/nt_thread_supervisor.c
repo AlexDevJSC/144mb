@@ -181,6 +181,29 @@ int nt_supervisor_detach(struct nt_thread_supervisor *sup)
 }
 
 
+/* The direct parent owns these immutable code ranges. Never fill them
+ * from phase flags or a range supplied in an unauthenticated guest RPC.
+ * A loaded-after-fork DLL and RW->RX JIT mapping are excluded. */
+static bool trusted_guest_rip(const struct nt_supervisor_guest_scope *scope,
+                               uintptr_t pc)
+{
+    if (!scope || !scope->code_begin ||
+        scope->code_end <= scope->code_begin ||
+        scope->additional_code_count > NT_GUEST_ADDITIONAL_CODE_MAX ||
+        (scope->additional_code_count && !scope->additional_code))
+        return false;
+    if (pc >= scope->code_begin && pc < scope->code_end)
+        return true;
+    for (size_t i = 0; i < scope->additional_code_count; ++i) {
+        const struct nt_guest_code_range range = scope->additional_code[i];
+        if (!range.begin || range.end <= range.begin)
+            return false;
+        if (pc >= range.begin && pc < range.end)
+            return true;
+    }
+    return false;
+}
+
 /* Check an already-stopped, real Linux AMD64 CPU context. The phase is a
  * trusted boundary protocol, *not* sufficient proof on its own: verify
  * actual RIP and GS_BASE supplied by the kernel. Do not read guest memory
@@ -207,7 +230,7 @@ int nt_supervisor_get_guest_context(struct nt_thread_supervisor *sup,
     if (phase_before != NT_GUEST_BOUNDARY_GUEST ||
         phase_after != NT_GUEST_BOUNDARY_GUEST ||
         transition_before != transition_after ||
-        out->rip < scope->code_begin || out->rip >= scope->code_end ||
+        !trusted_guest_rip(scope, out->rip) ||
         out->rsp == 0 || out->gs_base != scope->teb) {
         errno = EBUSY;
         return -1;
