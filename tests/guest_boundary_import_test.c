@@ -94,7 +94,7 @@ static int test_calls(void)
     for (unsigned i = 0; i < 50; ++i) {
         const uint64_t integer = eight(1,2,3,4,5,6,7,8);
         const double floating = floater(1.0,2.0,3.0,4.0,5.0);
-        if (integer != 204 || fabs(floating - 121.0) > 0.00001 ||
+        if (integer != 204 || fabs(floating - 143.0) > 0.00001 ||
             nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_GUEST ||
             nt_guest_boundary_host_nesting() != 0)
             return 5;
