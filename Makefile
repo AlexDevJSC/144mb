@@ -291,9 +291,9 @@ $(BUILD_DIR)/thread-broker-registry-test: tests/thread_broker_registry_test.c sr
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) -pthread -o "$@"
 
-$(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
+$(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    $(filter %.c,$^) -pthread -o "$@"
+	    $(filter %.c %.S,$^) -pthread -o "$@"
 
 $(BUILD_DIR)/guest-boundary-import-test: tests/guest_boundary_import_test.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
@@ -304,9 +304,9 @@ $(BUILD_DIR)/guest-boundary-import-test: tests/guest_boundary_import_test.c src/
 check-guest-boundary: $(BUILD_DIR)/guest-boundary-import-test
 	timeout 20s $(BUILD_DIR)/guest-boundary-import-test
 
-$(BUILD_DIR)/supervisor-authenticated-ipc-test: tests/supervisor_authenticated_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
+$(BUILD_DIR)/supervisor-authenticated-ipc-test: tests/supervisor_authenticated_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    $(filter %.c,$^) -pthread -o "$@"
+	    $(filter %.c %.S,$^) -pthread -o "$@"
 
 .PHONY: check-supervisor-authenticated-ipc
 check-supervisor-authenticated-ipc: $(BUILD_DIR)/supervisor-authenticated-ipc-test
