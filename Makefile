@@ -404,6 +404,12 @@ check-fs4-storage-service:
 
 check: check-fs4-storage-service
 
+.PHONY: check-fs4-service-supervisor
+check-fs4-service-supervisor:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_service_supervisor.py'
+
+check: check-fs4-service-supervisor
+
 $(BUILD_DIR)/fs4-ntfs-probe: src/tools/fs4_ntfs_probe.c $(RUNTIME_OBJECTS) src/runtime/winfile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
