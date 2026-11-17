@@ -176,12 +176,21 @@ def service_attestation(socket_path: str, service_user: str) -> None:
         with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
             conn.settimeout(5.0)
             conn.connect(socket_path)
-            peer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-            _pid, actual_uid, _gid = struct.unpack("3i", peer)
-            if actual_uid != uid:
-                raise Refused("Storage daemon peer UID mismatch")
+            # SO_PEERCRED may report systemd (root), which created the
+            # listening socket. Verify the ACTUAL reply sender via kernel
+            # SCM_CREDENTIALS instead of authenticating PID1 by mistake.
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             conn.sendall(b'{"version":1,"op":"status"}')
-            reply = json.loads(conn.recv(4096))
+            message, control, flags, _ = conn.recvmsg(
+                4096, socket.CMSG_SPACE(struct.calcsize("3i")))
+            identities = [struct.unpack("3i", raw[:12])
+                          for level, kind, raw in control
+                          if level == socket.SOL_SOCKET and
+                          kind == socket.SCM_CREDENTIALS and len(raw) >= 12]
+            if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or
+                    len(identities) != 1 or identities[0][1] != uid):
+                raise Refused("Untrusted storage reply credentials")
+            reply = json.loads(message.decode("utf-8"))
             if reply.get("version") != 1 or reply.get("ok") is not True or (
                     reply.get("mediated") is not True):
                 raise Refused("Service denied or FUSE mount unavailable")
