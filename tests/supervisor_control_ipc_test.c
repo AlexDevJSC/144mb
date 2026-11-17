@@ -4,6 +4,7 @@
  * This is NOT a claim of universal Windows PE code compatibility. */
 #define _GNU_SOURCE
 #include "thread_broker_ipc.h"
+#include "nt_services.h"
 #include "ntnative/guest_boundary_runtime.h"
 #include <asm/prctl.h>
 #include <errno.h>
