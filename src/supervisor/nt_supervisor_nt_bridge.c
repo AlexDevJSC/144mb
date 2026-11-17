@@ -192,8 +192,12 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
     /* Compiled ONLY into the dedicated negative-test binary, not exposed
      * as a Windows API/environment switch or a production build flag.
      * The kernel really received the write; simulate a corrupt readback. */
-    if (readback)
+    extern _Atomic uint32_t nt_sup_test_verify_corrupted;
+    if (readback) {
         verified.rax ^= UINT64_C(1);
+        atomic_fetch_add_explicit(&nt_sup_test_verify_corrupted, 1,
+                                  memory_order_relaxed);
+    }
 #endif
     if (readback &&
         memcmp(&verified, &altered, sizeof(altered)) == 0) {
