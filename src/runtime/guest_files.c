@@ -1342,6 +1342,8 @@ static bool read_share_pending(int gate, struct share_pending_record *record)
 
 static bool set_share_pending(int gate, const struct stat *file, const char *path)
 {
+    if (!wal_healthy())
+        return false;
     struct share_pending_record record;
     if (!read_share_pending(gate, &record))
         return false;
@@ -1442,6 +1444,8 @@ static bool share_registry_has_leases(int gate, bool *active)
 static bool finalize_share_pending_locked(int gate,
                                           const struct share_pending_record *pending)
 {
+    if (!wal_healthy())
+        return false;
     if (!pending->pending)
         return true;
     const char *relative = pending->path;
@@ -2543,6 +2547,13 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
                                 (write_access ? FILE_WRITE : 0) |
                                 ((desired & UINT32_C(0x00010000)) ? FILE_DELETE : 0);
     pthread_mutex_lock(&file_lock);
+    if (!wal_healthy() && disposition != OPEN_EXISTING) {
+        pthread_mutex_unlock(&file_lock);
+        close(parent);
+        free(saved_path);
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return UINTPTR_MAX;
+    }
     struct guest_file *slot = new_file();
     bool created = false;
     uintptr_t result = UINTPTR_MAX;
@@ -3348,6 +3359,12 @@ static int32_t change_path(const char *input, enum path_operation operation)
     }
 
     pthread_mutex_lock(&file_lock);
+    if (!wal_healthy()) {
+        pthread_mutex_unlock(&file_lock);
+        close(parent);
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
     int status;
     int deletion_guard = -1;
     if (operation == MAKE_DIRECTORY) {
