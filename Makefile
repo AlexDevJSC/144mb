@@ -453,6 +453,13 @@ check-dos83-sigkill: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediat
 
 check: check-dos83-sigkill
 
+.PHONY: check-dos83-alias-durability
+check-dos83-alias-durability: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_alias_sigkill.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-alias-durability
+
 .PHONY: check-dos83-all-grants
 check-dos83-all-grants: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_all_grants.py \
