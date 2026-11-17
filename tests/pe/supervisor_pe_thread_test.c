@@ -141,6 +141,19 @@ static _Noreturn void child_main(const char *path,
     _Static_assert(sizeof(callback) == sizeof(callback_address), "AMD64 callback pointer");
     memcpy(&callback_address, &callback, sizeof(callback));
     atomic_store_explicit(&shared->host_callback, callback_address, memory_order_release);
+    /* Alternate guard-paged stack is owned solely by the controlled
+     * guest APC trampoline; never substitute the interrupted host stack. */
+    const size_t stack_bytes = 65536;
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0 || page_size >= (long)stack_bytes)
+        _exit(63);
+    void *apc_stack = mmap(NULL, stack_bytes, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (apc_stack == MAP_FAILED ||
+        mprotect(apc_stack, (size_t)page_size, PROT_NONE) != 0)
+        _exit(64);
+    atomic_store_explicit(&shared->apc_stack_top,
+                          (uintptr_t)apc_stack + stack_bytes, memory_order_release);
     struct guest_worker worker = {.image = &image, .shared = shared, .ready_fd = ready_fd};
     pthread_t thread;
     if (pthread_create(&thread, NULL, guest_worker_main, &worker))
@@ -152,6 +165,8 @@ static _Noreturn void child_main(const char *path,
                                                   memory_order_acquire);
     if (!atomic_load_explicit(&shared->guest_finished, memory_order_acquire))
         _exit(58);
+    if (munmap(apc_stack, stack_bytes) != 0)
+        _exit(65);
     pe_image_unload(&image);
     _exit(result == 0 ? 0 : 59);
 }
@@ -317,6 +332,34 @@ int main(int argc, char **argv)
         fputs("FAIL PE did not progress after host critical boundary\\n", stderr);
         goto cleanup;
     }
+    /* A genuine asynchronous APC-like transfer: no SleepEx or alertable
+     * wait is involved. Only an import-free trusted PE trampoline is
+     * allowed; it signals INT3, and the supervisor restores complete
+     * XSTATE and original registers before returning to the interrupted
+     * PE instruction. This is not general Win32 APC support. */
+    struct user_regs_struct before_apc;
+    const uintptr_t apc_entry =
+        atomic_load_explicit(&shared->apc_entry, memory_order_acquire);
+    const uintptr_t apc_stack_top =
+        atomic_load_explicit(&shared->apc_stack_top, memory_order_acquire);
+    if (apc_entry < scope.code_begin || apc_entry >= scope.code_end ||
+        !apc_stack_top ||
+        nt_supervisor_interrupt_guest(&sup, &scope, 1500, &before_apc)) {
+        fputs("FAIL cannot prepare controlled guest APC\\n", stderr);
+        goto cleanup;
+    }
+    const uint64_t guest_before_apc = atomic_load(&shared->guest_ticks);
+    if (nt_supervisor_invoke_trusted_guest_apc(
+            &sup, &scope, apc_entry, apc_stack_top,
+            (uintptr_t)shared, &shared->apc_delivered, 1500)) {
+        perror("FAIL controlled asynchronous guest APC");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&shared->apc_delivered, memory_order_acquire) != 1u ||
+        !wait_for_guest_ticks(shared, guest_before_apc)) {
+        fputs("FAIL guest did not resume after asynchronous APC\\n", stderr);
+        goto cleanup;
+    }
     if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &rejected) ||
         nt_supervisor_detach(&sup)) {
         perror("FAIL PE detach"); goto cleanup;
@@ -332,7 +375,7 @@ int main(int argc, char **argv)
             }
             puts("PASS supervisor PE32+: guest-only RIP/GS boundary, real async stop, "
                  "AMD64 GET/SETREGSET, host-mutex rejection, forged-phase rejection, "
-                 "resume, detach and clean return");
+                 "true guest APC with XSTATE restore, resume, detach and clean return");
             rc = 0;
             goto finished;
         }
