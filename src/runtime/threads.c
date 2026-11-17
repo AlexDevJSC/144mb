@@ -2545,6 +2545,11 @@ static nt_status terminate_suspended_thread(uintptr_t handle, uint32_t exit_code
             status = NT_STATUS_NOT_SUPPORTED;
         else if (state->signaled || state->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
+        else if (state->supervisor_async_suspended)
+            /* This is a REAL ptrace stop, not CREATE_SUSPENDED startup.
+             * Clearing the local counter here previously lost the only
+             * tracked ResumeThread route and stranded a kernel tracee. */
+            status = NT_STATUS_NOT_SUPPORTED;
         else if (state->suspend_count == 0 || state->cooperative_pause_requested)
             status = NT_STATUS_NOT_SUPPORTED;
         else {
