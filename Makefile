@@ -151,6 +151,7 @@ $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-thread_broker_registry.o: sr
 $(BUILD_DIR)/runtime-thread_broker_auth.o: src/runtime/thread_broker_auth.h
 $(BUILD_DIR)/runtime-thread_broker_ipc.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-child_process.o: src/runtime/thread_broker_ipc.h
 $(BUILD_DIR)/runtime-thread_broker_ipc.o: src/runtime/thread_broker_registry.h src/supervisor/nt_thread_supervisor.h include/ntnative/guest_boundary.h
+$(BUILD_DIR)/runtime-process.o: src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-shell.o: src/runtime/shell.h
 $(BUILD_DIR)/runtime-shell.o: src/runtime/child_process.h src/runtime/dialogs.h src/runtime/winfile.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-dialogs.o \
@@ -296,6 +297,15 @@ $(BUILD_DIR)/supervisor-authenticated-ipc-test: tests/supervisor_authenticated_i
 .PHONY: check-supervisor-authenticated-ipc
 check-supervisor-authenticated-ipc: $(BUILD_DIR)/supervisor-authenticated-ipc-test
 	timeout 25s $(BUILD_DIR)/supervisor-authenticated-ipc-test
+	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
+
+$(BUILD_DIR)/runtime-supervisor-launch-test: tests/runtime_supervisor_launch_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/sync.h src/runtime/thread_broker_ipc.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-runtime-supervisor-launch
+check-runtime-supervisor-launch: $(BUILD_DIR)/runtime-supervisor-launch-test
+	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
 
 $(BUILD_DIR)/runtime-test: tests/runtime_test.c $(RUNTIME_OBJECTS) include/ntnative/runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
@@ -369,7 +379,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
-check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/inherited-file-test \
+check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/inherited-file-test \
        $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/section-memory-test $(BUILD_DIR)/nt-object-broker $(BUILD_DIR)/object-broker-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator
