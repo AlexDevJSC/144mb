@@ -200,7 +200,7 @@ static bool wait_for_guest_ticks(struct nt_supervisor_pe_shared *state, uint64_t
     return false;
 }
 
-static bool wait_for_value(_Atomic uint32_t *value, uint32_t expected)
+static bool wait_for_value(const _Atomic uint32_t *value, uint32_t expected)
 {
     for (int i = 0; i < 300; ++i) {
         if (atomic_load_explicit(value, memory_order_acquire) == expected)
