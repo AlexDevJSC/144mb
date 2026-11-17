@@ -28,6 +28,29 @@ struct dos83_wal_entry {
 
 static int open_parent(int root, const char *path, char leaf[NAME_MAX + 1]);
 
+/* A failed WAL sync makes both on-disk and page-cache state uncertain.
+ * Never reuse an apparently empty WAL after a failed ftruncate/fsync:
+ * the old record may reappear after power failure and be replayed against
+ * a newer transaction. Recovery must occur in a NEW process, which first
+ * syncs the opened WAL inode before declaring it reusable. */
+static _Atomic bool wal_storage_poisoned;
+
+static bool wal_poison(int cause)
+{
+    atomic_store(&wal_storage_poisoned, true);
+    errno = cause ? cause : EIO;
+    return false;
+}
+
+static bool wal_healthy(void)
+{
+    if (atomic_load(&wal_storage_poisoned)) {
+        errno = EUCLEAN;
+        return false;
+    }
+    return true;
+}
+
 static void wal_put32(unsigned char *p, uint32_t v)
 {
     for (unsigned int i = 0; i < 4; ++i)
@@ -70,12 +93,13 @@ static bool wal_sync_pinned(int path_fd, bool directory)
     if (fd < 0 && !directory)
         fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0)
-        return false;
+        return wal_poison(errno);
     int result = fsync(fd);
     int error = errno;
     close(fd);
-    errno = error;
-    return result == 0;
+    if (result != 0)
+        return wal_poison(error);
+    return true;
 }
 
 static void wal_close(struct dos83_wal *wal)
@@ -90,6 +114,8 @@ static void wal_close(struct dos83_wal *wal)
 static bool wal_open(int root, struct dos83_wal *wal)
 {
     *wal = (struct dos83_wal){.fd = -1, .directory = -1};
+    if (!wal_healthy())
+        return false;
     if (mkdirat(root, ":ntnative-file-leases", 0700) != 0 &&
         errno != EEXIST)
         return false;
@@ -126,8 +152,17 @@ static bool wal_open(int root, struct dos83_wal *wal)
     }
     /* Persist the directory entry before a new WAL can authorize changes. */
     if (fsync(wal->directory) != 0) {
+        int error = errno;
         wal_close(wal);
-        return false;
+        return wal_poison(error);
+    }
+    /* Also fsync the WAL inode on EVERY new process/admission, even when
+     * empty: a previous process may have observed a failed clear fsync.
+     * A current page-cache size of zero alone is not durable evidence. */
+    if (dos83_test_io_error("wal-open-fsync") || fsync(wal->fd) != 0) {
+        int error = errno;
+        wal_close(wal);
+        return wal_poison(error);
     }
     return true;
 }
@@ -144,7 +179,11 @@ static bool wal_empty(struct dos83_wal *wal)
 }
 static bool wal_clear(struct dos83_wal *wal)
 {
-    return ftruncate(wal->fd, 0) == 0 && fsync(wal->fd) == 0;
+    if (ftruncate(wal->fd, 0) != 0)
+        return wal_poison(errno);
+    if (dos83_test_io_error("wal-clear-fsync") || fsync(wal->fd) != 0)
+        return wal_poison(errno);
+    return true;
 }
 
 static bool wal_encode(const struct dos83_wal_entry *entry,
@@ -204,12 +243,15 @@ static bool wal_write(struct dos83_wal *wal,
         if (written <= 0) {
             if (written == 0)
                 errno = EIO;
-            return false;
+            return wal_poison(errno);
         }
         done += (size_t)written;
     }
-    return ftruncate(wal->fd, (off_t)size) == 0 &&
-           fsync(wal->fd) == 0;
+    if (ftruncate(wal->fd, (off_t)size) != 0)
+        return wal_poison(errno);
+    if (dos83_test_io_error("wal-write-fsync") || fsync(wal->fd) != 0)
+        return wal_poison(errno);
+    return true;
 }
 
 /* Returns 1 if a verified pending record exists, 0 if empty, -1 on error.
