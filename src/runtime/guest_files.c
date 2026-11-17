@@ -1632,6 +1632,8 @@ static int acquire_share_registry_lease(const struct stat *info,
     return lease;
 }
 
+static bool acquire_open_delete_lease(int fd, unsigned int share);
+
 /* FUSE's opt-in NT-compatible inode bridge. Reuse the same on-disk OFD
  * registry as CreateFileW instead of inventing a POSIX-only lock table.
  * A missing marker is not an error; unreadable/malformed metadata is. */
