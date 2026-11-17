@@ -7,6 +7,8 @@ surviving hardlinks OUTSIDE grants, and refusal to overwrite foreign xattrs.
 """
 import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 
@@ -41,7 +43,7 @@ def record(root, source, dest, src_alias, victim, victim_alias):
     return raw
 
 
-def scenario(tool, phase):
+def scenario(tool, phase, *, fault_tool=None, replay_phase=None):
     with tempfile.TemporaryDirectory(prefix="nt-fs4-v2-recovery-") as temp:
         base = Path(temp)
         root = base / "C"
@@ -82,6 +84,15 @@ def scenario(tool, phase):
             raw[145] ^= 0x40
             journal.write_bytes(raw)
         should_fail = phase in ("foreign", "corrupt")
+        if replay_phase:
+            assert fault_tool is not None
+            killed = subprocess.run(
+                [fault_tool, "--root", str(root), "--recover"],
+                env=dict(os.environ, NT_DOS83_TEST_CRASH=replay_phase),
+                text=True, capture_output=True, timeout=15)
+            assert killed.returncode == -signal.SIGKILL, (
+                phase, replay_phase, killed.returncode, killed.stderr)
+            assert journal.stat().st_size > 0, (phase, replay_phase)
         result = run(tool, root, "--recover", success=not should_fail)
         if should_fail:
             assert journal.stat().st_size > 0
@@ -111,11 +122,20 @@ def scenario(tool, phase):
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: dos83_replacement_recovery.py MEDIATOR")
+    if len(sys.argv) != 3:
+        raise SystemExit(
+            "Usage: dos83_replacement_recovery.py MEDIATOR FAULT_MEDIATOR")
+    normal, injected = (str(Path(x).resolve()) for x in sys.argv[1:])
     for phase in ("before-cleanup", "cleaned", "staged", "committed",
                   "foreign", "corrupt"):
-        scenario(str(Path(sys.argv[1]).resolve()), phase)
+        scenario(normal, phase)
+    for state, hook in (
+        ("cleaned", "replay-after-victim-restore"),
+        ("staged", "replay-after-victim-restore"),
+        ("staged", "replay-after-source-restore"),
+        ("committed", "replay-after-source-restore"),
+    ):
+        scenario(normal, state, fault_tool=injected, replay_phase=hook)
 
 
 if __name__ == "__main__":
