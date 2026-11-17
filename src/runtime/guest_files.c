@@ -1497,9 +1497,10 @@ static bool finalize_share_pending_locked(int gate,
     const int opened_error = errno;
     close(root);
     if (parent < 0) {
-        if (opened_error == ENOENT || opened_error == ENOTDIR)
-            return clear_share_pending(gate);
-        errno = opened_error;
+        /* A vanished parent cannot be fsynced: we cannot prove that its
+         * disappearance will survive a power interruption. Retain the
+         * pending marker rather than silently authorizing a new open. */
+        errno = opened_error ? opened_error : EUCLEAN;
         return false;
     }
     struct stat actual;
@@ -1507,25 +1508,65 @@ static bool finalize_share_pending_locked(int gate,
         if (!S_ISREG(actual.st_mode) ||
             (uint64_t)actual.st_dev != pending->dev ||
             (uint64_t)actual.st_ino != pending->ino) {
-            /* The old path no longer identifies the file: do not
-             * delete a different inode even if the name was reused. */
+            /* Unknown replacement: do not delete an unrelated inode and
+             * do not erase the durable marker on ambiguous physical state. */
             close(parent);
-            return clear_share_pending(gate);
-        }
-        if (unlinkat(parent, leaf, 0) != 0) {
-            const int error = errno;
-            close(parent);
-            errno = error;
+            errno = EUCLEAN;
             return false;
         }
+        int pinned = confined_open_raw(parent, leaf, O_PATH | O_NOFOLLOW, 0);
+        struct stat identity;
+        char entry_key[112];
+        if (pinned < 0 || fstat(pinned, &identity) != 0 ||
+            identity.st_dev != actual.st_dev ||
+            identity.st_ino != actual.st_ino ||
+            !dos83_entry_key(parent, leaf, entry_key) ||
+            clear_guest_xattr(pinned, entry_key) != 0 ||
+            !wal_sync_pinned(pinned, false)) {
+            const int failure = errno;
+            if (pinned >= 0)
+                close(pinned);
+            close(parent);
+            errno = failure ? failure : EUCLEAN;
+            return false;
+        }
+        close(pinned);
+        dos83_test_crash("after-pending-xattr-cleanup");
+        /* Do not use the untrusted name if it changed while we synced
+         * metadata; the marker is still durable and can be retried. */
+        struct stat verify;
+        if (fstatat(parent, leaf, &verify, AT_SYMLINK_NOFOLLOW) != 0 ||
+            verify.st_dev != actual.st_dev ||
+            verify.st_ino != actual.st_ino ||
+            unlinkat(parent, leaf, 0) != 0) {
+            const int failure = errno;
+            close(parent);
+            errno = failure ? failure : EUCLEAN;
+            return false;
+        }
+        dos83_test_crash("after-pending-unlink");
     } else if (errno != ENOENT) {
         const int error = errno;
         close(parent);
         errno = error;
         return false;
     }
+    /* The pending record MUST remain durable until the physical unlink
+     * and the parent directory entry are synced. A failure here cannot
+     * turn into a successful marker clear or new filename admission. */
+    if (dos83_test_io_error("pending-parent-fsync") ||
+        !wal_sync_pinned(parent, true)) {
+        const int failure = errno;
+        close(parent);
+        (void)wal_poison(failure);
+        return false;
+    }
     close(parent);
-    return clear_share_pending(gate);
+    dos83_test_crash("after-pending-parent-fsync");
+    const bool cleared = clear_share_pending(gate);
+    if (cleared)
+        dos83_test_crash("after-pending-clear");
+    return cleared;
 }
 
 static bool reap_share_pending_locked(int gate)
