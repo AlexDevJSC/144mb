@@ -110,6 +110,45 @@ assert len(set(aliases)) == len(aliases), aliases
 print("PASS P2.3 real FUSE rename, create, xattr isolation, symlink denial and concurrent Linux writers")
 PY
 python3 tests/dos83_contract_matrix.py "$tmp/lower" "$tmp/view" "$mediator"
+# This must go through a REAL mounted FUSE file descriptor. Without direct_io
+# the second read can be satisfied from the Linux page cache, bypassing the
+# Win32 OFD range-lock check in fs_read altogether.
+printf 'CACHED' > "$tmp/lower/nt-marked-cache.dat"
+"$mediator" --root "$tmp/lower" --mark 'C:/nt-marked-cache.dat'
+python3 - "$tmp/lower/nt-marked-cache.dat" "$tmp/view/nt-marked-cache.dat" <<'PY'
+import errno
+import fcntl
+import os
+import struct
+import sys
+
+backing, view = sys.argv[1:]
+lock_fd = os.open(backing, os.O_RDWR | os.O_CLOEXEC)
+view_fd = os.open(view, os.O_RDONLY | os.O_CLOEXEC)
+
+def set_lock(kind):
+    # Linux x86_64 struct flock: short, short, 64-bit start/len, pid, pad.
+    request = struct.pack("hhqqi4x", kind, os.SEEK_SET, 0, 1, 0)
+    fcntl.fcntl(lock_fd, fcntl.F_OFD_SETLK, request)
+
+try:
+    assert os.pread(view_fd, 1, 0) == b"C"
+    set_lock(fcntl.F_WRLCK)
+    try:
+        try:
+            os.pread(view_fd, 1, 0)
+        except OSError as failure:
+            assert failure.errno in (errno.EAGAIN, errno.EACCES), failure
+        else:
+            raise AssertionError("marked cached read bypassed NT byte lock")
+    finally:
+        set_lock(fcntl.F_UNLCK)
+    assert os.pread(view_fd, 1, 0) == b"C"
+finally:
+    os.close(view_fd)
+    os.close(lock_fd)
+print("PASS mounted marked-file read cache bypass and OFD byte-lock enforcement")
+PY
 # Stronger perimeter: even a Linux program that knows the lower path
 # must be unable to rename, create or truncate it after the Landlock policy.
 if "$landlock" --probe >/dev/null 2>&1; then

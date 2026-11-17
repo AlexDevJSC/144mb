@@ -29,8 +29,13 @@ make, GCC, python3, xattrs, fuse3/fusermount3, bubblewrap, entorno
 gráfico de pruebas si corresponde y los paquetes de compilación del
 README de la revisión:
 
-    git checkout feature/filesystem4-fedora-physical-acceptance-20261117
+    git checkout feature/filesystem4-integrated-validation-20261117
     bash scripts/fedora-filesystem4-acceptance.sh --physical-confirmed --windows-reference /ruta/fs4-windows-reference.json
+
+La rama integrada suma el modo PE de la PR #153 y la corrección de
+supervisor/FUSE de la PR #150. En esta rama el script ejecuta también
+una sesión PE aislada sobre un perfil C: **descartable**, sin utilizar
+ni sobrescribir los datos personales de C: del usuario.
 
 También se puede ejecutar sin --windows-reference para obtener un
 informe parcial, pero el código de salida 3 indica INCOMPLETE.
