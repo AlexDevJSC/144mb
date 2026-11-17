@@ -31,6 +31,26 @@ antes de adjuntar la nueva sesión del padre directo. Esto evita
 autorizar por accidente un nieto en un broker que sólo reconoce las
 credenciales del hijo inmediato.
 
+### Traducción HANDLE → TID autorizable
+
+`nt_runtime_supervisor_open_thread_handle()`, en
+`src/runtime/threads.c`, conecta la tabla real de objetos/hilos
+Win32/NT con el cliente IPC. Valida que el HANDLE designa un hilo
+local vivo, que contiene **todos** los derechos pedidos y que no
+designa un proceso PE remoto o un alias reutilizado. Libera
+`wait_lock` **antes** de entrar al socket (evitando un deadlock con
+el servidor), recibe una identidad nueva del padre, comprueba
+`PID/TID/generación` y revalida el HANDLE después de la operación.
+Si el HANDLE se cerró o cambió, revoca el capability recién emitido y
+rechaza la petición sin rellenar salidas.
+
+Este adaptador es una **función C interna**, no una exportación Win32.
+`tests/runtime_supervisor_launch_test.c` verifica que un HANDLE
+concedido sólo con `THREAD_GET_CONTEXT` no puede producir una
+autorización `THREAD_SUSPEND_RESUME`, mientras el HANDLE original
+sí obtiene la autorización exacta para el hilo creado con
+`nt_CreateThread`.
+
 El servidor mantiene el `pidfd` del proceso hijo creado por este mismo
 `fork()`; el cliente no puede escoger otro PID ni activar privilegios
 en el servidor mediante un paquete. El nuevo protocolo es la **versión
