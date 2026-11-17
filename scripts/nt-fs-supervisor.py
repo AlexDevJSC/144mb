@@ -189,8 +189,7 @@ def run_session(lower: Path, view: Path, program: list[str]) -> int:
                                stderr=subprocess.DEVNULL)
             stop_group(fuse_proc)
             if mounted(view, mountpoint):
-                print("ERROR: mediated mount could not be unmounted safely",
-                      file=sys.stderr)
+                raise Refused("FUSE mount remains active after cleanup; refusing success")
 
 
 def main(argv: list[str]) -> int:
