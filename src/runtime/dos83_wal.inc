@@ -257,6 +257,12 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
     entry->old_size = old_size;
     memcpy(entry->old_dest, bytes + 112, 14);
     memcpy(entry->alias, bytes + 126, 14);
+    if (entry->staged &&
+        (!memchr(entry->alias, '\0', sizeof(entry->alias)) ||
+         entry->alias[0] == '\0')) {
+        errno = EUCLEAN;
+        return -1;
+    }
     memcpy(entry->from, bytes + DOS83_WAL_HEADER, from_size);
     memcpy(entry->to, bytes + DOS83_WAL_HEADER + from_size, to_size);
     return 1;
