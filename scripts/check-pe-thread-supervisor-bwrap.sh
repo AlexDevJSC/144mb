@@ -21,8 +21,8 @@ if [[ ! -x "$runner" || ! -r "$fixture" ]]; then
   exit 2
 fi
 
-# The namespace contains only /usr (system toolchain/runtime), /etc (glibc
-# config), a read-only copy of this checkout, proc/dev, and ephemeral /tmp.
+# The namespace contains only /usr (system toolchain/runtime), an empty /etc,
+# a read-only copy of this checkout, proc/dev, and ephemeral /tmp.
 # Supervisor+tracee are both children *inside* the same Bubblewrap PID/user
 # namespace; do not attach through the namespace boundary or grant CAP_SYS_PTRACE.
 # /lib and /lib64 are usr-merge symlinks on Ubuntu 24.04 and Fedora 45.
@@ -34,7 +34,7 @@ set +e
 timeout 25s bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-net \
   --new-session --die-with-parent \
   --ro-bind /usr /usr \
-  --ro-bind /etc /etc \
+  --dir /etc \
   --ro-bind "$PWD" "$work_dir" \
   --symlink usr/bin /bin \
   --symlink usr/lib /lib \
