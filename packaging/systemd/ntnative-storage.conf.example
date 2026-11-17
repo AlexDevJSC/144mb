@@ -1,0 +1,4 @@
+# Root-owned /etc/ntnative-storage.conf; no shell substitutions or secrets.
+# Replace with the numeric UID and primary GID of the one authorized client.
+NT_STORAGE_CLIENT_UID=1000
+NT_STORAGE_CLIENT_GID=1000
