@@ -53,5 +53,15 @@ int nt_supervisor_get_guest_context(struct nt_thread_supervisor *sup,
 int nt_supervisor_set_guest_rax(struct nt_thread_supervisor *sup,
                                 const struct nt_supervisor_guest_scope *scope,
                                 uint64_t value);
+/* Trusted PE-only APC proof: inject a synthetic ms_abi callback on a
+ * dedicated, already-mapped guest stack, intercept its deliberate INT3,
+ * restore kernel-supplied general registers AND full NT_X86_XSTATE, then
+ * resume at the original interrupted PE instruction. Not a general
+ * NtQueueApcThreadEx implementation. No host locks/callback nesting. */
+int nt_supervisor_invoke_trusted_guest_apc(
+    struct nt_thread_supervisor *sup,
+    const struct nt_supervisor_guest_scope *scope,
+    uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
+    const _Atomic uint32_t *guest_completion, unsigned timeout_ms);
 void nt_supervisor_release(struct nt_thread_supervisor *sup);
 #endif
