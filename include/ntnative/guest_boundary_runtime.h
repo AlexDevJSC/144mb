@@ -57,6 +57,13 @@ void nt_guest_boundary_guest_enter(void);
 void nt_guest_boundary_guest_leave(void);
 uint32_t nt_guest_boundary_current_phase(void);
 uint32_t nt_guest_boundary_host_nesting(void);
+/* Any nonlocal exception/longjmp that may bypass an import epilogue
+ * permanently disables asynchronous stops on that TID until teardown.
+ * The runtime must NOT attempt to reconstruct abandoned host locks or
+ * assume the old return stack has unwound. This is fail-closed. */
+void nt_guest_boundary_mark_nonlocal_transfer(void);
+bool nt_guest_boundary_nonlocal_poisoned(void);
+
 
 /* ABI-independent ms_x64 import assembly calls these. Reentrant host
  * callbacks must remain HOST while the outer runtime stack frame exists.
