@@ -31,8 +31,8 @@ DOS83_FUSE_TARGET =
 endif
 RUNTIME_PARTS = guest_boundary exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
-                dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry thread_broker_ipc shell console
-RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o $(BUILD_DIR)/runtime-thread-supervisor-core.o $(BUILD_DIR)/runtime-guest_boundary_import.o
+                dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry thread_broker_ipc thread_supervisor_control_server shell console
+RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o $(BUILD_DIR)/runtime-thread-supervisor-core.o $(BUILD_DIR)/runtime-guest_boundary_import.o $(BUILD_DIR)/runtime-thread-supervisor-nt-bridge.o
 RUNTIME_LIBS = -lm -ldl -lcrypto -pthread $(DESKTOP_LIBS) $(GDI_LIBS) $(FFI_LIBS) $(ICU_LIBS)
 ifneq ($(strip $(IMAGE_LIBS)),)
 RUNTIME_PARTS += wic
@@ -108,6 +108,9 @@ $(BUILD_DIR)/counter.o: src/ntdll/counter.c include/ntnative/counter.h | $(BUILD
 $(BUILD_DIR)/runtime-guest_boundary_import.o: src/runtime/guest_boundary_import.S | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -c "$<" -o "$@"
 
+$(BUILD_DIR)/runtime-thread-supervisor-nt-bridge.o: src/supervisor/nt_supervisor_nt_bridge.c src/supervisor/nt_supervisor_nt_bridge.h src/supervisor/nt_thread_supervisor.h src/runtime/nt_services.h src/runtime/compat.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) -pthread -c "$<" -o "$@"
+
 $(BUILD_DIR)/runtime-thread-supervisor-core.o: src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h include/ntnative/guest_boundary.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -pthread -c "$<" -o "$@"
 
@@ -155,6 +158,7 @@ $(BUILD_DIR)/runtime-child_process.o: src/runtime/winbase.h src/runtime/winfile.
 $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-thread_broker_registry.o: src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h
 $(BUILD_DIR)/runtime-thread_broker_auth.o: src/runtime/thread_broker_auth.h
 $(BUILD_DIR)/runtime-thread_broker_ipc.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-child_process.o: src/runtime/thread_broker_ipc.h
+$(BUILD_DIR)/runtime-thread_supervisor_control_server.o: src/runtime/thread_supervisor_control_server.h src/supervisor/nt_supervisor_nt_bridge.h src/runtime/thread_broker_ipc.h
 $(BUILD_DIR)/runtime-thread_broker_ipc.o: src/runtime/thread_broker_registry.h src/supervisor/nt_thread_supervisor.h include/ntnative/guest_boundary.h include/ntnative/guest_boundary_runtime.h
 $(BUILD_DIR)/runtime-process.o: src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h include/ntnative/guest_boundary_runtime.h
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-shell.o: src/runtime/shell.h
@@ -292,7 +296,7 @@ $(BUILD_DIR)/thread-broker-registry-test: tests/thread_broker_registry_test.c sr
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) -pthread -o "$@"
 
-$(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
+$(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
 
@@ -305,7 +309,7 @@ $(BUILD_DIR)/guest-boundary-import-test: tests/guest_boundary_import_test.c src/
 check-guest-boundary: $(BUILD_DIR)/guest-boundary-import-test
 	timeout 20s $(BUILD_DIR)/guest-boundary-import-test
 
-$(BUILD_DIR)/supervisor-authenticated-ipc-test: tests/supervisor_authenticated_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
+$(BUILD_DIR)/supervisor-authenticated-ipc-test: tests/supervisor_authenticated_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
 
