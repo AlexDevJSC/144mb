@@ -140,10 +140,10 @@ class FileSystemSupervisorTests(unittest.TestCase):
                 with self.assertRaises(MODULE.Refused):
                     MODULE.require_pe_profile(profile)
                 os.chmod(profile, 0o700)
-                alias = root / "alias"
-                alias.symlink_to(profile, target_is_directory=True)
+                profile.rmdir()
+                profile.symlink_to(other, target_is_directory=True)
                 with self.assertRaises(MODULE.Refused):
-                    MODULE.require_pe_profile(alias)
+                    MODULE.require_pe_profile(other)
 
     def test_pe_mode_parser_forwards_to_session_without_running_guest(self):
         with tempfile.TemporaryDirectory() as temp:
