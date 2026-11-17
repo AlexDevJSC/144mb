@@ -16,6 +16,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+#include <string.h>
 
 extern const char runtime_test_guest_begin[], runtime_test_guest_end[];
 static _Atomic uint64_t ticks;
