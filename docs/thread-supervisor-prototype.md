@@ -14,7 +14,7 @@
 
 ## Reproducción
 
-En Linux AMD64 con compilador C, pthread y soporte kernel de `pidfd_open`, `PTRACE_SEIZE` y `PTRACE_GETREGSET`:
+En Linux AMD64 con compilador C, binutils GNU (incluida la emulación `i386pep`), pthread y soporte kernel de `pidfd_open`, `PTRACE_SEIZE` y `PTRACE_GETREGSET`:
 
 ```bash
 bash scripts/check-thread-supervisor.sh
@@ -37,7 +37,7 @@ En Fedora, ejecutar **sin `sudo`**. Registrar `uname -a`, `/proc/sys/kernel/yama
 
 ## Etapa 2 — ejecución real de PE32+ y comprobación de contexto (17-11-2026)
 
-Se ha añadido una prueba reproducible que compila un **PE32+ AMD64 auténtico con MinGW**, lo carga con el parser y el mapeador existentes `src/pe/image.c` (no un mapeador de laboratorio distinto) y ejecuta su punto de entrada en un pthread con `nt_guest_thread_enter` y **GS apuntando al TEB del runtime**. El hilo huésped no realiza llamadas al host ni mantiene locks del runtime durante su bucle de prueba. Un segundo hilo del proceso hijo mantiene un contador de actividad Linux independiente.
+Se ha añadido una prueba reproducible que compila un **PE32+ AMD64 auténtico con GCC + GNU objcopy/ld (emulación i386pep)**, reutilizando el procedimiento de `nt-counter.exe`, lo carga con el parser y el mapeador existentes `src/pe/image.c` (no un mapeador de laboratorio distinto) y ejecuta su punto de entrada en un pthread con `nt_guest_thread_enter` y **GS apuntando al TEB del runtime**. El hilo huésped no realiza llamadas al host ni mantiene locks del runtime durante su bucle de prueba. Un segundo hilo del proceso hijo mantiene un contador de actividad Linux independiente.
 
 - `tests/pe/supervisor_pe_fixture.c`: ejecutable PE32+ freestanding que aumenta un contador en memoria compartida y termina cuando el anfitrión solicita salir; no contiene importaciones Win32, callbacks ni CRT.
 - `tests/pe/supervisor_pe_thread_test.c`: cargador PE y anfitrión de prueba. El proceso padre es el supervisor y el hijo directo ejecuta el PE en su segundo hilo. Se registra TID real, rango de código PE y dirección del TEB antes de adjuntar `ptrace`.
