@@ -136,6 +136,63 @@ class Security(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"PermissionError", result.stderr)
 
+    def test_systemd_root_listener_and_nonroot_reply_sender(self):
+        """Reproduce a real systemd socket, creator root, acceptor nobody.
+
+        SO_PEERCRED on the client side reports the creator, NOT the daemon;
+        SCM_CREDENTIALS on replies must identify the daemon's true UID.
+        """
+        if os.geteuid() != 0:
+            self.skipTest("Needs root to create a root-owned listener then drop UID")
+        with tempfile.TemporaryDirectory() as temp:
+            os.chmod(temp, 0o777)
+            endpoint = str(Path(temp) / "activated.sock")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+                listener.bind(endpoint)
+                os.chmod(endpoint, 0o777)
+                listener.listen(2)
+                child = os.fork()
+                if child == 0:
+                    try:
+                        os.setgroups([])
+                        os.setgid(65534)
+                        os.setuid(65534)
+                        for _ in range(2):
+                            conn, _addr = listener.accept()
+                            with conn:
+                                conn.recv(4096)
+                                conn.sendall(b'{"version":1,"ok":true,"mediated":true}')
+                        os._exit(0)
+                    except BaseException:
+                        os._exit(55)
+                try:
+                    # Real peer UID at connection is PID1/root, so authenticating
+                    # using SO_PEERCRED would fail despite the correct service.
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as probe:
+                        probe.connect(endpoint)
+                        creator = service.peer_identity(probe)[1]
+                        self.assertEqual(creator, 0)
+                    # Two accepted requests from the nonroot service, not the
+                    # listener creator. Test both client tools.
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location(
+                        "fs4_control", ROOT / "scripts/nt-storage-control.py")
+                    control = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(control)
+                    with mock.patch.object(control.sys, "argv", [
+                            "nt-storage-control", "--socket", endpoint,
+                            "--service-user", "nobody", "status"]):
+                        self.assertEqual(control.main(), 0)
+                    spec2 = importlib.util.spec_from_file_location(
+                        "fs4_supervisor", ROOT / "scripts/nt-fs-supervisor.py")
+                    supervisor = importlib.util.module_from_spec(spec2)
+                    spec2.loader.exec_module(supervisor)
+                    supervisor.service_attestation(endpoint, "nobody")
+                finally:
+                    _pid, status = os.waitpid(child, 0)
+                    self.assertTrue(os.WIFEXITED(status) and
+                                    os.WEXITSTATUS(status) == 0, status)
+
     def test_every_service_fuse_callback_checks_kernel_uid(self):
         code = (ROOT / "src/tools/dos83_fuse.c").read_text(encoding="utf-8")
         callbacks = ("getattr", "opendir", "readdir", "releasedir", "open",
