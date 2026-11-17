@@ -11,6 +11,23 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+/* All CET decisions share one fail-closed policy. Test-only forced mode
+ * lives solely in a separately compiled negative test binary; neither
+ * the normal launcher nor an incoming PE RPC can switch this at runtime. */
+static bool shadow_stack_unsafe(void)
+{
+#ifdef NT_TEST_FORCE_CET_SHSTK
+    return true;
+#elif defined(SYS_arch_prctl)
+    unsigned long state = 0;
+    if (syscall(SYS_arch_prctl, 0x5005u, &state) == 0)
+        return state != 0;
+    return errno != EINVAL && errno != ENOSYS;
+#else
+    return true;
+#endif
+}
+
 /* No unreviewed PE import can enable the gate or supply a mapping. */
 static _Atomic bool import_gate_enabled;
 static uintptr_t trusted_code_begin, trusted_code_end;
@@ -123,8 +140,12 @@ void nt_guest_boundary_guest_enter(void)
     if (guest_entry_depth == UINT32_MAX)
         _Exit(138);
     ++guest_entry_depth;
-    if (host_import_depth == 0 && !nonlocal_poisoned)
+    if (shadow_stack_unsafe()) {
+        nonlocal_poisoned = true; /* never mark a CET guest safe to stop */
+        publish_phase(NT_GUEST_BOUNDARY_HOST);
+    } else if (host_import_depth == 0 && !nonlocal_poisoned) {
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
+    }
 }
 void nt_guest_boundary_guest_leave(void)
 {
@@ -168,14 +189,8 @@ uintptr_t nt_guest_boundary_import_enter(uintptr_t target, uintptr_t return_pc)
     /* SHSTK may have become enabled AFTER imports were resolved. Our
      * return-address-rewriting gate is not safe with a hardware shadow
      * stack. Fail closed before installing the ordinary-stack return. */
-#if defined(SYS_arch_prctl)
-    unsigned long shstk = 0;
-    if (syscall(SYS_arch_prctl, 0x5005u, &shstk) == 0) {
-        if (shstk != 0) _Exit(142);
-    } else if (errno != EINVAL && errno != ENOSYS) {
-        _Exit(143);
-    }
-#endif
+    if (shadow_stack_unsafe())
+        _Exit(142);
     if (host_import_depth >= MAX_IMPORT_NESTING || target == 0 || return_pc == 0)
         _Exit(140);
     host_return_stack[host_import_depth++] = return_pc;
@@ -206,14 +221,10 @@ nt_guest_proc nt_guest_boundary_wrap_import(nt_guest_proc target)
     /* This return-address-based gate is incompatible with userspace CET
      * shadow stacks. Fail closed instead of corrupting the hardware
      * protected return stack. Linux arch_prctl(ARCH_SHSTK_STATUS)=0x5005. */
-#if defined(SYS_arch_prctl)
-    unsigned long shstk_status = 0;
-    if (syscall(SYS_arch_prctl, 0x5005u, &shstk_status) == 0) {
-        if (shstk_status != 0) { errno = ENOTSUP; return NULL; }
-    } else if (errno != EINVAL && errno != ENOSYS) {
+    if (shadow_stack_unsafe()) {
+        errno = ENOTSUP;
         return NULL;
     }
-#endif
     uintptr_t original = 0;
     _Static_assert(sizeof(target) == sizeof(original), "AMD64 function pointer");
     memcpy(&original, &target, sizeof(original));
