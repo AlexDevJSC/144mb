@@ -162,6 +162,55 @@ prototipo aumentaría el riesgo de corrupción/lockups.
 **Componente 4: 96 % → 96 % (+0 pp).** La evidencia estricta de la
 frontera no equivale a paridad de APIs ni a aceptación en hardware físico.
 
+## Etapa 4 — puente NT acotado y APC especial en PE controlado (17-11-2026)
+
+`src/supervisor/nt_supervisor_nt_bridge.[ch]` añade un **adaptador
+experimental en el proceso supervisor externo**, con códigos
+`NTSTATUS`, comprobación de derechos y semántica de contador de
+suspensión (hasta 127). Sólo funciona sobre **un TID hijo registrado
+y detenido mediante la frontera**:
+
+- `nt_supervisor_nt_suspend_thread` y `...resume_thread`: permisos
+  `THREAD_SUSPEND_RESUME`, `previous` real, suspensiones anidadas
+  y reanudación sólo tras el último descenso. Se comprueba que el
+  contador del PE no avanza mientras sigue suspendido.
+- `nt_supervisor_nt_get_context`: obtiene `RIP`, `RSP`,
+  `RFLAGS` y registros generales realmente suministrados por Linux,
+  traducidos al `CONTEXT` AMD64 del proyecto con `CONTROL`,
+  `INTEGER` y `SEGMENTS`. No finge soporte de debug/FP/XSTATE en
+  `GetThreadContext`.
+- `nt_supervisor_nt_set_context`: permite la escritura comprobable
+  de registros enteros (excepto los punteros de control `RIP/RSP`,
+  y `RBP`). Las escrituras generales de control, `GS` y SIMD
+  permanecen denegadas. El test escribe `RAX`, lo lee y restaura
+  antes de reanudar.
+- `nt_supervisor_nt_queue_trusted_apc`: ejecuta una APC **sin espera
+  alertable** mediante `ptrace`, exclusivamente en un PE fixture
+  sin importaciones y con pila APC propia, guard page, trampolín
+  Microsoft x64, finalización `INT3` y captura/restauración real
+  de `NT_X86_XSTATE` y todos los registros generales. Nunca
+  entrega el `SIGTRAP` al invitado. Rechaza ejecución en secciones
+  críticas, stacks no autorizados o estados incompletos. El test
+  exige progreso del PE después de la APC.
+
+**Esto no es aún conectar las exportaciones Win32 reales**:
+`nt_SuspendThread`, `nt_GetThreadContext`, `nt_SetThreadContext`,
+`nt_NtQueueApcThreadEx` y `nt_QueueUserAPC2` siguen usando
+los contratos previos. Los nuevos métodos viven **en el supervisor
+externo**, y todavía requieren un broker IPC autenticado entre cada
+HANDLE NT y el TID correspondiente, más mediación general de
+transiciones y callbacks, antes de que sean el backend del runtime.
+Un proceso Linux no puede hacer `ptrace` de otro hilo de su propio
+grupo como si fuera su trazador externo.
+
+**Evidencia de CI:** <https://github.com/AlexDevJSC/144mb/actions/runs/44039343577>
+PASS en test Linux, test Linux UBSan, PE32+ con puente NT/APC y
+PE32+ UBSan; Bubblewrap runner Ubuntu: **INCOMPLETE** por
+restricciones de namespaces/`ptrace`, no aprobación física Fedora.
+
+**Madurez componente 4: 96 % → 96 % (+0 puntos porcentuales).**
+Se amplía la prueba arquitectónica, no las exportaciones en producción.
+
 ## Riesgos todavía abiertos
 
 1. **Frontera PE/host no demostrada.** `ptrace` puede parar el hilo mientras mantiene un mutex de Linux, una pila de la implementación o un callback hacia el runtime; esto puede bloquear el proceso. El test utiliza un bucle C libre de esos recursos. Que exista un supervisor no elimina este problema. Antes de integrarlo, definir un protocolo de estados verificable `GUEST_RUNNING`, `HOST_TRANSITION`, `HOST_CRITICAL`, `PTRACE_STOPPED` y reconocer transiciones de host sin dejar locks retenidos al parar.
