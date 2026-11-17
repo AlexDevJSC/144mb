@@ -106,8 +106,22 @@ static void *server_main(void *context)
 bool nt_broker_server_start(int fd,
     const struct nt_thread_broker_registered_peer *peer)
 {
-    if (peer == NULL || !fd_seqpacket(fd) || !live_child(peer))
+    if (peer == NULL || !fd_seqpacket(fd) || !live_child(peer) ||
+        peer->trusted_startup_dll_count > NT_GUEST_ADDITIONAL_CODE_MAX)
         return false;
+    for (size_t i = 0; i < peer->trusted_startup_dll_count; ++i) {
+        const struct nt_guest_code_range range = peer->trusted_startup_dlls[i];
+        if (!range.begin || range.end <= range.begin ||
+            !(range.end <= peer->trusted_code_begin ||
+              range.begin >= peer->trusted_code_end))
+            return false;
+        for (size_t j = 0; j < i; ++j) {
+            const struct nt_guest_code_range prior =
+                peer->trusted_startup_dlls[j];
+            if (!(range.end <= prior.begin || range.begin >= prior.end))
+                return false;
+        }
+    }
     /* Must be installed BEFORE any client message can be queued, not
      * lazily by the detached recvmsg worker after a poll wakeup. */
     const int on = 1;
@@ -276,7 +290,9 @@ static bool supervisor_guest_probe(const struct nt_thread_broker_registered_peer
     const struct nt_supervisor_guest_scope scope = {
         .boundary = &slot->boundary, .teb = teb,
         .code_begin = peer->trusted_code_begin,
-        .code_end = peer->trusted_code_end
+        .code_end = peer->trusted_code_end,
+        .additional_code = peer->trusted_startup_dlls,
+        .additional_code_count = peer->trusted_startup_dll_count
     };
     struct nt_thread_supervisor sup;
     nt_supervisor_init(&sup);
