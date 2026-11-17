@@ -4,6 +4,7 @@
  * generation leases and a real external ptrace GETREGSET probe. */
 #define _GNU_SOURCE
 #include "thread_broker_ipc.h"
+#include "nt_services.h"
 
 #include <errno.h>
 #include <pthread.h>
