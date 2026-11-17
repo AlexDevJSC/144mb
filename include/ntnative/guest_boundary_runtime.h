@@ -37,6 +37,17 @@ bool nt_guest_boundary_import_gate_enabled(void);
  * Main executable code range only; unloaded/secondary DLLs fail closed. */
 bool nt_guest_boundary_set_image_range(uintptr_t begin, uintptr_t end);
 bool nt_guest_boundary_get_image_range(uintptr_t *begin, uintptr_t *end);
+
+/* Immutable PARENT manifest for DLLs imported and pinned before fork.
+ * Deliberately excludes LoadLibrary after process start, JIT and any
+ * module that the guest could unload/remap. MAX=64 matches dll_graph. */
+enum { NT_GUEST_ADDITIONAL_CODE_MAX = 64 };
+struct nt_guest_code_range { uintptr_t begin, end; };
+bool nt_guest_boundary_set_startup_code_ranges(
+    const struct nt_guest_code_range *ranges, size_t count);
+bool nt_guest_boundary_get_startup_code_ranges(
+    struct nt_guest_code_range *out, size_t capacity, size_t *count);
+
 /* All resolved native imports get a W^X trampoline, irrespective of their
  * C return types or parameter counts. On allocation failure, returns NULL,
  * causing the PE loader to fail rather than installing an unguarded import. */
