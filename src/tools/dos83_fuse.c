@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -798,8 +799,30 @@ static int backend_selftest(void)
         fprintf(stderr, "FAIL: NT open bypassed Linux FUSE writer lease\n");
         return 1;
     }
-    if (fs_release(marked_path, &linux_writer) != 0 ||
-        fs_open(marked_path, &denied) != 0 ||
+    if (fs_release(marked_path, &linux_writer) != 0) {
+        fprintf(stderr, "FAIL: Linux writer release\n");
+        return 1;
+    }
+    /* A forked Linux writer dies without fs_release: its independent OFD
+     * lease must be dropped by the kernel, not by the parent supervisor. */
+    pid_t child = fork();
+    if (child == 0) {
+        struct fuse_file_info crashed = {.flags = O_WRONLY};
+        _exit(fs_open(marked_path, &crashed) == 0 ? 0 : 21);
+    }
+    int child_status = 0;
+    if (child < 0 || waitpid(child, &child_status, 0) != child ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        fprintf(stderr, "FAIL: forked Linux writer lease setup\n");
+        return 1;
+    }
+    nt_handle = nt_CreateFileW(u"C:\\NTCompatibleSharedFile.dat",
+                               UINT32_C(0x80000000), NT_FS_READ, NULL, 3, 0, 0);
+    if (nt_handle == UINTPTR_MAX || !nt_CloseHandle(nt_handle)) {
+        fprintf(stderr, "FAIL: crashed Linux writer leaked OFD lease\n");
+        return 1;
+    }
+    if (fs_open(marked_path, &denied) != 0 ||
         fs_release(marked_path, &denied) != 0 ||
         fs_unlink(marked_path) != 0) {
         fprintf(stderr, "FAIL: marked lease release or delete\n");
