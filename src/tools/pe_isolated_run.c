@@ -346,6 +346,13 @@ static int execute_pe(int fd, const char *dos_path, const char *command,
      * authenticated supervisor endpoint first, including nested PE runs.
      * The private broker is not exposed as a Windows import. */
     nt_runtime_enable_supervisor_ipc();
+    /* Experimental feature gate is a conscious host user opt-in. The
+     * broker still requires parent-owned code scope, TID generation,
+     * authenticated IPC and real RIP/GS/TEB; the environment alone never
+     * grants authority over a Linux process. */
+    const char *experimental = getenv("NT144_EXPERIMENTAL_PTRACE_THREADS");
+    if (experimental != NULL && strcmp(experimental, "1") == 0)
+        nt_runtime_enable_supervisor_async_context();
     uint32_t code = 0;
     const bool ran = nt_runtime_run_fixture(guest_entry, &code);
     pe_image_unload(&active);
