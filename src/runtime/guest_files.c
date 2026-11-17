@@ -3368,11 +3368,18 @@ static int remove_file_or_defer(int parent, const char *leaf, const char *dos_pa
             error = EBUSY;
     }
     if (error == 0) {
-        if (active) {
-            if (!set_share_pending(gate, target, dos_path))
-                error = errno;
-        } else if (unlinkat(parent, leaf, 0) != 0) {
+        /* Even an immediate DeleteFile is a durable disposition. The
+         * pending record is committed BEFORE namespace mutation, so a
+         * SIGKILL between xattr cleanup/unlink/parent fsync is replayable
+         * from the per-inode registry. A surviving hardlink outside the
+         * granted root must not retain the deleted entry's DOS83 alias. */
+        if (!set_share_pending(gate, target, dos_path)) {
             error = errno;
+        } else if (!active) {
+            struct share_pending_record durable;
+            if (!read_share_pending(gate, &durable) ||
+                !finalize_share_pending_locked(gate, &durable))
+                error = errno;
         }
     }
     if (status == 0)
