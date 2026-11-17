@@ -33,6 +33,10 @@ struct nt_guest_boundary_session {
 /* Parent/launcher chooses the opt-in BEFORE PE IAT resolution. */
 void nt_guest_boundary_enable_import_gate(void);
 bool nt_guest_boundary_import_gate_enabled(void);
+/* Immutable to the guest: supplied by the trusted loader before fork.
+ * Main executable code range only; unloaded/secondary DLLs fail closed. */
+bool nt_guest_boundary_set_image_range(uintptr_t begin, uintptr_t end);
+bool nt_guest_boundary_get_image_range(uintptr_t *begin, uintptr_t *end);
 /* All resolved native imports get a W^X trampoline, irrespective of their
  * C return types or parameter counts. On allocation failure, returns NULL,
  * causing the PE loader to fail rather than installing an unguarded import. */
