@@ -1632,6 +1632,51 @@ static int acquire_share_registry_lease(const struct stat *info,
     return lease;
 }
 
+/* FUSE's opt-in NT-compatible inode bridge. Reuse the same on-disk OFD
+ * registry as CreateFileW instead of inventing a POSIX-only lock table.
+ * A missing marker is not an error; unreadable/malformed metadata is. */
+int nt_runtime_nt_file_marker(int fd)
+{
+    char marker[2];
+    ssize_t length = fgetxattr(fd, NT_FS_COMPAT_MARKER, marker, sizeof(marker));
+    if (length < 0) {
+        if (errno == ENODATA || errno == ENOTSUP)
+            return 0;
+        return -1;
+    }
+    if (length != 1 || marker[0] != '1') {
+        errno = EINVAL;
+        return -1;
+    }
+    return 1;
+}
+
+int nt_runtime_acquire_linux_nt_lease(int fd, uint32_t access, uint32_t share)
+{
+    if ((access | share) & ~NT_FS_SHARE_ALL) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct stat info;
+    if (fstat(fd, &info) != 0)
+        return -1;
+    if (!S_ISREG(info.st_mode)) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* The transient flock serializes an open against NT deletion; the
+     * durable OFD lease models the lifetime of the Linux open handle. */
+    if (!acquire_open_delete_lease(fd, share))
+        return -1;
+    return acquire_share_registry_lease(&info, access, share);
+}
+
+void nt_runtime_release_linux_nt_lease(int *lease)
+{
+    if (lease)
+        release_share_lease(lease);
+}
+
 /* Windows permits rename/unlink of an open file only when every existing
  * handle explicitly grants FILE_SHARE_DELETE. Native Linux keeps its inode
  * alive until the final descriptor is closed. A full NT delete-pending
