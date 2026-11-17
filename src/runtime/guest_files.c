@@ -1242,13 +1242,15 @@ _Static_assert(sizeof(struct share_lease_record) == 8, "share lease record layou
 static int open_share_registry(const struct stat *info)
 {
     pthread_mutex_lock(&root_lock);
-    const int root = drive_root >= 0 ? fcntl(drive_root, F_DUPFD_CLOEXEC, 3) : -1;
+    const int root = drive_root >= 0 ?
+                     fcntl(drive_root, F_DUPFD_CLOEXEC, 3) : -1;
     pthread_mutex_unlock(&root_lock);
     if (root < 0) {
         errno = EACCES;
         return -1;
     }
-    if (mkdirat(root, ":ntnative-file-leases", 0700) < 0 && errno != EEXIST) {
+    if (mkdirat(root, ":ntnative-file-leases", 0700) < 0 &&
+        errno != EEXIST) {
         const int error = errno;
         close(root);
         errno = error;
@@ -1256,18 +1258,21 @@ static int open_share_registry(const struct stat *info)
     }
     const int directory = confined_open_raw(root, ":ntnative-file-leases",
                                              O_RDONLY | O_DIRECTORY, 0);
-    const int directory_error = errno;
-    close(root);
     if (directory < 0) {
-        errno = directory_error;
+        const int error = errno;
+        close(root);
+        errno = error;
         return -1;
     }
     struct stat dir_stat;
     if (fstat(directory, &dir_stat) != 0 ||
-        dir_stat.st_uid != geteuid() || (dir_stat.st_mode & 077u) != 0) {
-        const int error = errno;
+        !S_ISDIR(dir_stat.st_mode) ||
+        dir_stat.st_uid != geteuid() ||
+        (dir_stat.st_mode & 077u) != 0) {
+        const int error = errno ? errno : EACCES;
         close(directory);
-        errno = error == 0 ? EACCES : error;
+        close(root);
+        errno = error;
         return -1;
     }
     char filename[64];
@@ -1275,24 +1280,43 @@ static int open_share_registry(const struct stat *info)
                            (uintmax_t)info->st_dev, (uintmax_t)info->st_ino);
     if (n < 0 || (size_t)n >= sizeof(filename)) {
         close(directory);
+        close(root);
         errno = ENAMETOOLONG;
         return -1;
     }
-    const int fd = confined_open_raw(directory, filename, O_RDWR | O_CREAT, 0600);
-    const int error = errno;
-    close(directory);
+    int fd = confined_open_raw(directory, filename, O_RDWR | O_CREAT, 0600);
     if (fd < 0) {
+        const int error = errno;
+        close(directory);
+        close(root);
         errno = error;
         return -1;
     }
     struct stat lock_stat;
     if (fstat(fd, &lock_stat) != 0 || !S_ISREG(lock_stat.st_mode) ||
-        lock_stat.st_uid != geteuid() || (lock_stat.st_mode & 077u) != 0) {
-        const int cause = errno;
+        lock_stat.st_nlink != 1 || lock_stat.st_uid != geteuid() ||
+        (lock_stat.st_mode & 077u) != 0) {
+        const int error = errno ? errno : EACCES;
         close(fd);
-        errno = cause == 0 ? EACCES : cause;
+        close(directory);
+        close(root);
+        errno = error;
         return -1;
     }
+    /* The per-inode marker's filename AND the containing registry must
+     * survive power failure before a delete-pending bit can be committed.
+     * fsync(fd) happens when the marker is written; the two directory
+     * barriers here make first-time creation of both names durable. */
+    if (fsync(directory) != 0 || !wal_sync_pinned(root, true)) {
+        const int error = errno;
+        close(fd);
+        close(directory);
+        close(root);
+        (void)wal_poison(error);
+        return -1;
+    }
+    close(directory);
+    close(root);
     return fd;
 }
 
