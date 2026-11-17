@@ -22,6 +22,15 @@ BUILD_DIR=build-supervisor-ubsan CFLAGS='-O1 -g -fsanitize=undefined -fno-saniti
   bash scripts/check-thread-supervisor.sh
 ```
 
+Para ejecutar la prueba de aceptación con registro automático del entorno en Fedora KDE, sin elevar privilegios:
+
+```bash
+bash scripts/fedora-thread-supervisor-acceptance.sh
+cat build/supervisor-fedora-acceptance/result.txt
+```
+
+El script genera `environment.txt` (commit, kernel, Fedora, SELinux, Yama, arquitectura y compilador), `test.log` y `result.txt`. También puede ejecutarse mediante `make check-thread-supervisor` sin crear el informe de aceptación.
+
 En Fedora, ejecutar **sin `sudo`**. Registrar `uname -a`, `/proc/sys/kernel/yama/ptrace_scope` si existe, estado SELinux y código final. La CI tiene un workflow de Ubuntu dedicado; el RPM Fedora y el PE launcher no activan esta función experimental.
 
 **Criterios de resultado:** código 0 y línea `PASS supervisor: ...` significan que el experimento se ejecutó; código 77 significa `INCOMPLETE` por bloqueo de host; otros códigos significan `FAIL`. No elevar permisos, desactivar SELinux ni modificar `ptrace_scope` para conseguir un resultado positivo.
