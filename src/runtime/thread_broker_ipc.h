@@ -33,6 +33,7 @@ struct nt_thread_broker_reply {
  * dereference is performed in the supervisor. NTSTATUS travels in the
  * reply.status field as an unsigned 32-bit bit pattern. */
 #include "compat.h"
+#include "ntnative/counter.h"
 struct nt_broker_context_request {
     struct nt_broker_rpc request;
     struct nt_context64 context;
