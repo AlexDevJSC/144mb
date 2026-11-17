@@ -76,10 +76,17 @@ check-thread-supervisor:
 # Controlled *real* PE32+ integration, still opt-in and never shipped.
 # Uses the actual validated image loader and guest GS/TEB setup. This is
 # a dedicated fixture ABI, not general Windows executable support.
-$(BUILD_DIR)/supervisor-pe-fixture.exe: tests/pe/supervisor_pe_fixture.c tests/pe/supervisor_pe_shared.h | $(BUILD_DIR)
-	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
-	    -Wl,--entry,supervisor_pe_entry,--subsystem,console,--no-insert-timestamp,--disable-reloc-section,--disable-dynamicbase,--strip-all \
-	    -o "$@" "$<"
+$(BUILD_DIR)/supervisor-pe-fixture.elf.o: tests/pe/supervisor_pe_fixture.c tests/pe/supervisor_pe_shared.h | $(BUILD_DIR)
+	$(CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) -fno-pie \
+	    -fno-toplevel-reorder -fno-reorder-blocks-and-partition -c "$<" -o "$@"
+
+$(BUILD_DIR)/supervisor-pe-fixture.coff.o: $(BUILD_DIR)/supervisor-pe-fixture.elf.o
+	$(OBJCOPY) -j .text -O pe-x86-64 "$<" "$@"
+
+$(BUILD_DIR)/supervisor-pe-fixture.exe: $(BUILD_DIR)/supervisor-pe-fixture.coff.o tests/pe/fixture.ld
+	$(LD) -m i386pep -T tests/pe/fixture.ld --entry supervisor_pe_entry \
+	    --subsystem console --no-insert-timestamp --disable-reloc-section \
+	    --strip-all -o "$@" "$<"
 
 $(BUILD_DIR)/supervisor-pe-thread-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_thread_supervisor.h src/pe/image.c src/pe/image.h src/runtime/guest_thread.c include/ntnative/guest_thread.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/supervisor -Itests/pe \
