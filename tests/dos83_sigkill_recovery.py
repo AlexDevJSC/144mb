@@ -15,8 +15,9 @@ import tempfile
 PHASES = (
     ("after_wal_fsync", False),
     ("after_staging_xattr", False),
-    ("before_renameat2", False),
-    ("after_renameat2", True),
+    ("after_staged_inode_fsync", False),
+    ("after_source_alias_cleanup", True),
+    ("after_parent_fsync", True),
 )
 MAGIC_WAL = ":ntnative-file-leases/dos83-rename-v1.wal"
 ORIGINAL = b"fs4-original-content-\x00\xff-2026"
