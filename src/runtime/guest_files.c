@@ -2586,8 +2586,40 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         const int fd = open_shared(slot, parent, leaf, options, access, share, &created);
         error = errno;
         if (fd >= 0) {
-            if (truncate && !created && ftruncate(fd, 0) != 0) {
-                error = errno;
+            bool committed = true;
+            if (created)
+                dos83_test_crash("after-file-create");
+            if (truncate && !created) {
+                if (ftruncate(fd, 0) != 0)
+                    committed = false;
+                else
+                    dos83_test_crash("after-file-truncate");
+            }
+            int sync_error = committed ? 0 : errno;
+            if (committed && (created || truncate)) {
+                if (!wal_sync_pinned(fd, false)) {
+                    committed = false;
+                    sync_error = errno;
+                } else if (created) {
+                    dos83_test_crash("after-file-create-fsync");
+                } else {
+                    dos83_test_crash("after-file-truncate-fsync");
+                }
+            }
+            if (committed && created) {
+                if (!wal_sync_pinned(parent, true)) {
+                    committed = false;
+                    sync_error = errno;
+                } else {
+                    dos83_test_crash("after-file-parent-fsync");
+                }
+            }
+            if (!committed) {
+                /* Create/truncate may already have physically taken effect
+                 * after a failed fsync. Never return a successful HANDLE,
+                 * and latch storage EIO to forbid additional mutations. */
+                error = sync_error ? sync_error : EIO;
+                (void)wal_poison(error);
                 close(fd);
                 release_share_lease(&slot->share_lease_fd);
             } else {
