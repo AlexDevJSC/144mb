@@ -333,6 +333,12 @@ check-fs-backing-audit:
 
 check: check-fs-backing-audit
 
+.PHONY: check-fs4-acceptance-gates
+check-fs4-acceptance-gates:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs4_acceptance_gate.py'
+
+check: check-fs4-acceptance-gates
+
 $(BUILD_DIR)/nt-dos83-mediator: src/tools/dos83_mediator.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
