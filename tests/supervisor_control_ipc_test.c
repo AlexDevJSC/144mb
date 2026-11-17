@@ -27,6 +27,7 @@ extern const char control_loop_begin[], control_loop_end[];
 struct shared {
     struct nt_guest_boundary_session session;
     _Atomic uint32_t tid, ready, stop, host_phase, finish, seen_signal;
+    uint32_t test_mode;
     _Atomic uint64_t ticks;
 };
 static struct shared *data;
@@ -52,8 +53,28 @@ static void *guest_worker(void *argument)
     if (!nt_broker_client_register_thread(tid))
         _exit(52);
     atomic_store_explicit(&sh->tid, tid, memory_order_release);
+    /* One negative fixture actually executes RW→RX JIT code, which
+     * the parent must NEVER treat as a trusted startup PE section. */
+    void *jit = NULL;
+    if (sh->test_mode == 4) {
+        static const unsigned char loop[] = {
+            0x8b,0x07,0x85,0xc0,0x75,0x06,0xf0,0x48,
+            0xff,0x06,0xeb,0xf4,0xc3
+        };
+        jit = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                   MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (jit == MAP_FAILED) _exit(53);
+        memcpy(jit, loop, sizeof(loop));
+        if (mprotect(jit, 4096, PROT_READ|PROT_EXEC) != 0)
+            _exit(54);
+    }
     nt_guest_boundary_guest_enter();
     atomic_store_explicit(&sh->ready, 1, memory_order_release);
+    if (jit != NULL) {
+        void (*dynamic_code)(const _Atomic uint32_t *, _Atomic uint64_t *) = NULL;
+        memcpy(&dynamic_code, &jit, sizeof(dynamic_code));
+        dynamic_code(&sh->stop, &sh->ticks);
+    } else {
     /* Parent uses these independently-known symbols as a *trusted*
      * guest code range. All instructions inside are leaf, lock-free,
      * with no calls into host or libc. */
@@ -71,7 +92,10 @@ static void *guest_worker(void *argument)
         : "+m"(sh->ticks)
         : "m"(sh->stop)
         : "eax", "memory");
+    }
     nt_guest_boundary_guest_leave();
+    if (jit != NULL)
+        (void)munmap(jit, 4096);
     atomic_store_explicit(&sh->host_phase, 1, memory_order_release);
     while (!atomic_load_explicit(&sh->finish, memory_order_acquire))
         sched_yield();
@@ -108,7 +132,7 @@ static _Noreturn void child_client(int fd, unsigned mode)
         NT_STATUS_NOT_SUPPORTED)
         _exit(25); /* GET without a confirmed suspend must be rejected. */
     uint32_t previous = UINT32_MAX;
-    if (mode == 0) {
+    if (mode == 0 || mode == 3 || mode == 4) {
         if (nt_broker_client_supervisor_suspend(capability, &previous) !=
             NT_STATUS_NOT_SUPPORTED || previous != UINT32_MAX)
             _exit(26);
@@ -233,6 +257,7 @@ static int run_one(unsigned mode)
                 MAP_SHARED|MAP_ANONYMOUS, -1, 0);
     if (data == MAP_FAILED) return 1;
     memset(data, 0, sizeof(*data));
+    data->test_mode = mode;
     int sockets[2];
     uint8_t secret[16];
     if (socketpair(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC, 0, sockets) ||
@@ -254,8 +279,10 @@ static int run_one(unsigned mode)
         .child_pid = child, .uid = getuid(), .gid = getgid(),
         .child_pidfd = pidfd,
         .guest_session = &data->session,
-        .trusted_code_begin = (uintptr_t)control_loop_begin,
-        .trusted_code_end = (uintptr_t)control_loop_end,
+        .trusted_code_begin = mode == 3 ?
+            (uintptr_t)control_loop_end + 32 : (uintptr_t)control_loop_begin,
+        .trusted_code_end = mode == 3 ?
+            (uintptr_t)control_loop_end + 64 : (uintptr_t)control_loop_end,
         .allowed_access = NT_BROKER_QUERY_LIMITED_INFORMATION |
             (mode != 0 ? NT_BROKER_SERVER_ENABLE_THREAD_CONTROL : 0u)
     };
@@ -280,10 +307,11 @@ static int run_one(unsigned mode)
 int main(void)
 {
     alarm(35);
-    if (run_one(0) || run_one(1) || run_one(2)) return 1;
+    if (run_one(0) || run_one(1) || run_one(2) ||
+        run_one(3) || run_one(4)) return 1;
     puts("PASS authenticated control IPC: opt-in only, persistent nested "
          "suspension, real AMD64 CONTEXT GET/SET/restore, unsupported groups, "
          "queued Linux SIGUSR1 preserved, HOST-phase denial, no stale leases, "
-         "EOF during ptrace suspension resumes the worker, 32 attach cycles");
+         "EOF cleanup, 32 attach cycles, DLL-like out-of-range and real RW→RX JIT denial");
     return 0;
 }
