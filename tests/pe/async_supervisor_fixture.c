@@ -60,6 +60,16 @@ int import_fixture_entry(void)
         ctx.Rip == 0 || ctx.Rsp == 0 ||
         ctx.ContextFlags != (CONTEXT_CONTROL | CONTEXT_INTEGER))
         return 14;
+    /* The real Windows PE32+ import reads the Linux NT_PRFPREG/FltSave
+     * state. Its matching write path is intentionally not authorised. */
+    CONTEXT floating = {0};
+    floating.ContextFlags = CONTEXT_FLOATING_POINT;
+    if (NtGetContextThread(thread, &floating) != 0 ||
+        floating.MxCsr == 0 ||
+        floating.ContextFlags != CONTEXT_FLOATING_POINT)
+        return 28;
+    if (NtSetContextThread(thread, &floating) != (LONG)0xc00000bbu)
+        return 29;
     /* Verified integer update; original value restored while still
      * suspended, so the guest continues with original observable state. */
     CONTEXT integer = ctx;
