@@ -39,20 +39,99 @@
 static int lower_root = -1;
 static pthread_mutex_t namespace_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* NT-compatible files opt into the existing CreateFile OFD lease registry.
+ * A separate live lease for each FUSE FD preserves independent lifetimes. */
+struct view_file_lease {
+    int fd, lease;
+    struct view_file_lease *next;
+};
+static struct view_file_lease *view_leases;
+static pthread_mutex_t view_lease_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int view_lease_add(int fd, int lease)
+{
+    struct view_file_lease *item = malloc(sizeof(*item));
+    if (!item)
+        return -ENOMEM;
+    *item = (struct view_file_lease){.fd = fd, .lease = lease};
+    pthread_mutex_lock(&view_lease_lock);
+    item->next = view_leases;
+    view_leases = item;
+    pthread_mutex_unlock(&view_lease_lock);
+    return 0;
+}
+
+static int view_lease_take(int fd)
+{
+    int lease = -1;
+    pthread_mutex_lock(&view_lease_lock);
+    struct view_file_lease **cursor = &view_leases;
+    while (*cursor) {
+        if ((*cursor)->fd == fd) {
+            struct view_file_lease *item = *cursor;
+            *cursor = item->next;
+            lease = item->lease;
+            free(item);
+            break;
+        }
+        cursor = &(*cursor)->next;
+    }
+    pthread_mutex_unlock(&view_lease_lock);
+    return lease;
+}
+
+static bool view_lease_active(int fd)
+{
+    pthread_mutex_lock(&view_lease_lock);
+    bool active = false;
+    for (struct view_file_lease *item = view_leases; item; item = item->next)
+        if (item->fd == fd) {
+            active = true;
+            break;
+        }
+    pthread_mutex_unlock(&view_lease_lock);
+    return active;
+}
+
+/* Marked files observe the same kernel OFD byte-range locks as LockFileEx. */
+static int view_range_access(int fd, off_t offset, size_t size, bool writing)
+{
+    if (!view_lease_active(fd) || size == 0)
+        return 0;
+    if (offset < 0 || size > (size_t)INT64_MAX ||
+        (uint64_t)offset > (uint64_t)INT64_MAX - (uint64_t)size)
+        return -EINVAL;
+    struct flock request = {
+        .l_type = writing ? F_WRLCK : F_RDLCK,
+        .l_whence = SEEK_SET, .l_start = offset, .l_len = (off_t)size
+    };
+    if (fcntl(fd, F_OFD_GETLK, &request) < 0)
+        return -errno;
+    return request.l_type == F_UNLCK ? 0 : -EAGAIN;
+}
+
+
 static const char *relpath(const char *path)
 {
-    if (!path || path[0] != '/')
+    if (!path || path[0] != '/') {
+        errno = EINVAL;
         return NULL;
+    }
+    /* Clients must not see or alter the authoritative share-lease files. */
+    static const char hidden[] = "/:ntnative-file-leases";
+    const size_t n = sizeof(hidden) - 1;
+    if (!strncmp(path, hidden, n) && (path[n] == '/' || path[n] == '\0')) {
+        errno = EACCES;
+        return NULL;
+    }
     return path[1] ? path + 1 : ".";
 }
 
 static int lower_open(const char *path, int flags, mode_t mode)
 {
     const char *relative = relpath(path);
-    if (!relative) {
-        errno = EINVAL;
+    if (!relative)
         return -1;
-    }
     const struct open_how how = {
         .flags = (uint64_t)(flags | O_CLOEXEC | O_NOFOLLOW),
         .mode = (uint64_t)((flags & O_CREAT) ? mode : 0),
@@ -66,7 +145,9 @@ static int lower_open(const char *path, int flags, mode_t mode)
 static int lower_parent(const char *path, char leaf[NAME_MAX + 1])
 {
     const char *relative = relpath(path);
-    if (!relative || (relative[0] == '.' && relative[1] == '\0')) {
+    if (!relative)
+        return -1;
+    if (relative[0] == '.' && relative[1] == '\0') {
         errno = EINVAL;
         return -1;
     }
@@ -172,9 +253,9 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
                       off_t offset, struct fuse_file_info *fi,
                       enum fuse_readdir_flags flags)
 {
-    (void)path;
-    (void)offset;
     (void)flags;
+    if (offset < 0)
+        return -EINVAL;
     int dupfd = dup((int)fi->fh);
     if (dupfd < 0)
         return -errno;
@@ -185,7 +266,10 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
         return -error;
     }
     int error = 0;
-    rewinddir(dir);
+    if (offset)
+        seekdir(dir, (long)offset);
+    else
+        rewinddir(dir);
     for (;;) {
         errno = 0;
         const struct dirent *entry = readdir(dir);
@@ -193,7 +277,15 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
             error = errno;
             break;
         }
-        if (filler(buffer, entry->d_name, NULL, 0,
+        if (!strcmp(path, "/") &&
+            !strcmp(entry->d_name, ":ntnative-file-leases"))
+            continue;
+        const long cookie = telldir(dir);
+        if (cookie < 0) {
+            error = errno ? errno : EIO;
+            break;
+        }
+        if (filler(buffer, entry->d_name, NULL, (off_t)cookie,
                    (enum fuse_fill_dir_flags)0))
             break;
     }
