@@ -1579,6 +1579,98 @@ static bool reap_share_pending_locked(int gate)
     return active || finalize_share_pending_locked(gate, &pending);
 }
 
+/* Scan durable C: delete-pending records BEFORE admitting new clients.
+ * After SIGKILL the final owner has no live OFD lease; unlike a normal
+ * open, it cannot discover a deleted inode's registry by pathname.
+ * Therefore startup must iterate the trusted, private per-inode files.
+ * Corruption/foreign identity fails closed and leaves the marker intact. */
+static bool fs4_recover_pending_deletes(int c_root)
+{
+    int registry = confined_open_raw(c_root, ":ntnative-file-leases",
+                                     O_RDONLY | O_DIRECTORY, 0);
+    if (registry < 0)
+        return errno == ENOENT;
+    struct stat registry_info;
+    if (fstat(registry, &registry_info) != 0 ||
+        !S_ISDIR(registry_info.st_mode) ||
+        registry_info.st_uid != geteuid() ||
+        (registry_info.st_mode & 077u) != 0) {
+        const int cause = errno ? errno : EACCES;
+        close(registry);
+        errno = cause;
+        return false;
+    }
+    int iter = fcntl(registry, F_DUPFD_CLOEXEC, 0);
+    DIR *dir = iter < 0 ? NULL : fdopendir(iter);
+    if (!dir) {
+        const int cause = errno;
+        if (iter >= 0)
+            close(iter);
+        close(registry);
+        errno = cause;
+        return false;
+    }
+    bool ok = true;
+    int failure = 0;
+    for (;;) {
+        errno = 0;
+        const struct dirent *ent = readdir(dir);
+        if (!ent) {
+            if (errno) {
+                ok = false;
+                failure = errno;
+            }
+            break;
+        }
+        const char *dash = strchr(ent->d_name, '-');
+        if (!dash || dash == ent->d_name || !dash[1])
+            continue;
+        char *end = NULL;
+        errno = 0;
+        const uintmax_t dev = strtoumax(ent->d_name, &end, 16);
+        if (errno || end != dash)
+            continue;
+        const uintmax_t ino = strtoumax(dash + 1, &end, 16);
+        if (errno || end == dash + 1 || *end)
+            continue; /* Not a per-inode lease record. */
+        int gate = confined_open_raw(registry, ent->d_name, O_RDWR, 0);
+        struct stat gate_stat;
+        if (gate < 0 || fstat(gate, &gate_stat) != 0 ||
+            !S_ISREG(gate_stat.st_mode) || gate_stat.st_nlink != 1 ||
+            gate_stat.st_uid != geteuid() || (gate_stat.st_mode & 077u)) {
+            failure = gate < 0 ? errno : EUCLEAN;
+            if (gate >= 0)
+                close(gate);
+            ok = false;
+            break;
+        }
+        int locked;
+        do {
+            locked = flock(gate, LOCK_EX);
+        } while (locked < 0 && errno == EINTR);
+        struct share_pending_record pending;
+        bool active = false;
+        if (locked != 0 ||
+            !read_share_pending(gate, &pending) ||
+            (pending.pending && ((uintmax_t)pending.dev != dev ||
+                                 (uintmax_t)pending.ino != ino)) ||
+            (pending.pending && !share_registry_has_leases(gate, &active)) ||
+            (pending.pending && !active &&
+             !finalize_share_pending_locked(gate, &pending))) {
+            failure = errno ? errno : EUCLEAN;
+            ok = false;
+        }
+        close(gate);
+        if (!ok)
+            break;
+    }
+    closedir(dir);
+    close(registry);
+    if (!ok)
+        errno = failure ? failure : EUCLEAN;
+    return ok;
+}
+
 /* Obtain a fresh open description of an existing lease registry. dup()
  * would share its OFD lock with the handle; an independent description
  * is essential to observe that lock when deciding whether to reap. */
