@@ -137,6 +137,19 @@ static _Noreturn void child_client(int fd, unsigned mode)
          NT_BROKER_SUPERVISOR_SET_CONTEXT, &identity, &capability) ||
         identity.guest_thread_id != tid || capability == 0)
         _exit(24);
+    /* Forged capability must produce a precise NTSTATUS and preserve
+     * every caller output byte, including on the extended GET reply. */
+    _Alignas(16) struct nt_context64 forged = {0};
+    forged.flags = 0x100003u;
+    forged.rax = UINT64_C(0xdeadbeef11223344);
+    uint32_t untouched_count = UINT32_MAX;
+    if (nt_broker_client_supervisor_get_context(capability + 1, &forged) !=
+            NT_STATUS_ACCESS_DENIED ||
+        forged.rax != UINT64_C(0xdeadbeef11223344) ||
+        nt_broker_client_supervisor_suspend(capability + 1, &untouched_count) !=
+            NT_STATUS_ACCESS_DENIED ||
+        untouched_count != UINT32_MAX)
+        _exit(56);
     _Alignas(16) struct nt_context64 before = {0};
     before.flags = 0x100003u; /* AMD64 CONTROL|INTEGER */
     if (nt_broker_client_supervisor_get_context(capability, &before) !=
