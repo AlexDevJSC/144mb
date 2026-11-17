@@ -379,18 +379,23 @@ static bool dos83_move_end(struct dos83_move_txn *txn, bool committed)
             }
         }
     }
-    if (txn->victim_fd >= 0 && committed &&
-        clear_guest_xattr(txn->victim_fd, txn->dest_key) != 0) {
-        ok = false;
-        if (!error)
-            error = errno;
-    }
-    if (txn->victim_fd >= 0 && ok && committed) {
+    if (txn->victim_fd >= 0 && committed) {
         struct stat st;
-        if (fstat(txn->victim_fd, &st) != 0 ||
-            !wal_sync_pinned(txn->victim_fd, S_ISDIR(st.st_mode))) {
+        if (fstat(txn->victim_fd, &st) != 0) {
             ok = false;
-            error = errno;
+            if (!error)
+                error = errno;
+        } else if (st.st_nlink > 0) {
+            /* A replaced final link cannot be reopened via procfs and
+             * has no durable metadata to preserve. Surviving hardlinks
+             * still need the stale destination-entry xattr removed. */
+            if (clear_guest_xattr(txn->victim_fd, txn->dest_key) != 0 ||
+                !wal_sync_pinned(txn->victim_fd,
+                                 S_ISDIR(st.st_mode))) {
+                ok = false;
+                if (!error)
+                    error = errno;
+            }
         }
     }
     /* Both directory entries and xattrs must reach stable storage before
