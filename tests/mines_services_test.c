@@ -524,7 +524,8 @@ static void check_user_folders(void)
     CHECK(nt_runtime_set_user_folder_root(folder, NULL));
     CHECK(nt_RemoveDirectoryA("C:/Users/guest") && nt_RemoveDirectoryA("C:/Users"));
     CHECK(nt_runtime_set_file_root(NULL) && nt_runtime_shared_user_folders() == 0);
-    CHECK(unlink(link) == 0 && rmdir(native) == 0 &&
+    CHECK(unlink(link) == 0 && nt_test_cleanup_share_registry(native) &&
+          rmdir(native) == 0 &&
           nt_test_cleanup_share_registry(drive) && rmdir(drive) == 0);
     puts("PASS Windows known folders and direct Linux file access with separate roots");
 }

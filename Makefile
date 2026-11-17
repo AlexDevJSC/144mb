@@ -135,7 +135,7 @@ $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/r
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-sync.o \
     $(BUILD_DIR)/runtime-guest_files.o: src/runtime/sync.h
 $(BUILD_DIR)/runtime-guest_files.o: override CPPFLAGS += $(ICU_CFLAGS)
-$(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/junctions.inc src/runtime/junction_control.inc
+$(BUILD_DIR)/runtime-guest_files.o: src/runtime/dos83_alias.inc src/runtime/dos83_wal.inc src/runtime/junctions.inc src/runtime/junction_control.inc
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-virtual_memory.o $(BUILD_DIR)/runtime-section_memory.o: src/runtime/section_memory.h
 $(BUILD_DIR)/runtime-section_memory.o $(BUILD_DIR)/runtime-threads.o $(BUILD_DIR)/runtime-object_broker.o: src/runtime/object_broker.h
 $(BUILD_DIR)/runtime-exports.o: src/runtime/dynamic_tls.h
@@ -354,6 +354,12 @@ $(BUILD_DIR)/nt-dos83-mediator: src/tools/dos83_mediator.c $(RUNTIME_OBJECTS) sr
 
 check-dos83-mediator: $(BUILD_DIR)/nt-dos83-mediator
 	sh tests/dos83_mediator_smoke.sh "$(BUILD_DIR)/nt-dos83-mediator"
+
+.PHONY: check-dos83-wal
+check-dos83-wal: $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_recovery.py "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-dos83-wal
 
 $(BUILD_DIR)/mines-services-test: tests/mines_services_test.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/user_folders.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \

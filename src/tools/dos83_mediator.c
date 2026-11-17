@@ -429,7 +429,7 @@ static bool to_wide(const char *input, uint16_t *output, size_t capacity)
 int main(int argc, char **argv)
 {
     if (argc < 4 || strcmp(argv[1], "--root") != 0) {
-        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW\n", argv[0]);
+        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW\n", argv[0]);
         return 2;
     }
     if (!nt_runtime_set_file_root(argv[2])) {
@@ -437,9 +437,17 @@ int main(int argc, char **argv)
         return 2;
     }
     int result = 2;
-    if (argc == 4 && strcmp(argv[3], "--watch") == 0) {
-        result = run_watch(argv[2]);
+    if (argc == 4 && strcmp(argv[3], "--recover") == 0) {
+        result = nt_runtime_recover_dos83() ? 0 : 3;
+        if (result)
+            perror("DOS 8.3 WAL recovery refused");
+    } else if (argc == 4 && strcmp(argv[3], "--watch") == 0) {
+        result = nt_runtime_recover_dos83() ? run_watch(argv[2]) : 3;
     } else if (argc == 4 && strcmp(argv[3], "--scan") == 0) {
+        if (!nt_runtime_recover_dos83()) {
+            perror("DOS 8.3 WAL recovery refused");
+            return 3;
+        }
         struct monitor state = { .root = -1, .inotify_fd = -1 };
         state.root = open(argv[2], O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (state.root < 0) {

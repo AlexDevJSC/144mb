@@ -118,6 +118,13 @@ static int NT_MS_ABI guest_entry(void)
                                                               active_child_environment : environ));
     if (!nt_runtime_set_file_root("/game"))
         return 118;
+    /* A PE must never run against an unresolved/crashed C: namespace.
+     * This uses the file broker's own root and lock, not ptrace or thread
+     * supervision; recovery refuses ambiguous inode identities. */
+    if (!nt_runtime_recover_dos83()) {
+        perror("DOS 8.3 journal recovery refused");
+        return 118;
+    }
     if (!open_secondary_grants()) {
         perror("Cannot initialize secondary DOS/UNC roots");
         return 118;
