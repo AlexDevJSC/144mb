@@ -20,6 +20,12 @@ on:
       - 'Makefile'
       - 'src/pe/image.c'
       - 'src/runtime/guest_thread.c'
+      - 'src/runtime/guest_boundary.c'
+      - 'src/runtime/guest_boundary_import.S'
+      - 'src/runtime/exports.c'
+      - 'src/runtime/threads.c'
+      - 'include/ntnative/guest_boundary_runtime.h'
+      - 'tests/guest_boundary_import_test.c'
       - '.github/workflows/thread-supervisor.yml'
   pull_request:
     paths:
@@ -41,6 +47,12 @@ on:
       - 'Makefile'
       - 'src/pe/image.c'
       - 'src/runtime/guest_thread.c'
+      - 'src/runtime/guest_boundary.c'
+      - 'src/runtime/guest_boundary_import.S'
+      - 'src/runtime/exports.c'
+      - 'src/runtime/threads.c'
+      - 'include/ntnative/guest_boundary_runtime.h'
+      - 'tests/guest_boundary_import_test.c'
       - '.github/workflows/thread-supervisor.yml'
   workflow_dispatch:
 permissions:
@@ -58,6 +70,13 @@ jobs:
           cc --version | head -1
           ld -V | grep -F i386pep
           objcopy --version | head -1
+      - name: Verify Win64 import ABI and host lock gate
+        run: make check-guest-boundary
+      - name: Repeat Win64 guest/host import ABI with UBSan
+        run: |
+          make BUILD_DIR=build-guest-boundary-ubsan \
+            CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
+            check-guest-boundary
       - name: Prove authenticated runtime/parent supervisor IPC and generation revocation
         run: make -j2 check-supervisor-authenticated-ipc
       - name: Repeat authenticated supervisor IPC test with UBSan
