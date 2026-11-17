@@ -583,10 +583,10 @@ check-pe-image: $(BUILD_DIR)/pe-image-test
 
 # Real Windows PE32+ integration for the opt-in authenticated supervisor.
 # This does NOT enable ptrace control in the normal PE launcher.
-$(BUILD_DIR)/async-supervisor-fixture.exe: tests/pe/async_supervisor_fixture.c | $(BUILD_DIR)
+$(BUILD_DIR)/async-supervisor-fixture.exe: tests/pe/async_supervisor_fixture.c $(BUILD_DIR)/guest_companion.dll | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) -fno-builtin \
 	    -fno-tree-loop-distribute-patterns $(PE_FIXTURE_LDFLAGS) \
-	    -o "$@" "$<" -lntdll -lkernel32
+	    -o "$@" "$<" $(BUILD_DIR)/fixture-guest_companion.a -lntdll -lkernel32
 
 $(BUILD_DIR)/pe-async-supervisor-host: tests/pe/async_supervisor_host.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/pe/dll_graph.h src/runtime/compat.h src/runtime/sync.h include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
