@@ -1,0 +1,273 @@
+/* SPDX-License-Identifier: MIT */
+/* Opt-in trusted integration fixture. Loads a real MinGW-built PE32+,
+ * executes the guest entry on a thread with its actual GS/TEB, and
+ * supervises only that direct child's guest thread. */
+#define _GNU_SOURCE
+#include "image.h"
+#include "ntnative/guest_thread.h"
+#include "nt_thread_supervisor.h"
+#include "supervisor_pe_shared.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+struct guest_worker {
+    const struct pe_image *image;
+    struct nt_supervisor_pe_shared *shared;
+    int ready_fd;
+};
+
+static void pause_ms(long ms)
+{
+    struct timespec value = {.tv_sec = ms / 1000,
+                             .tv_nsec = (ms % 1000) * 1000000L};
+    while (nanosleep(&value, &value) && errno == EINTR) {}
+}
+
+static bool read_pe_fixture(const char *path, unsigned char **bytes, size_t *length)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    struct stat statbuf;
+    if (fstat(fd, &statbuf) || !S_ISREG(statbuf.st_mode) ||
+        statbuf.st_size <= 0 || statbuf.st_size > PE_IMAGE_MAX_BYTES) {
+        close(fd);
+        return false;
+    }
+    *length = (size_t)statbuf.st_size;
+    *bytes = malloc(*length);
+    if (!*bytes) { close(fd); return false; }
+    size_t done = 0;
+    while (done < *length) {
+        ssize_t n = read(fd, *bytes + done, *length - done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        done += (size_t)n;
+    }
+    close(fd);
+    if (done == *length) return true;
+    free(*bytes);
+    *bytes = NULL;
+    return false;
+}
+
+static void *guest_worker_main(void *arg)
+{
+    struct guest_worker *worker = arg;
+    struct nt_guest_thread state = {0};
+    if (!nt_guest_thread_enter(&state, (uintptr_t)worker->image->base))
+        _exit(53);
+    atomic_store_explicit(&worker->shared->guest_teb,
+                          (uintptr_t)nt_guest_thread_teb(), memory_order_release);
+    const uintptr_t target = (uintptr_t)worker->image->base + worker->image->entry_rva;
+    int (__attribute__((ms_abi)) *guest_entry)(struct nt_supervisor_pe_shared *);
+    memcpy(&guest_entry, &target, sizeof(guest_entry));
+    const pid_t tid = (pid_t)syscall(SYS_gettid);
+    if (write(worker->ready_fd, &tid, sizeof(tid)) != (ssize_t)sizeof(tid))
+        _exit(54);
+    close(worker->ready_fd);
+    const int result = guest_entry(worker->shared);
+    atomic_store_explicit(&worker->shared->guest_exit_code, (uint32_t)result,
+                          memory_order_release);
+    if (!nt_guest_thread_leave(&state))
+        _exit(55);
+    return NULL;
+}
+
+static _Noreturn void child_main(const char *path,
+                                 struct nt_supervisor_pe_shared *shared,
+                                 int ready_fd)
+{
+    unsigned char *file = NULL;
+    size_t length = 0;
+    if (!read_pe_fixture(path, &file, &length)) _exit(50);
+    struct pe_image image = {0};
+    char error[192] = {0};
+    const bool loaded = pe_image_load(file, length, NULL, NULL,
+                                      &image, error, sizeof(error));
+    free(file);
+    if (!loaded) {
+        fprintf(stderr, "FAIL controlled PE load: %s\n", error);
+        _exit(51);
+    }
+    if (image.code_size == 0 ||
+        image.entry_rva < image.code_rva ||
+        image.entry_rva - image.code_rva >= image.code_size ||
+        (uintptr_t)image.base > UINTPTR_MAX - image.code_rva - image.code_size)
+        _exit(52);
+    atomic_store_explicit(&shared->code_begin,
+                          (uintptr_t)image.base + image.code_rva, memory_order_release);
+    atomic_store_explicit(&shared->code_end,
+                          (uintptr_t)image.base + image.code_rva + image.code_size,
+                          memory_order_release);
+    struct guest_worker worker = {.image = &image, .shared = shared, .ready_fd = ready_fd};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, guest_worker_main, &worker))
+        _exit(56);
+    while (!atomic_load_explicit(&shared->stop_requested, memory_order_acquire))
+        atomic_fetch_add_explicit(&shared->host_ticks, 1, memory_order_relaxed);
+    if (pthread_join(thread, NULL)) _exit(57);
+    const uint32_t result = atomic_load_explicit(&shared->guest_exit_code,
+                                                  memory_order_acquire);
+    if (!atomic_load_explicit(&shared->guest_finished, memory_order_acquire))
+        _exit(58);
+    pe_image_unload(&image);
+    _exit(result == 0 ? 0 : 59);
+}
+
+static bool read_child_tid(int fd, pid_t *tid)
+{
+    struct pollfd pollfd = {.fd = fd, .events = POLLIN};
+    if (poll(&pollfd, 1, 2500) != 1 || !(pollfd.revents & POLLIN)) return false;
+    return read(fd, tid, sizeof(*tid)) == (ssize_t)sizeof(*tid);
+}
+
+static bool wait_for_guest_ticks(struct nt_supervisor_pe_shared *state, uint64_t previous)
+{
+    for (int i = 0; i < 300; ++i) {
+        if (atomic_load_explicit(&state->guest_ticks, memory_order_acquire) > previous)
+            return true;
+        pause_ms(5);
+    }
+    return false;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 2) {
+        fputs("Usage: supervisor-pe-thread-test BUILD_GENERATED_PE.exe\n", stderr);
+        return 2;
+    }
+    struct nt_supervisor_pe_shared *shared =
+        mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE,
+             MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+    if (shared == MAP_FAILED) { perror("mmap"); return 1; }
+    memset(shared, 0, sizeof(*shared));
+    int ready[2] = {-1, -1};
+    if (pipe(ready)) { perror("pipe"); munmap(shared, sizeof(*shared)); return 1; }
+    pid_t child = fork();
+    if (child < 0) { perror("fork"); close(ready[0]); close(ready[1]); return 1; }
+    if (child == 0) {
+        close(ready[0]);
+        child_main(argv[1], shared, ready[1]);
+    }
+    close(ready[1]);
+    ready[1] = -1;
+    int rc = 1, status = 0;
+    struct nt_thread_supervisor sup;
+    nt_supervisor_init(&sup);
+    pid_t tid = 0;
+    if (!read_child_tid(ready[0], &tid)) {
+        fputs("FAIL PE guest thread did not initialize\n", stderr);
+        goto cleanup;
+    }
+    close(ready[0]); ready[0] = -1;
+    if (!wait_for_guest_ticks(shared, 1000)) {
+        fputs("FAIL real PE code did not execute\n", stderr);
+        goto cleanup;
+    }
+    const uintptr_t begin = atomic_load_explicit(&shared->code_begin, memory_order_acquire);
+    const uintptr_t end = atomic_load_explicit(&shared->code_end, memory_order_acquire);
+    const uintptr_t teb = atomic_load_explicit(&shared->guest_teb, memory_order_acquire);
+    if (begin == 0 || begin >= end || teb == 0 || tid == child) {
+        fputs("FAIL invalid guest image/TEB/TID identity\n", stderr);
+        goto cleanup;
+    }
+    if (nt_supervisor_seize_child(&sup, child, tid)) {
+        if (errno == EPERM || errno == EACCES || errno == ENOTSUP || errno == ENOSYS) {
+            fprintf(stderr, "INCOMPLETE PE ptrace denied by host policy: %s\n",
+                    strerror(errno));
+            rc = 77;
+        } else perror("FAIL PE supervisor seize");
+        goto cleanup;
+    }
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        if (nt_supervisor_interrupt(&sup, 1500)) {
+            perror("FAIL PE interrupt"); goto cleanup;
+        }
+        struct user_regs_struct original, modified, restored;
+        if (nt_supervisor_get_registers(&sup, &original)) {
+            perror("FAIL PE GETREGSET"); goto cleanup;
+        }
+        if (original.rip < begin || original.rip >= end || original.rsp == 0 ||
+            original.gs_base != teb) {
+            fprintf(stderr, "FAIL stopped outside PE guest or with incorrect GS: "
+                    "rip=%llx code=[%llx,%llx) gs=%llx expected=%llx\n",
+                    (unsigned long long)original.rip, (unsigned long long)begin,
+                    (unsigned long long)end, (unsigned long long)original.gs_base,
+                    (unsigned long long)teb);
+            goto cleanup;
+        }
+        const uint64_t guest_before = atomic_load_explicit(&shared->guest_ticks,
+                                                            memory_order_acquire);
+        const uint64_t host_before = atomic_load_explicit(&shared->host_ticks,
+                                                           memory_order_acquire);
+        pause_ms(60);
+        if (atomic_load_explicit(&shared->guest_ticks, memory_order_acquire) != guest_before ||
+            atomic_load_explicit(&shared->host_ticks, memory_order_acquire) <= host_before) {
+            fputs("FAIL PE thread not independently stopped\n", stderr);
+            goto cleanup;
+        }
+        if (nt_supervisor_set_rax(&sup, UINT64_C(0x1122334455667788)) ||
+            nt_supervisor_get_registers(&sup, &modified) ||
+            modified.rax != UINT64_C(0x1122334455667788) ||
+            modified.rip != original.rip || modified.rsp != original.rsp ||
+            modified.gs_base != original.gs_base ||
+            nt_supervisor_set_rax(&sup, original.rax) ||
+            nt_supervisor_get_registers(&sup, &restored) ||
+            restored.rax != original.rax) {
+            fputs("FAIL PE context SETREGSET/restore\n", stderr);
+            goto cleanup;
+        }
+        if (nt_supervisor_continue(&sup)) { perror("FAIL PE continue"); goto cleanup; }
+        if (!wait_for_guest_ticks(shared, guest_before)) {
+            fputs("FAIL PE did not resume execution\n", stderr);
+            goto cleanup;
+        }
+    }
+    if (nt_supervisor_interrupt(&sup, 1500) ||
+        nt_supervisor_detach(&sup)) {
+        perror("FAIL PE detach"); goto cleanup;
+    }
+    atomic_store_explicit(&shared->stop_requested, 1u, memory_order_release);
+    for (int i = 0; i < 300; ++i) {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+                !atomic_load_explicit(&shared->guest_finished, memory_order_acquire)) {
+                fputs("FAIL PE guest did not return cleanly\n", stderr);
+                goto finished;
+            }
+            puts("PASS supervisor PE32+: actual guest RIP, GS/TEB, independent stop, "
+                 "AMD64 GET/SETREGSET, twice resume, detach and clean return");
+            rc = 0;
+            goto finished;
+        }
+        if (waited < 0) break;
+        pause_ms(10);
+    }
+    fputs("FAIL PE process did not exit\n", stderr);
+cleanup:
+    atomic_store_explicit(&shared->stop_requested, 1u, memory_order_release);
+    (void)kill(child, SIGKILL);
+    (void)waitpid(child, &status, 0);
+finished:
+    if (ready[0] >= 0) (void)close(ready[0]);
+    nt_supervisor_release(&sup);
+    (void)munmap(shared, sizeof(*shared));
+    return rc;
+}
