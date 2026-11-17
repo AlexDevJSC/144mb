@@ -432,3 +432,79 @@ bool nt_runtime_recover_dos83(void)
     errno = error;
     return ok;
 }
+
+/* Preflight every explicitly granted physical root, not only C:.
+ * This does NOT intercept host writes: it prevents any PE instruction from
+ * running with a *known* outstanding journal on a D:-Z:, UNC or user-folder
+ * root. The pinned fd list is captured under root_lock; WAL locking never
+ * nests inside root_lock. Duplicate grants to the same inode are checked
+ * once. */
+bool nt_runtime_recover_all_dos83(void)
+{
+    enum { MAX_GRANTS = 1 + 26 + UNC_LIMIT + NT_USER_FOLDER_COUNT };
+    int roots[MAX_GRANTS];
+    struct stat seen[MAX_GRANTS];
+    size_t count = 0;
+    int error = 0;
+    bool ok = true;
+    pthread_mutex_lock(&root_lock);
+    int grants[MAX_GRANTS];
+    size_t grant_count = 0;
+    grants[grant_count++] = drive_root;
+    for (size_t i = 0; i < 26; ++i)
+        if (drive_roots[i].active)
+            grants[grant_count++] = drive_roots[i].fd;
+    for (size_t i = 0; i < UNC_LIMIT; ++i)
+        if (unc_roots[i].active)
+            grants[grant_count++] = unc_roots[i].fd;
+    for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i)
+        if (folder_roots[i].active)
+            grants[grant_count++] = folder_roots[i].fd;
+    if (drive_root < 0) {
+        ok = false;
+        error = EACCES;
+    }
+    for (size_t i = 0; i < grant_count && ok; ++i) {
+        if (grants[i] < 0)
+            continue;
+        struct stat st;
+        if (fstat(grants[i], &st) != 0) {
+            ok = false;
+            error = errno;
+            break;
+        }
+        bool duplicate = false;
+        for (size_t j = 0; j < count; ++j)
+            if (st.st_dev == seen[j].st_dev && st.st_ino == seen[j].st_ino) {
+                duplicate = true;
+                break;
+            }
+        if (duplicate)
+            continue;
+        int fd = fcntl(grants[i], F_DUPFD_CLOEXEC, 0);
+        if (fd < 0) {
+            ok = false;
+            error = errno;
+            break;
+        }
+        roots[count] = fd;
+        seen[count] = st;
+        ++count;
+    }
+    pthread_mutex_unlock(&root_lock);
+    if (ok) {
+        pthread_mutex_lock(&dos83_lock);
+        for (size_t i = 0; i < count; ++i) {
+            if (!wal_recover_root(roots[i])) {
+                ok = false;
+                error = errno;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&dos83_lock);
+    }
+    for (size_t i = 0; i < count; ++i)
+        close(roots[i]);
+    errno = ok ? 0 : error;
+    return ok;
+}
