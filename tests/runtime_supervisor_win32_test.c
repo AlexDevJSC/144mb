@@ -10,6 +10,7 @@
 
 #include <asm/prctl.h>
 #include <sched.h>
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -70,6 +71,14 @@ static void NT_MS_ABI never_called_native_apc(void *a, void *b, void *c)
 }
 static int NT_MS_ABI test_entry(void)
 {
+    /* The controlled supervisor child MUST make Linux reject even a
+     * direct guest arch_prctl(SHSTK_ENABLE/DISABLE/LOCK/UNLOCK), without
+     * relying on CET hardware or a cooperative runtime API wrapper. */
+    for (unsigned cet = 0x5001u; cet <= 0x5004u; ++cet) {
+        errno = 0;
+        if (syscall(SYS_arch_prctl, cet, 0UL) != -1 || errno != EPERM)
+            return 38;
+    }
     atomic_store(&ticks, 0);
     atomic_store(&entered, 0);
     atomic_store(&stop, 0);
