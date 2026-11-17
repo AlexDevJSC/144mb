@@ -73,6 +73,11 @@ def run_session(lower: Path, view: Path, program: list[str]) -> int:
     fuse = root / "build" / "nt-dos83-fuse"
     landlock = root / "build" / "nt-dos83-landlock"
     # Accept both an in-tree build and an installed RPM/user-local setup.
+    sibling = Path(__file__).resolve().parent
+    if not fuse.is_file():
+        fuse = sibling / "nt-dos83-fuse"
+    if not landlock.is_file():
+        landlock = sibling / "nt-dos83-landlock"
     if not fuse.is_file():
         fuse = Path(shutil.which("nt-dos83-fuse") or str(fuse))
     if not landlock.is_file():
