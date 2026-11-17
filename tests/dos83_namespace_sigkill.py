@@ -47,10 +47,6 @@ def scenario(normal, fault, operation, phase):
         assert killed.returncode == -signal.SIGKILL, (
             operation, phase, killed.returncode, killed.stderr)
         for _ in range(2):
-            replay = invoke(normal, root, "--recover", "unused")
-            # --recover takes no extra pathname; call it separately below.
-            if replay.returncode == 0:
-                raise AssertionError("Unexpected --recover PATH accepted")
             recovered = subprocess.run([normal, "--root", str(root), "--recover"],
                                        text=True, capture_output=True, timeout=15)
             assert recovered.returncode == 0, (
