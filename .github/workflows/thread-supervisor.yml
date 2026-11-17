@@ -3,6 +3,13 @@ on:
   push:
     paths:
       - 'src/supervisor/**'
+      - 'src/runtime/thread_broker_*.c'
+      - 'src/runtime/thread_broker_*.h'
+      - 'src/runtime/process.c'
+      - 'src/runtime/compat.h'
+      - 'src/tools/pe_isolated_run.c'
+      - 'tests/supervisor_authenticated_ipc_test.c'
+      - 'tests/runtime_supervisor_launch_test.c'
       - 'tests/thread_supervisor_test.c'
       - 'tests/pe/supervisor_pe_*.c'
       - 'tests/pe/supervisor_pe_shared.h'
@@ -17,6 +24,13 @@ on:
   pull_request:
     paths:
       - 'src/supervisor/**'
+      - 'src/runtime/thread_broker_*.c'
+      - 'src/runtime/thread_broker_*.h'
+      - 'src/runtime/process.c'
+      - 'src/runtime/compat.h'
+      - 'src/tools/pe_isolated_run.c'
+      - 'tests/supervisor_authenticated_ipc_test.c'
+      - 'tests/runtime_supervisor_launch_test.c'
       - 'tests/thread_supervisor_test.c'
       - 'tests/pe/supervisor_pe_*.c'
       - 'tests/pe/supervisor_pe_shared.h'
@@ -44,6 +58,13 @@ jobs:
           cc --version | head -1
           ld -V | grep -F i386pep
           objcopy --version | head -1
+      - name: Prove authenticated runtime/parent supervisor IPC and generation revocation
+        run: make -j2 check-supervisor-authenticated-ipc
+      - name: Repeat authenticated supervisor IPC test with UBSan
+        run: |
+          make -j2 BUILD_DIR=build-supervisor-ipc-ubsan \
+            CFLAGS='-O1 -g -fsanitize=undefined -fno-sanitize-recover=all' \
+            check-supervisor-authenticated-ipc
       - name: Prove independent asynchronous stop and register roundtrip
         run: make check-thread-supervisor
       - name: Repeat with undefined-behavior sanitizer
