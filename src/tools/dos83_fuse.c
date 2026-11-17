@@ -112,6 +112,20 @@ static int view_range_access(int fd, off_t offset, size_t size, bool writing)
 }
 
 
+/* Size changes on a marked file cannot bypass existing NT byte-range locks.
+ * l_len=0 queries [0, EOF) and any lock beyond the current end. */
+static int view_truncate_lock(int fd, bool marked)
+{
+    if (!marked)
+        return 0;
+    struct flock request = {
+        .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0
+    };
+    if (fcntl(fd, F_OFD_GETLK, &request) < 0)
+        return -errno;
+    return request.l_type == F_UNLCK ? 0 : -EAGAIN;
+}
+
 static const char *relpath(const char *path)
 {
     if (!path || path[0] != '/') {
@@ -333,8 +347,8 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
             return -error;
         }
     }
-    int error = 0;
-    if (truncate && ftruncate(fd, 0) != 0)
+    int error = truncate ? view_truncate_lock(fd, marked != 0) : 0;
+    if (!error && truncate && ftruncate(fd, 0) != 0)
         error = -errno;
     if (!error && lease >= 0)
         error = view_lease_add(fd, lease);
@@ -418,15 +432,30 @@ static int fs_fsync(const char *path, int datasync, struct fuse_file_info *fi)
 
 static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 {
-    bool borrowed = fi != NULL;
+    if (size < 0)
+        return -EINVAL;
+    const bool borrowed = fi != NULL;
     int fd = borrowed ? (int)fi->fh : lower_open(path, O_WRONLY, 0);
     if (fd < 0)
         return -errno;
-    int result = ftruncate(fd, size);
-    int error = errno;
+    int lease = -1;
+    int marked = borrowed ? (view_lease_active(fd) ? 1 : 0) :
+                            nt_runtime_nt_file_marker(fd);
+    int error = marked < 0 ? -errno : 0;
+    if (!borrowed && marked > 0) {
+        lease = nt_runtime_acquire_linux_nt_lease(fd, NT_FS_WRITE,
+                                                  NT_FS_SHARE_ALL);
+        if (lease < 0)
+            error = -errno;
+    }
+    if (!error)
+        error = view_truncate_lock(fd, marked > 0);
+    if (!error && ftruncate(fd, size) != 0)
+        error = -errno;
+    nt_runtime_release_linux_nt_lease(&lease);
     if (!borrowed)
         close(fd);
-    return result == 0 ? 0 : -error;
+    return error;
 }
 
 static int fs_mkdir(const char *path, mode_t mode)
