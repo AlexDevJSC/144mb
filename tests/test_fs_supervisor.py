@@ -123,6 +123,45 @@ class FileSystemSupervisorTests(unittest.TestCase):
                 reopened = MODULE.lock_session(root / "view")
                 os.close(reopened)
 
+    def test_pe_mode_requires_exact_private_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            profile = root / "nt-native-linux" / "C:"
+            profile.mkdir(parents=True)
+            os.chmod(profile, 0o700)
+            other = root / "other"
+            other.mkdir()
+            with mock.patch.dict(os.environ, {
+                    "HOME": temp, "XDG_STATE_HOME": temp}):
+                MODULE.require_pe_profile(profile)
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.require_pe_profile(other)
+                os.chmod(profile, 0o755)
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.require_pe_profile(profile)
+                os.chmod(profile, 0o700)
+                alias = root / "alias"
+                alias.symlink_to(profile, target_is_directory=True)
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.require_pe_profile(alias)
+
+    def test_pe_mode_parser_forwards_to_session_without_running_guest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "lower").mkdir()
+            (root / "view").mkdir()
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": temp}):
+                with mock.patch.object(MODULE, "run_session",
+                                       return_value=7) as run:
+                    status = MODULE.main([
+                        "--lower", str(root / "lower"), "--view",
+                        str(root / "view"), "--pe", "--",
+                        "/tmp/safe-test.exe", "--flag"])
+                    self.assertEqual(status, 7)
+                    self.assertTrue(run.call_args.args[3])
+                    self.assertEqual(run.call_args.args[2],
+                                     ["/tmp/safe-test.exe", "--flag"])
+
     def test_unverified_mount_refusal_without_executing_guest(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
