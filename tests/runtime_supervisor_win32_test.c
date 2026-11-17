@@ -103,6 +103,12 @@ static int NT_MS_ABI test_entry(void)
     if (nt_NtSuspendThread(thread, &native_previous) != NT_STATUS_SUCCESS ||
         native_previous != 1)
         return 14;
+    /* Regression: TerminateThread is ONLY for CREATE_SUSPENDED startup
+     * gates. On a real kernel stop it must not reset the local count or
+     * strand the traced worker. Both public API forms must reject it. */
+    if (nt_TerminateThread(thread, 99) ||
+        nt_NtTerminateThread(thread, (nt_status)99) != NT_STATUS_NOT_SUPPORTED)
+        return 36;
     _Alignas(16) struct nt_context64 context = {0};
     context.flags = 0x100003u;
     if (!nt_GetThreadContext(thread, &context) ||
