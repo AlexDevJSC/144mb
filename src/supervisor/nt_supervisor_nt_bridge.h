@@ -15,6 +15,10 @@ struct nt_supervisor_nt_thread {
     struct nt_supervisor_guest_scope scope;
     uint32_t granted_access;
     uint32_t suspend_count;
+    /* Set after a register-write attempt; cleared only after exact
+     * kernel readback proves the new or rolled-back state. A failure
+     * while true requires pidfd-targeted termination, never DETACH. */
+    bool unsafe_register_state;
 };
 
 enum {
