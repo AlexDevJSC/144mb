@@ -81,6 +81,12 @@ static int NT_MS_ABI test_entry(void)
     for (int i = 0; i < 3000 && !atomic_load(&entered); ++i)
         msleep(1);
     if (!atomic_load(&entered)) return 11;
+    /* The public HANDLE rights gate must reject a limited-access alias
+     * before asking the trusted parent to interrupt the target. */
+    uintptr_t limited = nt_OpenThread(0x0008u, 0, tid); /* GET_CONTEXT only */
+    if (!limited || nt_SuspendThread(limited) != UINT32_MAX ||
+        !nt_CloseHandle(limited))
+        return 28;
     /* Special APC delivery is not yet safe for arbitrary functions,
      * and must NOT be reported as a successful normal APC queue. */
     if (nt_QueueUserAPC2(never_called_user_apc, thread, 0, 1) != 0 ||
@@ -92,7 +98,10 @@ static int NT_MS_ABI test_entry(void)
     const uint64_t frozen = atomic_load(&ticks);
     msleep(20);
     if (atomic_load(&ticks) != frozen) return 13;
-    if (nt_SuspendThread(thread) != 1) return 14;
+    uint32_t native_previous = UINT32_MAX;
+    if (nt_NtSuspendThread(thread, &native_previous) != NT_STATUS_SUCCESS ||
+        native_previous != 1)
+        return 14;
     _Alignas(16) struct nt_context64 context = {0};
     context.flags = 0x100003u;
     if (!nt_GetThreadContext(thread, &context) ||
@@ -113,7 +122,19 @@ static int NT_MS_ABI test_entry(void)
     if (!nt_SetThreadContext(thread, &integer)) return 18;
     integer.flags = 0x100003u;
     if (nt_SetThreadContext(thread, &integer)) return 19;
-    if (nt_ResumeThread(thread) != 2) return 20;
+    /* The NTSTATUS forms must also refuse CONTROL, FP/XSTATE and
+     * changes to the instruction pointer; they must never claim a
+     * successful register write for unsupported groups. */
+    if (nt_NtSetContextThread(thread, &integer) != NT_STATUS_NOT_SUPPORTED)
+        return 29;
+    _Alignas(16) struct nt_context64 invalid = {0};
+    invalid.flags = 0x100008u; /* floating-point group is not supported */
+    if (nt_NtGetContextThread(thread, &invalid) != NT_STATUS_INVALID_PARAMETER)
+        return 30;
+    native_previous = UINT32_MAX;
+    if (nt_NtResumeThread(thread, &native_previous) != NT_STATUS_SUCCESS ||
+        native_previous != 2)
+        return 20;
     msleep(20);
     if (atomic_load(&ticks) != frozen) return 21;
     if (nt_ResumeThread(thread) != 1) return 22;
@@ -149,6 +170,7 @@ int main(void)
     }
     puts("PASS real runtime Win32 entrypoints: SuspendThread nested counts, "
          "Get/SetThreadContext AMD64 integer readback, ResumeThread, "
-         "HOST fail-close, authenticated direct-parent IPC, two sessions");
+         "HANDLE rights, NTSTATUS API parity, HOST fail-close, "
+         "authenticated direct-parent IPC, two sessions");
     return 0;
 }
