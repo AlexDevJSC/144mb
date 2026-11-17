@@ -6,6 +6,7 @@
 #include "image.h"
 #include "ntnative/guest_thread.h"
 #include "nt_thread_supervisor.h"
+#include "nt_supervisor_nt_bridge.h"
 #include "supervisor_pe_shared.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -251,6 +252,71 @@ int main(int argc, char **argv)
         } else perror("FAIL PE supervisor seize");
         goto cleanup;
     }
+    /* Contract adapter for NT/Win32 suspension/context semantics:
+     * rights, nested counts, authentic CORE+INTEGER context, and
+     * verified integer register writes. This runs in the external
+     * supervisor, not yet through the PE's production import table. */
+    struct nt_supervisor_nt_thread nt = {
+        .tracer = &sup, .scope = scope,
+        .granted_access = NT_SUP_THREAD_SUSPEND_RESUME |
+                          NT_SUP_THREAD_GET_CONTEXT | NT_SUP_THREAD_SET_CONTEXT
+    };
+    uint32_t previous = 999;
+    nt.granted_access &= ~NT_SUP_THREAD_SUSPEND_RESUME;
+    if (nt_supervisor_nt_suspend_thread(&nt, &previous) != NT_STATUS_ACCESS_DENIED) {
+        fputs("FAIL NT thread-rights gate\\n", stderr);
+        goto cleanup;
+    }
+    nt.granted_access |= NT_SUP_THREAD_SUSPEND_RESUME;
+    if (nt_supervisor_nt_suspend_thread(&nt, &previous) != NT_STATUS_SUCCESS ||
+        previous != 0 ||
+        nt_supervisor_nt_suspend_thread(&nt, &previous) != NT_STATUS_SUCCESS ||
+        previous != 1 || nt.suspend_count != 2) {
+        fputs("FAIL NT nested suspension semantics\\n", stderr);
+        goto cleanup;
+    }
+    _Alignas(16) struct nt_context64 context = {0};
+    context.flags = NT_SUP_CONTEXT_AMD64 | NT_SUP_CONTEXT_CONTROL |
+                    NT_SUP_CONTEXT_INTEGER;
+    if (nt_supervisor_nt_get_context(&nt, &context) != NT_STATUS_SUCCESS ||
+        context.rip < begin || context.rip >= end || context.rsp == 0) {
+        fputs("FAIL NT AMD64 context capture\\n", stderr);
+        goto cleanup;
+    }
+    _Alignas(16) struct nt_context64 integer = context;
+    integer.flags = NT_SUP_CONTEXT_AMD64 | NT_SUP_CONTEXT_INTEGER;
+    const uint64_t original_rax = integer.rax;
+    integer.rax = UINT64_C(0xaabbccdd11223344);
+    if (nt_supervisor_nt_set_context(&nt, &integer) != NT_STATUS_SUCCESS) {
+        fputs("FAIL NT AMD64 integer context write\\n", stderr);
+        goto cleanup;
+    }
+    _Alignas(16) struct nt_context64 readback = {0};
+    readback.flags = NT_SUP_CONTEXT_AMD64 | NT_SUP_CONTEXT_INTEGER;
+    if (nt_supervisor_nt_get_context(&nt, &readback) != NT_STATUS_SUCCESS ||
+        readback.rax != integer.rax) {
+        fputs("FAIL NT AMD64 context readback\\n", stderr);
+        goto cleanup;
+    }
+    integer.rax = original_rax;
+    if (nt_supervisor_nt_set_context(&nt, &integer) != NT_STATUS_SUCCESS) {
+        fputs("FAIL NT AMD64 integer context restore\\n", stderr);
+        goto cleanup;
+    }
+    const uint64_t frozen_ticks = atomic_load(&shared->guest_ticks);
+    if (nt_supervisor_nt_resume_thread(&nt, &previous) != NT_STATUS_SUCCESS ||
+        previous != 2 || nt.suspend_count != 1) {
+        fputs("FAIL NT partial resume\\n", stderr);
+        goto cleanup;
+    }
+    pause_ms(20);
+    if (atomic_load(&shared->guest_ticks) != frozen_ticks ||
+        nt_supervisor_nt_resume_thread(&nt, &previous) != NT_STATUS_SUCCESS ||
+        previous != 1 || nt.suspend_count != 0 ||
+        !wait_for_guest_ticks(shared, frozen_ticks)) {
+        fputs("FAIL NT final resume\\n", stderr);
+        goto cleanup;
+    }
     for (int cycle = 0; cycle < 2; ++cycle) {
         struct user_regs_struct original, modified, restored;
         if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &original)) {
@@ -337,22 +403,20 @@ int main(int argc, char **argv)
      * allowed; it signals INT3, and the supervisor restores complete
      * XSTATE and original registers before returning to the interrupted
      * PE instruction. This is not general Win32 APC support. */
-    struct user_regs_struct before_apc;
     const uintptr_t apc_entry =
         atomic_load_explicit(&shared->apc_entry, memory_order_acquire);
     const uintptr_t apc_stack_top =
         atomic_load_explicit(&shared->apc_stack_top, memory_order_acquire);
     if (apc_entry < scope.code_begin || apc_entry >= scope.code_end ||
-        !apc_stack_top ||
-        nt_supervisor_interrupt_guest(&sup, &scope, 1500, &before_apc)) {
+        !apc_stack_top) {
         fputs("FAIL cannot prepare controlled guest APC\\n", stderr);
         goto cleanup;
     }
     const uint64_t guest_before_apc = atomic_load(&shared->guest_ticks);
-    if (nt_supervisor_invoke_trusted_guest_apc(
-            &sup, &scope, apc_entry, apc_stack_top,
-            (uintptr_t)shared, &shared->apc_delivered, 1500)) {
-        perror("FAIL controlled asynchronous guest APC");
+    if (nt_supervisor_nt_queue_trusted_apc(&nt, apc_entry, apc_stack_top,
+                                            (uintptr_t)shared,
+                                            &shared->apc_delivered) != NT_STATUS_SUCCESS) {
+        fputs("FAIL supervised NT special APC delivery\\n", stderr);
         goto cleanup;
     }
     if (atomic_load_explicit(&shared->apc_delivered, memory_order_acquire) != 1u ||
@@ -375,7 +439,7 @@ int main(int argc, char **argv)
             }
             puts("PASS supervisor PE32+: guest-only RIP/GS boundary, real async stop, "
                  "AMD64 GET/SETREGSET, host-mutex rejection, forged-phase rejection, "
-                 "true guest APC with XSTATE restore, resume, detach and clean return");
+                 "NT suspend/context adapter, asynchronous APC/XSTATE restore, detach and clean return");
             rc = 0;
             goto finished;
         }
