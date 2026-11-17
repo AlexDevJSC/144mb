@@ -82,8 +82,8 @@ El RPC adicional `SUP_PROBE_GUEST` aplica **simultáneamente**:
 2. Slot de ese TID presente y TEB publicado de forma coherente.
 3. Fase `GUEST` estable antes y después de leer `GETREGSET`,
    con la generación de transición sin cambiar.
-4. `RIP` dentro de la sección ejecutable del **PE principal
-   validado por el padre** y `GS_BASE == TEB`, `RSP != 0`.
+4. `RIP` dentro del PE principal o de un rango de DLL **pinned y
+   autorizado por el padre antes del fork**, y `GS_BASE == TEB`, `RSP != 0`.
 
 Ante un rechazo la parada temporal se reanuda antes de responder,
 y el supervisor se desadjunta. El diagnóstico está desactivado por
@@ -144,9 +144,10 @@ creado una nueva vinculación de TEB. El estado conservador evita
 inventar un unwinding de las pilas Linux y Windows; no constituye
 soporte universal de C++ exceptions o VEH sobre callbacks arbitrarios.
 
-Los rangos del supervisor permanecen ligados al PE principal
-verificado antes del `fork`. Las direcciones de DLL invitadas sin
-una inscripción confiable del padre y las páginas generadas
+Los rangos del supervisor permanecen ligados al PE principal y a las
+DLL importadas y pinned cuyo manifiesto se capturó antes del `fork`.
+Las direcciones de DLL invitadas sin esa inscripción confiable del
+padre y las páginas generadas
 dinámicamente, aunque sean `PROT_READ|PROT_EXEC`, **NO** se
 incluyen automáticamente. No es suficiente que la fase publicada
 sea `GUEST`: `PTRACE_GETREGSET` debe mostrar RIP dentro de la
