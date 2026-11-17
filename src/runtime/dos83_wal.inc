@@ -151,11 +151,15 @@ static bool wal_open(int root, struct dos83_wal *wal)
         return false;
     }
     /* Persist the directory entry before a new WAL can authorize changes. */
-    if (fsync(wal->directory) != 0) {
+    if (fsync(wal->directory) != 0 ||
+        !wal_sync_pinned(root, true)) {
         int error = errno;
         wal_close(wal);
         return wal_poison(error);
     }
+    /* The private registry itself may have been created by mkdirat:
+     * parent-root fsync ensures its directory ENTRY is durable, while
+     * fsync(wal->directory) above ensures the WAL filename is durable. */
     /* Also fsync the WAL inode on EVERY new process/admission, even when
      * empty: a previous process may have observed a failed clear fsync.
      * A current page-cache size of zero alone is not durable evidence. */
