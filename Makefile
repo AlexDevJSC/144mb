@@ -398,6 +398,12 @@ check-fs4-acceptance-gates:
 
 check: check-fs-backing-audit check-fs4-acceptance-gates
 
+.PHONY: check-fs4-storage-service
+check-fs4-storage-service:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_nt_storage_service.py'
+
+check: check-fs4-storage-service
+
 $(BUILD_DIR)/fs4-ntfs-probe: src/tools/fs4_ntfs_probe.c $(RUNTIME_OBJECTS) src/runtime/winfile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
@@ -932,3 +938,17 @@ install: $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/pe-isolated-run $(BUILD_DIR)/
 ifneq ($(strip $(FUSE3_LIBS)),)
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-fuse" "$(DESTDIR)$(BINDIR)/nt-dos83-fuse"
 endif
+
+# Explicit opt-in installer. Does NOT create a service account, migrate
+# backing, modify SELinux, enable units or grant client group membership.
+.PHONY: install-fs4-storage-service
+install-fs4-storage-service: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-mediator
+	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-fuse" "$(DESTDIR)$(PREFIX)/bin/nt-dos83-fuse"
+	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-mediator" "$(DESTDIR)$(PREFIX)/bin/nt-dos83-mediator"
+	install -D -m 0755 scripts/nt-storage-service.py "$(DESTDIR)$(PREFIX)/libexec/ntnative-storage-service"
+	install -D -m 0755 scripts/nt-storage-control.py "$(DESTDIR)$(PREFIX)/bin/nt-storage-control"
+	sed 's|@NT_PREFIX@|$(PREFIX)|g' packaging/systemd/ntnative-storage.service > "$(BUILD_DIR)/ntnative-storage.service"
+	install -D -m 0644 "$(BUILD_DIR)/ntnative-storage.service" "$(DESTDIR)/usr/lib/systemd/system/ntnative-storage.service"
+	install -D -m 0644 packaging/systemd/ntnative-storage.socket "$(DESTDIR)/usr/lib/systemd/system/ntnative-storage.socket"
+	install -D -m 0644 packaging/systemd/ntnative-storage.sysusers "$(DESTDIR)/usr/lib/sysusers.d/ntnative-storage.conf"
+	@echo 'INSTALLED only: administrator must provision dedicated UID, FUSE allow_other, and /etc/ntnative-storage.conf before enabling'
