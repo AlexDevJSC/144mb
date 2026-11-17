@@ -474,6 +474,13 @@ check-dos83-pending-delete-durability: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DI
 
 check: check-dos83-pending-delete-durability
 
+.PHONY: check-dos83-namespace-durability
+check-dos83-namespace-durability: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_namespace_sigkill.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-namespace-durability
+
 .PHONY: check-dos83-all-grants
 check-dos83-all-grants: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_all_grants.py \
