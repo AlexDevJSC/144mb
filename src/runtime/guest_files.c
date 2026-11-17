@@ -613,8 +613,23 @@ static void dos83_test_crash(const char *phase)
         _exit(137);
     }
 }
+/* Test-only fsync failure, once per process. Production has NO environment
+ * controlled storage failure path. This specifically exercises the unsafe
+ * truncate-success/fsync-error window on a WAL that appears empty. */
+static bool dos83_test_io_error(const char *phase)
+{
+    static _Atomic bool injected;
+    const char *requested = getenv("NT_DOS83_TEST_IO_ERROR");
+    if (requested && strcmp(requested, phase) == 0 &&
+        !atomic_exchange(&injected, true)) {
+        errno = EIO;
+        return true;
+    }
+    return false;
+}
 #else
 #define dos83_test_crash(phase) ((void)0)
+#define dos83_test_io_error(phase) (false)
 #endif
 
 #include "dos83_alias.inc"
