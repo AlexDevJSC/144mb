@@ -50,6 +50,9 @@ if [[ -n "$reference" && ! -r "$reference" ]]; then
     echo 'INCOMPLETE: missing Windows reference' >&2
     exit 3
 fi
+if [[ -n "$reference" ]]; then
+    python3 "$(dirname "$0")/fs4_windows_reference_validate.py" "$reference" || exit 3
+fi
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo"
 if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
