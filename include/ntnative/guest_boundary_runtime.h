@@ -81,6 +81,11 @@ bool nt_guest_boundary_signal_guest_phase(void);
 /* Async-signal-safe read of immutable preflight PE .text grants (including
  * pinned startup DLLs); JIT and LoadLibrary-after-start are denied. */
 bool nt_guest_boundary_signal_guest_code(uintptr_t pc);
+/* Hardware VEH/SEH dispatch may temporarily leave a guest-only RIP,
+ * then reauthorise it ONLY if no host import frame was abandoned.
+ * These are internal runtime calls, never guest-facing APIs. */
+bool nt_guest_boundary_begin_guest_hardware_seh(uintptr_t fault_pc);
+bool nt_guest_boundary_finish_guest_hardware_seh(uintptr_t resume_pc);
 /* Any nonlocal exception/longjmp that may bypass an import epilogue
  * permanently disables asynchronous stops on that TID until teardown.
  * The runtime must NOT attempt to reconstruct abandoned host locks or
