@@ -46,4 +46,11 @@ nt_status nt_supervisor_nt_queue_trusted_apc(struct nt_supervisor_nt_thread *sta
                                              uintptr_t entry, uintptr_t stack_top,
                                              uintptr_t argument,
                                              const _Atomic uint32_t *completion);
+/* Supervisor-owned guard only: cancellation token or a pinned IPC socket
+ * whose peer disconnects. Does not make SPECIAL_USER_APC public. */
+nt_status nt_supervisor_nt_queue_trusted_apc_guarded(
+    struct nt_supervisor_nt_thread *state,
+    uintptr_t entry, uintptr_t stack_top, uintptr_t argument,
+    const _Atomic uint32_t *completion,
+    const _Atomic uint32_t *cancel, int peer_fd);
 #endif
