@@ -27,9 +27,15 @@
 static uintptr_t resolve(const char *module, const char *name, uint16_t ordinal, void *graph)
 {
     const uintptr_t address = pe_dll_graph_resolve(module, name, ordinal, graph);
-    if (address == 0)
-        fprintf(stderr, "Unresolved: %s!%s%u\n", module, name ? name : "#",
-                name ? 0 : ordinal);
+    if (address == 0) {
+        /* Never append a spurious '0' to a named import: it obscures
+         * whether the PE actually contains an unexpected export name.
+         * Preserve the ordinal-only diagnostic as module!#<number>. */
+        if (name != NULL)
+            fprintf(stderr, "Unresolved: %s!%s\n", module, name);
+        else
+            fprintf(stderr, "Unresolved: %s!#%u\n", module, (unsigned)ordinal);
+    }
     return address;
 }
 
