@@ -213,7 +213,8 @@ static bool wait_for_value(const _Atomic uint32_t *value, uint32_t expected)
 
 #if defined(NT_SUP_TEST_APC_CANCEL) || \
     defined(NT_SUP_TEST_APC_DISCONNECT) || \
-    defined(NT_SUP_TEST_APC_SIGNAL)
+    defined(NT_SUP_TEST_APC_SIGNAL) || \
+    defined(NT_SUP_TEST_APC_SPOOF_ILL)
 /* The observer is a separate Linux thread. It never performs ptrace.
  * It waits until the *real PE callback* is executing on its alternate
  * stack, then cancels, disconnects or sends a directed Linux signal. */
@@ -234,8 +235,15 @@ static void *apc_disturbance_main(void *data)
                                   memory_order_release);
 #elif defined(NT_SUP_TEST_APC_DISCONNECT)
             if (shutdown(task->peer_fd, SHUT_RDWR) != 0) return NULL;
-#elif defined(NT_SUP_TEST_APC_SIGNAL)
-            if (syscall(SYS_tgkill, task->child, task->tid, SIGUSR1) != 0)
+#elif defined(NT_SUP_TEST_APC_SIGNAL) || defined(NT_SUP_TEST_APC_SPOOF_ILL)
+            /* One genuine SIGUSR1 interruption and one user-spoofed
+             * SIGILL. The latter must NEVER become a CPU exception. */
+#ifdef NT_SUP_TEST_APC_SPOOF_ILL
+            const int outgoing = SIGILL;
+#else
+            const int outgoing = SIGUSR1;
+#endif
+            if (syscall(SYS_tgkill, task->child, task->tid, outgoing) != 0)
                 return NULL;
 #endif
             atomic_store_explicit(&task->triggered, 1u, memory_order_release);
@@ -471,7 +479,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 #if defined(NT_SUP_TEST_APC_CANCEL) || defined(NT_SUP_TEST_APC_DISCONNECT) || \
-    defined(NT_SUP_TEST_APC_SIGNAL)
+    defined(NT_SUP_TEST_APC_SIGNAL) || defined(NT_SUP_TEST_APC_SPOOF_ILL)
     atomic_store_explicit(&shared->apc_hold, 1u, memory_order_release);
     atomic_store_explicit(&shared->apc_mode, 1u, memory_order_release);
     struct apc_disturbance disturbance = {
@@ -492,6 +500,10 @@ int main(int argc, char **argv)
     }
 #elif defined(NT_SUP_TEST_APC_EXCEPTION)
     atomic_store_explicit(&shared->apc_mode, 2u, memory_order_release);
+#elif defined(NT_SUP_TEST_APC_EXCEPTION_FPE)
+    atomic_store_explicit(&shared->apc_mode, 3u, memory_order_release);
+#elif defined(NT_SUP_TEST_APC_EXCEPTION_SEGV)
+    atomic_store_explicit(&shared->apc_mode, 4u, memory_order_release);
 #elif defined(NT_SUP_TEST_APC_PRE_CANCEL)
     atomic_store_explicit(&shared->apc_cancel, 1u, memory_order_release);
 #elif !defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) && \
@@ -515,7 +527,7 @@ int main(int argc, char **argv)
             &shared->apc_delivered, apc_cancel, apc_peer_fd);
 
 #if defined(NT_SUP_TEST_APC_CANCEL) || defined(NT_SUP_TEST_APC_DISCONNECT) || \
-    defined(NT_SUP_TEST_APC_SIGNAL)
+    defined(NT_SUP_TEST_APC_SIGNAL) || defined(NT_SUP_TEST_APC_SPOOF_ILL)
     if (pthread_join(disturbance_thread, NULL) != 0 ||
         atomic_load_explicit(&disturbance.triggered,
                              memory_order_acquire) != 1u) {
@@ -560,7 +572,10 @@ int main(int argc, char **argv)
     defined(NT_SUP_TEST_APC_CANCEL) || \
     defined(NT_SUP_TEST_APC_DISCONNECT) || \
     defined(NT_SUP_TEST_APC_SIGNAL) || \
-    defined(NT_SUP_TEST_APC_EXCEPTION)
+    defined(NT_SUP_TEST_APC_SPOOF_ILL) || \
+    defined(NT_SUP_TEST_APC_EXCEPTION) || \
+    defined(NT_SUP_TEST_APC_EXCEPTION_FPE) || \
+    defined(NT_SUP_TEST_APC_EXCEPTION_SEGV)
     /* Any failure AFTER the injected PC/RSP is active is irreversible.
      * Do not continue or detach; SIGKILL must target the pidfd child. */
     errno = 0;
@@ -583,6 +598,40 @@ int main(int argc, char **argv)
         atomic_load_explicit(&shared->apc_delivered,
                              memory_order_acquire) != 0u) {
         fputs("FAIL APC disturbance did not occur during PE callback\n", stderr);
+        goto cleanup;
+    }
+#endif
+#if defined(NT_SUP_TEST_APC_EXCEPTION) || \
+    defined(NT_SUP_TEST_APC_EXCEPTION_FPE) || \
+    defined(NT_SUP_TEST_APC_EXCEPTION_SEGV)
+    /* ptrace GETSIGINFO must report a *kernel-origin* CPU signal in
+     * pinned PE code with the correct NT mapping. This is evidence
+     * for fail-closed diagnosis, NOT a guest SEH continuation. */
+#ifdef NT_SUP_TEST_APC_EXCEPTION
+    const int wanted_linux_signal = SIGILL;
+    const uint32_t wanted_nt_status = UINT32_C(0xc000001d);
+#elif defined(NT_SUP_TEST_APC_EXCEPTION_FPE)
+    const int wanted_linux_signal = SIGFPE;
+    const uint32_t wanted_nt_status = UINT32_C(0xc0000094);
+#else
+    const int wanted_linux_signal = SIGSEGV;
+    const uint32_t wanted_nt_status = UINT32_C(0xc0000005);
+#endif
+    const struct nt_supervisor_guest_fault fault = sup.last_guest_fault;
+    if (!fault.valid || fault.linux_signal != wanted_linux_signal ||
+        fault.nt_status != wanted_nt_status || fault.linux_code <= 0 ||
+        fault.instruction < begin || fault.instruction >= end ||
+        (wanted_linux_signal == SIGSEGV &&
+         (fault.fault_address != 0 || fault.information_count != 0))) {
+        fprintf(stderr, "FAIL CPU fault not kernel-authenticated as NT "
+                "exception: sig=%d code=%d status=%08x rip=%llx\\n",
+                fault.linux_signal, fault.linux_code, fault.nt_status,
+                (unsigned long long)fault.instruction);
+        goto cleanup;
+    }
+#elif defined(NT_SUP_TEST_APC_SIGNAL) || defined(NT_SUP_TEST_APC_SPOOF_ILL)
+    if (sup.last_guest_fault.valid) {
+        fputs("FAIL tgkill forged a kernel-origin guest CPU fault\n", stderr);
         goto cleanup;
     }
 #endif
