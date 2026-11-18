@@ -149,13 +149,53 @@ int nt_supervisor_get_registers(struct nt_thread_supervisor *sup, struct user_re
 int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
 {
     if (sup && sup->compromised) { errno = EPERM; return -1; }
-    struct user_regs_struct regs;
-    if (nt_supervisor_get_registers(sup, &regs)) return -1;
-    regs.rax = value;
-    struct iovec vec = {.iov_base = &regs, .iov_len = sizeof(regs)};
-    if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_PRSTATUS, &vec) == -1) return -1;
-    if (vec.iov_len != sizeof(regs)) { errno = EPROTO; return -1; }
-    return 0;
+    struct user_regs_struct original;
+    if (nt_supervisor_get_registers(sup, &original)) return -1;
+    struct user_regs_struct desired = original;
+    desired.rax = value;
+
+    /* A successful SETREGSET syscall is not proof of the requested state.
+     * The direct fixture helper must meet the same readback/rollback rule
+     * as NtSetContextThread. Never permit CONT/DETACH on uncertain GPRs. */
+    struct iovec vec = {.iov_base = &desired, .iov_len = sizeof(desired)};
+    const int write_result =
+        ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_PRSTATUS, &vec);
+    const int write_errno = write_result == -1 ? errno : EPROTO;
+    struct user_regs_struct verified = {0};
+    const bool readback = write_result == 0 && vec.iov_len == sizeof(desired) &&
+                          nt_supervisor_get_registers(sup, &verified) == 0;
+    const int read_errno = readback ? EPROTO : errno;
+#ifdef NT_SUP_TEST_FORCE_RAX_VERIFY_MISMATCH
+    /* Test-only negative path, never controlled by the guest or environment. */
+    extern _Atomic uint32_t nt_sup_test_rax_verify_corrupted;
+    if (readback) {
+        verified.rax ^= UINT64_C(1);
+        atomic_fetch_add_explicit(&nt_sup_test_rax_verify_corrupted, 1,
+                                  memory_order_relaxed);
+    }
+#endif
+    if (readback && memcmp(&verified, &desired, sizeof(desired)) == 0)
+        return 0;
+
+    /* SETREGSET can fail after an ambiguous partial update. Restore the
+     * entire kernel-supplied GPR snapshot while the tracee remains stopped. */
+#ifndef NT_SUP_TEST_FORCE_RAX_ROLLBACK_FAILURE
+    struct iovec undo = {.iov_base = &original, .iov_len = sizeof(original)};
+    if (ptrace(PTRACE_SETREGSET, sup->tid,
+               (void *)(uintptr_t)NT_PRSTATUS, &undo) == 0 &&
+        undo.iov_len == sizeof(original) &&
+        nt_supervisor_get_registers(sup, &verified) == 0 &&
+        memcmp(&verified, &original, sizeof(original)) == 0) {
+        errno = write_result == -1 ? write_errno :
+                (readback ? EPROTO : read_errno);
+        return -1;
+    }
+#endif
+    /* A failed rollback is irreversible until the pidfd proves death.
+     * Mark quarantine before requesting SIGKILL of this exact direct child. */
+    (void)nt_supervisor_terminate_compromised_child(sup);
+    errno = EIO;
+    return -1;
 }
 
 int nt_supervisor_continue(struct nt_thread_supervisor *sup)
