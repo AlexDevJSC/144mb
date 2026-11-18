@@ -88,5 +88,14 @@ bool nt_guest_boundary_nonlocal_poisoned(void);
 uintptr_t nt_guest_boundary_import_enter(uintptr_t target, uintptr_t return_pc);
 uintptr_t nt_guest_boundary_import_leave(void);
 void nt_guest_boundary_import_entry(void); /* written in x86-64 assembly */
+void nt_guest_boundary_import_return(void); /* synthetic Win64 import return */
+
+/* Only the naked RaiseException/RtlUnwind entrypoints can legitimately
+ * bypass the reviewed import-return stub. Given the captured synthetic
+ * return, recover the immutable PE caller address only for ONE
+ * non-nested host import, verified in the pre-fork image/.text manifest.
+ * Returns the unchanged RIP if verification fails. No host stack unlock
+ * or general ELF unwind is implied. */
+uintptr_t nt_guest_boundary_seh_caller_pc(uintptr_t recorded_pc);
 
 #endif
