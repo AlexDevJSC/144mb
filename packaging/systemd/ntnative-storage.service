@@ -21,7 +21,7 @@ UMask=0077
 # until mount behaviour has been proven on the target Fedora image.
 ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/ntnative-storage/C
 ExecStartPre=/usr/bin/install -d -m 0755 /run/ntnative-storage/view
-ExecStart=/usr/bin/python3 @NT_PREFIX@/libexec/ntnative-storage-service --backing /var/lib/ntnative-storage/C --view /run/ntnative-storage/view --client-uid ${NT_STORAGE_CLIENT_UID} --client-gid ${NT_STORAGE_CLIENT_GID} --fuse @NT_PREFIX@/bin/nt-dos83-fuse --mediator @NT_PREFIX@/bin/nt-dos83-mediator --unmount /usr/bin/fusermount3
+ExecStart=/usr/bin/python3 @NT_PREFIX@/libexec/ntnative-storage-service --backing /var/lib/ntnative-storage/C --view /run/ntnative-storage/view --client-uid ${NT_STORAGE_CLIENT_UID} --client-gid ${NT_STORAGE_CLIENT_GID} --fuse @NT_PREFIX@/bin/nt-dos83-fuse --mediator @NT_PREFIX@/bin/nt-dos83-mediator --handle-broker @NT_PREFIX@/bin/nt-storage-handle-broker --unmount /usr/bin/fusermount3
 Restart=on-failure
 RestartSec=2
 KillMode=control-group

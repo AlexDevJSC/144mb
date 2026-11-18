@@ -509,6 +509,17 @@ check-fs4-readonly-session:
 
 check: check-fs4-readonly-session
 
+# Trusted Win32 HANDLE service worker, no physical backing FD passed to PE.
+$(BUILD_DIR)/nt-storage-handle-broker: src/tools/nt_storage_handle_broker.c $(RUNTIME_OBJECTS) src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-fs4-handle-broker
+check-fs4-handle-broker: $(BUILD_DIR)/nt-storage-handle-broker
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_handle_broker_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
+
+check: check-fs4-handle-broker
+
 .PHONY: check-fs4-service-supervisor
 check-fs4-service-supervisor:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_service_supervisor.py'
@@ -1119,9 +1130,10 @@ endif
 # Explicit opt-in installer. Does NOT create a service account, migrate
 # backing, modify SELinux, enable units or grant client group membership.
 .PHONY: install-fs4-storage-service
-install-fs4-storage-service: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-mediator
+install-fs4-storage-service: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-storage-handle-broker
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-fuse" "$(DESTDIR)$(PREFIX)/bin/nt-dos83-fuse"
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-mediator" "$(DESTDIR)$(PREFIX)/bin/nt-dos83-mediator"
+	install -D -m 0755 "$(BUILD_DIR)/nt-storage-handle-broker" "$(DESTDIR)$(PREFIX)/bin/nt-storage-handle-broker"
 	install -D -m 0755 scripts/nt-storage-service.py "$(DESTDIR)$(PREFIX)/libexec/ntnative-storage-service"
 	install -D -m 0644 scripts/fs4_readonly_session.py "$(DESTDIR)$(PREFIX)/libexec/fs4_readonly_session.py"
 	install -D -m 0755 scripts/nt-storage-control.py "$(DESTDIR)$(PREFIX)/bin/nt-storage-control"

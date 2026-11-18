@@ -74,3 +74,29 @@ D. Matriz bajo apagados inesperados, recuperación, multicliente,
 regresión Windows y denegación del UID host no autorizado.
 
 No procede declarar terminado el aislamiento sin todos esos hitos.
+
+## Broker Win32 HANDLE v3 (18-11-2026)
+
+Nuevo proceso C de confianza `nt-storage-handle-broker` bajo el UID
+`ntnative-storage`: recibe el socket autenticado por SO_PEERCRED en el
+servicio y ejecuta las APIs Win32 reales `nt_CreateFileW`, `nt_ReadFile`,
+`nt_WriteFile`, `nt_CloseHandle`, `nt_DeleteFileW`, `nt_MoveFileExW`,
+`nt_SetEndOfFile` y `nt_LockFile/nt_UnlockFile`. De esta forma conserva
+el mismo sistema físico de leases OFD, delete-pending y WAL del runtime;
+**no** hay ficheros temporales ni envío de FD de backing por SCM_RIGHTS.
+
+El contrato binario fijo v3 se prueba con sockets Unix de tipo SEQPACKET.
+Cada conexión tiene nonce de sesión, como máximo 32 capacidades de handle
+aleatorias, 256 peticiones, 2048 bytes por E/S y 120 segundos de vida.
+Una petición con nonce incorrecto revoca la conexión. Las rutas C:/ se
+validan y el backend mantiene la restricción de raíz por FD del runtime.
+En producción consulta la vista FUSE viva en cada operación y el servicio
+mata trabajadores al detenerse. Los binarios confiables exigen propiedad
+root y no ser escribibles por clientes.
+
+**Desactivado por defecto:** requiere la opción explícita de administrador
+`NT_STORAGE_EXPERIMENTAL_HANDLES=1`. El PE aún **no utiliza** ese protocolo:
+ni el supervisor `--service-socket --pe` ni Bubblewrap levantan un PE usando
+esta vía. Integrar el adaptador PE, ampliar funciones (atributos, directory
+enumeration, reparse y ACL), probar 2/4 procesos y Fedora SELinux Enforcing
+son requisitos previos para habilitar cualquier modo PE generalista.
