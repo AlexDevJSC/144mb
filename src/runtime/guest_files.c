@@ -5413,6 +5413,7 @@ struct async_request {
     pid_t owner_pid, owner_tid;
     uintptr_t completion_port, completion_key;
     int fd;
+    uintptr_t remote_handle; /* duplicated service capability pins I/O lifetime */
     void *buffer;
     uint32_t size;
     off_t offset;
@@ -5462,18 +5463,31 @@ static void *async_worker_loop(void *argument)
 
         ssize_t result = -1;
         int error = 0;
-        if (!range_unlocked(job.fd, (uint64_t)job.offset, job.size, job.write_access)) {
-            error = errno;
+        if (job.remote_handle) {
+            uint32_t transferred = 0;
+            const bool success = nt_fs4_remote_io_at(job.remote_handle,
+                        job.buffer, job.size, &transferred, job.write_access,
+                        (uint64_t)job.offset) != 0;
+            error = success ? 0 : (int)nt_GetLastError();
+            result = success ? (ssize_t)transferred : -1;
+            /* The source guest may have closed its HANDLE, but this
+             * independently duplicated capability keeps its OFD lease. */
+            (void)nt_fs4_remote_close(job.remote_handle);
         } else {
-            do {
-                result = job.write_access ?
-                    pwrite(job.fd, job.buffer, job.size, job.offset) :
-                    pread(job.fd, job.buffer, job.size, job.offset);
-            } while (result < 0 && errno == EINTR);
-            error = errno;
+            if (!range_unlocked(job.fd, (uint64_t)job.offset, job.size, job.write_access)) {
+                error = errno;
+            } else {
+                do {
+                    result = job.write_access ?
+                        pwrite(job.fd, job.buffer, job.size, job.offset) :
+                        pread(job.fd, job.buffer, job.size, job.offset);
+                } while (result < 0 && errno == EINTR);
+                error = errno;
+            }
+            close(job.fd);
         }
-        close(job.fd);
         const uint32_t status = result >= 0 ? NT_ERROR_SUCCESS :
+            job.remote_handle ? (uint32_t)error :
             error == EAGAIN ? NT_ERROR_LOCK_VIOLATION : path_error(error, false);
         pthread_mutex_lock(&async_lock);
         __atomic_store_n(&job.completion->internal_high,
