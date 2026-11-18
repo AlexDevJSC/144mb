@@ -850,7 +850,69 @@ void nt_runtime_end_namespace_mutation(int guard)
         close(guard);
 }
 
-bool nt_runtime_refresh_dos83_path(const char *input)
+/* A dedicated-UID service uses a second, PRIVATE admission gate outside
+ * the WAL, so cooperative FUSE and PE opens have the same lock order:
+ * admission -> WAL -> per-inode FILE_SHARE. This gate never escapes through
+ * FUSE or an SCM_RIGHTS descriptor. */
+int nt_runtime_begin_service_admission(void)
+{
+    const char *relative = "C:/";
+    int root = duplicate_root(&relative);
+    if (root < 0)
+        return -1;
+    static const char private_name[] = ":ntnative-file-leases";
+    if (mkdirat(root, private_name, 0700) != 0 && errno != EEXIST) {
+        const int error=errno;
+        close(root);
+        errno=error;
+        return -1;
+    }
+    int dir = openat(root, private_name,
+                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    const int opened_error=errno;
+    close(root);
+    if (dir<0) {
+        errno=opened_error;
+        return -1;
+    }
+    struct stat meta;
+    if (fstat(dir,&meta)!=0 || !S_ISDIR(meta.st_mode) ||
+        meta.st_uid!=geteuid() || (meta.st_mode & 077u)) {
+        close(dir);
+        errno=EACCES;
+        return -1;
+    }
+    int fd=openat(dir,"fs4-service-admission-v1.lock",
+                  O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,0600);
+    const int error=errno;
+    close(dir);
+    if(fd<0) {
+        errno=error;
+        return -1;
+    }
+    if(fstat(fd,&meta)!=0 || !S_ISREG(meta.st_mode) ||
+       meta.st_uid!=geteuid() || (meta.st_mode & 077u)) {
+        close(fd);
+        errno=EACCES;
+        return -1;
+    }
+    int acquired;
+    do { acquired=flock(fd,LOCK_EX); } while(acquired<0 && errno==EINTR);
+    if(acquired<0) {
+        const int cause=errno;
+        close(fd);
+        errno=cause;
+        return -1;
+    }
+    return fd;
+}
+void nt_runtime_end_service_admission(int guard)
+{
+    if (guard>=0)
+        close(guard);
+}
+
+static bool refresh_dos83_alias_internal(const char *input,bool wal_already_locked)
 {
     char normalized[PATH_MAX], leaf[NAME_MAX + 1], alias[14];
     if (!guest_path(input, normalized))
@@ -859,7 +921,7 @@ bool nt_runtime_refresh_dos83_path(const char *input)
     int root = duplicate_root(&relative);
     if (root < 0)
         return false;
-    if (!wal_namespace_ready(root)) {
+    if (!wal_already_locked && !wal_namespace_ready(root)) {
         const int cause = errno;
         close(root);
         errno = cause;
@@ -877,6 +939,15 @@ bool nt_runtime_refresh_dos83_path(const char *input)
     close(parent);
     errno = saved;
     return ok;
+}
+
+bool nt_runtime_refresh_dos83_path(const char *input)
+{
+    return refresh_dos83_alias_internal(input,false);
+}
+bool nt_runtime_refresh_dos83_path_guarded(const char *input)
+{
+    return refresh_dos83_alias_internal(input,true);
 }
 
 bool nt_runtime_reconcile_host_rename(const char *old_path,

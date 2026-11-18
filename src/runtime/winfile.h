@@ -26,6 +26,12 @@ bool nt_runtime_namespace_mutation_admissible(const char *path);
  * It does NOT journal an interrupted direct create/mkdir/truncate. */
 int nt_runtime_begin_namespace_mutation(const char *path);
 void nt_runtime_end_namespace_mutation(int guard);
+/* Dedicated-UID coarse cross-process admission gate. Hold before acquiring
+ * the WAL/FILE_SHARE locks; only the service and FUSE worker call this. */
+int nt_runtime_begin_service_admission(void);
+void nt_runtime_end_service_admission(int guard);
+/* Caller MUST already own the WAL lock for the same root. */
+bool nt_runtime_refresh_dos83_path_guarded(const char *path);
 bool nt_runtime_refresh_dos83_path(const char *path);
 bool nt_runtime_reconcile_host_rename(const char *old_path, const char *new_path);
 /* Host-only recovery. Replays only unambiguous, checksummed pending C:
