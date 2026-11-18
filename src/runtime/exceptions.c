@@ -670,6 +670,13 @@ static _Noreturn void dispatch_exception_common(
     }
     complete_software_capture(origin);
     const bool ready = prepare_software_stack();
+    if (!hardware && code == UINT32_C(0xe14400af))
+        (void)fprintf(stderr, "APC-SEH trace: guest_pc=0x%llx sp=0x%llx reconciled=%u ready=%u stack=0x%llx..0x%llx image=0x%llx..0x%llx\\n",
+            (unsigned long long)origin->rip, (unsigned long long)origin->rsp,
+            (unsigned)reconciled_import, (unsigned)ready,
+            (unsigned long long)stack_low, (unsigned long long)stack_high,
+            (unsigned long long)(image.base + image.code_begin),
+            (unsigned long long)(image.base + image.code_end));
     struct nt_exception_record record = {.code = code, .flags = flags & SOFTWARE_NONCONTINUABLE,
                                          .address = (void *)(uintptr_t)origin->rip};
     if (arguments) {
@@ -699,8 +706,16 @@ static _Noreturn void dispatch_exception_common(
         for (size_t i = 0; i < SOFTWARE_MAX_FRAMES; ++i) {
             struct nt_dispatcher_context dispatch;
             if (!software_frame(SOFTWARE_EHANDLER, &next, &dispatch,
-                                hardware && i == 0))
+                                hardware && i == 0)) {
+                if (!hardware && code == UINT32_C(0xe14400af))
+                    (void)fprintf(stderr, "APC-SEH frame denied: index=%zu pc=0x%llx rsp=0x%llx\\n",
+                        i, (unsigned long long)next.rip, (unsigned long long)next.rsp);
                 break;
+            }
+            if (!hardware && code == UINT32_C(0xe14400af))
+                (void)fprintf(stderr, "APC-SEH frame=%zu caller=0x%llx handler=%p unwind=%p rsp=0x%llx\\n",
+                    i, (unsigned long long)dispatch.pc, dispatch.handler,
+                    (void *)dispatch.function, (unsigned long long)dispatch.frame);
             if (dispatch.handler && invoke_software_handler(&dispatch, &record, origin) == SEH_CONTINUE_EXECUTION) {
                 if (record.flags & SOFTWARE_NONCONTINUABLE)
                     software_failure(STATUS_NONCONTINUABLE);
