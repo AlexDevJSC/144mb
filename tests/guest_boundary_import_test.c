@@ -211,7 +211,7 @@ int main(void)
     void (*epilogue)(void) = nt_guest_boundary_import_return;
     uintptr_t synthetic = 0;
     memcpy(&synthetic, &epilogue, sizeof(synthetic));
-    if (nt_guest_boundary_seh_caller_pc(synthetic_seh) != synthetic_seh)
+    if (nt_guest_boundary_seh_caller_pc(synthetic) != synthetic)
         return 21;
     nt_guest_boundary_guest_enter();
     const uintptr_t approved = 0x400100u;
@@ -267,7 +267,7 @@ int main(void)
         return 23;
     (void)nt_guest_boundary_import_enter(0x100u, 0x400700u);
     (void)nt_guest_boundary_import_enter(0x101u, 0x400800u);
-    if (nt_guest_boundary_seh_caller_pc(synthetic) != synthetic ||
+    if (nt_guest_boundary_seh_caller_pc(synthetic_seh) != synthetic_seh ||
         nt_guest_boundary_begin_guest_software_import_seh(0x400700u))
         return 24;
     (void)nt_guest_boundary_import_leave();
