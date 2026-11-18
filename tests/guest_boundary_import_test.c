@@ -89,7 +89,8 @@ static int test_calls(void)
     memcpy(&eight, &wrapped_eight, sizeof(eight));
     memcpy(&floater, &wrapped_float, sizeof(floater));
     nt_guest_boundary_guest_enter();
-    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_GUEST)
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_GUEST ||
+        !nt_guest_boundary_special_apc_allowed())
         return 4;
     for (unsigned i = 0; i < 50; ++i) {
         const uint64_t integer = eight(1,2,3,4,5,6,7,8);
@@ -100,7 +101,8 @@ static int test_calls(void)
             return 5;
     }
     nt_guest_boundary_guest_leave();
-    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST)
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_HOST ||
+        nt_guest_boundary_special_apc_allowed())
         return 6;
     return 0;
 }
@@ -189,6 +191,19 @@ int main(void)
         !nt_guest_boundary_get_startup_code_ranges(snapshot,
                   NT_GUEST_ADDITIONAL_CODE_MAX, &count) || count != 0)
         return 17; /* a new PE image revokes every old DLL range */
+    /* The normal, non-supervised PE runner has no MAP_SHARED slot;
+     * the LOCAL import-return checkpoint still authorises callbacks.
+     * It must never pretend this is an external ptrace GUEST phase. */
+    nt_guest_boundary_install_child_session(NULL);
+    if (nt_guest_boundary_special_apc_allowed())
+        return 18;
+    nt_guest_boundary_guest_enter();
+    if (nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_UNREGISTERED ||
+        !nt_guest_boundary_special_apc_allowed())
+        return 19;
+    nt_guest_boundary_guest_leave();
+    if (nt_guest_boundary_special_apc_allowed())
+        return 20;
     puts("PASS guest/host import ABI: Microsoft x64 8-argument stack, XMM float, "
          "nested callbacks with host mutex, nonlocal poison, pinned-DLL manifest, per-thread phases and revocation");
     return 0;
