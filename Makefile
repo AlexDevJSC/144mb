@@ -112,6 +112,19 @@ $(BUILD_DIR)/supervisor-pe-apc-failure-test: tests/pe/supervisor_pe_thread_test.
 check-pe-thread-supervisor-apc-failure: $(BUILD_DIR)/supervisor-pe-apc-failure-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-failure-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 
+# Separate injection: corrupt the final XSTATE readback AFTER the real
+# PE callback and both restoration writes have completed.
+$(BUILD_DIR)/supervisor-pe-apc-xstate-failure-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/runtime -Isrc/supervisor -Itests/pe \
+	    $(WARN_CFLAGS) $(CFLAGS) -DNT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH=1 $(LDFLAGS) \
+	    tests/pe/supervisor_pe_thread_test.c src/supervisor/nt_thread_supervisor.c \
+	    src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c \
+	    src/runtime/guest_boundary_import.S -pthread $(LDLIBS) -o "$@"
+
+.PHONY: check-pe-thread-supervisor-apc-xstate-failure
+check-pe-thread-supervisor-apc-xstate-failure: $(BUILD_DIR)/supervisor-pe-apc-xstate-failure-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-xstate-failure-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+
 $(BUILD_DIR):
 	mkdir -p "$@"
 
