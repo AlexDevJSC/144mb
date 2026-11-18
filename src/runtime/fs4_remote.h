@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "compat.h"
+#include "nt_services.h" /* nt_status, NT_STATUS_* */
 struct nt_find_data_w;
 struct nt_file_attribute_data;
 struct nt_handle_file_info;
