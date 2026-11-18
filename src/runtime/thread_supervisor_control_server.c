@@ -4,6 +4,7 @@
 #include "ntnative/guest_boundary_runtime.h"
 #include "../supervisor/nt_supervisor_nt_bridge.h"
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/types.h>
 #include <stdatomic.h>
