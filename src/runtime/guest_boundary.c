@@ -341,6 +341,7 @@ bool nt_guest_boundary_finish_guest_software_import_seh(uintptr_t resume_pc)
 bool nt_guest_boundary_special_apc_allowed(void)
 {
     if (guest_entry_depth == 0 || host_import_depth != 0 ||
+        hardware_seh_guest_only || software_seh_naked_import_only ||
         nonlocal_poisoned || shadow_stack_unsafe())
         return false;
     return current_slot == NULL ||
@@ -426,7 +427,9 @@ uintptr_t nt_guest_boundary_import_leave(void)
         _Exit(141);
     const uintptr_t ret = host_return_stack[--host_import_depth];
     host_return_stack[host_import_depth] = 0;
-    if (host_import_depth == 0 && guest_entry_depth != 0 && !nonlocal_poisoned) {
+    if (host_import_depth == 0 && guest_entry_depth != 0 &&
+        !hardware_seh_guest_only && !software_seh_naked_import_only &&
+        !nonlocal_poisoned) {
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
         signal_guest_phase = 1;
     } else {
@@ -438,7 +441,9 @@ uintptr_t nt_guest_boundary_import_leave(void)
      * dispatch at this point, not while the imported host routine owns
      * its mutex or while an outer guest→host callback is active. */
     if (host_import_depth == 0 && guest_entry_depth != 0 &&
-        !nonlocal_poisoned && nt_runtime_special_apc_checkpoint != NULL)
+        !nonlocal_poisoned && !hardware_seh_guest_only &&
+        !software_seh_naked_import_only &&
+        nt_runtime_special_apc_checkpoint != NULL)
         nt_runtime_special_apc_checkpoint();
     return ret;
 }
