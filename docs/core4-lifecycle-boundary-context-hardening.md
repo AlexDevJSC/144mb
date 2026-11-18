@@ -215,3 +215,75 @@ bash scripts/fedora-thread-supervisor-acceptance.sh
 
 El test físico Bubblewrap con SELinux debe clasificarse como
 INCOMPLETE si no puede ejercer la parada por política del anfitrión.
+
+
+## Segunda pasada: cuarentena irreversible y continuidad del IPC
+
+### Estado `compromised` del trazador
+
+Cuando el kernel no devuelve los registros escritos ni permite
+verificar una restauración completa, el objeto Linux de supervisión
+marca `compromised=true`. La marca se publica **antes** de iniciar
+`pidfd_send_signal(SIGKILL)`. Desde ese momento se rechazan todas
+las operaciones NT de suspensión, contexto y APC; incluso los helpers
+directos `PTRACE_CONT`, `PTRACE_DETACH` y la modificación de RAX
+devuelven error.
+
+El broker mantiene el `pidfd` y `PTRACE_O_EXITKILL` hasta que una
+lectura `poll(POLLIN)` del `pidfd` confirma la muerte del proceso.
+En ese intervalo **no** se desadjunta el hilo con registros inseguros.
+Si termina el pthread supervisor antes de confirmar la muerte,
+`PTRACE_O_EXITKILL` evita que un tracee comprometido continúe
+viviendo tras perder al trazador. Ni un retorno positivo de
+`pidfd_send_signal` ni un cierre de fd se confunden con la
+confirmación de terminación.
+
+La prueba `supervisor_context_rollback_fault_test` ahora exige que
+`CONT` y `DETACH` fallen con `EPERM`, y que `NtResumeThread`
+rechace el hilo antes de observar su muerte por `SIGKILL`.
+
+### Sesiones de IPC largas y señales Linux
+
+El servidor anterior reutilizaba una espera de **1 segundo** pensada
+para paquetes individuales como si fuera un límite de tiempo de
+vida de la sesión. Un invitado que ejecutaba durante más de un
+segundo sin llamar al broker perdía su sesión aunque siguiera vivo.
+
+La recepción del servidor utiliza ahora `poll` simultáneo sobre
+el socket `SOCK_SEQPACKET` y el `pidfd` del hijo, **sin timeout
+de inactividad**. Solo acaba por EOF, error de canal, error de
+autenticación o confirmación kernel de muerte del hijo. El límite
+de 4 segundos sigue aplicándose a una petición/respuesta del
+cliente: una sesión viva no significa que un RPC concreto pueda
+esperar indefinidamente.
+
+También se reinicia `poll` cuando llega una señal Linux
+(`EINTR`), calculando el plazo restante mediante
+`CLOCK_MONOTONIC`: la señal no cierra una sesión válida ni
+amplía su tiempo máximo de respuesta.
+
+Las pruebas cubren:
+
+- Hilo realmente suspendido durante 1,35 s sin tráfico IPC, seguido
+  de una segunda suspensión autenticada y recuperación.
+- Dos procesos invitados autenticados, consulta de sólo lectura
+  entre ellos después de 1,35 s sin mensajes y revocación al cerrar.
+- Falso padre de prueba que entrega `SIGUSR1` al cliente durante
+  `poll` y después devuelve una respuesta válida dentro de plazo,
+  sin alterar la semántica de errores ni perder la sesión.
+
+### Estado de desarrollo / puerta para la siguiente fase
+
+| Frente | Implementación actual | Pendiente antes de producción |
+|---|---|---|
+| Ciclo de vida IPC y suspensión | Contrato de IPC autenticado, varias suspensiones, tiempo de vida, revocación y rollback fatal protegido | Aceptación física Fedora + Bubblewrap y estrés multihilo bajo políticas reales; medir respuestas ante fallos del anfitrión |
+| Frontera PE↔runtime | Import gate, transiciones de callbacks revisadas, DLLs de arranque pinned, fallo cerrado para JIT y CET | Aislamiento ante PE nativo deliberadamente malicioso y semántica integral de unwind/callbacks fuera de las rutas revisadas |
+| CONTEXT AMD64 | CONTROL/INTEGER/SEGMENTS y FXSAVE de sólo lectura; INTEGER de escritura con readback y rollback | Escrituras RIP/RSP, FP, DEBUG y XSTATE siguen sin soporte; bloqueo deliberado hasta gestión íntegra de señales/SEH |
+
+**Decisión:** estos contratos constituyen un subconjunto implementado
+y susceptible de validación por el usuario; no demuestran que todos
+los problemas 1–3 estén cerrados para cualquier ejecutable Windows.
+La siguiente fase prudente es la aceptación física y una matriz
+diferencial contra Windows sobre casos exactos, **antes** de activar
+supervisión asíncrona por defecto. Si el anfitrión no permite
+`ptrace`/Bubblewrap, registrar **INCOMPLETE**, no **PASS**.
