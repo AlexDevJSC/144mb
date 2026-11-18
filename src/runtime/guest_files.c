@@ -3594,7 +3594,22 @@ static int32_t change_path(const char *input, enum path_operation operation)
     }
 
     pthread_mutex_lock(&file_lock);
+    /* Match CreateFile's lock order: file_lock -> WAL -> per-inode share.
+     * The old wal_namespace_ready preflight alone had a TOCTOU window
+     * before mkdirat, unlinkat and durable delete-pending commits. */
+    int mutation_guard = -1;
+    if (private_c_path(path)) {
+        mutation_guard = nt_runtime_begin_namespace_mutation(path);
+        if (mutation_guard < 0) {
+            const int error = errno ? errno : EUCLEAN;
+            pthread_mutex_unlock(&file_lock);
+            close(parent);
+            nt_SetLastError(path_error(error, false));
+            return 0;
+        }
+    }
     if (!wal_healthy()) {
+        nt_runtime_end_namespace_mutation(mutation_guard);
         pthread_mutex_unlock(&file_lock);
         close(parent);
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
@@ -3628,6 +3643,7 @@ static int32_t change_path(const char *input, enum path_operation operation)
                     else
                         dos83_test_crash("after-delete-parent-fsync");
                     const int saved_error = errno;
+                    nt_runtime_end_namespace_mutation(mutation_guard);
                     pthread_mutex_unlock(&file_lock);
                     close(parent);
                     errno = saved_error;
@@ -3684,6 +3700,7 @@ static int32_t change_path(const char *input, enum path_operation operation)
     const int error = errno;
     if (deletion_guard >= 0)
         close(deletion_guard);
+    nt_runtime_end_namespace_mutation(mutation_guard);
     pthread_mutex_unlock(&file_lock);
     close(parent);
     if (status != 0)

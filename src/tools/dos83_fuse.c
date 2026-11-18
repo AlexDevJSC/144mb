@@ -751,6 +751,11 @@ static int fs_link(const char *from, const char *to)
 {
     if (!service_authorized())
         return -EACCES;
+    /* POSIX linkat bypasses Win32 FILE_SHARE_DELETE and pending-delete
+     * rules. Until CreateHardLink is brokered, do not publish it in the
+     * dedicated-UID namespace. Legacy non-service remains unchanged. */
+    if (service_mode)
+        return -EOPNOTSUPP;
     int guard = guest_mutation_begin(to);
     if (guard < 0)
         return guard;
@@ -808,6 +813,10 @@ static int fs_utimens(const char *path, const struct timespec times[2],
 {
     if (!service_authorized())
         return -EACCES;
+    /* Until this operation is a broker transaction with WAL, NT ACL and
+     * delete-pending/share validation, no direct service-UID write. */
+    if (service_mode)
+        return -EOPNOTSUPP;
     int fd = fi ? (int)fi->fh : lower_open(path, O_RDONLY, 0);
     if (fd < 0)
         return -errno;
@@ -847,6 +856,10 @@ static int fs_setxattr(const char *path, const char *name, const char *value,
 {
     if (!service_authorized())
         return -EACCES;
+    /* POSIX user.* xattrs can alter security-sensitive state without NT
+     * privileges or a durable metadata transaction. Refuse for UID service. */
+    if (service_mode)
+        return -EOPNOTSUPP;
     if (reserved_xattr(name) ||
         (service_mode && strncmp(name, "user.", 5) != 0))
         return -EACCES;
@@ -863,6 +876,8 @@ static int fs_removexattr(const char *path, const char *name)
 {
     if (!service_authorized())
         return -EACCES;
+    if (service_mode)
+        return -EOPNOTSUPP;
     if (reserved_xattr(name))
         return -EACCES;
     int fd = lower_open(path, O_RDONLY, 0);
