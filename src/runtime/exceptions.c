@@ -450,9 +450,19 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
                  * Retire its proven import stub (if any), not arbitrary
                  * ELF frames, pthread mutexes or foreign callbacks. */
                 if (!nt_guest_boundary_retire_specific_handler_import()) {
+                    if (record->code == UINT32_C(0xe14400af))
+                        (void)fprintf(stderr,
+                            "APC-SEH refused handler bridge: scope=0x%x pc=0x%llx frame=0x%llx\\n",
+                            scope.target, (unsigned long long)dispatch->pc,
+                            (unsigned long long)frame);
                     nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
                     return SEH_CONTINUE_SEARCH;
                 }
+                if (record->code == UINT32_C(0xe14400af))
+                    (void)fprintf(stderr,
+                        "APC-SEH starting target unwind: target=0x%llx frame=0x%llx\\n",
+                        (unsigned long long)(image.base + scope.target),
+                        (unsigned long long)frame);
                 seh.transfer(record, frame, image.base + scope.target, dispatch);
                 nt_SetLastError(NT_ERROR_GEN_FAILURE);
                 break;
