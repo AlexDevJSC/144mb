@@ -454,6 +454,12 @@ check-fs4-ntfs-diff: $(BUILD_DIR)/fs4-ntfs-probe
 
 check: check-fs4-ntfs-diff
 
+.PHONY: check-fs4-reparse-wal
+check-fs4-reparse-wal: $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_reparse_symlink_wal.py "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-fs4-reparse-wal
+
 $(BUILD_DIR)/nt-dos83-mediator: src/tools/dos83_mediator.c $(RUNTIME_OBJECTS) src/runtime/compat.h src/runtime/winfile.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"

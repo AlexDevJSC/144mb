@@ -64,3 +64,15 @@ siendo legible, pero nunca satisface `complete` de la matriz avanzada.
 Esto crea una puerta de medición, NO implementa ACL NTFS completas ni
 una equivalencia de reparse/seguridad; no ejecutar el script de Windows
 fuera de una máquina NTFS real y un directorio de prueba desechable.
+
+## Reparse symlink / journal (18-11-2026)
+
+`CreateSymbolicLinkW` mantiene ahora el mismo `flock(LOCK_EX)` del WAL
+mientras ejecuta `symlinkat` y `fsync` del directorio padre. Una
+transacción anterior pendiente o corrupta bloquea la creación **antes** del
+syscall; una prueba de mediador verifica que conserva target/WAL. Mantiene
+la política exclusiva de targets relativos a archivos regulares existentes.
+
+No convierte symlinks Linux en tags NTFS arbitrarios, no implementa
+`FSCTL_DELETE_REPARSE_POINT` sobre un enlace POSIX y no garantiza rollback
+tras interrupción eléctrica entre la creación y el fsync.
