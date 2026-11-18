@@ -96,6 +96,10 @@ jobs:
           cc --version | head -1
           ld -V | grep -F i386pep
           objcopy --version | head -1
+      - name: Classify genuine kernel faults and reject spoofed signals
+        run: make -j2 check-hardware-fault-classifier
+      - name: Deliver real UD2, FPE, and access faults on isolated host stack
+        run: make -j2 check-hardware-fault-signals
       - name: Verify Win64 import ABI and host lock gate
         run: make check-guest-boundary
       - name: Repeat Win64 guest/host import ABI with UBSan

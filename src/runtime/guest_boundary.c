@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -47,6 +48,10 @@ static _Thread_local struct nt_guest_boundary_slot *current_slot;
 static _Thread_local unsigned guest_entry_depth;
 static _Thread_local unsigned host_import_depth;
 static _Thread_local bool nonlocal_poisoned;
+/* sig_atomic_t is accessed directly by the synchronous Linux kernel
+ * signal gate. Do NOT perform pthread operations or CET syscalls from
+ * its signal handler. Never interpret this local bit as ptrace authority. */
+static _Thread_local volatile sig_atomic_t signal_guest_phase;
 enum { MAX_IMPORT_NESTING = 128, MAX_GATED_TARGETS = 8192 };
 static _Thread_local uintptr_t host_return_stack[MAX_IMPORT_NESTING];
 
@@ -133,6 +138,7 @@ void nt_guest_boundary_install_child_session(struct nt_guest_boundary_session *s
     guest_entry_depth = 0;
     host_import_depth = 0;
     nonlocal_poisoned = false;
+    signal_guest_phase = 0;
     memset(host_return_stack, 0, sizeof(host_return_stack));
 }
 struct nt_guest_boundary_session *nt_guest_boundary_current_session(void)
@@ -181,6 +187,7 @@ void nt_guest_boundary_thread_detach(void)
     guest_entry_depth = 0;
     host_import_depth = 0;
     nonlocal_poisoned = false;
+    signal_guest_phase = 0;
 }
 static void publish_phase(enum nt_guest_boundary_phase phase)
 {
@@ -197,9 +204,11 @@ void nt_guest_boundary_guest_enter(void)
     ++guest_entry_depth;
     if (shadow_stack_unsafe()) {
         nonlocal_poisoned = true; /* never mark a CET guest safe to stop */
+        signal_guest_phase = 0;
         publish_phase(NT_GUEST_BOUNDARY_HOST);
     } else if (host_import_depth == 0 && !nonlocal_poisoned) {
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
+        signal_guest_phase = 1;
     }
 }
 void nt_guest_boundary_guest_leave(void)
@@ -207,8 +216,10 @@ void nt_guest_boundary_guest_leave(void)
     if (guest_entry_depth == 0)
         _Exit(139);
     --guest_entry_depth;
-    if (guest_entry_depth == 0 || host_import_depth != 0 || nonlocal_poisoned)
+    if (guest_entry_depth == 0 || host_import_depth != 0 || nonlocal_poisoned) {
+        signal_guest_phase = 0;
         publish_phase(NT_GUEST_BOUNDARY_HOST);
+    }
 }
 uint32_t nt_guest_boundary_current_phase(void)
 {
@@ -220,6 +231,19 @@ uint32_t nt_guest_boundary_current_phase(void)
 uint32_t nt_guest_boundary_host_nesting(void)
 {
     return host_import_depth;
+}
+bool nt_guest_boundary_signal_guest_phase(void)
+{
+    return signal_guest_phase != 0;
+}
+bool nt_guest_boundary_signal_guest_code(uintptr_t pc)
+{
+    if (pc >= trusted_code_begin && pc < trusted_code_end)
+        return true;
+    for (size_t i = 0; i < startup_code_count; ++i)
+        if (pc >= startup_code[i].begin && pc < startup_code[i].end)
+            return true;
+    return false;
 }
 /* The ordinary PE runner may be launched without the opt-in external
  * ptrace supervisor. Its local guest depth is still trustworthy at the
@@ -242,6 +266,7 @@ bool nt_guest_boundary_special_apc_allowed(void)
 void nt_guest_boundary_mark_nonlocal_transfer(void)
 {
     nonlocal_poisoned = true;
+    signal_guest_phase = 0;
     publish_phase(NT_GUEST_BOUNDARY_HOST);
 }
 bool nt_guest_boundary_nonlocal_poisoned(void)
@@ -262,6 +287,7 @@ uintptr_t nt_guest_boundary_import_enter(uintptr_t target, uintptr_t return_pc)
         _Exit(142);
     if (host_import_depth >= MAX_IMPORT_NESTING || target == 0 || return_pc == 0)
         _Exit(140);
+    signal_guest_phase = 0; /* before crossing into any host import */
     host_return_stack[host_import_depth++] = return_pc;
     publish_phase(NT_GUEST_BOUNDARY_HOST);
     return target;
@@ -310,10 +336,13 @@ uintptr_t nt_guest_boundary_import_leave(void)
         _Exit(141);
     const uintptr_t ret = host_return_stack[--host_import_depth];
     host_return_stack[host_import_depth] = 0;
-    if (host_import_depth == 0 && guest_entry_depth != 0 && !nonlocal_poisoned)
+    if (host_import_depth == 0 && guest_entry_depth != 0 && !nonlocal_poisoned) {
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
-    else
+        signal_guest_phase = 1;
+    } else {
+        signal_guest_phase = 0;
         publish_phase(NT_GUEST_BOUNDARY_HOST);
+    }
     /* The host import has completed and its return-stack slot is gone.
      * The return trampoline still preserves Win64 integer/XMM registers;
      * dispatch at this point, not while the imported host routine owns
