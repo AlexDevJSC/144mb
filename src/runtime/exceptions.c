@@ -459,6 +459,7 @@ struct software_exception {
     struct software_exception *previous;
     unsigned int depth;
     bool hardware; /* origin RIP is faulting instruction, not return PC */
+    bool reconciled_import; /* proven naked RaiseException, no host locks */
 };
 static _Thread_local struct software_exception *active_software;
 
@@ -606,6 +607,11 @@ static _Noreturn void resume_software(const struct nt_context64 *context, struct
     if (active_software != NULL && active_software->hardware) {
         if (!nt_guest_boundary_finish_guest_hardware_seh(context->rip))
             software_failure(STATUS_INVALID_TARGET);
+    } else if (active_software != NULL && active_software->reconciled_import) {
+        /* Only the one audited naked RaiseException import was bypassed.
+         * Every other ELF stack frame or callback still fails closed. */
+        if (!nt_guest_boundary_finish_guest_software_import_seh(context->rip))
+            software_failure(STATUS_INVALID_TARGET);
     } else {
         nt_guest_boundary_mark_nonlocal_transfer();
     }
@@ -626,9 +632,15 @@ static _Noreturn void dispatch_exception_common(
     /* A SOFTWARE RaiseException crosses the Win64 IAT return gate; the
      * recorded PC can be its synthetic ELF trampoline. A CPU hardware
      * fault originates at the real guest instruction; never rewrite it. */
+    bool reconciled_import = false;
     if (!hardware) {
-        origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
-        nt_guest_boundary_mark_nonlocal_transfer();
+        const uintptr_t original_pc = origin->rip;
+        origin->rip = nt_guest_boundary_seh_caller_pc(original_pc);
+        if (origin->rip != original_pc)
+            reconciled_import =
+                nt_guest_boundary_begin_guest_software_import_seh(origin->rip);
+        if (!reconciled_import)
+            nt_guest_boundary_mark_nonlocal_transfer();
     } else if (!nt_guest_boundary_begin_guest_hardware_seh(origin->rip)) {
         software_failure(STATUS_INVALID_TARGET);
     }
@@ -643,7 +655,8 @@ static _Noreturn void dispatch_exception_common(
     struct software_exception state = {
         .origin = origin, .previous = active_software,
         .depth = active_software ? active_software->depth + 1 : 1,
-        .hardware = hardware
+        .hardware = hardware,
+        .reconciled_import = reconciled_import
     };
     if (state.depth > SOFTWARE_MAX_NESTING)
         software_failure(STATUS_BAD_STACK);
