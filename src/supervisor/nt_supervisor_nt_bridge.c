@@ -222,6 +222,8 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
     /* Separate fatal-path test: simulate both a corrupt readback and
      * an impossible rollback. No resume is permitted after this point. */
 #endif
+    if (state->unsafe_register_state)
+        state->tracer->compromised = true;
     return NT_STATUS_NOT_SUPPORTED;
 }
 
