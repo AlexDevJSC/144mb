@@ -23,6 +23,7 @@
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,6 +40,17 @@
  * Otherwise a FUSE request would recurse into itself and deadlock. */
 static int lower_root = -1;
 static pthread_mutex_t namespace_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Enable fault injection exclusively for --selftest. Production service
+ * mounting never arms these SIGKILL hooks, regardless of environment. */
+static bool fs4_staging_selftest;
+static void fs4_stage_test_crash(const char *phase)
+{
+    if (!fs4_staging_selftest)
+        return;
+    const char *fault = getenv("NT_FS4_FUSE_TEST_CRASH");
+    if (fault && strcmp(fault, phase) == 0)
+        (void)raise(SIGKILL);
+}
 
 /* Service-UID mode: the service owns backing; FUSE permits only the
  * explicitly configured client UID. Kernel-supplied credentials (not paths
@@ -463,6 +475,8 @@ static int fs_create_staged_service(const char *path, mode_t mode,
         if (!error)
             lease = -1; /* lifecycle transferred to FUSE view registry */
     }
+    if (!error)
+        fs4_stage_test_crash("post-lease");
     bool published = false;
     if (!error) {
         if (linkat(fd, "", parent, name, AT_EMPTY_PATH) < 0)
@@ -470,6 +484,8 @@ static int fs_create_staged_service(const char *path, mode_t mode,
         else
             published = true;
     }
+    if (published)
+        fs4_stage_test_crash("post-link");
     if (!error && fsync(fd) != 0)
         error = -errno;
     if (!error) {
@@ -486,7 +502,11 @@ static int fs_create_staged_service(const char *path, mode_t mode,
         }
     }
     if (!error)
+        fs4_stage_test_crash("post-fsync");
+    if (!error)
         error = guest_refresh(path);
+    if (!error)
+        fs4_stage_test_crash("post-alias");
     if (error) {
         if (published) {
             /* Refuse to remove another inode if an external writer changed
@@ -978,6 +998,7 @@ static const struct fuse_operations ops = {
  * with /dev/fuse unavailable. This does NOT validate kernel FUSE mounting. */
 static int backend_selftest(void)
 {
+    fs4_staging_selftest = true;
     int outside = lower_open("/../../etc/passwd", O_RDONLY, 0);
     if (outside >= 0) {
         close(outside);

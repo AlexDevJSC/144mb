@@ -532,6 +532,13 @@ $(BUILD_DIR)/nt-storage-handle-broker: src/tools/nt_storage_handle_broker.c $(RU
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
 
+.PHONY: check-fs4-fuse-staging-sigkill
+check-fs4-fuse-staging-sigkill: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_fuse_stage_sigkill.py \
+	    "$(BUILD_DIR)/nt-dos83-fuse" "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-fs4-fuse-staging-sigkill
+
 .PHONY: check-fs4-handle-broker
 check-fs4-handle-broker: $(BUILD_DIR)/nt-storage-handle-broker
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_handle_broker_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
