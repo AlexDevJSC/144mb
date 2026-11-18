@@ -472,8 +472,19 @@ static int fs_create_staged_service(const char *path, mode_t mode,
     }
     if (!error && fsync(fd) != 0)
         error = -errno;
-    if (!error && fsync(parent) != 0)
-        error = -errno;
+    if (!error) {
+        /* lower_parent returns an O_PATH directory FD: fsync(O_PATH)
+         * fails with EBADF. Reopen the pinned directory, not a host path. */
+        int directory_sync = openat(parent, ".", O_RDONLY | O_DIRECTORY |
+                                   O_NOFOLLOW | O_CLOEXEC);
+        if (directory_sync < 0)
+            error = -errno;
+        else {
+            if (fsync(directory_sync) != 0)
+                error = -errno;
+            close(directory_sync);
+        }
+    }
     if (!error)
         error = guest_refresh(path);
     if (error) {
