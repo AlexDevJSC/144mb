@@ -362,6 +362,19 @@ $(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
 
+# Kernel-directed APC smoke test using the actual production AMD64
+# register/FXSAVE restore assembly. No PE loader or desktop required.
+$(BUILD_DIR)/guest-async-apc-signal-test: tests/guest_async_apc_signal_test.c src/runtime/guest_async_apc.c src/runtime/guest_async_apc.h src/runtime/context.S | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_async_apc_signal_test.c src/runtime/guest_async_apc.c \
+	    src/runtime/context.S -pthread -o "$@"
+
+.PHONY: check-guest-async-apc-signal
+check-guest-async-apc-signal: $(BUILD_DIR)/guest-async-apc-signal-test
+	timeout 15s $(BUILD_DIR)/guest-async-apc-signal-test
+
+check: check-guest-async-apc-signal
+
 # Pure, host-only Linux signal/NTSTATUS classifier. Link without the
 # real Windows runtime so spoofing and access-bit regressions fail loudly.
 $(BUILD_DIR)/guest-hardware-fault-test: tests/guest_hardware_fault_test.c src/runtime/guest_hardware_fault.c src/runtime/guest_hardware_fault.h | $(BUILD_DIR)
