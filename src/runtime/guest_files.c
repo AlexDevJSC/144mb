@@ -5323,15 +5323,26 @@ static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
         nt_SetLastError(path_error(errno, true));
         return 0;
     }
+    int mutation_guard = -1;
+    if (private_c_path(path)) {
+        mutation_guard = nt_runtime_begin_namespace_mutation(path);
+        if (mutation_guard < 0) {
+            nt_SetLastError(path_error(errno ? errno : EUCLEAN, false));
+            return 0;
+        }
+    }
     const char *relative = path;
     const int root = duplicate_root(&relative);
     if (root < 0) {
-        nt_SetLastError(path_error(errno, true));
+        const int error = errno;
+        nt_runtime_end_namespace_mutation(mutation_guard);
+        nt_SetLastError(path_error(error, true));
         return 0;
     }
     if (!wal_namespace_ready(root)) {
         const int cause = errno;
         close(root);
+        nt_runtime_end_namespace_mutation(mutation_guard);
         nt_SetLastError(path_error(cause ? cause : EUCLEAN, true));
         return 0;
     }
@@ -5339,6 +5350,7 @@ static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
     const int open_error = errno;
     close(root);
     if (fd < 0) {
+        nt_runtime_end_namespace_mutation(mutation_guard);
         nt_SetLastError(path_error(open_error, false));
         return 0;
     }
@@ -5368,8 +5380,11 @@ static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
                 result = fchmod(fd, changed);
         }
     }
+    if (result == 0 && !wal_sync_pinned(fd, S_ISDIR(info.st_mode)))
+        result = -1;
     const int error = errno;
     close(fd);
+    nt_runtime_end_namespace_mutation(mutation_guard);
     if (result < 0)
         nt_SetLastError(path_error(error, false));
     return result == 0;
@@ -7759,8 +7774,10 @@ int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, 
             nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const int fd = duplicate_handle(handle, FILE_WRITE);
-        return file_result(fd, fd >= 0 && ftruncate(fd, length) == 0);
+        const bool success = truncate_guest_handle(handle, (off_t)length, false);
+        if (!success)
+            nt_SetLastError(path_error(errno, false));
+        return success;
     }
     if (kind == 0) {
         struct basic_file_info basic;

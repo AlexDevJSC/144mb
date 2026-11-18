@@ -89,6 +89,9 @@ def handle_service_handshake(expected_uid):
 
 def main():
     required(os.geteuid() != 0, "unprivileged client, never root")
+    required(not (os.environ.get("CI") == "true" or
+                  os.environ.get("GITHUB_ACTIONS") == "true"),
+             "physical owner-run only, never CI")
     enforcement = subprocess.run(["getenforce"], text=True, capture_output=True)
     required(enforcement.returncode == 0 and
              enforcement.stdout.strip() == "Enforcing", "SELinux Enforcing")
@@ -165,6 +168,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] != ["--physical-confirmed"]:
+        print("REFUSED: supply --physical-confirmed on actual Fedora host",
+              file=sys.stderr)
+        sys.exit(2)
     try:
         main()
     except (OSError, RuntimeError, ValueError) as exc:
