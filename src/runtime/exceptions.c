@@ -566,15 +566,19 @@ bool nt_runtime_enable_software_seh(uint32_t begin, uint32_t end,
 static bool prepare_software_stack(void)
 {
     pthread_attr_t attr;
-    if (!image.code_end)
-        return false;
+    /* A PE built without .pdata may still use vectored continuable
+     * software exceptions. Frame-specific SEH still needs .pdata, but
+     * VEH only needs authenticated PE RIP and bounded guest stack.
+     * Do not deny the entire VEH path just because unwind tables are
+     * absent, and never attempt a synthetic Win64 frame walk then. */
     uintptr_t apc_low = 0;
     size_t apc_size = 0;
     if (nt_runtime_guest_async_apc_stack_for_current != NULL &&
         nt_runtime_guest_async_apc_stack_for_current(&apc_low, &apc_size))
         return nt_runtime_set_unwind_stack((void *)apc_low, apc_size) &&
-               nt_runtime_set_seh_dispatch(image.code_begin, image.code_end,
-                                           selected_software_handler);
+               (!image.code_end ||
+                nt_runtime_set_seh_dispatch(image.code_begin, image.code_end,
+                                            selected_software_handler));
     if (pthread_getattr_np(pthread_self(), &attr) != 0)
         return false;
     void *low = NULL;
@@ -582,7 +586,9 @@ static bool prepare_software_stack(void)
     const int result = pthread_attr_getstack(&attr, &low, &size);
     pthread_attr_destroy(&attr);
     return result == 0 && low && nt_runtime_set_unwind_stack(low, size) &&
-           nt_runtime_set_seh_dispatch(image.code_begin, image.code_end, selected_software_handler);
+           (!image.code_end ||
+            nt_runtime_set_seh_dispatch(image.code_begin, image.code_end,
+                                        selected_software_handler));
 }
 
 static bool software_code(uint64_t address)
@@ -695,7 +701,10 @@ static void complete_software_capture(struct nt_context64 *context)
 
 static _Noreturn void resume_software(const struct nt_context64 *context, struct software_exception *previous)
 {
-    if (!software_code(context->rip) || !software_stack_pointer(context->rsp)) {
+    if (!(software_code(context->rip) ||
+          (!image.code_end &&
+           nt_guest_boundary_signal_guest_code(context->rip))) ||
+        !software_stack_pointer(context->rsp)) {
         (void)fprintf(stderr, "SEH resume scope denied RIP=0x%llx RSP=0x%llx\\n",
                       (unsigned long long)context->rip,
                       (unsigned long long)context->rsp);
