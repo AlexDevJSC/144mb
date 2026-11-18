@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Experimental read-only FileSystem4 capabilities, NEVER a writable PE backend."""
 import base64
+import errno
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,17 @@ def pinned_readonly(root,path):
         if not stat.S_ISREG(st.st_mode) or st.st_dev!=os.fstat(root).st_dev:
             os.close(file)
             raise Refused("not a regular file on granted device")
+        # The read-only IPC protocol has no NT FILE_SHARE lease handling.
+        # Never bypass the authoritative FUSE/Win32 lease of marked files.
+        try:
+            marker=os.getxattr(file,"user.ntnative.fs_compat")
+        except OSError as exc:
+            if exc.errno!=errno.ENODATA:
+                os.close(file)
+                raise Refused("cannot prove unmarked file") from exc
+        else:
+            os.close(file)
+            raise Refused("NT-marked file requires the shared lease broker")
         return file
     except OSError as exc:
         raise Refused("path not readable") from exc

@@ -133,8 +133,8 @@ def serve_one(conn: socket.socket, *, client_uid: int, mediator: str,
         except (UnicodeError, ValueError):
             raise Refused("Malformed request") from None
         if request == {"version": 2, "op": "session"}:
-            if not ready:
-                raise Refused("Storage view not ready")
+            if not ready or os.environ.get("NT_STORAGE_EXPERIMENTAL_READONLY") != "1":
+                raise Refused("Experimental read-only session disabled")
             run_readonly_session(conn, backing)
             return
         reply = dispatch(request, mediator=mediator, backing=backing,

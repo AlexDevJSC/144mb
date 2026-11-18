@@ -127,24 +127,26 @@ class Security(unittest.TestCase):
                     except BaseException as exc:
                         faults.append(exc)
                 thread = threading.Thread(target=serve, daemon=True)
-                thread.start()
-                welcome = json.loads(client.recv(4096))
-                self.assertTrue(welcome["readonly"])
-                sess = welcome["session"]
-                def ask(operation, **kwargs):
-                    payload = dict(version=2, session=sess, op=operation, **kwargs)
-                    client.sendall(json.dumps(payload).encode("utf-8"))
-                    return json.loads(client.recv(4096))
-                opened = ask("open", path="C:/safe.bin")
-                self.assertTrue(opened["ok"])
-                value = ask("read", handle=opened["handle"], offset=0, size=11)
-                self.assertEqual(base64.b64decode(value["data_b64"]), b"UID SERVICE")
-                self.assertFalse(ask("write", handle=opened["handle"],
-                                     data_b64="WA==")["ok"])
-                self.assertTrue(ask("end")["ok"])
-                thread.join(timeout=3)
-                self.assertFalse(thread.is_alive())
-                self.assertFalse(faults)
+                with mock.patch.dict(os.environ, {"NT_STORAGE_EXPERIMENTAL_READONLY": "1"}):
+                    thread.start()
+                    welcome = json.loads(client.recv(4096))
+                    self.assertTrue(welcome["readonly"])
+                    sess = welcome["session"]
+                    def ask(operation, **kwargs):
+                        payload = dict(version=2, session=sess, op=operation, **kwargs)
+                        client.sendall(json.dumps(payload).encode("utf-8"))
+                        return json.loads(client.recv(4096))
+                    opened = ask("open", path="C:/safe.bin")
+                    self.assertTrue(opened["ok"])
+                    value = ask("read", handle=opened["handle"], offset=0, size=11)
+                    self.assertEqual(base64.b64decode(value["data_b64"]), b"UID SERVICE")
+                    self.assertFalse(ask("write", handle=opened["handle"],
+                                         data_b64="WA==")["ok"])
+                    self.assertTrue(ask("end")["ok"])
+                    thread.join(timeout=3)
+                    self.assertFalse(thread.is_alive())
+                    self.assertFalse(faults)
+                # V2 is NOT on by default until the NT share-lease adapter exists.
 
             with socket_pair() as (server, client):
                 client.sendall(b'{"version":2,"op":"session"}')
