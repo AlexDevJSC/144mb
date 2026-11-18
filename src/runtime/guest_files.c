@@ -6213,6 +6213,17 @@ static nt_status nt_guest_io(uintptr_t handle, uintptr_t event, void *apc, void 
     if (offset != NULL && *offset < 0)
         return nt_file_complete(io, NT_STATUS_INVALID_PARAMETER, 0);
 
+    if (nt_fs4_remote_handle(handle)) {
+        /* Offset-based native I/O must not silently mutate the shared
+         * Win32 file pointer; the v3 protocol supports sequential I/O. */
+        if (offset != NULL)
+            return nt_file_complete(io, NT_STATUS_NOT_SUPPORTED, 0);
+        uint32_t transferred = 0;
+        if (nt_fs4_remote_io(handle, buffer, length, &transferred,
+                             write_operation))
+            return nt_file_complete(io, NT_STATUS_SUCCESS, transferred);
+        return nt_file_complete(io, nt_file_error(nt_GetLastError()), 0);
+    }
     const int fd = duplicate_handle(handle, write_operation ? FILE_WRITE : FILE_READ);
     if (fd < 0)
         return nt_file_complete(io, nt_file_errno_status(errno), 0);
