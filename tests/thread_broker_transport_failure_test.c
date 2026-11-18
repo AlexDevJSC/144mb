@@ -113,13 +113,19 @@ static int cancel_live_rpc(int notify_fd, int mode)
     }
     if (pthread_join(worker, NULL) != 0)
         return 24;
+    const bool attached_after = nt_broker_client_is_attached();
+    const bool lingering_request = nt_broker_client_abort_inflight();
     if (item.query_success ||
         item.control_status != NT_STATUS_NOT_SUPPORTED ||
         item.identity.guest_thread_id != 0x51515151u ||
         item.previous != 0x5a5a5a5au ||
-        nt_broker_client_is_attached() ||
-        nt_broker_client_abort_inflight())
+        attached_after || lingering_request) {
+        fprintf(stderr, "FAIL cancel flags mode=%d success=%d status=%08x tid=%08x prev=%08x attached=%d inflight=%d\\n",
+                mode, (int)item.query_success, (unsigned)item.control_status,
+                item.identity.guest_thread_id, item.previous,
+                (int)attached_after, (int)lingering_request);
         return 25;
+    }
     if (nt_broker_client_supervisor_query(item.capability,
             NT_BROKER_SUPERVISOR_GET_CONTEXT, &item.identity) ||
         item.identity.guest_thread_id != 0x51515151u)
