@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "guest_hardware_fault.h"
+#include "guest_xstate_policy.h"
 #include "compat.h"
 #include "ntnative/guest_boundary_runtime.h"
 
@@ -235,11 +236,17 @@ static void guest_fault_signal(int sig, siginfo_t *information, void *frame)
         const uint64_t supported =
             UINT64_C(0x3) | UINT64_C(1) << 2 |
             UINT64_C(1) << 5 | UINT64_C(1) << 6 |
-            UINT64_C(1) << 7; /* x87, SSE, AVX, AVX512 SIMD only */
+            UINT64_C(1) << 7 | UINT64_C(1) << 9;
+        /* PKRU is an OS-managed XSTATE feature: permit it only when
+         * the saved kernel value exactly matches the running thread.
+         * NEVER restore PKRU on a host dispatcher stack. */
 #ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
         denied_at = 5;
 #endif
-        if ((active & ~supported) || (compacted & UINT64_C(0x8000000000000000)))
+        if ((active & ~supported) ||
+            (compacted & UINT64_C(0x8000000000000000)) ||
+            ((active & (UINT64_C(1) << 9)) &&
+             !nt_guest_xstate_pkru_matches(fp, bytes)))
             fail_closed(sig);
         xstate_size = bytes;
         has_xsave = true;
@@ -343,6 +350,16 @@ void nt_runtime_guest_hardware_fault_restore_extended(void)
     if (!slot->pending)
         return;
     if (slot->has_xsave) {
+        /* A callback may execute WRPKRU. Resume is forbidden if it
+         * changes guest/host memory-access rights. Only SIMD can be
+         * restored on this temporary ELF dispatcher stack. */
+        const volatile unsigned char *fp = slot->xstate;
+        uint64_t features = 0;
+        for (unsigned j = 0; j < 8; ++j)
+            features |= (uint64_t)fp[512 + j] << (8 * j);
+        if ((features & (UINT64_C(1) << 9)) &&
+            !nt_guest_xstate_pkru_matches(fp, slot->xstate_size))
+            fail_closed(SIGSEGV);
         uint32_t xcr0_low = 0, xcr0_high = 0;
         __asm__ __volatile__("xgetbv" : "=a"(xcr0_low),
                              "=d"(xcr0_high) : "c"(0));
