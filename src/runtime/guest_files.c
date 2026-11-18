@@ -2201,6 +2201,21 @@ uintptr_t NT_MS_ABI nt_CreateIoCompletionPort(uintptr_t file, uintptr_t existing
     if (!port)
         return 0;
 
+    if (nt_fs4_remote_handle(file)) {
+        pthread_mutex_lock(&iocp_lock);
+        const bool port_valid=find_iocp_port(port)!=NULL;
+        pthread_mutex_unlock(&iocp_lock);
+        const bool accepted=port_valid &&
+            nt_fs4_remote_associate_iocp(file,port,completion_key);
+        if (!accepted) {
+            if (created)
+                (void)close_iocp_port(port);
+            if (!port_valid)
+                nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        return port;
+    }
     pthread_mutex_lock(&file_lock);
     pthread_mutex_lock(&iocp_lock);
     struct guest_file *entry = find_handle(file);
@@ -2505,7 +2520,7 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     /* In PE service mode, the HANDLE never opens the Linux backing here.
      * The dedicated-UID Win32 broker owns its real FD and share leases. */
     if (nt_fs4_remote_mode()) {
-        if ((flags & (FILE_FLAG_OVERLAPPED | FILE_FLAG_OPEN_REPARSE_POINT |
+        if ((flags & (FILE_FLAG_OPEN_REPARSE_POINT |
                       FILE_FLAG_BACKUP_SEMANTICS)) != 0 ||
             (attributes != NULL && attributes->inherit)) {
             nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
@@ -3133,6 +3148,8 @@ bool nt_runtime_restore_inherited_files(int manifest_fd)
 
 int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_get_flags(handle,flags);
     if (!flags) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -3229,6 +3246,8 @@ int32_t NT_MS_ABI nt_CreatePipe(uintptr_t *reader, uintptr_t *writer,
 
 int32_t NT_MS_ABI nt_SetHandleInformation(uintptr_t handle, uint32_t mask, uint32_t flags)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_set_flags(handle,mask,flags);
     if (((mask | flags) & ~(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE)) != 0) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -7330,6 +7349,10 @@ _Static_assert(sizeof(struct standard_file_info) == 24, "FILE_STANDARD_INFO layo
 
 int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind, void *info, uint32_t size)
 {
+    if (nt_fs4_remote_handle(handle)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
     if (info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
