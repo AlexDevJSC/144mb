@@ -235,10 +235,11 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
     return NT_STATUS_NOT_SUPPORTED;
 }
 
-nt_status nt_supervisor_nt_queue_trusted_apc(struct nt_supervisor_nt_thread *state,
-                                             uintptr_t entry, uintptr_t stack_top,
-                                             uintptr_t argument,
-                                             const _Atomic uint32_t *completion)
+nt_status nt_supervisor_nt_queue_trusted_apc_guarded(
+    struct nt_supervisor_nt_thread *state,
+    uintptr_t entry, uintptr_t stack_top, uintptr_t argument,
+    const _Atomic uint32_t *completion,
+    const _Atomic uint32_t *cancel, int peer_fd)
 {
     if (!state || !state->tracer || !completion) return NT_STATUS_INVALID_PARAMETER;
     if (state->tracer->compromised || state->unsafe_register_state)
@@ -249,9 +250,19 @@ nt_status nt_supervisor_nt_queue_trusted_apc(struct nt_supervisor_nt_thread *sta
     struct user_regs_struct regs;
     if (nt_supervisor_interrupt_guest(state->tracer, &state->scope, 1500, &regs))
         return translate_ptrace_error(errno);
-    if (nt_supervisor_invoke_trusted_guest_apc(state->tracer, &state->scope,
-                                              entry, stack_top, argument,
-                                              completion, 1500))
+    if (nt_supervisor_invoke_trusted_guest_apc_guarded(
+            state->tracer, &state->scope, entry, stack_top, argument,
+            completion, 1500, cancel, peer_fd))
         return translate_ptrace_error(errno);
     return NT_STATUS_SUCCESS;
+}
+
+/* Existing experimental caller retains its original, unguarded contract. */
+nt_status nt_supervisor_nt_queue_trusted_apc(struct nt_supervisor_nt_thread *state,
+                                             uintptr_t entry, uintptr_t stack_top,
+                                             uintptr_t argument,
+                                             const _Atomic uint32_t *completion)
+{
+    return nt_supervisor_nt_queue_trusted_apc_guarded(
+        state, entry, stack_top, argument, completion, NULL, -1);
 }
