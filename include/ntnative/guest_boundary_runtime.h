@@ -86,6 +86,10 @@ bool nt_guest_boundary_signal_guest_code(uintptr_t pc);
  * These are internal runtime calls, never guest-facing APIs. */
 bool nt_guest_boundary_begin_guest_hardware_seh(uintptr_t fault_pc);
 bool nt_guest_boundary_finish_guest_hardware_seh(uintptr_t resume_pc);
+/* Reconcile only the known naked RaiseException import entry that has
+ * no ELF mutex/cleanup resources. No arbitrary host frame is unwound. */
+bool nt_guest_boundary_begin_guest_software_import_seh(uintptr_t caller_pc);
+bool nt_guest_boundary_finish_guest_software_import_seh(uintptr_t resume_pc);
 /* Any nonlocal exception/longjmp that may bypass an import epilogue
  * permanently disables asynchronous stops on that TID until teardown.
  * The runtime must NOT attempt to reconstruct abandoned host locks or
