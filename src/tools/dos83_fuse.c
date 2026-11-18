@@ -387,6 +387,11 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         nt_runtime_end_namespace_mutation(guard);
         return -error;
     }
+    /* In dedicated-UID service mode EVERY FUSE file shares the PE OFD
+     * registry, including files without the legacy opt-in xattr. Otherwise
+     * a POSIX open on an unmarked inode could bypass a PE FILE_SHARE lease. */
+    if (service_mode)
+        marked = 1;
     int lease = -1;
     if (marked) {
         const int mode = fi->flags & O_ACCMODE;
@@ -397,6 +402,7 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         if (lease < 0) {
             int error = errno;
             close(fd);
+            nt_runtime_end_namespace_mutation(guard);
             return -error;
         }
     }
@@ -435,7 +441,25 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
      * openat2 rejects file-type bits in open_how.mode with EINVAL. */
     int fd = lower_open(path, fi->flags | O_CREAT | O_EXCL, mode & 07777);
     int error = fd < 0 ? -errno : guest_refresh(path);
+    int lease = -1;
+    if (!error && service_mode) {
+        const int access_mode = fi->flags & O_ACCMODE;
+        const uint32_t access = access_mode == O_RDONLY ? NT_FS_READ :
+            access_mode == O_WRONLY ? NT_FS_WRITE : NT_FS_READ | NT_FS_WRITE;
+        lease = nt_runtime_acquire_linux_nt_lease(fd, access, NT_FS_SHARE_ALL);
+        if (lease < 0) {
+            error = -errno;
+        } else {
+            error = view_lease_add(fd, lease);
+            if (!error) {
+                fi->direct_io = 1;
+                fi->keep_cache = 0;
+            }
+        }
+    }
     if (error && fd >= 0) {
+        if (lease >= 0)
+            nt_runtime_release_linux_nt_lease(&lease);
         close(fd);
         char name[NAME_MAX + 1];
         int parent = lower_parent(path, name);
@@ -527,6 +551,8 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
     int marked = borrowed ? (view_lease_active(fd) ? 1 : 0) :
                             nt_runtime_nt_file_marker(fd);
     int error = marked < 0 ? -errno : 0;
+    if (!error && service_mode)
+        marked = 1;
     if (!borrowed && marked > 0) {
         lease = nt_runtime_acquire_linux_nt_lease(fd, NT_FS_WRITE,
                                                   NT_FS_SHARE_ALL);
@@ -579,7 +605,7 @@ static int fs_mknod(const char *path, mode_t mode, dev_t dev)
     struct fuse_file_info fi = { .flags = O_WRONLY };
     int result = fs_create(path, mode & 0777, &fi);
     if (!result)
-        (void)close((int)fi.fh);
+        (void)fs_release(path, &fi);
     return result;
 }
 

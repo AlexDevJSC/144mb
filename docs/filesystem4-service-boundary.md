@@ -122,3 +122,13 @@ desactivado por defecto.
 Es imprescindible ejecutar pruebas adversarias en Fedora físico (SELinux
 Enforcing, montajes alternativos, cierres y reconexiones) antes de
 considerarlo seguro para uso de propósito general.
+
+## FUSE: leases OFD también para archivos no marcados
+
+En modo de servicio UID, FUSE adquiere ahora el registro OFD de FILE_SHARE
+para todos los opens/creates/truncates, sin depender de un xattr opt-in.
+Además usa direct_io y evita que la caché de página salte los chequeos de
+locks por rango. El nuevo test de C: PE debe comprobar conflictos cruzados
+con un cliente Linux de la vista física en Fedora; un CI sin montaje FUSE
+no prueba esta garantía. La ventana de creación antes de adquirir lease
+aún requiere una transacción unificada para poder declararse atómica.
