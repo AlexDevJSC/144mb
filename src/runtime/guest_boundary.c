@@ -302,6 +302,24 @@ bool nt_guest_boundary_begin_guest_software_import_seh(uintptr_t caller_pc)
     publish_phase(NT_GUEST_BOUNDARY_HOST);
     return true;
 }
+bool nt_guest_boundary_retire_specific_handler_import(void)
+{
+    if (host_import_depth == 0)
+        return true; /* direct trusted runtime call, no import to retire */
+    if (host_import_depth != 1 || nonlocal_poisoned ||
+        !(hardware_seh_guest_only || software_seh_naked_import_only) ||
+        !nt_guest_boundary_signal_guest_code(host_return_stack[0]))
+        return false;
+    /* The reviewed C-specific handler has no owned ELF resources when
+     * it transfers to the Windows exception target. Skip only its IAT
+     * thunk; never detach, unwound, or pretend to unlock host frames. */
+    host_return_stack[0] = 0;
+    host_import_depth = 0;
+    signal_guest_phase = 0;
+    publish_phase(NT_GUEST_BOUNDARY_HOST);
+    return true;
+}
+
 bool nt_guest_boundary_finish_guest_software_import_seh(uintptr_t resume_pc)
 {
     if (!software_seh_naked_import_only ||
