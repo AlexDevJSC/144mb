@@ -164,6 +164,8 @@ fi
     echo 'PASS: automated Fedora filesystem regression only.'
     echo 'MANUAL PENDING: SIGKILL and power-cycle recovery, another UID denial,'
     echo 'SELinux AVC review, concurrent FUSE/PE operations, Windows comparison.'
+    echo 'Collect root-only AVC/context evidence separately:'
+    echo 'sudo bash scripts/fedora-fs4-selinux-evidence.sh --physical-confirmed'
     echo 'No universal service UID isolation or 100% NTFS claim.'
     printf 'Evidence: %s\n' "$report"
 } | tee -a "$report"
