@@ -23,7 +23,37 @@ __declspec(dllimport) LONG NTAPI NtTestAlert(void);
 __declspec(dllimport) LONG NTAPI NtDelayExecution(BOOLEAN, const LARGE_INTEGER *);
 
 static volatile DWORD apc_count, callback_thread, callback_ok, worker_id;
-static volatile DWORD self_count;
+static volatile DWORD self_count, special_count, special_seh_count;
+static void NTAPI special_native_apc(void *context, void *first, void *second)
+{
+    if ((uintptr_t)context == 0x777u && (uintptr_t)first == 0x778u &&
+        (uintptr_t)second == 0x779u)
+        ++special_count;
+}
+static void CALLBACK special_user_apc(ULONG_PTR argument)
+{
+    if (argument == 0x77au)
+        ++special_count;
+}
+/* Reuse the runtime's existing PE RaiseException -> VEH -> CONTEXT
+ * restoration, rather than a Linux SIGSEGV handler. This tests a
+ * continuable Windows software exception *inside* an APC callback. */
+static LONG CALLBACK special_veh(PEXCEPTION_POINTERS pointers)
+{
+    if (pointers && pointers->ExceptionRecord &&
+        pointers->ExceptionRecord->ExceptionCode == 0xe14400a5u) {
+        ++special_seh_count;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void CALLBACK special_seh_apc(ULONG_PTR argument)
+{
+    if (argument == 0x77bu) {
+        RaiseException(0xe14400a5u, 0, 0, NULL);
+        ++special_seh_count;
+    }
+}
 static void CALLBACK single_apc(ULONG_PTR argument)
 {
     ++apc_count;
@@ -101,10 +131,13 @@ static DWORD WINAPI worker(void *unused)
         NtTestAlert() != STATUS_OK)
         return 35;
 
-    /* Reserve HANDLE 1 is a special APC (unsafe without asynchronous
-     * context transition). It must fail, not queue a fake normal APC. */
+    /* Guest-only, bounded delivery at the safe return from this NT
+     * import, without an alertable wait or hijacking a host mutex. */
     if (NtQueueApcThreadEx(GetCurrentThread(), (HANDLE)(uintptr_t)1,
-                           native_apc, NULL, NULL, NULL) != STATUS_NOT_SUPPORTED)
+                           special_native_apc, (void *)(uintptr_t)0x777u,
+                           (void *)(uintptr_t)0x778u,
+                           (void *)(uintptr_t)0x779u) != STATUS_OK ||
+        special_count != 1u || NtTestAlert() != STATUS_OK)
         return 36;
 
     typedef DWORD (WINAPI *queue_apc2)(PAPCFUNC, HANDLE, ULONG_PTR, DWORD);
@@ -115,13 +148,103 @@ static DWORD WINAPI worker(void *unused)
     if (modern == NULL || !modern(self_apc, GetCurrentThread(), 0x177u, 0) ||
         NtTestAlert() != STATUS_USER_APC || self_count != 4)
         return 37;
-    SetLastError(0);
-    if (modern(self_apc, GetCurrentThread(), 0x177u, 1) ||
-        GetLastError() != ERROR_NOT_SUPPORTED || NtTestAlert() != STATUS_OK)
+    if (!modern(special_user_apc, GetCurrentThread(), 0x77au, 1) ||
+        special_count != 2u || NtTestAlert() != STATUS_OK)
         return 38;
-    if (!CloseHandle(event))
+    /* A malformed flag and a callback outside the parent's pinned PE
+     * executable range must never be scheduled or executed. */
+    SetLastError(0);
+    if (modern(special_user_apc, GetCurrentThread(), 0x77au, 2) ||
+        GetLastError() != ERROR_INVALID_PARAMETER)
+        return 86;
+    union { uintptr_t address; PAPCFUNC callback; } invalid = {
+        .address = (uintptr_t)0x12345u
+    };
+    SetLastError(0);
+    if (modern(invalid.callback, GetCurrentThread(), 0x77au, 1) ||
+        GetLastError() != ERROR_NOT_SUPPORTED)
+        return 87;
+
+    /* A continuable software exception in the APC uses existing
+     * guest VEH/SEH dispatch. Run it LAST: a non-local restore must
+     * poison the host-import boundary against future async ptrace. */
+    void *veh = AddVectoredExceptionHandler(1, special_veh);
+    if (!veh)
+        return 39;
+    if (!modern(special_seh_apc, GetCurrentThread(), 0x77bu, 1) ||
+        special_seh_count != 2u)
+        return 40;
+    if (!RemoveVectoredExceptionHandler(veh) || !CloseHandle(event))
         return 31;
     return 0x144;
+}
+
+/* Special APCs run in a real secondary PE thread's import-return
+ * checkpoint while its application only uses NON-ALERTABLE Sleep().
+ * Its normal APC queue must not consume these callbacks. */
+struct special_target {
+    HANDLE ready;
+    DWORD tid, observed, count, fifo;
+};
+static void CALLBACK special_secondary_user(ULONG_PTR argument)
+{
+    struct special_target *state = (struct special_target *)argument;
+    state->observed = GetCurrentThreadId();
+    if (state->count == 0 && state->fifo == 0)
+        state->fifo = 1;
+    ++state->count;
+}
+static void NTAPI special_secondary_native(void *context, void *first, void *second)
+{
+    struct special_target *state = context;
+    if (first != (void *)(uintptr_t)0x711u ||
+        second != (void *)(uintptr_t)0x722u)
+        return;
+    if (state->count == 1 && state->fifo == 1)
+        state->fifo = 2;
+    state->observed = GetCurrentThreadId();
+    ++state->count;
+}
+static DWORD WINAPI special_nonalertable_worker(void *argument)
+{
+    struct special_target *state = argument;
+    state->tid = GetCurrentThreadId();
+    if (!SetEvent(state->ready))
+        return 80;
+    for (unsigned i = 0; i < 400 && state->count < 2; ++i)
+        Sleep(5); /* never SleepEx(..., TRUE) */
+    if (state->count != 2 || state->fifo != 2 ||
+        state->observed != state->tid)
+        return 81;
+    return 0x188u;
+}
+static int test_special_nonalertable(void)
+{
+    struct special_target state = {0};
+    state.ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!state.ready) return 82;
+    DWORD tid = 0, exit_code = 0;
+    HANDLE thread = CreateThread(NULL, 0, special_nonalertable_worker,
+                                 &state, 0, &tid);
+    if (!thread || !tid || WaitForSingleObject(state.ready, 5000) != WAIT_OBJECT_0)
+        return 83;
+    typedef DWORD (WINAPI *queue_apc2)(PAPCFUNC, HANDLE, ULONG_PTR, DWORD);
+    union { FARPROC address; queue_apc2 call; } resolved = {
+        .address = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "QueueUserAPC2")
+    };
+    if (!resolved.call ||
+        !resolved.call(special_secondary_user, thread, (ULONG_PTR)&state, 1) ||
+        NtQueueApcThreadEx(thread, (HANDLE)(uintptr_t)1,
+                           special_secondary_native, &state,
+                           (void *)(uintptr_t)0x711u,
+                           (void *)(uintptr_t)0x722u) != STATUS_OK)
+        return 84;
+    if (WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(thread, &exit_code) || exit_code != 0x188u ||
+        state.count != 2 || state.fifo != 2 || state.observed != tid ||
+        !CloseHandle(thread) || !CloseHandle(state.ready))
+        return 85;
+    return 0;
 }
 
 /* Four concurrent PE Win32 threads independently consume two queued APCs,
@@ -228,6 +351,8 @@ int import_fixture_entry(void)
         GetLastError() != ERROR_ACCESS_DENIED ||
         NtQueueApcThread(restricted, native_apc, NULL, NULL, NULL) != STATUS_ACCESS_DENIED ||
         NtQueueApcThreadEx(restricted, NULL, native_apc, NULL, NULL, NULL) != STATUS_ACCESS_DENIED ||
+        NtQueueApcThreadEx(restricted, (HANDLE)(uintptr_t)1,
+                           special_native_apc, NULL, NULL, NULL) != STATUS_ACCESS_DENIED ||
         NtAlertThread(restricted) != STATUS_ACCESS_DENIED ||
         NtAlertResumeThread(restricted, NULL) != STATUS_ACCESS_DENIED)
         return 12;
@@ -288,5 +413,6 @@ int import_fixture_entry(void)
         return 48;
     if (!CloseHandle(gated) || !CloseHandle(ready))
         return 49;
-    return test_apc_concurrent_threads();
+    const int special = test_special_nonalertable();
+    return special ? special : test_apc_concurrent_threads();
 }

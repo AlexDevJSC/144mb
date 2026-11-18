@@ -53,6 +53,9 @@ struct guest_apc {
 struct guest_apc_queue {
     struct guest_apc *head, *tail;
     uint32_t count;
+    /* Only special queues consult this lock-free indicator from the PE
+     * import-return path. Mutation remains serialized by wait_lock. */
+    _Atomic bool available;
 };
 /* The bounded Linux backend can boost a guest by one Linux nice step
  * and automatically restore its original base after a monotonic deadline.
@@ -78,7 +81,7 @@ struct waitable {
     bool brokered;
     struct nt_broker_resource broker;
     uintptr_t teb_base;
-    struct guest_apc_queue apcs;
+    struct guest_apc_queue apcs, special_apcs;
     uint32_t suspend_count;
     /* Running guest threads can only be paused at an explicit runtime
      * alertable checkpoint, never through an asynchronous Linux signal. */
@@ -126,7 +129,11 @@ static _Thread_local uint32_t thread_result;
 static _Thread_local sigjmp_buf thread_exit;
 /* A guest's primary thread is not represented by a waitable. Its own
  * pseudo-handle has a strictly thread-local queue, never a host TID. */
-static _Thread_local struct guest_apc_queue primary_apcs;
+static _Thread_local struct guest_apc_queue primary_apcs, primary_special_apcs;
+/* Recursion guard: an APC may import Win32, which itself returns via this
+ * boundary. Dispatch pending APCs only after the current callback returns
+ * or when a later unrelated safe-point is reached. */
+static _Thread_local bool special_apc_dispatching;
 static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
 static _Thread_local uint16_t primary_thread_group;
@@ -353,6 +360,35 @@ static struct guest_apc_queue *current_apcs(void)
 {
     return running_thread != NULL ? &running_thread->apcs : &primary_apcs;
 }
+static struct guest_apc_queue *current_special_apcs(void)
+{
+    return running_thread != NULL ?
+           &running_thread->special_apcs : &primary_special_apcs;
+}
+
+/* The privileged PE loader has already pinned executable .text ranges.
+ * Never let an APC invoke a raw host ELF pointer or JIT memory supplied
+ * as an opaque Win32 callback. Dynamic LoadLibrary and unpinned modules
+ * remain explicitly unsupported, rather than silently trusted. */
+static bool trusted_special_apc_entry(uintptr_t pc)
+{
+    uintptr_t start = 0, end = 0;
+    if (pc == 0 || !nt_guest_boundary_import_gate_enabled() ||
+        !nt_guest_boundary_get_image_range(&start, &end))
+        return false;
+    if (pc >= start && pc < end)
+        return true;
+    struct nt_guest_code_range dlls[NT_GUEST_ADDITIONAL_CODE_MAX];
+    size_t count = 0;
+    if (!nt_guest_boundary_get_startup_code_ranges(
+            dlls, NT_GUEST_ADDITIONAL_CODE_MAX, &count))
+        return false;
+    for (size_t i = 0; i < count; ++i)
+        if (pc >= dlls[i].begin && pc < dlls[i].end)
+            return true;
+    return false;
+}
+
 
 /* The caller holds wait_lock. APC callbacks execute only on their target
  * thread, after dropping this lock, and never from a Linux signal handler. */
@@ -368,18 +404,25 @@ static bool consume_alert_locked(void)
     return true;
 }
 
-static struct guest_apc *pop_apc_locked(void)
+static struct guest_apc *pop_apc_queue_locked(struct guest_apc_queue *queue)
 {
-    struct guest_apc_queue *queue = current_apcs();
     struct guest_apc *apc = queue->head;
     if (apc != NULL) {
         queue->head = apc->next;
         if (queue->head == NULL)
             queue->tail = NULL;
         --queue->count;
+        if (queue->count == 0)
+            atomic_store_explicit(&queue->available, false,
+                                  memory_order_release);
         apc->next = NULL;
     }
     return apc;
+}
+
+static struct guest_apc *pop_apc_locked(void)
+{
+    return pop_apc_queue_locked(current_apcs());
 }
 
 /* Called under wait_lock in the target thread at an alertable waiting
@@ -416,6 +459,41 @@ static void invoke_apc(struct guest_apc *apc)
     free(apc);
 }
 
+/* Called ONLY by the protected PE import-return boundary, after it
+ * verified the final host import has returned, no host mutex is owned
+ * by this gate, and GS still belongs to the guest. This is a guest-safe
+ * cooperative APC delivery point, NOT arbitrary PC interruption.
+ * A callback which raises a software Windows exception follows the
+ * existing RaiseException -> VEH/SEH machinery on its own target thread.
+ * Any nonlocal unwinding poisons the guest/host gate fail-closed. */
+void nt_runtime_special_apc_checkpoint(void)
+{
+    if (special_apc_dispatching)
+        return;
+    /* Most imported Win32 calls have no pending APC. Avoid taking
+     * wait_lock (and a second CET probe) on every PE import. */
+    if (!atomic_load_explicit(&current_special_apcs()->available,
+                              memory_order_acquire))
+        return;
+    if (!nt_guest_boundary_special_apc_allowed() ||
+        nt_guest_thread_teb() == NULL)
+        return;
+    special_apc_dispatching = true;
+    /* Bound each crossing: callbacks can re-queue themselves. */
+    for (unsigned delivered = 0; delivered < 8; ++delivered) {
+        pthread_mutex_lock(&wait_lock);
+        struct guest_apc *apc =
+            pop_apc_queue_locked(current_special_apcs());
+        pthread_mutex_unlock(&wait_lock);
+        if (!apc)
+            break;
+        invoke_apc(apc);
+        if (nt_guest_boundary_nonlocal_poisoned())
+            break;
+    }
+    special_apc_dispatching = false;
+}
+
 /* On termination the target cannot execute additional APCs. The queue
  * belongs to its canonical THREAD slot even after every HANDLE is closed. */
 static void clear_apcs_locked(struct guest_apc_queue *queue)
@@ -426,12 +504,15 @@ static void clear_apcs_locked(struct guest_apc_queue *queue)
         free(apc);
         apc = next;
     }
+    /* Accesses are serialized by wait_lock; publish empty before the
+     * underlying thread slot can be recycled. */
     *queue = (struct guest_apc_queue){0};
 }
 
-nt_status nt_runtime_queue_apc(uintptr_t handle, guest_user_apc user,
-                                guest_native_apc native,
-                                uintptr_t first, uintptr_t second, uintptr_t third)
+static nt_status queue_apc_common(uintptr_t handle,
+                                guest_user_apc user, guest_native_apc native,
+                                uintptr_t first, uintptr_t second, uintptr_t third,
+                                bool special)
 {
     if ((user == NULL) == (native == NULL))
         return NT_STATUS_INVALID_PARAMETER;
@@ -439,7 +520,10 @@ nt_status nt_runtime_queue_apc(uintptr_t handle, guest_user_apc user,
     struct guest_apc_queue *queue = NULL;
     nt_status status = NT_STATUS_SUCCESS;
     if (handle == UINTPTR_MAX - 1) {
-        queue = current_apcs();
+        if (special && nt_guest_thread_teb() == NULL)
+            status = NT_STATUS_NOT_SUPPORTED;
+        else
+            queue = special ? current_special_apcs() : current_apcs();
     } else {
         struct waitable *object = find_waitable(handle);
         if (object == NULL)
@@ -450,13 +534,26 @@ nt_status nt_runtime_queue_apc(uintptr_t handle, guest_user_apc user,
             status = NT_STATUS_NOT_SUPPORTED;
         else if (!(object->access & 0x10u)) /* THREAD_SET_CONTEXT */
             status = NT_STATUS_ACCESS_DENIED;
-        else if (wait_state(object)->signaled)
+        else if (wait_state(object)->signaled ||
+                 wait_state(object)->terminate_at_start)
             status = NT_STATUS_THREAD_IS_TERMINATING;
+        else if (special && wait_state(object)->teb_base == 0)
+            status = NT_STATUS_NOT_SUPPORTED;
         else
-            queue = &wait_state(object)->apcs;
+            queue = special ? &wait_state(object)->special_apcs :
+                              &wait_state(object)->apcs;
     }
     if (queue != NULL) {
-        if (queue->count >= MAX_PENDING_APC) {
+        uintptr_t callback = 0;
+        _Static_assert(sizeof(callback) == sizeof(native) &&
+                       sizeof(callback) == sizeof(user), "PE32+ AMD64 pointers");
+        if (native != NULL)
+            memcpy(&callback, &native, sizeof(callback));
+        else
+            memcpy(&callback, &user, sizeof(callback));
+        if (special && !trusted_special_apc_entry(callback)) {
+            status = NT_STATUS_NOT_SUPPORTED;
+        } else if (queue->count >= MAX_PENDING_APC) {
             status = NT_STATUS_NO_MEMORY;
         } else {
             struct guest_apc *apc = calloc(1, sizeof(*apc));
@@ -473,12 +570,22 @@ nt_status nt_runtime_queue_apc(uintptr_t handle, guest_user_apc user,
                     queue->head = apc;
                 queue->tail = apc;
                 ++queue->count;
+                if (special)
+                    atomic_store_explicit(&queue->available, true,
+                                          memory_order_release);
                 pthread_cond_broadcast(&wait_changed);
             }
         }
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
+}
+
+nt_status nt_runtime_queue_apc(uintptr_t handle, guest_user_apc user,
+                                guest_native_apc native,
+                                uintptr_t first, uintptr_t second, uintptr_t third)
+{
+    return queue_apc_common(handle, user, native, first, second, third, false);
 }
 
 uint32_t NT_MS_ABI nt_QueueUserAPC(guest_user_apc callback, uintptr_t handle, uintptr_t data)
@@ -496,13 +603,18 @@ nt_status NT_MS_ABI nt_NtQueueApcThread(uintptr_t thread, guest_native_apc routi
                                 (uintptr_t)first, (uintptr_t)second);
 }
 
-/* A NULL reserve behaves exactly as NtQueueApcThread. A special APC
- * (reserve=1) requires interrupting a thread even outside alertable waits;
- * no safe mechanism exists here, so refuse it instead of faking delivery. */
+/* Reserve==0 preserves the normal alertable-APC contract. Reserve==1
+ * queues a distinct special APC, but ONLY for a pinned executable PE
+ * callback and a target with a live TEB: it runs on that thread's next
+ * safe Win64 import return, not at an arbitrary interrupted instruction.
+ * Other nonzero reservations fail rather than silently downgrade. */
 nt_status NT_MS_ABI nt_NtQueueApcThreadEx(uintptr_t thread, uintptr_t reserve,
                                          guest_native_apc routine,
                                          void *context, void *first, void *second)
 {
+    if (reserve == 1)
+        return queue_apc_common(thread, NULL, routine, (uintptr_t)context,
+                                (uintptr_t)first, (uintptr_t)second, true);
     if (reserve != 0)
         return NT_STATUS_NOT_SUPPORTED;
     return nt_NtQueueApcThread(thread, routine, context, first, second);
@@ -511,11 +623,15 @@ nt_status NT_MS_ABI nt_NtQueueApcThreadEx(uintptr_t thread, uintptr_t reserve,
 uint32_t NT_MS_ABI nt_QueueUserAPC2(guest_user_apc callback, uintptr_t handle,
                                    uintptr_t data, uint32_t flags)
 {
-    /* QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC cannot run safely while the
-     * target holds internal pthread locks. Do not silently queue a normal
-     * APC in its place. */
+    if (flags == 1) {
+        const nt_status status =
+            queue_apc_common(handle, callback, NULL, data, 0, 0, true);
+        if (status != NT_STATUS_SUCCESS)
+            nt_SetLastError(nt_runtime_nt_error(status));
+        return status == NT_STATUS_SUCCESS;
+    }
     if (flags != 0) {
-        nt_SetLastError(flags == 1 ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_PARAMETER);
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
     return nt_QueueUserAPC(callback, handle, data);
@@ -2344,6 +2460,7 @@ static void finish_thread(struct nt_guest_thread *guest, bool attached)
     running_thread->exit_code = thread_result;
     running_thread->teb_base = 0; /* stack-allocated TEB is no longer live */
     clear_apcs_locked(&running_thread->apcs);
+    clear_apcs_locked(&running_thread->special_apcs);
     running_thread->signaled = true;
     release_waitable(running_thread);
     pthread_cond_broadcast(&wait_changed);

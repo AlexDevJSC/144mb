@@ -68,6 +68,12 @@ void nt_guest_boundary_guest_enter(void);
 void nt_guest_boundary_guest_leave(void);
 uint32_t nt_guest_boundary_current_phase(void);
 uint32_t nt_guest_boundary_host_nesting(void);
+/* Is the CURRENT thread at a reviewed PE-owned import-return safe point?
+ * The ordinary PE runner may have no parent supervisor session: that is
+ * not by itself an error. Never use UNREGISTERED as a fake GUEST phase
+ * for ptrace; this query ONLY authorises synchronous same-thread calls
+ * from the reviewed return gate. */
+bool nt_guest_boundary_special_apc_allowed(void);
 /* Any nonlocal exception/longjmp that may bypass an import epilogue
  * permanently disables asynchronous stops on that TID until teardown.
  * The runtime must NOT attempt to reconstruct abandoned host locks or

@@ -50,6 +50,12 @@ static _Thread_local bool nonlocal_poisoned;
 enum { MAX_IMPORT_NESTING = 128, MAX_GATED_TARGETS = 8192 };
 static _Thread_local uintptr_t host_return_stack[MAX_IMPORT_NESTING];
 
+/* This hook is supplied by threads.c when the Win32 runtime is linked.
+ * Smaller standalone gate tests intentionally link without threads.c.
+ * Never invoke it from import_enter (host locks may be held), and never
+ * from a Linux signal handler. */
+extern void nt_runtime_special_apc_checkpoint(void) __attribute__((weak));
+
 struct gate_target { uintptr_t native, wrapper; };
 static struct gate_target gates[MAX_GATED_TARGETS];
 static size_t gate_count;
@@ -215,6 +221,20 @@ uint32_t nt_guest_boundary_host_nesting(void)
 {
     return host_import_depth;
 }
+/* The ordinary PE runner may be launched without the opt-in external
+ * ptrace supervisor. Its local guest depth is still trustworthy at the
+ * import-return gate, but the shared phase stays UNREGISTERED. This
+ * predicate must NEVER be substituted for ptrace ownership/GS checks:
+ * it is only for same-thread, synchronous APC callback invocation. */
+bool nt_guest_boundary_special_apc_allowed(void)
+{
+    if (guest_entry_depth == 0 || host_import_depth != 0 ||
+        nonlocal_poisoned || shadow_stack_unsafe())
+        return false;
+    return current_slot == NULL ||
+           nt_guest_boundary_current_phase() == NT_GUEST_BOUNDARY_GUEST;
+}
+
 /* The only safe decision after a known exception/longjmp can bypass
  * a previously installed trampoline return slot is to deny suspension
  * for the remainder of this particular thread. We never fabricate a
@@ -263,6 +283,13 @@ uintptr_t nt_guest_boundary_import_leave(void)
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
     else
         publish_phase(NT_GUEST_BOUNDARY_HOST);
+    /* The host import has completed and its return-stack slot is gone.
+     * The return trampoline still preserves Win64 integer/XMM registers;
+     * dispatch at this point, not while the imported host routine owns
+     * its mutex or while an outer guest→host callback is active. */
+    if (host_import_depth == 0 && guest_entry_depth != 0 &&
+        !nonlocal_poisoned && nt_runtime_special_apc_checkpoint != NULL)
+        nt_runtime_special_apc_checkpoint();
     return ret;
 }
 
