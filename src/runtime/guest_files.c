@@ -633,6 +633,11 @@ static bool dos83_test_io_error(const char *phase)
 #define dos83_test_io_error(phase) (false)
 #endif
 
+/* An admitted FUSE namespace callback already owns the physical WAL
+ * exclusive lock. It must not attempt to acquire dos83_lock after WAL:
+ * rename acquires the locks in the opposite order. The per-directory
+ * registry flock still serializes alias assignment across processes. */
+static _Thread_local unsigned int fs4_wal_guard_depth;
 #include "dos83_alias.inc"
 
 /* Exact spelling wins, including a symlink (the actual open rejects it).
@@ -841,13 +846,17 @@ int nt_runtime_begin_namespace_mutation(const char *input)
         return -1;
     }
     close(wal.directory);
+    ++fs4_wal_guard_depth;
     return wal.fd; /* LOCK_EX remains held until end() */
 }
 
 void nt_runtime_end_namespace_mutation(int guard)
 {
-    if (guard >= 0)
+    if (guard >= 0) {
         close(guard);
+        if (fs4_wal_guard_depth > 0)
+            --fs4_wal_guard_depth;
+    }
 }
 
 bool nt_runtime_refresh_dos83_path(const char *input)
@@ -2674,7 +2683,26 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
                                 (write_access ? FILE_WRITE : 0) |
                                 ((desired & UINT32_C(0x00010000)) ? FILE_DELETE : 0);
     pthread_mutex_lock(&file_lock);
+    /* Shared lock ordering: local file_lock, then physical WAL, then
+     * per-inode lease. Rename uses the same order and cannot publish an
+     * intermediate name while create/truncate is acquiring its lease. */
+    int mutation_guard = -1;
+    /* The dedicated-UID WAL is currently an authority for C: only.
+     * Creating private registry state on an unrelated D:/UNC grant is
+     * unsafe and breaks its existing cleanup/lifecycle contract. */
+    if (disposition != OPEN_EXISTING && private_c_path(path)) {
+        mutation_guard = nt_runtime_begin_namespace_mutation(path);
+        if (mutation_guard < 0) {
+            const int denied = errno ? errno : EUCLEAN;
+            pthread_mutex_unlock(&file_lock);
+            close(parent);
+            free(saved_path);
+            nt_SetLastError(path_error(denied, false));
+            return UINTPTR_MAX;
+        }
+    }
     if (!wal_healthy() && disposition != OPEN_EXISTING) {
+        nt_runtime_end_namespace_mutation(mutation_guard);
         pthread_mutex_unlock(&file_lock);
         close(parent);
         free(saved_path);
@@ -2737,6 +2765,7 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
             }
         }
     }
+    nt_runtime_end_namespace_mutation(mutation_guard);
     pthread_mutex_unlock(&file_lock);
     close(parent);
     free(saved_path);
@@ -3565,7 +3594,22 @@ static int32_t change_path(const char *input, enum path_operation operation)
     }
 
     pthread_mutex_lock(&file_lock);
+    /* Match CreateFile's lock order: file_lock -> WAL -> per-inode share.
+     * The old wal_namespace_ready preflight alone had a TOCTOU window
+     * before mkdirat, unlinkat and durable delete-pending commits. */
+    int mutation_guard = -1;
+    if (private_c_path(path)) {
+        mutation_guard = nt_runtime_begin_namespace_mutation(path);
+        if (mutation_guard < 0) {
+            const int error = errno ? errno : EUCLEAN;
+            pthread_mutex_unlock(&file_lock);
+            close(parent);
+            nt_SetLastError(path_error(error, false));
+            return 0;
+        }
+    }
     if (!wal_healthy()) {
+        nt_runtime_end_namespace_mutation(mutation_guard);
         pthread_mutex_unlock(&file_lock);
         close(parent);
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
@@ -3599,6 +3643,7 @@ static int32_t change_path(const char *input, enum path_operation operation)
                     else
                         dos83_test_crash("after-delete-parent-fsync");
                     const int saved_error = errno;
+                    nt_runtime_end_namespace_mutation(mutation_guard);
                     pthread_mutex_unlock(&file_lock);
                     close(parent);
                     errno = saved_error;
@@ -3655,6 +3700,7 @@ static int32_t change_path(const char *input, enum path_operation operation)
     const int error = errno;
     if (deletion_guard >= 0)
         close(deletion_guard);
+    nt_runtime_end_namespace_mutation(mutation_guard);
     pthread_mutex_unlock(&file_lock);
     close(parent);
     if (status != 0)
@@ -6335,14 +6381,20 @@ static nt_status nt_guest_io(uintptr_t handle, uintptr_t event, void *apc, void 
         return nt_file_complete(io, NT_STATUS_INVALID_PARAMETER, 0);
 
     if (nt_fs4_remote_handle(handle)) {
-        /* Offset-based native I/O must not silently mutate the shared
-         * Win32 file pointer; the v3 protocol supports sequential I/O. */
-        if (offset != NULL)
-            return nt_file_complete(io, NT_STATUS_NOT_SUPPORTED, 0);
+        /* Positional NtReadFile/NtWriteFile use the same broker-owned inode
+         * and OFD lock registry as Win32 OVERLAPPED, without modifying
+         * the shared file pointer of the source HANDLE. */
         uint32_t transferred = 0;
-        if (nt_fs4_remote_io(handle, buffer, length, &transferred,
-                             write_operation))
+        const bool success = offset ?
+            nt_fs4_remote_io_at(handle, buffer, length, &transferred,
+                                 write_operation, (uint64_t)*offset) != 0 :
+            nt_fs4_remote_io(handle, buffer, length, &transferred,
+                             write_operation) != 0;
+        if (success) {
+            if (!write_operation && !transferred && length)
+                return nt_file_complete(io, NT_STATUS_END_OF_FILE, 0);
             return nt_file_complete(io, NT_STATUS_SUCCESS, transferred);
+        }
         return nt_file_complete(io, nt_file_error(nt_GetLastError()), 0);
     }
     const int fd = duplicate_handle(handle, write_operation ? FILE_WRITE : FILE_READ);
@@ -6476,6 +6528,14 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
     if (length < needed)
         return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
 
+    if (nt_fs4_remote_handle(handle)) {
+        const uint32_t saved_last_error=nt_GetLastError();
+        uint32_t returned=0;
+        const nt_status status=nt_fs4_remote_native_query(handle,buffer,length,
+                                                          information_class,&returned);
+        nt_SetLastError(saved_last_error);
+        return nt_file_complete(io,status,status==NT_STATUS_SUCCESS ? returned : 0);
+    }
     const int fd = duplicate_handle(handle, 0);
     if (fd < 0)
         return nt_file_complete(io, nt_file_errno_status(errno), 0);
@@ -6517,12 +6577,87 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
 
 static int32_t set_file_disposition(uintptr_t handle, bool deleting);
 
+/* Single physical WAL/lease path for both Win32 SetEndOfFile and native
+ * FileEndOfFileInformation. Prevent a concurrent FUSE namespace rename
+ * crossing the truncation syscall. No raw pathname re-open of the inode.
+ * Keep local file_lock before the WAL lock, matching CreateFile/MoveFile. */
+static bool truncate_guest_handle(uintptr_t handle, off_t length, bool at_cursor)
+{
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file=find_handle(handle);
+    int err=0;
+    if (!file)
+        err=EBADF;
+    else if (!(file->access & FILE_WRITE) || !file->path)
+        err=EACCES;
+    int guard=-1, fd=-1;
+    if (!err && private_c_path(file->path)) {
+        guard=nt_runtime_begin_namespace_mutation(file->path);
+        if (guard<0)
+            err=errno ? errno : EUCLEAN;
+    }
+    if (!err) {
+        fd=fcntl(file->fd,F_DUPFD_CLOEXEC,3);
+        if (fd<0)
+            err=errno;
+    }
+    if (!err && at_cursor) {
+        length=lseek(fd,0,SEEK_CUR);
+        if (length<0)
+            err=errno;
+    }
+    if (!err && length<0)
+        err=EINVAL;
+    if (!err) {
+        /* NT byte-range locks apply to length changes as well as writes.
+         * The query covers [0, EOF) including any locks past the new EOF. */
+        struct flock block={.l_type=F_WRLCK,.l_whence=SEEK_SET,
+                            .l_start=0,.l_len=0};
+        if (fcntl(fd,F_OFD_GETLK,&block)<0)
+            err=errno;
+        else if (block.l_type!=F_UNLCK)
+            err=EAGAIN;
+    }
+    if (!err && ftruncate(fd,length)<0)
+        err=errno;
+    if (!err && !wal_sync_pinned(fd,false))
+        err=errno ? errno : EIO;
+    if (err==EIO)
+        (void)wal_poison(err);
+    if (fd>=0)
+        close(fd);
+    if (guard>=0)
+        nt_runtime_end_namespace_mutation(guard);
+    pthread_mutex_unlock(&file_lock);
+    if (err) {
+        errno=err;
+        return false;
+    }
+    return true;
+}
+
 nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_status_block *io,
                                               const void *buffer, uint32_t length,
                                               uint32_t information_class)
 {
     if (io == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
+    if (nt_fs4_remote_handle(handle)) {
+        if (buffer == NULL)
+            return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
+        if (information_class != FILE_DISPOSITION_INFORMATION_CLASS &&
+            information_class != FILE_POSITION_INFORMATION_CLASS &&
+            information_class != FILE_END_OF_FILE_INFORMATION_CLASS)
+            return nt_file_complete(io, NT_STATUS_INVALID_INFO_CLASS, 0);
+        const uint32_t needed=information_class == FILE_DISPOSITION_INFORMATION_CLASS ? 1 : 8;
+        if (length < needed)
+            return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
+        const uint32_t saved_last_error=nt_GetLastError();
+        const nt_status status=nt_fs4_remote_native_set(handle,buffer,needed,
+                                                        information_class);
+        nt_SetLastError(saved_last_error);
+        return nt_file_complete(io,status,0);
+    }
     if (information_class == FILE_DISPOSITION_INFORMATION_CLASS) {
         if (buffer == NULL)
             return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
@@ -6551,23 +6686,30 @@ nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_statu
     if (info.current_byte_offset < 0)
         return nt_file_complete(io, NT_STATUS_INVALID_PARAMETER, 0);
 
-    const int fd = duplicate_handle(handle, information_class == FILE_END_OF_FILE_INFORMATION_CLASS ?
-                                    FILE_WRITE : 0);
+    if (information_class == FILE_END_OF_FILE_INFORMATION_CLASS) {
+        const bool success=truncate_guest_handle(handle,(off_t)info.current_byte_offset,false);
+        return nt_file_complete(io,success ? NT_STATUS_SUCCESS :
+                                nt_file_errno_status(errno),0);
+    }
+    const int fd = duplicate_handle(handle, 0);
     if (fd < 0)
         return nt_file_complete(io, nt_file_errno_status(errno), 0);
-
-    const bool success = information_class == FILE_POSITION_INFORMATION_CLASS ?
-                         lseek(fd, (off_t)info.current_byte_offset, SEEK_SET) >= 0 :
-                         ftruncate(fd, (off_t)info.current_byte_offset) == 0;
-    const int error = errno;
+    const bool success=lseek(fd,(off_t)info.current_byte_offset,SEEK_SET)>=0;
+    const int error=errno;
     (void)close(fd);
-    return nt_file_complete(io, success ? NT_STATUS_SUCCESS : nt_file_errno_status(error), 0);
+    return nt_file_complete(io,success ? NT_STATUS_SUCCESS : nt_file_errno_status(error),0);
 }
 
 nt_status NT_MS_ABI nt_NtFlushBuffersFile(uintptr_t handle, struct nt_io_status_block *io)
 {
     if (io == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
+    if (nt_fs4_remote_handle(handle)) {
+        const uint32_t last_error=nt_GetLastError();
+        const nt_status status=nt_fs4_remote_native_flush(handle);
+        nt_SetLastError(last_error);
+        return nt_file_complete(io,status,0);
+    }
     /* Match Win32 FlushFileBuffers: a read-only guest HANDLE cannot flush. */
     const int fd = duplicate_handle(handle, FILE_WRITE);
     if (fd < 0)
@@ -6580,6 +6722,13 @@ nt_status NT_MS_ABI nt_NtFlushBuffersFile(uintptr_t handle, struct nt_io_status_
 
 int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle)
 {
+    if (nt_fs4_remote_handle(handle)) {
+        const nt_status status=nt_fs4_remote_native_flush(handle);
+        if (status==NT_STATUS_SUCCESS)
+            return 1;
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
     const int fd = duplicate_handle(handle, FILE_WRITE);
     return file_result(fd, fd >= 0 && fsync(fd) == 0);
 }
@@ -6625,9 +6774,10 @@ int32_t NT_MS_ABI nt_SetEndOfFile(uintptr_t handle)
 {
     if (nt_fs4_remote_handle(handle))
         return nt_fs4_remote_truncate(handle);
-    const int fd = duplicate_handle(handle, FILE_WRITE);
-    const off_t position = fd >= 0 ? lseek(fd, 0, SEEK_CUR) : -1;
-    return file_result(fd, position >= 0 && ftruncate(fd, position) == 0);
+    const bool success=truncate_guest_handle(handle,0,true);
+    if (!success)
+        nt_SetLastError(path_error(errno,false));
+    return success;
 }
 
 uint32_t NT_MS_ABI nt_GetFileType(uintptr_t handle)

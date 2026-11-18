@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Win32 runtime HANDLEs over per-client binary IPC, no shared backing FDs."""
 import os
+import signal
+import threading
 from pathlib import Path
 import secrets
 import socket
@@ -17,17 +19,24 @@ REQ = struct.Struct("<IHHQqIIIIIIQ")
 REP = struct.Struct("<IHHIIQQ")
 MAGIC, VERSION = 0x34465348, 3
 OPEN, READ, WRITE, CLOSE, DELETE, RENAME, TRUNCATE, LOCK, UNLOCK = range(1, 10)
+SEEK, SIZE = 10, 11
 ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE_AT, HANDLE_INFO = range(12, 21)
+NATIVE_QUERY, NATIVE_SET, NATIVE_FLUSH = 21, 22, 23
 
 class Broker:
-    def __init__(self, root):
+    def __init__(self, root, *, crash=None):
         server, self.client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.client.settimeout(5)
+        env = dict(os.environ)
+        if crash:
+            env["NT_FS4_TEST_CRASH"] = crash
+        else:
+            env.pop("NT_FS4_TEST_CRASH", None)
         self.process = subprocess.Popen([
             BINARY, "--root", str(root), "--fd", str(server.fileno()),
             "--client-uid", str(os.geteuid()), "--test"
         ], pass_fds=(server.fileno(),), stdin=subprocess.DEVNULL,
-           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         server.close()
         hello = self.client.recv(4096)
         if len(hello) != REP.size:
@@ -69,9 +78,11 @@ class FileSystem4Handles(unittest.TestCase):
                 self.assertEqual(error, 0)
                 self.assertNotEqual(h, 0)
                 self.assertEqual(b.call(WRITE, b"HELLO", handle=h)[0], 0)
-                self.assertEqual(b.call(READ, handle=h, offset=0, size=5),
+                self.assertEqual(b.call(SEEK, handle=h, offset=0, flags=0)[0], 0)
+                self.assertEqual(b.call(READ, handle=h, size=5),
                                  (0, 0, 5, b"HELLO"))
                 self.assertEqual(b.call(TRUNCATE, handle=h, offset=3)[0], 0)
+                self.assertEqual(b.call(SIZE, handle=h)[2], 3)
                 self.assertEqual(b.call(CLOSE, handle=h)[0], 0)
                 self.assertEqual((root / "file.txt").read_bytes(), b"HEL")
                 self.assertNotEqual(b.call(READ, handle=h, size=1)[0], 0)
@@ -183,6 +194,170 @@ class FileSystem4Handles(unittest.TestCase):
             finally:
                 a.close()
                 b.close()
+
+    def test_native_query_set_and_flush_through_service(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-native-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            broker = Broker(root)
+            try:
+                err, handle, _, _ = broker.call(OPEN, b"C:/native.dat",
+                                               access=0xC0000000,
+                                               share=7, disposition=1)
+                self.assertEqual(err, 0)
+                self.assertEqual(broker.call(WRITE, b"ABCDEFG",
+                                             handle=handle)[0], 0)
+                err, _, status, data = broker.call(
+                    NATIVE_QUERY, handle=handle, access=5, size=24)
+                self.assertEqual((err, status, len(data)), (0, 0, 24))
+                self.assertEqual(struct.unpack_from("<q", data, 8)[0], 7)
+                self.assertEqual(broker.call(NATIVE_SET,
+                    struct.pack("<q", 2), handle=handle, access=14)[2], 0)
+                err, _, status, data = broker.call(
+                    NATIVE_QUERY, handle=handle, access=14, size=8)
+                self.assertEqual((err, status, struct.unpack("<q", data)[0]),
+                                 (0, 0, 2))
+                self.assertEqual(broker.call(NATIVE_SET,
+                    struct.pack("<q", 4), handle=handle, access=20)[2], 0)
+                self.assertEqual(broker.call(NATIVE_FLUSH,
+                                             handle=handle)[2], 0)
+                self.assertEqual(broker.call(CLOSE, handle=handle)[0], 0)
+                self.assertEqual((root/"native.dat").read_bytes(), b"ABCD")
+            finally:
+                broker.close()
+
+    def test_sigkill_releases_remote_share_lease(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-kill-lease-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            (root / "lease.dat").write_bytes(b"SAFE")
+            first, second = Broker(root), Broker(root)
+            killed = False
+            try:
+                err, handle, _, _ = first.call(OPEN, b"C:/lease.dat",
+                                                access=0x80000000,
+                                                share=0, disposition=3)
+                self.assertEqual(err, 0)
+                self.assertEqual(second.call(OPEN, b"C:/lease.dat",
+                    access=0x80000000, share=7, disposition=3)[0], 32)
+                os.kill(first.process.pid, signal.SIGKILL)
+                first.process.wait(timeout=5)
+                first.client.close()
+                killed = True
+                self.assertNotEqual(first.process.returncode, 0)
+                err, available, _, _ = second.call(
+                    OPEN, b"C:/lease.dat", access=0x80000000,
+                    share=7, disposition=3)
+                self.assertEqual(err, 0, "SIGKILL leaked physical OFD lease")
+                self.assertEqual(second.call(CLOSE, handle=available)[0], 0)
+                self.assertEqual((root / "lease.dat").read_bytes(), b"SAFE")
+            finally:
+                if not killed:
+                    first.close()
+                second.close()
+
+    def test_concurrent_create_new_is_single_winner(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-create-race-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            first, second = Broker(root), Broker(root)
+            start = threading.Barrier(3)
+            results = []
+            def create(client):
+                start.wait(timeout=5)
+                results.append((client, client.call(
+                    OPEN, b"C:/contended.bin", access=0xC0000000,
+                    share=7, disposition=1)))
+            try:
+                a = threading.Thread(target=create, args=(first,))
+                b = threading.Thread(target=create, args=(second,))
+                a.start(); b.start(); start.wait(timeout=5)
+                a.join(timeout=8); b.join(timeout=8)
+                self.assertFalse(a.is_alive() or b.is_alive(),
+                                 "stalled physical WAL/lease lock ordering")
+                self.assertEqual(len(results), 2)
+                self.assertEqual(sum(reply[0] == 0 for _, reply in results), 1)
+                for broker, reply in results:
+                    if reply[0] == 0:
+                        self.assertEqual(broker.call(CLOSE,
+                                                     handle=reply[1])[0], 0)
+                self.assertTrue((root / "contended.bin").is_file())
+            finally:
+                first.close()
+                second.close()
+
+    def test_sigkill_during_broker_mutations_and_recovery(self):
+        """Process death after the syscall but before reply must not leak
+        WAL or share leases. This is NOT physical power-loss durability."""
+        for phase in ("after-open", "after-write", "after-rename",
+                      "after-delete", "after-attribute", "after-native-set"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(
+                    prefix="fs4-broker-crash-") as temp:
+                root = Path(temp) / "C"
+                root.mkdir(mode=0o700)
+                if phase in ("after-write", "after-native-set"):
+                    (root / "victim.bin").write_bytes(b"ORIGINAL")
+                elif phase == "after-rename":
+                    (root / "victim.bin").write_bytes(b"RENAMED")
+                elif phase in ("after-delete", "after-attribute"):
+                    (root / "victim.bin").write_bytes(b"KEEP")
+                b = Broker(root, crash=phase)
+                try:
+                    # Send one successful destructive request to the worker.
+                    if phase == "after-open":
+                        req = (OPEN, b"C:/victim.bin", dict(access=0xC0000000,
+                                                          share=7, disposition=1))
+                    elif phase in ("after-write", "after-native-set"):
+                        err, h, _, _ = b.call(OPEN, b"C:/victim.bin",
+                                              access=0xC0000000, share=7,
+                                              disposition=3)
+                        self.assertEqual(err, 0)
+                        req = ((WRITE, b"RESULT", dict(handle=h))
+                               if phase == "after-write" else
+                               (NATIVE_SET, struct.pack("<q", 3),
+                                dict(handle=h, access=20)))
+                    elif phase == "after-rename":
+                        req = (RENAME, b"C:/victim.bin\0C:/renamed.bin", {})
+                    elif phase == "after-delete":
+                        req = (DELETE, b"C:/victim.bin", {})
+                    else:
+                        req = (ATTR_SET, b"C:/victim.bin", dict(flags=1))
+                    with self.assertRaises(AssertionError):
+                        b.call(req[0], req[1], **req[2])
+                    self.assertEqual(b.process.wait(timeout=5),
+                                     -signal.SIGKILL)
+                finally:
+                    b.client.close()
+                # A cold worker re-runs startup recovery under the same root.
+                recovered = Broker(root)
+                try:
+                    if phase == "after-open":
+                        self.assertTrue((root / "victim.bin").exists())
+                    elif phase == "after-write":
+                        self.assertEqual((root / "victim.bin").read_bytes(),
+                                         b"RESULTAL")
+                    elif phase == "after-native-set":
+                        self.assertEqual((root / "victim.bin").read_bytes(), b"ORI")
+                    elif phase == "after-rename":
+                        self.assertFalse((root / "victim.bin").exists())
+                        self.assertEqual((root / "renamed.bin").read_bytes(),
+                                         b"RENAMED")
+                    elif phase == "after-delete":
+                        self.assertFalse((root / "victim.bin").exists())
+                    elif phase == "after-attribute":
+                        err, _, _, attrs = recovered.call(
+                            ATTR_GET, b"C:/victim.bin")
+                        self.assertEqual(err, 0)
+                        self.assertEqual(struct.unpack_from("<I", attrs)[0] & 1, 1)
+                    path = b"C:/renamed.bin" if phase == "after-rename" else b"C:/victim.bin"
+                    if phase != "after-delete":
+                        err, cap, _, _ = recovered.call(
+                            OPEN, path, access=0x80000000, share=7,
+                            disposition=3)
+                        self.assertEqual(err, 0, "orphaned OFD lease")
+                        self.assertEqual(recovered.call(CLOSE, handle=cap)[0], 0)
+                finally:
+                    recovered.close()
 
     def test_wrong_session_nonce_revokes_handles_and_socket(self):
         with tempfile.TemporaryDirectory(prefix="fs4-nonce-") as temp:

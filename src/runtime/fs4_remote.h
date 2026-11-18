@@ -4,12 +4,19 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "nt_services.h" /* nt_status, NT_STATUS_* */
 struct nt_find_data_w;
 struct nt_file_attribute_data;
 struct nt_handle_file_info;
 
 /* Win32 runtime-side, opt-in client of the dedicated-UID HANDLE broker.
  * No Linux backing FDs or paths are ever transferred to guest code. */
+nt_status nt_fs4_remote_native_query(uintptr_t handle,void *buffer,
+                                    uint32_t capacity,uint32_t kind,
+                                    uint32_t *received);
+nt_status nt_fs4_remote_native_set(uintptr_t handle,const void *buffer,
+                                  uint32_t size,uint32_t kind);
+nt_status nt_fs4_remote_native_flush(uintptr_t handle);
 bool nt_fs4_remote_mode(void);
 bool nt_fs4_remote_handle(uintptr_t handle);
 bool nt_fs4_remote_search(uintptr_t handle);

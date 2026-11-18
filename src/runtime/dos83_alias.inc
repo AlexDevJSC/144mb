@@ -205,10 +205,13 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
         return true;
     if (!wal_healthy())
         return false;
-    pthread_mutex_lock(&dos83_lock);
+    const bool already_serialized = fs4_wal_guard_depth != 0;
+    if (!already_serialized)
+        pthread_mutex_lock(&dos83_lock);
     int fd = confined_open_raw(parent, name, O_PATH | O_NOFOLLOW, 0);
     if (fd < 0) {
-        pthread_mutex_unlock(&dos83_lock);
+        if (!already_serialized)
+            pthread_mutex_unlock(&dos83_lock);
         return false;
     }
     struct stat st;
@@ -294,7 +297,8 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
     if (gate >= 0)
         close(gate);
     close(fd);
-    pthread_mutex_unlock(&dos83_lock);
+    if (!already_serialized)
+        pthread_mutex_unlock(&dos83_lock);
     if (error) {
         errno = error;
         return false;

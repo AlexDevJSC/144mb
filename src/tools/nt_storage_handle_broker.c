@@ -7,12 +7,14 @@
 #define _GNU_SOURCE
 #include "compat.h"
 #include "winfile.h"
+#include "nt_services.h"
 
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <linux/limits.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,7 +35,8 @@ enum { FS4_HELLO = 0, FS4_OPEN = 1, FS4_READ = 2, FS4_WRITE = 3,
        FS4_SEEK = 10, FS4_SIZE = 11, FS4_ATTR_GET=12,
        FS4_ATTR_SET=13, FS4_FIND_FIRST=14, FS4_FIND_NEXT=15,
        FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
-       FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20 };
+       FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
+       FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23 };
 struct fs4_request {
     uint32_t magic;
     uint16_t version, op;
@@ -365,6 +368,42 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         free_slot->search=false;result.handle=cap;
         result.error=NT_ERROR_SUCCESS;break;
     }
+    /* Raw NTSTATUS is returned in value; error remains zero for a valid
+     * RPC even when the native operation fails. No guest pointers or FDs. */
+    case FS4_NATIVE_QUERY: {
+        if (!slot || slot->search || n || q->size > FS4_DATA_MAX ||
+            (q->access != 5 && q->access != 14))
+            break;
+        struct nt_io_status_block io={0};
+        const nt_status status=nt_NtQueryInformationFile(slot->native,&io,
+                                        output,q->size,q->access);
+        result.error=NT_ERROR_SUCCESS;
+        result.value=(uint32_t)status;
+        if (status==NT_STATUS_SUCCESS && io.information <= FS4_DATA_MAX)
+            result.length=(uint32_t)io.information;
+        break;
+    }
+    case FS4_NATIVE_SET: {
+        if (!slot || slot->search || n!=q->size ||
+            (q->access!=13 && q->access!=14 && q->access!=20) ||
+            (q->access==13 ? n!=1 : n!=8))
+            break;
+        struct nt_io_status_block io={0};
+        const nt_status status=nt_NtSetInformationFile(slot->native,&io,
+                                        payload,q->size,q->access);
+        result.error=NT_ERROR_SUCCESS;
+        result.value=(uint32_t)status;
+        break;
+    }
+    case FS4_NATIVE_FLUSH: {
+        if (!slot || slot->search || n || q->size)
+            break;
+        struct nt_io_status_block io={0};
+        const nt_status status=nt_NtFlushBuffersFile(slot->native,&io);
+        result.error=NT_ERROR_SUCCESS;
+        result.value=(uint32_t)status;
+        break;
+    }
     case FS4_DELETE:
         if (n != q->size || !to_wide(payload, n, path))
             break;
@@ -458,6 +497,21 @@ static int serve(struct session *s)
         if (!receive_request(s->socket_fd, &request, payload, &n))
             break;
         const struct fs4_reply reply = dispatch(s, &request, payload, n, output);
+        /* Offline-only SIGKILL injection happens AFTER a successful
+         * physical mutation but BEFORE its IPC reply is observable.
+         * Never available on a production --view worker. */
+        if (s->offline_test && reply.error == NT_ERROR_SUCCESS &&
+            (request.op != FS4_NATIVE_SET || reply.value == NT_STATUS_SUCCESS)) {
+            const char *fault = getenv("NT_FS4_TEST_CRASH");
+            const char *phase = request.op == FS4_OPEN ? "after-open" :
+                request.op == FS4_WRITE ? "after-write" :
+                request.op == FS4_RENAME ? "after-rename" :
+                request.op == FS4_DELETE ? "after-delete" :
+                request.op == FS4_ATTR_SET ? "after-attribute" :
+                request.op == FS4_NATIVE_SET ? "after-native-set" : NULL;
+            if (fault && phase && strcmp(fault, phase) == 0)
+                (void)raise(SIGKILL);
+        }
         if (!send_reply(s, &reply, reply.length ? output : NULL))
             break;
         if (request.nonce != s->nonce || request.magic != FS4_MAGIC)

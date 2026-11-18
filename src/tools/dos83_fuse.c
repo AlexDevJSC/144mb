@@ -23,6 +23,7 @@
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,6 +40,17 @@
  * Otherwise a FUSE request would recurse into itself and deadlock. */
 static int lower_root = -1;
 static pthread_mutex_t namespace_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Enable fault injection exclusively for --selftest. Production service
+ * mounting never arms these SIGKILL hooks, regardless of environment. */
+static bool fs4_staging_selftest;
+static void fs4_stage_test_crash(const char *phase)
+{
+    if (!fs4_staging_selftest)
+        return;
+    const char *fault = getenv("NT_FS4_FUSE_TEST_CRASH");
+    if (fault && strcmp(fault, phase) == 0)
+        (void)raise(SIGKILL);
+}
 
 /* Service-UID mode: the service owns backing; FUSE permits only the
  * explicitly configured client UID. Kernel-supplied credentials (not paths
@@ -429,6 +441,97 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
+/* Dedicated storage UID uses staged inode publication. */
+/* Publish the inode only AFTER it holds a compatible OFD FILE_SHARE
+ * lease. A normal O_CREAT makes the inode visible before share admission:
+ * a concurrent PE CreateFile can open it during that interval. O_TMPFILE
+ * requires backing filesystem support; there is NO unsafe fallback.
+ * The WAL guard is owned by the caller through the final alias refresh. */
+static int fs_create_staged_service(const char *path, mode_t mode,
+                                    struct fuse_file_info *fi)
+{
+    char name[NAME_MAX + 1];
+    int parent = lower_parent(path, name);
+    if (parent < 0)
+        return -errno;
+    const int access_mode = fi->flags & O_ACCMODE;
+    if (access_mode != O_WRONLY && access_mode != O_RDWR) {
+        close(parent);
+        return -EINVAL;
+    }
+    int fd = openat(parent, ".", O_TMPFILE | O_CLOEXEC | access_mode,
+                    mode & 07777);
+    if (fd < 0) {
+        int error = -errno;
+        close(parent);
+        return error;
+    }
+    const uint32_t access = access_mode == O_RDWR ?
+                            NT_FS_READ | NT_FS_WRITE : NT_FS_WRITE;
+    int lease = nt_runtime_acquire_linux_nt_lease(fd, access, NT_FS_SHARE_ALL);
+    int error = lease < 0 ? -errno : 0;
+    if (!error) {
+        error = view_lease_add(fd, lease);
+        if (!error)
+            lease = -1; /* lifecycle transferred to FUSE view registry */
+    }
+    if (!error)
+        fs4_stage_test_crash("post-lease");
+    bool published = false;
+    if (!error) {
+        if (linkat(fd, "", parent, name, AT_EMPTY_PATH) < 0)
+            error = -errno;
+        else
+            published = true;
+    }
+    if (published)
+        fs4_stage_test_crash("post-link");
+    if (!error && fsync(fd) != 0)
+        error = -errno;
+    if (!error) {
+        /* lower_parent returns an O_PATH directory FD: fsync(O_PATH)
+         * fails with EBADF. Reopen the pinned directory, not a host path. */
+        int directory_sync = openat(parent, ".", O_RDONLY | O_DIRECTORY |
+                                   O_NOFOLLOW | O_CLOEXEC);
+        if (directory_sync < 0)
+            error = -errno;
+        else {
+            if (fsync(directory_sync) != 0)
+                error = -errno;
+            close(directory_sync);
+        }
+    }
+    if (!error)
+        fs4_stage_test_crash("post-fsync");
+    if (!error)
+        error = guest_refresh(path);
+    if (!error)
+        fs4_stage_test_crash("post-alias");
+    if (error) {
+        if (published) {
+            /* Refuse to remove another inode if an external writer changed
+             * the name while the alias/WAL transaction was in progress. */
+            struct stat expected, current;
+            if (fstat(fd, &expected) == 0 &&
+                fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+                expected.st_dev == current.st_dev &&
+                expected.st_ino == current.st_ino)
+                (void)unlinkat(parent, name, 0);
+        }
+        if (lease >= 0)
+            nt_runtime_release_linux_nt_lease(&lease);
+        int registry_lease = view_lease_take(fd);
+        nt_runtime_release_linux_nt_lease(&registry_lease);
+        close(fd);
+    } else {
+        fi->fh = (uint64_t)fd;
+        fi->direct_io = 1;
+        fi->keep_cache = 0;
+    }
+    close(parent);
+    return error;
+}
+
 static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
@@ -437,6 +540,12 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     if (guard < 0)
         return guard;
     pthread_mutex_lock(&namespace_lock);
+    if (service_mode) {
+        int result = fs_create_staged_service(path, mode, fi);
+        pthread_mutex_unlock(&namespace_lock);
+        nt_runtime_end_namespace_mutation(guard);
+        return result;
+    }
     /* FUSE create receives an inode mode (S_IFREG | permissions).
      * openat2 rejects file-type bits in open_how.mode with EINVAL. */
     int fd = lower_open(path, fi->flags | O_CREAT | O_EXCL, mode & 07777);
@@ -662,6 +771,11 @@ static int fs_link(const char *from, const char *to)
 {
     if (!service_authorized())
         return -EACCES;
+    /* POSIX linkat bypasses Win32 FILE_SHARE_DELETE and pending-delete
+     * rules. Until CreateHardLink is brokered, do not publish it in the
+     * dedicated-UID namespace. Legacy non-service remains unchanged. */
+    if (service_mode)
+        return -EOPNOTSUPP;
     int guard = guest_mutation_begin(to);
     if (guard < 0)
         return guard;
@@ -719,6 +833,10 @@ static int fs_utimens(const char *path, const struct timespec times[2],
 {
     if (!service_authorized())
         return -EACCES;
+    /* Until this operation is a broker transaction with WAL, NT ACL and
+     * delete-pending/share validation, no direct service-UID write. */
+    if (service_mode)
+        return -EOPNOTSUPP;
     int fd = fi ? (int)fi->fh : lower_open(path, O_RDONLY, 0);
     if (fd < 0)
         return -errno;
@@ -758,6 +876,10 @@ static int fs_setxattr(const char *path, const char *name, const char *value,
 {
     if (!service_authorized())
         return -EACCES;
+    /* POSIX user.* xattrs can alter security-sensitive state without NT
+     * privileges or a durable metadata transaction. Refuse for UID service. */
+    if (service_mode)
+        return -EOPNOTSUPP;
     if (reserved_xattr(name) ||
         (service_mode && strncmp(name, "user.", 5) != 0))
         return -EACCES;
@@ -774,6 +896,8 @@ static int fs_removexattr(const char *path, const char *name)
 {
     if (!service_authorized())
         return -EACCES;
+    if (service_mode)
+        return -EOPNOTSUPP;
     if (reserved_xattr(name))
         return -EACCES;
     int fd = lower_open(path, O_RDONLY, 0);
@@ -874,6 +998,7 @@ static const struct fuse_operations ops = {
  * with /dev/fuse unavailable. This does NOT validate kernel FUSE mounting. */
 static int backend_selftest(void)
 {
+    fs4_staging_selftest = true;
     int outside = lower_open("/../../etc/passwd", O_RDONLY, 0);
     if (outside >= 0) {
         close(outside);
@@ -1073,6 +1198,55 @@ static int backend_selftest(void)
     if (unlinkat(lower_root, safe_name + 1, 0) != 0) {
         fprintf(stderr, "FAIL: FUSE WAL test cleanup\\n");
         return 1;
+    }
+    /* Dedicated-UID create must acquire an OFD lease BEFORE linkat makes
+     * the name visible, and may never fall back to unsafe O_CREAT. */
+    const char *staged_name = "/FS4StagedLeaseTest.txt";
+    struct fuse_file_info staging = {.flags = O_WRONLY};
+    int stage_guard = guest_mutation_begin(staged_name);
+    if (stage_guard < 0) {
+        fprintf(stderr, "FAIL: staged service WAL admission\n");
+        return 1;
+    }
+    int staged = fs_create_staged_service(staged_name, 0600, &staging);
+    nt_runtime_end_namespace_mutation(stage_guard);
+    if (staged == -EOPNOTSUPP || staged == -ENOTSUP || staged == -EPERM ||
+        staged == -EINVAL) {
+        /* A filesystem may not support unnamed inodes; admission must
+         * refuse instead of publishing without a lease. */
+        int check = lower_open(staged_name, O_RDONLY, 0);
+        if (check >= 0) {
+            close(check);
+            fprintf(stderr, "FAIL: unsupported O_TMPFILE published a name\n");
+            return 1;
+        }
+        printf("SKIP staged service inode test: backing denies O_TMPFILE\n");
+    } else {
+        if (staged || !staging.direct_io || !view_lease_active((int)staging.fh)) {
+            fprintf(stderr, "FAIL: staged service inode was not leased\n");
+            return 1;
+        }
+        uintptr_t opposing = nt_CreateFileW(u"C:\\FS4StagedLeaseTest.txt",
+                                            UINT32_C(0x80000000), 0,
+                                            NULL, 3, 0, 0);
+        if (opposing != UINTPTR_MAX) {
+            (void)nt_CloseHandle(opposing);
+            fprintf(stderr, "FAIL: staged service inode bypassed PE share lease\n");
+            return 1;
+        }
+        if (fs_release(staged_name, &staging) != 0) {
+            fprintf(stderr, "FAIL: staged service lease cleanup\n");
+            return 1;
+        }
+        opposing = nt_CreateFileW(u"C:\\FS4StagedLeaseTest.txt",
+                                  UINT32_C(0x80000000), NT_FS_SHARE_ALL,
+                                  NULL, 3, 0, 0);
+        if (opposing == UINTPTR_MAX || !nt_CloseHandle(opposing) ||
+            fs_unlink(staged_name) != 0) {
+            fprintf(stderr, "FAIL: lease did not release after staged close\n");
+            return 1;
+        }
+        printf("PASS staged FUSE inode is leased before publication\n");
     }
     printf("PASS FUSE fail-closed pre-mutation WAL admission\\n");
     printf("PASS NT opt-in share leases, pre-truncate denial, range locks, metadata isolation\n");

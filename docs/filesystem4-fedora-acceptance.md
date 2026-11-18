@@ -81,3 +81,31 @@ El script Fedora no puede observar una computadora remota ni modificar
 SELinux desde ChatGPT. Hasta ejecutar pruebas físicas/Windows y cerrar
 incidencias, las PR #150, #152, #153, #155, #156 y P5 siguen siendo
 desarrollos revisables, no un FileSystem 100 % aprobado.
+
+
+## Actualización de aceptación: servicio UID y SELinux (18-11-2026)
+
+Además de la suite legacy, fedora-filesystem4-acceptance.sh ahora ejecuta
+scripts/fedora-fs4-service-acceptance.py contra el servicio UID REAL
+preinstalado en Fedora y el montaje FUSE /run/ntnative-storage/view.
+Se exige getenforce=Enforcing, cliente no-root, propietario de backing
+ntnative-storage distinto, denegación de lectura directa, respuestas
+autenticadas SCM_CREDENTIALS tanto en v1 como HELLO binario v3 y rechazo
+de SCM_RIGHTS (transferencias de FDs).
+
+En un directorio temporal de la vista comprueba lectura/escritura y rename,
+más rechazos de chmod, utimens, setxattr, removexattr, hardlink, symlink y
+lectura del marcador interno NT. Imprime etiquetas SELinux (ls -Zd) para
+inspección manual, sin considerarlas demostración de una política confinada.
+
+Requisitos previos: servicio UID instalado con FUSE montado, broker v3
+habilitado por administrador mediante NT_STORAGE_EXPERIMENTAL_HANDLES=1,
+usuario cliente no root. El script nunca configura DAC, mount ni SELinux.
+
+Inspección humana obligatoria: contexto SELinux del servicio, AVC logs
+(ausearch/journalctl), denegación por un segundo UID, PE reales concurrentes
+y reinicio. Una denegación provocada por DAC no certifica SELinux.
+
+Evidencia: esta sesión no dispone de Fedora físico. El entorno del asistente
+es Debian 13 sin /dev/fuse ni /sys/fs/selinux/enforce. Validación física:
+NO EJECUTADA. No desactivar SELinux para pasar el gate.
