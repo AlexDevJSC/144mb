@@ -933,12 +933,23 @@ check-pe-async-special-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-spe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-loop-fixture.exe
 
+# The same import-free Win64 thread executes RaiseException inside the
+# asynchronously delivered APC and must recover through .pdata SEH.
+$(BUILD_DIR)/async-special-apc-seh-fixture.exe: tests/pe/async_special_apc_loop_fixture.c tests/pe/async_special_apc_seh_callback.S $(BUILD_DIR)/fixture-seh.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -DNT_TEST_ASYNC_SEH -o "$@" "$<" tests/pe/async_special_apc_seh_callback.S $(BUILD_DIR)/fixture-seh.a -lkernel32
+
+.PHONY: check-pe-async-special-apc-seh
+check-pe-async-special-apc-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-seh-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-seh-fixture.exe
+
 check-pe-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe $(BUILD_DIR)/special-apc-seh-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/special-apc-seh-fixture.exe
 	$(MAKE) BUILD_DIR=$(BUILD_DIR) check-pe-async-special-apc
+	$(MAKE) BUILD_DIR=$(BUILD_DIR) check-pe-async-special-apc-seh
 
 # APC callback with a genuine PE .pdata/.xdata frame-based SEH scope.
 # No Linux signal handler, compiler builtin or host C SEH surrogate.
