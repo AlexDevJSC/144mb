@@ -211,7 +211,7 @@ int main(void)
     void (*epilogue)(void) = nt_guest_boundary_import_return;
     uintptr_t synthetic = 0;
     memcpy(&synthetic, &epilogue, sizeof(synthetic));
-    if (nt_guest_boundary_seh_caller_pc(synthetic) != synthetic)
+    if (nt_guest_boundary_seh_caller_pc(synthetic_seh) != synthetic_seh)
         return 21;
     nt_guest_boundary_guest_enter();
     const uintptr_t approved = 0x400100u;
@@ -254,11 +254,11 @@ int main(void)
     /* A SINGLE audited naked RaiseException import may abandon its
      * own synthetic return slot; nested/unrelated host frames may not.
      * The PE return RIP was fixed by the immutable loader manifest. */
-    uintptr_t synthetic = 0;
+    uintptr_t synthetic_seh = 0;
     void (*entry)(void) = nt_guest_boundary_import_return;
-    memcpy(&synthetic, &entry, sizeof(synthetic));
+    memcpy(&synthetic_seh, &entry, sizeof(synthetic_seh));
     (void)nt_guest_boundary_import_enter(0x100u, 0x400600u);
-    if (nt_guest_boundary_seh_caller_pc(synthetic) != 0x400600u ||
+    if (nt_guest_boundary_seh_caller_pc(synthetic_seh) != 0x400600u ||
         !nt_guest_boundary_begin_guest_software_import_seh(0x400600u) ||
         nt_guest_boundary_host_nesting() != 0 ||
         nt_guest_boundary_signal_guest_phase() ||
