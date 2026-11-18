@@ -249,9 +249,27 @@ bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t mod
         (void)nt_guest_thread_leave(thread);
         return false;
     }
+    /* A reviewed PE loader (not a guest import) supplies the immutable
+     * .text grant. Install the CPU signal stack even for an image with no
+     * .pdata so a pure PE loop can receive a private special-APC nudge.
+     * The APC signal is optional if the host already owns that realtime
+     * signal; regular import-return dispatch remains available. */
+    uintptr_t code_begin = 0, code_end = 0;
+    const bool trusted_pe =
+        nt_guest_boundary_import_gate_enabled() &&
+        nt_guest_boundary_get_image_range(&code_begin, &code_end);
     if (!nt_runtime_external_module_prepare_thread(thread) ||
+        (trusted_pe && nt_runtime_guest_hardware_fault_install != NULL &&
+         !nt_runtime_guest_hardware_fault_install()) ||
         (nt_runtime_guest_hardware_fault_thread_attach != NULL &&
          !nt_runtime_guest_hardware_fault_thread_attach())) {
+        (void)nt_guest_thread_leave(thread);
+        return false;
+    }
+    if (trusted_pe && nt_runtime_guest_async_apc_install != NULL &&
+        nt_runtime_guest_async_apc_thread_attach != NULL &&
+        nt_runtime_guest_async_apc_install() &&
+        !nt_runtime_guest_async_apc_thread_attach()) {
         (void)nt_guest_thread_leave(thread);
         return false;
     }
