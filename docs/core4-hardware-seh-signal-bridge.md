@@ -47,9 +47,11 @@ ucontext en CONTEXT AMD64, distingue **RIP hardware exacto** de la
 dirección de retorno software `RIP-1`, y entrega la excepción a la
 secuencia Windows existente: VEH → SEH por .pdata/.xdata →
 UnhandledExceptionFilter. Si un handler elige una continuación o
-`EXECUTE_HANDLER`, el runtime restaura el XSAVE del kernel (incluidas
-sus extensiones) y luego aplica el FXSAVE/CONTEXT Win64 aprobado por el
-handler y los GPR. Cualquier unwind no local envenena la frontera de
+`EXECUTE_HANDLER`, el runtime restaura **solo las extensiones SIMD**
+(YMM/ZMM, según CPU) del XSAVE del kernel y luego aplica el
+FXSAVE/CONTEXT Win64 aprobado por el handler y los GPR. Los componentes
+de XSAVE que cambien otros estados (PKRU, AMX, MPX y no revisados) se
+rechazan expresamente; no deben restaurarse desde una pila anfitriona. Cualquier unwind no local envenena la frontera de
 imports para impedir nuevos paros `ptrace` que presuman un host frame
 que ya no existe.
 
@@ -89,6 +91,9 @@ códigos desconocidos y comprueba lecturas/escrituras/ejecución.
   permite el ejecutable PE principal con alcance fijado por el
   lanzador. Módulos no fijados, páginas W→X y contextos alterados son
   rechazados.
+- **XSTATE no SIMD o modificado por el handler**: PKRU, AMX, MPX y
+  extensiones futuras se rechazan. El handler no puede editar YMM/ZMM
+  por un CONTEXT Windows ampliado en este perfil.
 - **Pruebas diferenciales Windows y hardware Fedora KDE**: un runner
   Ubuntu/Fedora en contenedor no las sustituye. SHSTK activo se rechaza
   en la puerta PE; no se pretende soporte CET.
