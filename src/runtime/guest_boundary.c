@@ -52,6 +52,10 @@ static _Thread_local bool nonlocal_poisoned;
  * signal gate. Do NOT perform pthread operations or CET syscalls from
  * its signal handler. Never interpret this local bit as ptrace authority. */
 static _Thread_local volatile sig_atomic_t signal_guest_phase;
+/* Only CPU faults from an already trusted guest-only instruction may
+ * recover this phase; a nonlocal import escape remains poisoned forever. */
+static _Thread_local bool hardware_seh_guest_only;
+static _Thread_local bool software_seh_naked_import_only;
 enum { MAX_IMPORT_NESTING = 128, MAX_GATED_TARGETS = 8192 };
 static _Thread_local uintptr_t host_return_stack[MAX_IMPORT_NESTING];
 
@@ -138,6 +142,8 @@ void nt_guest_boundary_install_child_session(struct nt_guest_boundary_session *s
     guest_entry_depth = 0;
     host_import_depth = 0;
     nonlocal_poisoned = false;
+    hardware_seh_guest_only = false;
+    software_seh_naked_import_only = false;
     signal_guest_phase = 0;
     memset(host_return_stack, 0, sizeof(host_return_stack));
 }
@@ -187,6 +193,8 @@ void nt_guest_boundary_thread_detach(void)
     guest_entry_depth = 0;
     host_import_depth = 0;
     nonlocal_poisoned = false;
+    hardware_seh_guest_only = false;
+    software_seh_naked_import_only = false;
     signal_guest_phase = 0;
 }
 static void publish_phase(enum nt_guest_boundary_phase phase)
@@ -245,6 +253,86 @@ bool nt_guest_boundary_signal_guest_code(uintptr_t pc)
             return true;
     return false;
 }
+/* The CPU kernel frame proves the fault occurred in the PE, while
+ * no host import-return slot is live. Temporarily deny asynchronous stops
+ * during the VEH/SEH *host* dispatcher, but do NOT permanently poison the
+ * guest when SEH unwinds only PE frames and resumes a validated PE RIP.
+ *
+ * This differs from RaiseException/RtlUnwind, which can bypass a live
+ * import trampoline. Never reauthorise that general ELF unwind. */
+bool nt_guest_boundary_begin_guest_hardware_seh(uintptr_t fault_pc)
+{
+    if (!signal_guest_phase || !nt_guest_boundary_signal_guest_code(fault_pc) ||
+        hardware_seh_guest_only || guest_entry_depth == 0 ||
+        host_import_depth != 0 || nonlocal_poisoned)
+        return false;
+    hardware_seh_guest_only = true;
+    signal_guest_phase = 0;
+    publish_phase(NT_GUEST_BOUNDARY_HOST);
+    return true;
+}
+bool nt_guest_boundary_finish_guest_hardware_seh(uintptr_t resume_pc)
+{
+    if (!hardware_seh_guest_only ||
+        !nt_guest_boundary_signal_guest_code(resume_pc) ||
+        guest_entry_depth == 0 || host_import_depth != 0 ||
+        nonlocal_poisoned)
+        return false;
+    hardware_seh_guest_only = false;
+    publish_phase(NT_GUEST_BOUNDARY_GUEST);
+    signal_guest_phase = 1;
+    return true;
+}
+
+/* Only the reviewed, naked Win64 RaiseException import may
+ * escape its synthetic return with no ELF resource owners. Its caller
+ * address must already have been authenticated and must equal the exact
+ * one outstanding host_return_stack slot. */
+bool nt_guest_boundary_begin_guest_software_import_seh(uintptr_t caller_pc)
+{
+    if (!caller_pc || !nt_guest_boundary_signal_guest_code(caller_pc) ||
+        guest_entry_depth == 0 || host_import_depth != 1 ||
+        hardware_seh_guest_only || software_seh_naked_import_only ||
+        nonlocal_poisoned || host_return_stack[0] != caller_pc)
+        return false;
+    host_return_stack[0] = 0;
+    host_import_depth = 0;
+    software_seh_naked_import_only = true;
+    signal_guest_phase = 0;
+    publish_phase(NT_GUEST_BOUNDARY_HOST);
+    return true;
+}
+bool nt_guest_boundary_retire_specific_handler_import(void)
+{
+    if (host_import_depth == 0)
+        return true; /* direct trusted runtime call, no import to retire */
+    if (host_import_depth != 1 || nonlocal_poisoned ||
+        !(hardware_seh_guest_only || software_seh_naked_import_only) ||
+        !nt_guest_boundary_signal_guest_code(host_return_stack[0]))
+        return false;
+    /* The reviewed C-specific handler has no owned ELF resources when
+     * it transfers to the Windows exception target. Skip only its IAT
+     * thunk; never detach, unwound, or pretend to unlock host frames. */
+    host_return_stack[0] = 0;
+    host_import_depth = 0;
+    signal_guest_phase = 0;
+    publish_phase(NT_GUEST_BOUNDARY_HOST);
+    return true;
+}
+
+bool nt_guest_boundary_finish_guest_software_import_seh(uintptr_t resume_pc)
+{
+    if (!software_seh_naked_import_only ||
+        !nt_guest_boundary_signal_guest_code(resume_pc) ||
+        guest_entry_depth == 0 || host_import_depth != 0 ||
+        nonlocal_poisoned || hardware_seh_guest_only)
+        return false;
+    software_seh_naked_import_only = false;
+    publish_phase(NT_GUEST_BOUNDARY_GUEST);
+    signal_guest_phase = 1;
+    return true;
+}
+
 /* The ordinary PE runner may be launched without the opt-in external
  * ptrace supervisor. Its local guest depth is still trustworthy at the
  * import-return gate, but the shared phase stays UNREGISTERED. This
@@ -253,6 +341,7 @@ bool nt_guest_boundary_signal_guest_code(uintptr_t pc)
 bool nt_guest_boundary_special_apc_allowed(void)
 {
     if (guest_entry_depth == 0 || host_import_depth != 0 ||
+        hardware_seh_guest_only || software_seh_naked_import_only ||
         nonlocal_poisoned || shadow_stack_unsafe())
         return false;
     return current_slot == NULL ||
@@ -266,6 +355,8 @@ bool nt_guest_boundary_special_apc_allowed(void)
 void nt_guest_boundary_mark_nonlocal_transfer(void)
 {
     nonlocal_poisoned = true;
+    hardware_seh_guest_only = false;
+    software_seh_naked_import_only = false;
     signal_guest_phase = 0;
     publish_phase(NT_GUEST_BOUNDARY_HOST);
 }
@@ -336,7 +427,9 @@ uintptr_t nt_guest_boundary_import_leave(void)
         _Exit(141);
     const uintptr_t ret = host_return_stack[--host_import_depth];
     host_return_stack[host_import_depth] = 0;
-    if (host_import_depth == 0 && guest_entry_depth != 0 && !nonlocal_poisoned) {
+    if (host_import_depth == 0 && guest_entry_depth != 0 &&
+        !hardware_seh_guest_only && !software_seh_naked_import_only &&
+        !nonlocal_poisoned) {
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
         signal_guest_phase = 1;
     } else {
@@ -348,7 +441,9 @@ uintptr_t nt_guest_boundary_import_leave(void)
      * dispatch at this point, not while the imported host routine owns
      * its mutex or while an outer guest→host callback is active. */
     if (host_import_depth == 0 && guest_entry_depth != 0 &&
-        !nonlocal_poisoned && nt_runtime_special_apc_checkpoint != NULL)
+        !nonlocal_poisoned && !hardware_seh_guest_only &&
+        !software_seh_naked_import_only &&
+        nt_runtime_special_apc_checkpoint != NULL)
         nt_runtime_special_apc_checkpoint();
     return ret;
 }

@@ -362,6 +362,19 @@ $(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
 
+# Kernel-directed APC smoke test using the actual production AMD64
+# register/FXSAVE restore assembly. No PE loader or desktop required.
+$(BUILD_DIR)/guest-async-apc-signal-test: tests/guest_async_apc_signal_test.c src/runtime/guest_async_apc.c src/runtime/guest_async_apc.h src/runtime/context.S | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_async_apc_signal_test.c src/runtime/guest_async_apc.c \
+	    src/runtime/context.S -pthread -o "$@"
+
+.PHONY: check-guest-async-apc-signal
+check-guest-async-apc-signal: $(BUILD_DIR)/guest-async-apc-signal-test
+	timeout 15s $(BUILD_DIR)/guest-async-apc-signal-test
+
+check: check-guest-async-apc-signal
+
 # Pure, host-only Linux signal/NTSTATUS classifier. Link without the
 # real Windows runtime so spoofing and access-bit regressions fail loudly.
 $(BUILD_DIR)/guest-hardware-fault-test: tests/guest_hardware_fault_test.c src/runtime/guest_hardware_fault.c src/runtime/guest_hardware_fault.h | $(BUILD_DIR)
@@ -370,7 +383,7 @@ $(BUILD_DIR)/guest-hardware-fault-test: tests/guest_hardware_fault_test.c src/ru
 
 $(BUILD_DIR)/guest-hardware-fault-signal-test: tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c src/runtime/guest_hardware_fault.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c -pthread -o "$@"
+	    tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c -DNT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS -pthread -o "$@"
 
 .PHONY: check-hardware-fault-classifier check-hardware-fault-signals
 check-hardware-fault-classifier: $(BUILD_DIR)/guest-hardware-fault-test
@@ -927,12 +940,23 @@ check-pe-async-special-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-spe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-loop-fixture.exe
 
+# The same import-free Win64 thread executes RaiseException inside the
+# asynchronously delivered APC and must recover through .pdata SEH.
+$(BUILD_DIR)/async-special-apc-seh-fixture.exe: tests/pe/async_special_apc_loop_fixture.c tests/pe/async_special_apc_seh_callback.S $(BUILD_DIR)/fixture-seh.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -DNT_TEST_ASYNC_SEH -o "$@" "$<" tests/pe/async_special_apc_seh_callback.S $(BUILD_DIR)/fixture-seh.a -lkernel32
+
+.PHONY: check-pe-async-special-apc-seh
+check-pe-async-special-apc-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-seh-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-seh-fixture.exe
+
 check-pe-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe $(BUILD_DIR)/special-apc-seh-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/special-apc-seh-fixture.exe
 	$(MAKE) BUILD_DIR=$(BUILD_DIR) check-pe-async-special-apc
+	$(MAKE) BUILD_DIR=$(BUILD_DIR) check-pe-async-special-apc-seh
 
 # APC callback with a genuine PE .pdata/.xdata frame-based SEH scope.
 # No Linux signal handler, compiler builtin or host C SEH surrogate.

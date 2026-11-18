@@ -4,11 +4,13 @@
 #include "winbase.h"
 #include "exception_callbacks.h"
 #include "ntnative/guest_boundary_runtime.h"
+#include "ntnative/runtime.h"
 
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 _Static_assert(sizeof(struct nt_context64) == 1232, "AMD64 CONTEXT size");
@@ -376,6 +378,14 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
                                        struct nt_context64 *context,
                                        struct nt_dispatcher_context *dispatch)
 {
+    if (record && record->code == UINT32_C(0xe14400af))
+        (void)fprintf(stderr,
+            "APC-SEH handler entered: frame=0x%llx pc=0x%llx scope=%p stack=0x%llx..0x%llx target=0x%llx\\n",
+            (unsigned long long)frame,
+            (unsigned long long)(dispatch ? dispatch->pc : 0),
+            dispatch ? dispatch->handler_data : NULL,
+            (unsigned long long)stack_low, (unsigned long long)stack_high,
+            (unsigned long long)(dispatch ? dispatch->target : 0));
     uint64_t base;
     if (record == NULL || context == NULL || dispatch == NULL || dispatch->context == NULL || seh.end == 0 ||
         stack_low == 0 || frame < stack_low || frame >= stack_high || dispatch->frame != frame ||
@@ -390,6 +400,8 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
     if (table == NULL)
         goto invalid;
     const uint32_t count = load_dword(table);
+    if (record->code == UINT32_C(0xe14400af))
+        (void)fprintf(stderr, "APC-SEH scope data offset=0x%x entries=%u\\n", offset, count);
     if (count > MAX_SEH_SCOPES || dispatch->scope_index > count ||
         image_bytes(offset, 4 + (size_t)count * 16) == NULL)
         goto invalid;
@@ -407,6 +419,10 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
     const bool unwinding = (record->flags & SEH_UNWIND_FLAGS) != 0;
     for (uint32_t i = dispatch->scope_index; i < count; ++i) {
         const struct seh_scope scope = read_scope(table, i);
+        if (record->code == UINT32_C(0xe14400af))
+            (void)fprintf(stderr,
+                "APC-SEH scope[%u] pc=0x%x begin=0x%x end=0x%x handler=0x%x target=0x%x unwinding=%u\\n",
+                i, pc, scope.begin, scope.end, scope.handler, scope.target, (unsigned)unwinding);
         if (pc < scope.begin || pc >= scope.end)
             continue;
         if (unwinding) {
@@ -430,6 +446,24 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
                     nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
                     break;
                 }
+                /* This resource-free builtin is the ONLY host C SEH
+                 * frame permitted to disappear on a nonlocal transfer.
+                 * Retire its proven import stub (if any), not arbitrary
+                 * ELF frames, pthread mutexes or foreign callbacks. */
+                if (!nt_guest_boundary_retire_specific_handler_import()) {
+                    if (record->code == UINT32_C(0xe14400af))
+                        (void)fprintf(stderr,
+                            "APC-SEH refused handler bridge: scope=0x%x pc=0x%llx frame=0x%llx\\n",
+                            scope.target, (unsigned long long)dispatch->pc,
+                            (unsigned long long)frame);
+                    nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+                    return SEH_CONTINUE_SEARCH;
+                }
+                if (record->code == UINT32_C(0xe14400af))
+                    (void)fprintf(stderr,
+                        "APC-SEH starting target unwind: target=0x%llx frame=0x%llx\\n",
+                        (unsigned long long)(image.base + scope.target),
+                        (unsigned long long)frame);
                 seh.transfer(record, frame, image.base + scope.target, dispatch);
                 nt_SetLastError(NT_ERROR_GEN_FAILURE);
                 break;
@@ -439,6 +473,8 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
     return SEH_CONTINUE_SEARCH;
 
 invalid:
+    if (record && record->code == UINT32_C(0xe14400af))
+        (void)fprintf(stderr, "APC-SEH handler rejected invalid metadata/scope\\n");
     nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
     return SEH_CONTINUE_SEARCH;
 }
@@ -459,8 +495,13 @@ struct software_exception {
     struct software_exception *previous;
     unsigned int depth;
     bool hardware; /* origin RIP is faulting instruction, not return PC */
+    bool reconciled_import; /* proven naked RaiseException, no host locks */
 };
 static _Thread_local struct software_exception *active_software;
+/* A naked, reviewed RtlUnwind(Ex) import may escape only its own
+ * resource-free Win64 thunk. Never treat an arbitrary host C frame as
+ * unwindable. Nested unwinds retain the existing fail-closed rules. */
+static _Thread_local bool naked_unwind_import_reconciled;
 
 /* Optional in minimal isolated exception tests; production PE runtime
  * supplies a kernel signal bridge with a dedicated host dispatch stack. */
@@ -481,6 +522,12 @@ _Noreturn void nt_restore_software_context(const struct nt_context64 *context);
 
 static _Noreturn void software_failure(uint32_t status)
 {
+    /* A real PE that exhausts safe VEH/SEH recovery must report why
+     * it stopped; silently calling _Exit(1) hid wrong NTSTATUS behind
+     * previous CI failures. This is a terminal, non-signal-handler path. */
+    (void)fprintf(stderr,
+                  "NT guest SEH fail closed: NTSTATUS=0x%08x\\n",
+                  (unsigned)status);
     nt_ExitProcess(status);
     _Exit(1);
 }
@@ -519,15 +566,19 @@ bool nt_runtime_enable_software_seh(uint32_t begin, uint32_t end,
 static bool prepare_software_stack(void)
 {
     pthread_attr_t attr;
-    if (!image.code_end)
-        return false;
+    /* A PE built without .pdata may still use vectored continuable
+     * software exceptions. Frame-specific SEH still needs .pdata, but
+     * VEH only needs authenticated PE RIP and bounded guest stack.
+     * Do not deny the entire VEH path just because unwind tables are
+     * absent, and never attempt a synthetic Win64 frame walk then. */
     uintptr_t apc_low = 0;
     size_t apc_size = 0;
     if (nt_runtime_guest_async_apc_stack_for_current != NULL &&
         nt_runtime_guest_async_apc_stack_for_current(&apc_low, &apc_size))
         return nt_runtime_set_unwind_stack((void *)apc_low, apc_size) &&
-               nt_runtime_set_seh_dispatch(image.code_begin, image.code_end,
-                                           selected_software_handler);
+               (!image.code_end ||
+                nt_runtime_set_seh_dispatch(image.code_begin, image.code_end,
+                                            selected_software_handler));
     if (pthread_getattr_np(pthread_self(), &attr) != 0)
         return false;
     void *low = NULL;
@@ -535,7 +586,9 @@ static bool prepare_software_stack(void)
     const int result = pthread_attr_getstack(&attr, &low, &size);
     pthread_attr_destroy(&attr);
     return result == 0 && low && nt_runtime_set_unwind_stack(low, size) &&
-           nt_runtime_set_seh_dispatch(image.code_begin, image.code_end, selected_software_handler);
+           (!image.code_end ||
+            nt_runtime_set_seh_dispatch(image.code_begin, image.code_end,
+                                        selected_software_handler));
 }
 
 static bool software_code(uint64_t address)
@@ -579,9 +632,60 @@ static bool software_frame(uint32_t type, struct nt_context64 *next,
            (!dispatch->handler || software_code((uintptr_t)dispatch->handler));
 }
 
-static int32_t invoke_software_handler(struct nt_dispatcher_context *dispatch, struct nt_exception_record *record,
+/* A Windows .pdata UNWIND_INFO can refer to an imported
+ * __C_specific_handler through the PE's own six-byte RIP-relative IAT
+ * jump thunk (FF 25 disp32). Calling it by that PE address from our ELF
+ * exception dispatcher would enter the generic guest import gate, whose
+ * synthetic return belongs to an ELF frame. Transferring to an SEH
+ * target could then strand a host import trampoline on the private
+ * stack. Never relax the import gate to permit that.
+ *
+ * Instead, call the single known, resource-free runtime builtin
+ * directly ONLY if the actual loaded PE thunk and its mapped IAT slot
+ * resolve to the exact native export provided by this runtime.
+ * All other PE handlers retain the normal guest call path, including
+ * their fail-closed rules. This is NOT general PE<->ELF unwinding. */
+static bool verified_c_specific_import_thunk(const void *address)
+{
+    const uintptr_t pc = (uintptr_t)address;
+    if (!software_code(pc) || pc < image.base)
+        return false;
+    const uintptr_t rva = pc - image.base;
+    if (rva > UINT32_MAX)
+        return false;
+    const unsigned char *thunk = image_bytes((uint32_t)rva, 6);
+    if (!thunk || thunk[0] != 0xff || thunk[1] != 0x25)
+        return false;
+    int32_t displacement = 0;
+    memcpy(&displacement, thunk + 2, sizeof(displacement));
+    /* Use checked RVAs, avoiding signed pointer overflow from a forged
+     * displacement or thunk close to the 4-GiB PE image boundary. */
+    const int64_t slot_rva = (int64_t)rva + 6 + displacement;
+    if (slot_rva < 0 || (uint64_t)slot_rva > UINT32_MAX)
+        return false;
+    const unsigned char *slot_bytes = image_bytes((uint32_t)slot_rva,
+                                                 sizeof(uintptr_t));
+    if (!slot_bytes)
+        return false;
+    uintptr_t target = 0, expected = 0;
+    memcpy(&target, slot_bytes, sizeof(target));
+    const nt_guest_proc builtin =
+        nt_runtime_resolve("vcruntime140.dll", "__C_specific_handler");
+    if (!builtin)
+        return false;
+    _Static_assert(sizeof(builtin) == sizeof(expected),
+                   "AMD64 native import entry");
+    memcpy(&expected, &builtin, sizeof(expected));
+    return target == expected;
+}
+
+static int32_t invoke_software_handler(struct nt_dispatcher_context *dispatch,
+                                       struct nt_exception_record *record,
                                        struct nt_context64 *context)
 {
+    if (verified_c_specific_import_thunk(dispatch->handler))
+        return nt_C_specific_handler(record, dispatch->frame, context,
+                                     dispatch);
     software_handler handler;
     memcpy(&handler, &dispatch->handler, sizeof(handler));
     return handler(record, dispatch->frame, context, dispatch);
@@ -597,9 +701,37 @@ static void complete_software_capture(struct nt_context64 *context)
 
 static _Noreturn void resume_software(const struct nt_context64 *context, struct software_exception *previous)
 {
-    if (!software_code(context->rip) || !software_stack_pointer(context->rsp))
+    if (!(software_code(context->rip) ||
+          (!image.code_end &&
+           nt_guest_boundary_signal_guest_code(context->rip))) ||
+        !software_stack_pointer(context->rsp)) {
+        (void)fprintf(stderr, "SEH resume scope denied RIP=0x%llx RSP=0x%llx\\n",
+                      (unsigned long long)context->rip,
+                      (unsigned long long)context->rsp);
         software_failure(STATUS_INVALID_TARGET);
-    nt_guest_boundary_mark_nonlocal_transfer();
+    }
+    /* A kernel CPU fault from a proved guest-only RIP has no
+     * abandoned host import, and its handler may safely reauthorise
+     * the PE boundary after selecting a guest RIP. General software
+     * RaiseException/RtlUnwind still poison nonlocal host transfers. */
+    if (active_software != NULL && active_software->hardware) {
+        if (!nt_guest_boundary_finish_guest_hardware_seh(context->rip)) {
+            (void)fprintf(stderr, "SEH guest-only phase resume denied RIP=0x%llx\\n",
+                          (unsigned long long)context->rip);
+            software_failure(STATUS_INVALID_TARGET);
+        }
+    } else if ((active_software != NULL && active_software->reconciled_import) ||
+               naked_unwind_import_reconciled) {
+        /* A single verified naked RaiseException or RtlUnwind(Ex)
+         * import owns no ELF locks, and the return PC must still point
+         * into the immutable PE code manifest. Do not lift this rule
+         * to C functions with host-owned stack resources. */
+        if (!nt_guest_boundary_finish_guest_software_import_seh(context->rip))
+            software_failure(STATUS_INVALID_TARGET);
+        naked_unwind_import_reconciled = false;
+    } else {
+        nt_guest_boundary_mark_nonlocal_transfer();
+    }
     active_software = previous;
     /* The Linux kernel supplied XSTATE at the signal. Restore extended
      * YMM/ZMM components immediately before the assembly final GPR/FXSAVE
@@ -617,11 +749,29 @@ static _Noreturn void dispatch_exception_common(
     /* A SOFTWARE RaiseException crosses the Win64 IAT return gate; the
      * recorded PC can be its synthetic ELF trampoline. A CPU hardware
      * fault originates at the real guest instruction; never rewrite it. */
-    if (!hardware)
-        origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
-    nt_guest_boundary_mark_nonlocal_transfer();
+    bool reconciled_import = false;
+    if (!hardware) {
+        const uintptr_t original_pc = origin->rip;
+        origin->rip = nt_guest_boundary_seh_caller_pc(original_pc);
+        if (origin->rip != original_pc)
+            reconciled_import =
+                nt_guest_boundary_begin_guest_software_import_seh(origin->rip);
+        if (!reconciled_import)
+            nt_guest_boundary_mark_nonlocal_transfer();
+    } else if (!nt_guest_boundary_begin_guest_hardware_seh(origin->rip)) {
+        (void)fprintf(stderr, "SEH guest-only CPU entry denied RIP=0x%llx\\n",
+                      (unsigned long long)origin->rip);
+        software_failure(STATUS_INVALID_TARGET);
+    }
     complete_software_capture(origin);
     const bool ready = prepare_software_stack();
+    if (!hardware && code == UINT32_C(0xe14400af))
+        (void)fprintf(stderr, "APC-SEH trace: guest_pc=0x%llx sp=0x%llx reconciled=%u ready=%u stack=0x%llx..0x%llx image=0x%llx..0x%llx\\n",
+            (unsigned long long)origin->rip, (unsigned long long)origin->rsp,
+            (unsigned)reconciled_import, (unsigned)ready,
+            (unsigned long long)stack_low, (unsigned long long)stack_high,
+            (unsigned long long)(image.base + image.code_begin),
+            (unsigned long long)(image.base + image.code_end));
     struct nt_exception_record record = {.code = code, .flags = flags & SOFTWARE_NONCONTINUABLE,
                                          .address = (void *)(uintptr_t)origin->rip};
     if (arguments) {
@@ -631,7 +781,8 @@ static _Noreturn void dispatch_exception_common(
     struct software_exception state = {
         .origin = origin, .previous = active_software,
         .depth = active_software ? active_software->depth + 1 : 1,
-        .hardware = hardware
+        .hardware = hardware,
+        .reconciled_import = reconciled_import
     };
     if (state.depth > SOFTWARE_MAX_NESTING)
         software_failure(STATUS_BAD_STACK);
@@ -650,8 +801,16 @@ static _Noreturn void dispatch_exception_common(
         for (size_t i = 0; i < SOFTWARE_MAX_FRAMES; ++i) {
             struct nt_dispatcher_context dispatch;
             if (!software_frame(SOFTWARE_EHANDLER, &next, &dispatch,
-                                hardware && i == 0))
+                                hardware && i == 0)) {
+                if (!hardware && code == UINT32_C(0xe14400af))
+                    (void)fprintf(stderr, "APC-SEH frame denied: index=%zu pc=0x%llx rsp=0x%llx\\n",
+                        i, (unsigned long long)next.rip, (unsigned long long)next.rsp);
                 break;
+            }
+            if (!hardware && code == UINT32_C(0xe14400af))
+                (void)fprintf(stderr, "APC-SEH frame=%zu caller=0x%llx handler=%p unwind=%p rsp=0x%llx\\n",
+                    i, (unsigned long long)dispatch.pc, dispatch.handler,
+                    (void *)dispatch.function, (unsigned long long)dispatch.frame);
             if (dispatch.handler && invoke_software_handler(&dispatch, &record, origin) == SEH_CONTINUE_EXECUTION) {
                 if (record.flags & SOFTWARE_NONCONTINUABLE)
                     software_failure(STATUS_NONCONTINUABLE);
@@ -736,8 +895,18 @@ _Noreturn void nt_unwind_software_exception(struct nt_context64 *origin, uint64_
 {
     /* RtlUnwind(Ex) is also a naked imported Win64 entry and may see
      * the same verified synthetic import-return PC as RaiseException. */
-    origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
-    nt_guest_boundary_mark_nonlocal_transfer();
+    const uintptr_t recorded = origin->rip;
+    origin->rip = nt_guest_boundary_seh_caller_pc(recorded);
+    /* The only resumable native import shortcut is a single verified,
+     * resource-free Win64 RtlUnwind(Ex) stub. A nested software SEH or
+     * a host callback must remain poisoned and fail closed. */
+    if (origin->rip != recorded && active_software == NULL &&
+        !naked_unwind_import_reconciled &&
+        nt_guest_boundary_begin_guest_software_import_seh(origin->rip)) {
+        naked_unwind_import_reconciled = true;
+    } else {
+        nt_guest_boundary_mark_nonlocal_transfer();
+    }
     if (!prepare_software_stack())
         software_failure(STATUS_BAD_STACK);
     complete_software_capture(origin);
