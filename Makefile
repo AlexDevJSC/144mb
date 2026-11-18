@@ -383,7 +383,7 @@ $(BUILD_DIR)/guest-hardware-fault-test: tests/guest_hardware_fault_test.c src/ru
 
 $(BUILD_DIR)/guest-hardware-fault-signal-test: tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c src/runtime/guest_hardware_fault.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c -pthread -o "$@"
+	    tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c -DNT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS -pthread -o "$@"
 
 .PHONY: check-hardware-fault-classifier check-hardware-fault-signals
 check-hardware-fault-classifier: $(BUILD_DIR)/guest-hardware-fault-test
