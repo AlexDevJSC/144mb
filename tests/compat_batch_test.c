@@ -1795,7 +1795,7 @@ static void check_files(void)
     CHECK(nt_DeleteFileA("D:\\games\\save.bin"));
     CHECK(nt_RemoveDirectoryA("D:\\games"));
     CHECK(nt_runtime_set_drive_root('D', NULL));
-    CHECK(rmdir(second_drive) == 0);
+    CHECK(nt_test_cleanup_share_registry(second_drive) && rmdir(second_drive) == 0);
     CHECK(nt_runtime_set_file_root(NULL) &&
           nt_test_cleanup_share_registry(root) && rmdir(root) == 0);
     puts("PASS scoped files, text and binary I/O, and denied paths");
