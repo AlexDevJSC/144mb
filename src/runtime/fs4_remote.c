@@ -387,6 +387,11 @@ int32_t nt_fs4_remote_close(uintptr_t handle)
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return 0;
     }
+    if (entry->search) {
+        pthread_mutex_unlock(&guard);
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
     struct reply response;
     bool ok=request(FS4_CLOSE,entry->cap,-1,0,0,0,0,
                     NULL,0,0,&response,NULL,0);

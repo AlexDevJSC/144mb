@@ -253,8 +253,8 @@ static int guest_refresh(const char *path)
     int n = snprintf(dos, sizeof(dos), "C:%s", path);
     if (n <= 0 || n >= (int)sizeof(dos))
         return -ENAMETOOLONG;
-    /* The caller already owns the WAL flock; taking it again would
-     * deadlock on a second open-file description in this process. */
+    /* The caller already holds the namespace WAL lock: skip the redundant
+     * read-only admission probe, but still fsync the DOS alias. */
     if (!nt_runtime_refresh_dos83_path_guarded(dos))
         return -(errno ? errno : EIO);
     return 0;

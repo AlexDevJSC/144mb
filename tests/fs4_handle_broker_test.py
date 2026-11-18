@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: MIT
 """Win32 runtime HANDLEs over per-client binary IPC, no shared backing FDs."""
 import os
+import fcntl
+import threading
+import time
 from pathlib import Path
 import secrets
 import socket
@@ -183,6 +186,69 @@ class FileSystem4Handles(unittest.TestCase):
             finally:
                 a.close()
                 b.close()
+
+    def test_service_admission_serializes_file_open_and_leases(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-admission-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            (root / "same.txt").write_bytes(b"ORIGINAL")
+            private = root / ":ntnative-file-leases"
+            private.mkdir(mode=0o700)
+            lockfile = private / "fs4-service-admission-v1.lock"
+            guard = os.open(lockfile, os.O_RDWR | os.O_CREAT, 0o600)
+            a, b = Broker(root), Broker(root)
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX)
+                observed = []
+                errors = []
+                def attempt(broker):
+                    try:
+                        observed.append(broker.call(OPEN, b"C:/same.txt",
+                                                    access=0x80000000,
+                                                    share=0, disposition=3))
+                    except Exception as exc:
+                        errors.append(exc)
+                first = threading.Thread(target=attempt, args=(a,))
+                second = threading.Thread(target=attempt, args=(b,))
+                first.start()
+                second.start()
+                time.sleep(0.2)
+                self.assertEqual(observed, [], "Broker bypassed service admission")
+                fcntl.flock(guard, fcntl.LOCK_UN)
+                first.join(timeout=4)
+                second.join(timeout=4)
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(sorted(item[0] for item in observed),
+                                 [0, 32])  # one OPEN, one FILE_SHARE conflict
+                opened = next(item for item in observed if item[0] == 0)
+                # Only the worker holding the winning capability can close.
+                closed_by = a if a.call(CLOSE, handle=opened[1])[0] == 0 else b
+                if closed_by is b:
+                    self.assertEqual(b.call(CLOSE, handle=opened[1])[0], 6)
+            finally:
+                fcntl.flock(guard, fcntl.LOCK_UN)
+                os.close(guard)
+                a.close()
+                b.close()
+
+    def test_corrupt_wal_denies_create_before_posix_mutation(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-wal-gate-") as temp:
+            root=Path(temp)/"C"
+            root.mkdir(mode=0o700)
+            broker=Broker(root)
+            try:
+                directory=root/":ntnative-file-leases"
+                journal=directory/"dos83-rename-v1.wal"
+                journal.write_bytes(b"INVALID-WAL")
+                result=broker.call(OPEN,b"C:/must-not-exist.dat",
+                                   access=0x40000000,share=7,disposition=1)
+                self.assertNotEqual(result[0],0)
+                self.assertFalse((root/"must-not-exist.dat").exists())
+                self.assertEqual(journal.read_bytes(),b"INVALID-WAL")
+            finally:
+                broker.close()
 
     def test_wrong_session_nonce_revokes_handles_and_socket(self):
         with tempfile.TemporaryDirectory(prefix="fs4-nonce-") as temp:
