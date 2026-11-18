@@ -3,6 +3,33 @@
 Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-order.md):
 **4 → 1 → 5 → 2 → 3 → 6 → 7** (nueva instrucción expresa del 14-11-2026; el orden original era 4 → 5 → 2 → 3 → 1 → 6 → 7). **Esta fase permanece activa** y el cargador PE/DLL no empieza hasta que se satisfagan los criterios de salida.
 
+## Actualización 18-11-2026: problema 5, APC avanzada experimental
+
+Después del cierre contractual acotado del problema 6, se trabaja en el
+problema **5 (APC avanzadas)**, respetando la cola interna
+**6 → 5 → 3 → 2 → 1 → 4 → 7**. La [PR #175](https://github.com/AlexDevJSC/144mb/pull/175)
+endurece la APC **experimental** fuera de esperas alertables sobre PE32+
+controlado: comprueba GPR y XSTATE después de los SETREGSET iniciales y
+finales, y pone en cuarentena irreversible el proceso hijo anclado a
+`pidfd` ante un resultado incierto. Añade dos fixtures negativos PE
+con fallo de confirmación y fallo de lectura final de XSTATE; ambos
+rechazan reanudar o desadjuntar el estado alterado.
+
+**NO** se han habilitado APC especiales universales mediante
+`NtQueueApcThreadEx` o `QueueUserAPC2`; no hay garantías para
+código PE arbitrario con callbacks, excepciones, JIT o locks de host.
+El trazador necesita finalizar para que `PTRACE_O_EXITKILL` cierre
+un tracee que no puede separarse de forma segura. Enviar SIGKILL
+por `pidfd` no equivale a comprobar muerte inmediata por `waitpid`.
+La aceptación Fedora KDE física sigue separada y pendiente.
+
+**Madurez del componente 4: 96 % → 96 % (+0 puntos)** bajo el criterio
+documentado de FileSystem 4: hardening verificable de un prototipo,
+pero ningún nuevo contrato Win32 completo. Véase
+[alcance y pruebas APC](core4-apc-xstate-failclosed.md).
+Las afirmaciones históricas anteriores sobre fases activas son
+cronología y no reemplazan esta actualización.
+
 ## Contratos implementados y perfil probado
 
 | Dominio | Entradas del invitado | Comportamiento |
