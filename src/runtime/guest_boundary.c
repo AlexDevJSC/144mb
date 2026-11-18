@@ -266,6 +266,37 @@ uintptr_t nt_guest_boundary_import_enter(uintptr_t target, uintptr_t return_pc)
     publish_phase(NT_GUEST_BOUNDARY_HOST);
     return target;
 }
+/* A naked Win64 RaiseException/RtlUnwind import sees the rewritten
+ * return trampoline in its original stack frame. The Windows CONTEXT
+ * must instead point to the real PE call site, or its .pdata/.xdata
+ * traversal cannot find any valid handler.
+ *
+ * This is allowed ONLY for the single reviewed import currently
+ * executing, with the original PE PC already saved in private TLS.
+ * A nested PE callback under a host import/mutex cannot use this:
+ * the normal false-return leaves that case fail-closed, never pretending
+ * to unwind an ELF mutex stack. */
+uintptr_t nt_guest_boundary_seh_caller_pc(uintptr_t recorded_pc)
+{
+    void (*trampoline)(void) = nt_guest_boundary_import_return;
+    uintptr_t synthetic = 0;
+    _Static_assert(sizeof(trampoline) == sizeof(synthetic),
+                   "AMD64 import-return address");
+    memcpy(&synthetic, &trampoline, sizeof(synthetic));
+    if (recorded_pc != synthetic || host_import_depth != 1 ||
+        guest_entry_depth == 0 || nonlocal_poisoned)
+        return recorded_pc;
+    const uintptr_t pc = host_return_stack[0];
+    if (!pc)
+        return recorded_pc;
+    if (pc >= trusted_code_begin && pc < trusted_code_end)
+        return pc;
+    for (size_t i = 0; i < startup_code_count; ++i)
+        if (pc >= startup_code[i].begin && pc < startup_code[i].end)
+            return pc;
+    return recorded_pc;
+}
+
 uintptr_t nt_guest_boundary_import_leave(void)
 {
     /* CET may be enabled by native code while the import call is in
