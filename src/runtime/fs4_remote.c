@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #include "fs4_remote.h"
 #include "compat.h"
+#include "winfile.h"
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
@@ -24,7 +25,10 @@
 enum { FS4_MAGIC=0x34465348u, FS4_VERSION=3, FS4_MAX=2048,
        FS4_LIMIT=32, FS4_OPEN=1, FS4_READ=2, FS4_WRITE=3,
        FS4_CLOSE=4, FS4_DELETE=5, FS4_RENAME=6, FS4_TRUNCATE=7,
-       FS4_LOCK=8, FS4_UNLOCK=9, FS4_SEEK=10, FS4_SIZE=11 };
+       FS4_LOCK=8, FS4_UNLOCK=9, FS4_SEEK=10, FS4_SIZE=11,
+       FS4_ATTR_GET=12, FS4_ATTR_SET=13, FS4_FIND_FIRST=14,
+       FS4_FIND_NEXT=15, FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
+       FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20 };
 struct request {
     uint32_t magic;
     uint16_t version, op;
@@ -41,7 +45,12 @@ struct reply {
 };
 _Static_assert(sizeof(struct request)==56, "FS4 client ABI request");
 _Static_assert(sizeof(struct reply)==32, "FS4 client ABI reply");
-struct remote_entry { uintptr_t guest; uint64_t cap; };
+struct remote_entry {
+    uintptr_t guest;
+    uint64_t cap;
+    bool search, overlapped;
+    uintptr_t completion_port, completion_key;
+};
 static pthread_mutex_t guard=PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t determine=PTHREAD_ONCE_INIT;
 static char endpoint[sizeof(((struct sockaddr_un *)0)->sun_path)];
@@ -90,6 +99,65 @@ static struct remote_entry *find_entry(uintptr_t guest)
         if (entries[i].guest==guest && entries[i].cap)
             return &entries[i];
     return NULL;
+}
+
+bool nt_fs4_remote_valid(uintptr_t handle)
+{
+    pthread_mutex_lock(&guard);
+    bool ok=nt_fs4_remote_handle(handle) && find_entry(handle)!=NULL;
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+bool nt_fs4_remote_search(uintptr_t handle)
+{
+    pthread_mutex_lock(&guard);
+    const struct remote_entry *entry=find_entry(handle);
+    bool found=entry && entry->search;
+    pthread_mutex_unlock(&guard);
+    return found;
+}
+
+bool nt_fs4_remote_overlapped(uintptr_t handle)
+{
+    pthread_mutex_lock(&guard);
+    const struct remote_entry *entry=find_entry(handle);
+    bool allowed=entry && !entry->search && entry->overlapped;
+    pthread_mutex_unlock(&guard);
+    return allowed;
+}
+
+size_t nt_fs4_remote_count(void)
+{
+    size_t count=0;
+    pthread_mutex_lock(&guard);
+    for(size_t i=0;i<FS4_LIMIT;i++)
+        if(entries[i].cap && !entries[i].search)
+            count++;
+    pthread_mutex_unlock(&guard);
+    return count;
+}
+
+static struct remote_entry *free_entry(void)
+{
+    for(size_t i=0;i<FS4_LIMIT;i++)
+        if(!entries[i].cap)
+            return &entries[i];
+    return NULL;
+}
+
+static uintptr_t adopt_cap(struct remote_entry *entry,uint64_t cap,
+                           bool search,bool overlapped)
+{
+    if(!entry || !cap || next_guest>=UINT32_MAX) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return UINTPTR_MAX;
+    }
+    const uintptr_t guest=(uintptr_t)(UINT64_C(0xf44e000000000000) |
+                                        (next_guest++ << 4));
+    *entry=(struct remote_entry){.guest=guest,.cap=cap,
+                                 .search=search,.overlapped=overlapped};
+    return guest;
 }
 
 static bool receive_reply(struct reply *value, unsigned char *data,
@@ -220,23 +288,22 @@ uintptr_t nt_fs4_remote_open(const char *path,uint32_t access,uint32_t share,
     if (!checked_path(path,&n))
         return UINTPTR_MAX;
     pthread_mutex_lock(&guard);
-    struct remote_entry *slot=NULL;
-    for (size_t i=0;i<FS4_LIMIT;i++)
-        if (!entries[i].cap && !slot)
-            slot=&entries[i];
+    struct remote_entry *slot=free_entry();
     if (!slot) {
         pthread_mutex_unlock(&guard);
         nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
         return UINTPTR_MAX;
     }
     struct reply response;
-    bool ok=request(FS4_OPEN,0,-1,access,share,disposition,flags,
+    const bool overlapped=(flags & UINT32_C(0x40000000))!=0;
+    /* Server owns an ordinary synchronous Win32 handle; async completion
+     * is implemented on the guest side over positional IPC. */
+    bool ok=request(FS4_OPEN,0,-1,access,share,disposition,
+                    flags & ~UINT32_C(0x40000000),
                     path,(uint32_t)n,(uint32_t)n,&response,NULL,0);
     uintptr_t handle=UINTPTR_MAX;
     if (ok && response.handle && next_guest<UINT32_MAX) {
-        handle=(uintptr_t)(UINT64_C(0xf44e000000000000) | (next_guest++ << 4));
-        slot->cap=response.handle;
-        slot->guest=handle;
+        handle=adopt_cap(slot,response.handle,false,overlapped);
     } else if (ok) {
         struct reply ignored;
         (void)request(FS4_CLOSE,response.handle,-1,0,0,0,0,
@@ -402,6 +469,211 @@ int32_t nt_fs4_remote_lock(uintptr_t handle,uint64_t offset,uint64_t length,
                              NULL,0,(uint32_t)length,&response,NULL,0);
     if (!entry)
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+/* All methods take the same process-local mutex as read/write/close; a
+ * search cursor and any file HANDLE cannot race an IPC close or reuse. */
+uintptr_t nt_fs4_remote_duplicate(uintptr_t handle)
+{
+    pthread_mutex_lock(&guard);
+    struct remote_entry *original=find_entry(handle), *slot=free_entry();
+    if (!original || original->search || !slot) {
+        nt_SetLastError(original ? NT_ERROR_NOT_ENOUGH_MEMORY : NT_ERROR_INVALID_HANDLE);
+        pthread_mutex_unlock(&guard);
+        return UINTPTR_MAX;
+    }
+    const bool overlapped=original->overlapped;
+    struct reply result={0};
+    bool ok=request(FS4_DUPLICATE,original->cap,-1,0,0,0,2,NULL,0,0,
+                    &result,NULL,0);
+    uintptr_t new_handle=UINTPTR_MAX;
+    if(ok && result.handle) {
+        new_handle=adopt_cap(slot,result.handle,false,overlapped);
+        if(new_handle!=UINTPTR_MAX) {
+            slot->completion_port=original->completion_port;
+            slot->completion_key=original->completion_key;
+        }
+    }
+    pthread_mutex_unlock(&guard);
+    return new_handle;
+}
+
+static bool path_request(uint16_t operation,const char *path,uint32_t flags,
+                         uint32_t access,uint32_t share,struct reply *reply,
+                         void *output,size_t capacity)
+{
+    size_t n=0;
+    if(!checked_path(path,&n))
+        return false;
+    pthread_mutex_lock(&guard);
+    bool ok=request(operation,0,-1,access,share,0,flags,path,(uint32_t)n,
+                    (uint32_t)n,reply,output,capacity);
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+int32_t nt_fs4_remote_get_attributes(const char *path,
+                                     struct nt_file_attribute_data *info)
+{
+    if(!info) {nt_SetLastError(NT_ERROR_INVALID_PARAMETER);return 0;}
+    struct reply reply={0};
+    struct nt_file_attribute_data result={0};
+    if(!path_request(FS4_ATTR_GET,path,0,0,0,&reply,&result,sizeof(result)))
+        return 0;
+    if(reply.length!=sizeof(result)) {
+        nt_SetLastError(NT_ERROR_BROKEN_PIPE);
+        return 0;
+    }
+    *info=result;
+    return 1;
+}
+
+int32_t nt_fs4_remote_set_attributes(const char *path,uint32_t flags)
+{
+    struct reply reply={0};
+    return path_request(FS4_ATTR_SET,path,flags,0,0,&reply,NULL,0);
+}
+
+uintptr_t nt_fs4_remote_find_first(const char *path,int32_t level,
+                                   int32_t operation,uint32_t flags,
+                                   struct nt_find_data_w *info)
+{
+    if(!info) {nt_SetLastError(NT_ERROR_INVALID_PARAMETER);return UINTPTR_MAX;}
+    size_t n=0;
+    if(!checked_path(path,&n))
+        return UINTPTR_MAX;
+    pthread_mutex_lock(&guard);
+    struct remote_entry *slot=free_entry();
+    if(!slot) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        pthread_mutex_unlock(&guard);
+        return UINTPTR_MAX;
+    }
+    struct nt_find_data_w result={0};
+    struct reply reply={0};
+    bool ok=request(FS4_FIND_FIRST,0,-1,(uint32_t)level,(uint32_t)operation,
+                    0,flags,path,(uint32_t)n,(uint32_t)n,&reply,
+                    (unsigned char *)&result,sizeof(result));
+    uintptr_t handle=UINTPTR_MAX;
+    if(ok && reply.length==sizeof(result) && reply.handle) {
+        handle=adopt_cap(slot,reply.handle,true,false);
+        if(handle!=UINTPTR_MAX)
+            *info=result;
+    } else if(ok) {
+        nt_SetLastError(NT_ERROR_BROKEN_PIPE);
+    }
+    pthread_mutex_unlock(&guard);
+    return handle;
+}
+
+int32_t nt_fs4_remote_find_next(uintptr_t handle,struct nt_find_data_w *info)
+{
+    if(!info) {nt_SetLastError(NT_ERROR_INVALID_PARAMETER);return 0;}
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    if(!entry || !entry->search) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        pthread_mutex_unlock(&guard);
+        return 0;
+    }
+    struct nt_find_data_w result={0};
+    struct reply reply={0};
+    bool ok=request(FS4_FIND_NEXT,entry->cap,-1,0,0,0,0,NULL,0,0,
+                    &reply,(unsigned char *)&result,sizeof(result));
+    if(ok && reply.length==sizeof(result))
+        *info=result;
+    else {
+        if(ok)
+            nt_SetLastError(NT_ERROR_BROKEN_PIPE);
+        ok=false;
+    }
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+int32_t nt_fs4_remote_find_close(uintptr_t handle)
+{
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    if(!entry || !entry->search) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        pthread_mutex_unlock(&guard);
+        return 0;
+    }
+    struct reply reply={0};
+    bool ok=request(FS4_FIND_CLOSE,entry->cap,-1,0,0,0,0,NULL,0,0,
+                    &reply,NULL,0);
+    *entry=(struct remote_entry){0};
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+int32_t nt_fs4_remote_handle_info(uintptr_t handle,
+                                  struct nt_handle_file_info *info)
+{
+    if(!info) {nt_SetLastError(NT_ERROR_INVALID_PARAMETER);return 0;}
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    if(!entry || entry->search) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        pthread_mutex_unlock(&guard);
+        return 0;
+    }
+    struct nt_handle_file_info result={0};
+    struct reply reply={0};
+    bool ok=request(FS4_HANDLE_INFO,entry->cap,-1,0,0,0,0,NULL,0,0,
+                    &reply,(unsigned char *)&result,sizeof(result));
+    if(ok && reply.length==sizeof(result))
+        *info=result;
+    else {
+        if(ok)
+            nt_SetLastError(NT_ERROR_BROKEN_PIPE);
+        ok=false;
+    }
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+int32_t nt_fs4_remote_io_at(uintptr_t handle,void *data,uint32_t length,
+                            uint32_t *done,bool write,uint64_t offset)
+{
+    if(done) *done=0;
+    if(!done || (length && !data) || offset>INT64_MAX ||
+       (uint64_t)length>INT64_MAX-offset) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    if(!entry || entry->search) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        pthread_mutex_unlock(&guard);
+        return 0;
+    }
+    bool ok=true;
+    uint32_t total=0;
+    do {
+        uint32_t amount=length-total;
+        if(amount>FS4_MAX) amount=FS4_MAX;
+        struct reply reply={0};
+        unsigned char *at=data ? (unsigned char *)data+total : NULL;
+        ok=request(write ? FS4_WRITE_AT : FS4_READ_AT,entry->cap,
+                   (int64_t)(offset+total),0,0,0,0,
+                   write ? at : NULL,write ? amount : 0,
+                   amount,&reply,write ? NULL : at,write ? 0 : amount);
+        if(!ok) break;
+        if(reply.value>amount || (!write && reply.length!=reply.value)) {
+            poisoned=true;
+            nt_SetLastError(NT_ERROR_BROKEN_PIPE);
+            ok=false;break;
+        }
+        total+=(uint32_t)reply.value;
+        if(reply.value<amount || length==0)
+            break;
+    } while(total<length);
+    *done=total;
     pthread_mutex_unlock(&guard);
     return ok;
 }
