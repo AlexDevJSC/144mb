@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 _Static_assert(sizeof(struct nt_context64) == 1232, "AMD64 CONTEXT size");
@@ -482,6 +483,12 @@ _Noreturn void nt_restore_software_context(const struct nt_context64 *context);
 
 static _Noreturn void software_failure(uint32_t status)
 {
+    /* A real PE that exhausts safe VEH/SEH recovery must report why
+     * it stopped; silently calling _Exit(1) hid wrong NTSTATUS behind
+     * previous CI failures. This is a terminal, non-signal-handler path. */
+    (void)fprintf(stderr,
+                  "NT guest SEH fail closed: NTSTATUS=0x%08x\\n",
+                  (unsigned)status);
     nt_ExitProcess(status);
     _Exit(1);
 }
