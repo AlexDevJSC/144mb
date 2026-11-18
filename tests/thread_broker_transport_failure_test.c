@@ -89,6 +89,7 @@ static int cancel_live_rpc(int notify_fd, int mode)
 {
     struct cancel_case item = {
         .mutation = mode == 7,
+        .control_status = NT_STATUS_NOT_SUPPORTED,
         .capability = UINT64_C(0x4141414141414141),
         .identity = {.guest_thread_id = 0x51515151u},
         .previous = 0x5a5a5a5au
