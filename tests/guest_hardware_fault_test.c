@@ -49,8 +49,8 @@ int main(void)
         verify(SIGFPE, FPE_INTDIV, 0, UINT32_C(0xc0000094), 0, 0) ||
         verify(SIGFPE, FPE_INTOVF, 0, UINT32_C(0xc0000095), 0, 0) ||
         verify(SIGBUS, BUS_ADRALN, 0, UINT32_C(0x80000002), 0, 0) ||
-        !nt_guest_hardware_fault_translate(SIGSEGV, SI_USER, 0, 0,
-                                            &status, &count, args) == false ||
+        nt_guest_hardware_fault_translate(SIGSEGV, SI_USER, 0, 0,
+                                           &status, &count, args) ||
         nt_guest_hardware_fault_translate(SIGILL, SI_TKILL, 0, 0,
                                            &status, &count, args) ||
         nt_guest_hardware_fault_translate(SIGFPE, -1, 0, 0,
