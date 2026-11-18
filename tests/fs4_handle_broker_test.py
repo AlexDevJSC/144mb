@@ -224,9 +224,9 @@ class FileSystem4Handles(unittest.TestCase):
                                  [0, 32])  # one OPEN, one FILE_SHARE conflict
                 opened = next(item for item in observed if item[0] == 0)
                 # Only the worker holding the winning capability can close.
-                closed_by = a if a.call(CLOSE, handle=opened[1])[0] == 0 else b
-                if closed_by is b:
-                    self.assertEqual(b.call(CLOSE, handle=opened[1])[0], 6)
+                results = [a.call(CLOSE, handle=opened[1])[0],
+                           b.call(CLOSE, handle=opened[1])[0]]
+                self.assertEqual(sorted(results), [0, 87])
             finally:
                 fcntl.flock(guard, fcntl.LOCK_UN)
                 os.close(guard)
