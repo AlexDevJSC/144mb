@@ -4,6 +4,7 @@
 #include "nt_services.h"
 #include "winbase.h"
 #include "winfile.h"
+#include "fs4_remote.h"
 #include "section_memory.h"
 #include "sync.h"
 #include "user_folders.h"
@@ -2501,6 +2502,17 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
     }
+    /* In PE service mode, the HANDLE never opens the Linux backing here.
+     * The dedicated-UID Win32 broker owns its real FD and share leases. */
+    if (nt_fs4_remote_mode()) {
+        if ((flags & (FILE_FLAG_OVERLAPPED | FILE_FLAG_OPEN_REPARSE_POINT |
+                      FILE_FLAG_BACKUP_SEMANTICS)) != 0 ||
+            (attributes != NULL && attributes->inherit)) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return UINTPTR_MAX;
+        }
+        return nt_fs4_remote_open(path, desired, share, disposition, flags);
+    }
     const char *resolved = path;
     const int root = duplicate_root(&resolved);
     if (root < 0) {
@@ -3350,6 +3362,8 @@ int32_t NT_MS_ABI nt_DuplicateHandle(uintptr_t source_process, uintptr_t source,
 
 nt_status NT_MS_ABI nt_NtClose(uintptr_t handle)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_close(handle) ? NT_STATUS_SUCCESS : NT_STATUS_INVALID_HANDLE;
     const int error = close_object(handle);
     switch (error) {
     case 0: return NT_STATUS_SUCCESS;
@@ -3361,6 +3375,8 @@ nt_status NT_MS_ABI nt_NtClose(uintptr_t handle)
 
 int32_t NT_MS_ABI nt_CloseHandle(uintptr_t handle)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_close(handle);
     const int error = close_object(handle);
     if (error)
         nt_SetLastError(path_error(error, false));
@@ -3469,6 +3485,18 @@ enum path_operation { MAKE_DIRECTORY, REMOVE_FILE, REMOVE_DIRECTORY };
 
 static int32_t change_path(const char *input, enum path_operation operation)
 {
+    if (nt_fs4_remote_mode()) {
+        if (operation != REMOVE_FILE) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        char remote_path[PATH_MAX];
+        if (!guest_path(input, remote_path)) {
+            nt_SetLastError(path_error(errno, true));
+            return 0;
+        }
+        return nt_fs4_remote_delete(remote_path);
+    }
     if (!wal_healthy()) {
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return 0;
@@ -3705,6 +3733,13 @@ static int32_t move_file_utf8(const char *from, const char *to, uint32_t flags)
     if (!guest_path(from, source) || !guest_path(to, destination)) {
         nt_SetLastError(path_error(errno, true));
         return 0;
+    }
+    if (nt_fs4_remote_mode()) {
+        if (flags & ~1u) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        return nt_fs4_remote_rename(source, destination, flags);
     }
     if (path_breaks_guest_root(source)) {
         nt_SetLastError(NT_ERROR_SHARING_VIOLATION);
@@ -5104,6 +5139,10 @@ static int32_t security_descriptor_from_fd(int fd, uint32_t information,
 int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information,
                                       void *descriptor, uint32_t size, uint32_t *needed)
 {
+    if (nt_fs4_remote_mode()) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
     char narrow[PATH_MAX], path[PATH_MAX];
     if (!wide_path(name, narrow))
         return 0;
@@ -5521,6 +5560,13 @@ static int32_t file_io(uintptr_t handle, void *buffer, uint32_t size,
 {
     if (done)
         *done = 0;
+    if (nt_fs4_remote_handle(handle)) {
+        if (overlap != NULL) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        return nt_fs4_remote_io(handle, buffer, size, done, writing);
+    }
     if ((done == NULL && overlap == NULL) || (size && buffer == NULL)) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -5837,6 +5883,9 @@ static int32_t range_lock(uintptr_t handle, uint64_t offset, uint64_t length,
 int32_t NT_MS_ABI nt_LockFile(uintptr_t handle, uint32_t low, uint32_t high,
                               uint32_t length_low, uint32_t length_high)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_lock(handle, (uint64_t)high << 32 | low,
+                                  (uint64_t)length_high << 32 | length_low, false);
     return range_lock(handle, (uint64_t)high << 32 | low,
                       (uint64_t)length_high << 32 | length_low, false, false, false);
 }
@@ -5844,6 +5893,9 @@ int32_t NT_MS_ABI nt_LockFile(uintptr_t handle, uint32_t low, uint32_t high,
 int32_t NT_MS_ABI nt_UnlockFile(uintptr_t handle, uint32_t low, uint32_t high,
                                 uint32_t length_low, uint32_t length_high)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_lock(handle, (uint64_t)high << 32 | low,
+                                  (uint64_t)length_high << 32 | length_low, true);
     return range_lock(handle, (uint64_t)high << 32 | low,
                       (uint64_t)length_high << 32 | length_low, true, false, false);
 }
@@ -6402,6 +6454,8 @@ int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle)
 
 int32_t NT_MS_ABI nt_GetFileSizeEx(uintptr_t handle, int64_t *size)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_size(handle, size);
     if (size == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -6416,6 +6470,8 @@ int32_t NT_MS_ABI nt_GetFileSizeEx(uintptr_t handle, int64_t *size)
 
 int32_t NT_MS_ABI nt_SetFilePointerEx(uintptr_t handle, int64_t offset, int64_t *position, uint32_t method)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_seek(handle, offset, method, position);
     const int whence[] = {SEEK_SET, SEEK_CUR, SEEK_END};
     if (method >= sizeof(whence) / sizeof(whence[0]) || (method == 0 && offset < 0)) {
         nt_SetLastError(method == 0 ? NT_ERROR_NEGATIVE_SEEK : NT_ERROR_INVALID_PARAMETER);
@@ -6435,6 +6491,8 @@ int32_t NT_MS_ABI nt_SetFilePointerEx(uintptr_t handle, int64_t offset, int64_t 
 
 int32_t NT_MS_ABI nt_SetEndOfFile(uintptr_t handle)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_truncate(handle);
     const int fd = duplicate_handle(handle, FILE_WRITE);
     const off_t position = fd >= 0 ? lseek(fd, 0, SEEK_CUR) : -1;
     return file_result(fd, position >= 0 && ftruncate(fd, position) == 0);
@@ -6442,6 +6500,8 @@ int32_t NT_MS_ABI nt_SetEndOfFile(uintptr_t handle)
 
 uint32_t NT_MS_ABI nt_GetFileType(uintptr_t handle)
 {
+    if (nt_fs4_remote_handle(handle))
+        return 1; /* FILE_TYPE_DISK: real file remains broker-owned */
     const int fd = duplicate_handle(handle, 0);
     struct stat info;
     if (!file_result(fd, fd >= 0 && fstat(fd, &info) == 0))
@@ -6786,6 +6846,10 @@ int32_t NT_MS_ABI nt_DeviceIoControl(uintptr_t handle, uint32_t control,
 int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
                                          struct nt_file_attribute_data *info)
 {
+    if (nt_fs4_remote_mode()) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
     if (level != 0 || info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -6943,6 +7007,10 @@ static int next_entry(const struct directory_search *search, struct nt_find_data
 uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, struct nt_find_data_w *data,
                                        int32_t operation, void *filter, uint32_t flags)
 {
+    if (nt_fs4_remote_mode()) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return UINTPTR_MAX;
+    }
     if (data == NULL || (level != 0 && level != 1) || (operation != 0 && operation != 1) ||
         filter != NULL || (flags & ~2u) != 0) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
