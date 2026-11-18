@@ -288,7 +288,7 @@ int32_t nt_fs4_remote_io(uintptr_t handle,void *data,uint32_t length,
         if (amount>FS4_MAX)
             amount=FS4_MAX;
         struct reply response;
-        unsigned char *buffer=(unsigned char *)data+total;
+        unsigned char *buffer=data ? (unsigned char *)data+total : NULL;
         ok=request(writing?FS4_WRITE:FS4_READ,entry->cap,-1,0,0,0,0,
                    writing ? buffer : NULL,writing?amount:0,amount,
                    &response,writing?NULL:buffer,writing?0:amount);

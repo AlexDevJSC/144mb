@@ -29,7 +29,8 @@ enum { FS4_MAGIC = 0x34465348u, FS4_VERSION = 3, FS4_DATA_MAX = 2048,
        FS4_PATH_MAX = 1024, FS4_HANDLE_MAX = 32, FS4_REQUEST_MAX = 256 };
 enum { FS4_HELLO = 0, FS4_OPEN = 1, FS4_READ = 2, FS4_WRITE = 3,
        FS4_CLOSE = 4, FS4_DELETE = 5, FS4_RENAME = 6,
-       FS4_TRUNCATE = 7, FS4_LOCK = 8, FS4_UNLOCK = 9 };
+       FS4_TRUNCATE = 7, FS4_LOCK = 8, FS4_UNLOCK = 9,
+       FS4_SEEK = 10, FS4_SIZE = 11 };
 struct fs4_request {
     uint32_t magic;
     uint16_t version, op;
@@ -268,15 +269,37 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         break;
     }
     case FS4_TRUNCATE:
-        if (!slot || n || q->size || q->offset < 0)
+        if (!slot || n || q->size || q->offset < -1)
             break;
-        if (!nt_SetFilePointerEx(slot->native, q->offset, NULL, 0)) {
+        if (q->offset >= 0 &&
+            !nt_SetFilePointerEx(slot->native, q->offset, NULL, 0)) {
             result.error = nt_GetLastError();
             break;
         }
         result.error = nt_SetEndOfFile(slot->native) ?
                        NT_ERROR_SUCCESS : nt_GetLastError();
         break;
+    case FS4_SEEK: {
+        int64_t position = -1;
+        if (!slot || n || q->size || q->flags > 2)
+            break;
+        bool success = nt_SetFilePointerEx(slot->native, q->offset,
+                                            &position, q->flags) != 0;
+        result.error = success ? NT_ERROR_SUCCESS : nt_GetLastError();
+        if (success)
+            result.value = (uint64_t)position;
+        break;
+    }
+    case FS4_SIZE: {
+        int64_t size = -1;
+        if (!slot || n || q->size)
+            break;
+        bool success = nt_GetFileSizeEx(slot->native, &size) != 0;
+        result.error = success ? NT_ERROR_SUCCESS : nt_GetLastError();
+        if (success)
+            result.value = (uint64_t)size;
+        break;
+    }
     case FS4_LOCK:
     case FS4_UNLOCK:
         if (!slot || n || q->offset < 0 || q->size == 0)
