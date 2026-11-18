@@ -141,6 +141,7 @@ void nt_guest_boundary_install_child_session(struct nt_guest_boundary_session *s
     guest_entry_depth = 0;
     host_import_depth = 0;
     nonlocal_poisoned = false;
+    hardware_seh_guest_only = false;
     signal_guest_phase = 0;
     memset(host_return_stack, 0, sizeof(host_return_stack));
 }
@@ -190,6 +191,7 @@ void nt_guest_boundary_thread_detach(void)
     guest_entry_depth = 0;
     host_import_depth = 0;
     nonlocal_poisoned = false;
+    hardware_seh_guest_only = false;
     signal_guest_phase = 0;
 }
 static void publish_phase(enum nt_guest_boundary_phase phase)
@@ -248,6 +250,37 @@ bool nt_guest_boundary_signal_guest_code(uintptr_t pc)
             return true;
     return false;
 }
+/* The CPU kernel frame proves the fault occurred in the PE, while
+ * no host import-return slot is live. Temporarily deny asynchronous stops
+ * during the VEH/SEH *host* dispatcher, but do NOT permanently poison the
+ * guest when SEH unwinds only PE frames and resumes a validated PE RIP.
+ *
+ * This differs from RaiseException/RtlUnwind, which can bypass a live
+ * import trampoline. Never reauthorise that general ELF unwind. */
+bool nt_guest_boundary_begin_guest_hardware_seh(uintptr_t fault_pc)
+{
+    if (!signal_guest_phase || !nt_guest_boundary_signal_guest_code(fault_pc) ||
+        hardware_seh_guest_only || guest_entry_depth == 0 ||
+        host_import_depth != 0 || nonlocal_poisoned)
+        return false;
+    hardware_seh_guest_only = true;
+    signal_guest_phase = 0;
+    publish_phase(NT_GUEST_BOUNDARY_HOST);
+    return true;
+}
+bool nt_guest_boundary_finish_guest_hardware_seh(uintptr_t resume_pc)
+{
+    if (!hardware_seh_guest_only ||
+        !nt_guest_boundary_signal_guest_code(resume_pc) ||
+        guest_entry_depth == 0 || host_import_depth != 0 ||
+        nonlocal_poisoned)
+        return false;
+    hardware_seh_guest_only = false;
+    publish_phase(NT_GUEST_BOUNDARY_GUEST);
+    signal_guest_phase = 1;
+    return true;
+}
+
 /* The ordinary PE runner may be launched without the opt-in external
  * ptrace supervisor. Its local guest depth is still trustworthy at the
  * import-return gate, but the shared phase stays UNREGISTERED. This
@@ -269,6 +302,7 @@ bool nt_guest_boundary_special_apc_allowed(void)
 void nt_guest_boundary_mark_nonlocal_transfer(void)
 {
     nonlocal_poisoned = true;
+    hardware_seh_guest_only = false;
     signal_guest_phase = 0;
     publish_phase(NT_GUEST_BOUNDARY_HOST);
 }
