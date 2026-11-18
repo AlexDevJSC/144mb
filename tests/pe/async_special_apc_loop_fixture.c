@@ -18,6 +18,11 @@ static void CALLBACK ordinary_apc(ULONG_PTR arg)
     struct async_target *state = (struct async_target *)arg;
     __atomic_add_fetch(&state->ordinary_calls, 1u, __ATOMIC_SEQ_CST);
 }
+#ifdef NT_TEST_ASYNC_SEH
+/* Implemented by a real .pdata/.xdata scope in PE AMD64 assembly. */
+extern void CALLBACK special_exception_apc(ULONG_PTR arg);
+#define SPECIAL_CALLBACK special_exception_apc
+#else
 static void CALLBACK special_apc(ULONG_PTR arg)
 {
     struct async_target *state = (struct async_target *)arg;
@@ -25,6 +30,8 @@ static void CALLBACK special_apc(ULONG_PTR arg)
                      __ATOMIC_SEQ_CST);
     __atomic_add_fetch(&state->special_calls, 1u, __ATOMIC_SEQ_CST);
 }
+#define SPECIAL_CALLBACK special_apc
+#endif
 static DWORD WINAPI pure_pe_loop(void *arg)
 {
     struct async_target *state = arg;
@@ -72,7 +79,7 @@ int import_fixture_entry(void)
         return 102;
     /* A normal APC must remain pending: no alertable wait ever occurs. */
     if (!QueueUserAPC(ordinary_apc, thread, (ULONG_PTR)&state) ||
-        !resolved.api(special_apc, thread, (ULONG_PTR)&state, 1u))
+        !resolved.api(SPECIAL_CALLBACK, thread, (ULONG_PTR)&state, 1u))
         return 104;
     if (WaitForSingleObject(thread, 12000) != WAIT_OBJECT_0 ||
         !GetExitCodeThread(thread, &exit_code) || exit_code != 0x1acu ||
