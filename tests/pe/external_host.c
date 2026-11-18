@@ -7,6 +7,7 @@
 #include "dll_graph.h"
 #include "ntnative/runtime.h"
 #include "ntnative/guest_thread.h"
+#include "ntnative/guest_boundary_runtime.h"
 #include "compat.h"
 #include "desktop.h"
 #include "desktop_resources.h"
@@ -97,6 +98,11 @@ int main(int argc, char **argv)
         return 2;
     }
     pe_dll_graph_install(graph);
+    /* Match the real isolated PE launcher: EVERY Win64 IAT import must
+     * enter the host through the reviewed gate, otherwise special APC
+     * callbacks are never dispatched at their return safe point.
+     * This host executes build-generated, reviewed PE fixtures ONLY. */
+    nt_guest_boundary_enable_import_gate();
     struct pe_image image = {0};
     char reason[192];
     const bool mapped = pe_image_load(file, length, resolve, graph,
@@ -104,6 +110,22 @@ int main(int argc, char **argv)
     free(file);
     if (!mapped) {
         fprintf(stderr, "Cannot map controlled external PE: %s\n", reason);
+        return 3;
+    }
+    if (!image.code_size ||
+        !nt_guest_boundary_set_image_range(
+            (uintptr_t)image.base + image.code_rva,
+            (uintptr_t)image.base + image.code_rva + image.code_size)) {
+        fputs("Cannot authorize controlled PE image executable scope\n", stderr);
+        return 3;
+    }
+    struct nt_guest_code_range pinned_dlls[NT_GUEST_ADDITIONAL_CODE_MAX];
+    size_t pinned_count = 0;
+    if (!pe_dll_graph_snapshot_pinned_code(
+            graph, pinned_dlls, NT_GUEST_ADDITIONAL_CODE_MAX, &pinned_count) ||
+        !nt_guest_boundary_set_startup_code_ranges(
+            pinned_dlls, pinned_count)) {
+        fputs("Cannot prove PE startup DLL executable scopes\n", stderr);
         return 3;
     }
     char temp[] = "/tmp/pe-fixture-XXXXXX";
@@ -167,7 +189,9 @@ int main(int argc, char **argv)
         return 8;
     }
     nt_runtime_notify_tls(1);
+    nt_guest_boundary_guest_enter();
     const int status = entry();
+    nt_guest_boundary_guest_leave();
     nt_runtime_notify_tls(0);
     pe_dll_graph_detach_all(graph);
     nt_runtime_run_fls_cleanup();
