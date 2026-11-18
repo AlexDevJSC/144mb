@@ -599,7 +599,16 @@ static _Noreturn void resume_software(const struct nt_context64 *context, struct
 {
     if (!software_code(context->rip) || !software_stack_pointer(context->rsp))
         software_failure(STATUS_INVALID_TARGET);
-    nt_guest_boundary_mark_nonlocal_transfer();
+    /* A kernel CPU fault from a proved guest-only RIP has no
+     * abandoned host import, and its handler may safely reauthorise
+     * the PE boundary after selecting a guest RIP. General software
+     * RaiseException/RtlUnwind still poison nonlocal host transfers. */
+    if (active_software != NULL && active_software->hardware) {
+        if (!nt_guest_boundary_finish_guest_hardware_seh(context->rip))
+            software_failure(STATUS_INVALID_TARGET);
+    } else {
+        nt_guest_boundary_mark_nonlocal_transfer();
+    }
     active_software = previous;
     /* The Linux kernel supplied XSTATE at the signal. Restore extended
      * YMM/ZMM components immediately before the assembly final GPR/FXSAVE
@@ -617,9 +626,12 @@ static _Noreturn void dispatch_exception_common(
     /* A SOFTWARE RaiseException crosses the Win64 IAT return gate; the
      * recorded PC can be its synthetic ELF trampoline. A CPU hardware
      * fault originates at the real guest instruction; never rewrite it. */
-    if (!hardware)
+    if (!hardware) {
         origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
-    nt_guest_boundary_mark_nonlocal_transfer();
+        nt_guest_boundary_mark_nonlocal_transfer();
+    } else if (!nt_guest_boundary_begin_guest_hardware_seh(origin->rip)) {
+        software_failure(STATUS_INVALID_TARGET);
+    }
     complete_software_capture(origin);
     const bool ready = prepare_software_stack();
     struct nt_exception_record record = {.code = code, .flags = flags & SOFTWARE_NONCONTINUABLE,
