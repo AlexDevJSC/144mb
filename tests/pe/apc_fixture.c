@@ -133,12 +133,14 @@ static DWORD WINAPI worker(void *unused)
 
     /* Guest-only, bounded delivery at the safe return from this NT
      * import, without an alertable wait or hijacking a host mutex. */
-    if (NtQueueApcThreadEx(GetCurrentThread(), (HANDLE)(uintptr_t)1,
+    const LONG special_status =
+        NtQueueApcThreadEx(GetCurrentThread(), (HANDLE)(uintptr_t)1,
                            special_native_apc, (void *)(uintptr_t)0x777u,
                            (void *)(uintptr_t)0x778u,
-                           (void *)(uintptr_t)0x779u) != STATUS_OK ||
-        special_count != 1u || NtTestAlert() != STATUS_OK)
-        return 36;
+                           (void *)(uintptr_t)0x779u);
+    if (special_status != STATUS_OK) return 36;
+    if (special_count != 1u) return 92;
+    if (NtTestAlert() != STATUS_OK) return 93;
 
     typedef DWORD (WINAPI *queue_apc2)(PAPCFUNC, HANDLE, ULONG_PTR, DWORD);
     union { FARPROC address; queue_apc2 call; } resolved = {
