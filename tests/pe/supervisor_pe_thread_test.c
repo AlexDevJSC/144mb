@@ -507,7 +507,9 @@ int main(int argc, char **argv)
 #elif defined(NT_SUP_TEST_APC_PRE_CANCEL)
     atomic_store_explicit(&shared->apc_cancel, 1u, memory_order_release);
 #elif !defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) && \
-      !defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
+      !defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH) && \
+      !defined(NT_SUP_TEST_APC_EXCEPTION_FPE) && \
+      !defined(NT_SUP_TEST_APC_EXCEPTION_SEGV)
     const uint64_t guest_before_apc = atomic_load(&shared->guest_ticks);
 #endif
 
