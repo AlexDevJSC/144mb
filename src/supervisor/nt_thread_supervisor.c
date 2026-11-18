@@ -99,6 +99,8 @@ int nt_supervisor_interrupt(struct nt_thread_supervisor *sup, unsigned timeout_m
     if (ptrace(PTRACE_INTERRUPT, sup->tid, NULL, NULL) == -1) return -1;
     uint64_t deadline = mono_ms() + timeout_ms;
     for (;;) {
+        if (nt_supervisor_apc_interrupted(cancel, peer_fd))
+            return nt_supervisor_apc_fail_closed(sup, ECANCELED);
         int status = 0;
         pid_t observed = waitpid(sup->tid, &status, __WALL | WNOHANG);
         if (observed == sup->tid) {
@@ -284,17 +286,37 @@ static int nt_supervisor_apc_fail_closed(struct nt_thread_supervisor *sup,
     return -1;
 }
 
+/* The cancellation flag and socket belong to the trusted supervisor, not
+ * to the untrusted PE. POLLHUP/POLLRDHUP indicate that the caller vanished;
+ * we never consume a request packet or reinterpret user memory as policy.
+ * This is an opt-in fixture guard, NOT a general-purpose APC cancel API. */
+static bool nt_supervisor_apc_interrupted(const _Atomic uint32_t *cancel,
+                                          int peer_fd)
+{
+    if (cancel && atomic_load_explicit(cancel, memory_order_acquire) != 0)
+        return true;
+    if (peer_fd < 0)
+        return false;
+    struct pollfd watcher = {.fd = peer_fd, .events = POLLIN | POLLRDHUP};
+    int ready = poll(&watcher, 1, 0);
+    if (ready < 0)
+        return errno != EINTR;
+    return ready > 0 &&
+           (watcher.revents & (POLLHUP | POLLRDHUP | POLLERR | POLLNVAL)) != 0;
+}
+
 /* INT3-terminated, trusted-fixture-only special APC proof. A complete
  * register+XSTATE round trip is required: restoring integer registers
  * alone after a callback would silently corrupt interrupted AVX code.
  * This is not safe for arbitrary Windows images, SEH, or host callbacks;
  * only a reviewed, import-free PE with an isolated APC stack may call it.
  * Any unprovable mutation terminates ONLY the pidfd-pinned child. */
-int nt_supervisor_invoke_trusted_guest_apc(
+int nt_supervisor_invoke_trusted_guest_apc_guarded(
     struct nt_thread_supervisor *sup,
     const struct nt_supervisor_guest_scope *scope,
     uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
-    const _Atomic uint32_t *guest_completion, unsigned timeout_ms)
+    const _Atomic uint32_t *guest_completion, unsigned timeout_ms,
+    const _Atomic uint32_t *cancel, int peer_fd)
 {
     if (sup && sup->compromised) { errno = EPERM; return -1; }
     if (!sup || !sup->stopped || !scope || !guest_completion ||
@@ -312,6 +334,12 @@ int nt_supervisor_invoke_trusted_guest_apc(
         errno = ENOTSUP;
         return -1;
     }
+    /* Before any state-changing ptrace, a canceled job can fail cleanly.
+     * After a mutation, cancellation instead requires quarantine. */
+    if (nt_supervisor_apc_interrupted(cancel, peer_fd)) {
+        errno = ECANCELED;
+        return -1;
+    }
     const uint32_t before =
         atomic_load_explicit(guest_completion, memory_order_acquire);
     /* Bound state capture by 64 KiB, aligned for XSAVE. An unavailable
@@ -324,6 +352,10 @@ int nt_supervisor_invoke_trusted_guest_apc(
         return -1;
     if (state.iov_len < 512 || state.iov_len > sizeof(xstate)) {
         errno = EPROTO;
+        return -1;
+    }
+    if (nt_supervisor_apc_interrupted(cancel, peer_fd)) {
+        errno = ECANCELED;
         return -1;
     }
     const size_t xstate_size = state.iov_len;
@@ -354,6 +386,8 @@ int nt_supervisor_invoke_trusted_guest_apc(
     if (nt_supervisor_get_registers(sup, &verified_regs) ||
         memcmp(&verified_regs, &inserted, sizeof(inserted)) != 0)
         return nt_supervisor_apc_fail_closed(sup, EPROTO);
+    if (nt_supervisor_apc_interrupted(cancel, peer_fd))
+        return nt_supervisor_apc_fail_closed(sup, ECANCELED);
     if (nt_supervisor_continue(sup))
         return nt_supervisor_apc_fail_closed(sup, errno);
 
@@ -413,6 +447,8 @@ int nt_supervisor_invoke_trusted_guest_apc(
 #endif
                 if (memcmp(observed_xstate, xstate, xstate_size) != 0)
                     return nt_supervisor_apc_fail_closed(sup, EPROTO);
+                if (nt_supervisor_apc_interrupted(cancel, peer_fd))
+                    return nt_supervisor_apc_fail_closed(sup, ECANCELED);
                 if (nt_supervisor_continue(sup))
                     return nt_supervisor_apc_fail_closed(sup, errno);
                 return 0;
@@ -433,6 +469,18 @@ int nt_supervisor_invoke_trusted_guest_apc(
         const struct timespec pause = {.tv_nsec = 1000000L};
         (void)nanosleep(&pause, NULL);
     }
+}
+
+/* Backwards-compatible trusted fixture API: no cancellation source. */
+int nt_supervisor_invoke_trusted_guest_apc(
+    struct nt_thread_supervisor *sup,
+    const struct nt_supervisor_guest_scope *scope,
+    uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
+    const _Atomic uint32_t *guest_completion, unsigned timeout_ms)
+{
+    return nt_supervisor_invoke_trusted_guest_apc_guarded(
+        sup, scope, guest_entry, guest_stack_top, guest_argument,
+        guest_completion, timeout_ms, NULL, -1);
 }
 
 /* Both normal release and error cleanup obey the same rule: never
