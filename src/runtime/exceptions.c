@@ -431,6 +431,14 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
                     nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
                     break;
                 }
+                /* This resource-free builtin is the ONLY host C SEH
+                 * frame permitted to disappear on a nonlocal transfer.
+                 * Retire its proven import stub (if any), not arbitrary
+                 * ELF frames, pthread mutexes or foreign callbacks. */
+                if (!nt_guest_boundary_retire_specific_handler_import()) {
+                    nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+                    return SEH_CONTINUE_SEARCH;
+                }
                 seh.transfer(record, frame, image.base + scope.target, dispatch);
                 nt_SetLastError(NT_ERROR_GEN_FAILURE);
                 break;
