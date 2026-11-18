@@ -90,6 +90,9 @@ bool nt_guest_boundary_finish_guest_hardware_seh(uintptr_t resume_pc);
  * no ELF mutex/cleanup resources. No arbitrary host frame is unwound. */
 bool nt_guest_boundary_begin_guest_software_import_seh(uintptr_t caller_pc);
 bool nt_guest_boundary_finish_guest_software_import_seh(uintptr_t resume_pc);
+/* Used ONLY by the validated, resource-free C-specific SEH handler just
+ * before its nonreturning transfer; nested/foreign ELF frames are denied. */
+bool nt_guest_boundary_retire_specific_handler_import(void);
 /* Any nonlocal exception/longjmp that may bypass an import epilogue
  * permanently disables asynchronous stops on that TID until teardown.
  * The runtime must NOT attempt to reconstruct abandoned host locks or
