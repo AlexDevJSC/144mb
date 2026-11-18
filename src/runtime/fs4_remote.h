@@ -1,0 +1,27 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef NTNATIVE_FS4_REMOTE_H
+#define NTNATIVE_FS4_REMOTE_H
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/* Win32 runtime-side, opt-in client of the dedicated-UID HANDLE broker.
+ * No Linux backing FDs or paths are ever transferred to guest code. */
+bool nt_fs4_remote_mode(void);
+bool nt_fs4_remote_handle(uintptr_t handle);
+uintptr_t nt_fs4_remote_open(const char *path, uint32_t access,
+                            uint32_t share, uint32_t disposition,
+                            uint32_t flags);
+int32_t nt_fs4_remote_io(uintptr_t handle, void *data, uint32_t length,
+                         uint32_t *done, bool write);
+int32_t nt_fs4_remote_close(uintptr_t handle);
+int32_t nt_fs4_remote_delete(const char *path);
+int32_t nt_fs4_remote_rename(const char *old_name, const char *new_name,
+                             uint32_t flags);
+int32_t nt_fs4_remote_seek(uintptr_t handle, int64_t offset, uint32_t method,
+                           int64_t *position);
+int32_t nt_fs4_remote_size(uintptr_t handle, int64_t *length);
+int32_t nt_fs4_remote_truncate(uintptr_t handle);
+int32_t nt_fs4_remote_lock(uintptr_t handle, uint64_t offset,
+                           uint64_t length, bool unlock);
+#endif
