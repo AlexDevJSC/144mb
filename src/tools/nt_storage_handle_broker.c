@@ -232,8 +232,13 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         if (!slot || slot->search || q->size>FS4_DATA_MAX ||
             n != (writing ? q->size : 0u) ||
             (positional ? (q->offset<0 || q->offset>INT64_MAX-(int64_t)q->size) :
-                          q->offset!=-1))
+                          q->offset < -1))
             break;
+        if (!positional && q->offset >= 0 &&
+            !nt_SetFilePointerEx(slot->native,q->offset,NULL,0)) {
+            result.error=nt_GetLastError();
+            break;
+        }
         /* OVERLAPPED on a synchronous service HANDLE is immediate and
          * positional, preserving its shared file cursor. No guest pointer
          * is transferred into the service process. */
