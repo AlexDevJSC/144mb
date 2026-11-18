@@ -148,6 +148,7 @@ int nt_supervisor_get_registers(struct nt_thread_supervisor *sup, struct user_re
 
 int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
 {
+    if (sup && sup->compromised) { errno = EPERM; return -1; }
     struct user_regs_struct regs;
     if (nt_supervisor_get_registers(sup, &regs)) return -1;
     regs.rax = value;
@@ -282,6 +283,7 @@ int nt_supervisor_invoke_trusted_guest_apc(
     uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
     const _Atomic uint32_t *guest_completion, unsigned timeout_ms)
 {
+    if (sup && sup->compromised) { errno = EPERM; return -1; }
     if (!sup || !sup->stopped || !scope || !guest_completion ||
         guest_entry < scope->code_begin || guest_entry >= scope->code_end ||
         guest_stack_top < (uintptr_t)0x10000 || timeout_ms == 0 ||
