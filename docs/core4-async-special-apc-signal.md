@@ -50,6 +50,29 @@ callbacks ordinarios permanecen en su cola y NO se ejecutan sin una
 espera alertable. Si el anfitrión ya ha ocupado la señal reservada,
 el runtime no roba ese manejador y conserva el modo cooperativo.
 
+## Recuperación limitada de fronteras VEH/SEH
+
+Se implementa una reconciliación **estricta por procedencia**:
+cuando SIGILL/SIGFPE/SIGSEGV proviene de RIP PE, sin import
+ELF abierto, el runtime marca temporalmente HOST durante el
+dispatcher VEH/SEH y autoriza volver a GUEST **solo después** de
+que el Win64 handler seleccione un RIP PE válido. Esto permite
+recuperar varios fallos hardware sucesivos sin envenenar falsamente
+la frontera.
+
+Para `RaiseException`, la única excepción recuperable es la
+entrada **naked** del import Win64 auditado, con un solo slot sintético
+de retorno, validado contra el manifiesto de código del cargador.
+No cruza destructores, mutex ni cleanup del host: solo retira ese
+slot y reautoriza tras seleccionar el RIP PE. Las llamadas ELF
+anidadas y los callbacks que abandonan importaciones generales
+continúan denegados. El test de frontera verifica que un segundo
+slot impide esta reconciliación.
+
+**Esto NO es un desenrollado PE↔ELF arbitrario.** Se evita cruzar
+frames host sin contrato de limpieza; no se inventa una tabla `.pdata`
+para ELF ni se promete invocar `pthread_cleanup` ajeno.
+
 ## Excepciones dentro de la nueva pila APC
 
 `prepare_software_stack()` reconoce la pila privada del callback y
