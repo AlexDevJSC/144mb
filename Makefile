@@ -909,11 +909,23 @@ $(BUILD_DIR)/fixture-nt_apc.a: tests/pe/nt_apc.def | $(BUILD_DIR)
 $(BUILD_DIR)/apc-fixture.exe: tests/pe/apc_fixture.c $(BUILD_DIR)/fixture-nt_apc.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-nt_apc.a -lkernel32
 
+# A genuine PE busy loop contains no import, wait or yield in the
+# interval between entering the loop and handling a remote special APC.
+# Its kernel signal path is independent of the import-return checkpoint.
+$(BUILD_DIR)/async-special-apc-loop-fixture.exe: tests/pe/async_special_apc_loop_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
+
+.PHONY: check-pe-async-special-apc
+check-pe-async-special-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-loop-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-loop-fixture.exe
+
 check-pe-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe $(BUILD_DIR)/special-apc-seh-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/special-apc-seh-fixture.exe
+	$(MAKE) BUILD_DIR=$(BUILD_DIR) check-pe-async-special-apc
 
 # APC callback with a genuine PE .pdata/.xdata frame-based SEH scope.
 # No Linux signal handler, compiler builtin or host C SEH surrogate.
