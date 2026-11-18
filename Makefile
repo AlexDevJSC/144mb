@@ -125,6 +125,32 @@ $(BUILD_DIR)/supervisor-pe-apc-xstate-failure-test: tests/pe/supervisor_pe_threa
 check-pe-thread-supervisor-apc-xstate-failure: $(BUILD_DIR)/supervisor-pe-apc-xstate-failure-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-xstate-failure-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 
+# Additional trust-boundary cases: cancellation before/after mutation,
+# a disconnected supervisor-owned socket, asynchronous SIGUSR1 to a guest
+# Linux TID, and a real PE UD2 CPU exception. No public APC hooks.
+APC_GUARD_CASES := cancel disconnect signal exception pre-cancel
+
+define APC_GUARD_FIXTURE
+$(BUILD_DIR)/supervisor-pe-apc-$(1)-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/runtime -Isrc/supervisor -Itests/pe \
+	    $(WARN_CFLAGS) $(CFLAGS) -DNT_SUP_TEST_APC_$(2)=1 $(LDFLAGS) \
+	    tests/pe/supervisor_pe_thread_test.c src/supervisor/nt_thread_supervisor.c \
+	    src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c \
+	    src/runtime/guest_boundary_import.S -pthread $(LDLIBS) -o "$@"
+endef
+
+$(eval $(call APC_GUARD_FIXTURE,cancel,CANCEL))
+$(eval $(call APC_GUARD_FIXTURE,disconnect,DISCONNECT))
+$(eval $(call APC_GUARD_FIXTURE,signal,SIGNAL))
+$(eval $(call APC_GUARD_FIXTURE,exception,EXCEPTION))
+$(eval $(call APC_GUARD_FIXTURE,pre-cancel,PRE_CANCEL))
+
+.PHONY: check-pe-thread-supervisor-apc-guards
+check-pe-thread-supervisor-apc-guards: $(addprefix $(BUILD_DIR)/supervisor-pe-apc-,$(addsuffix -test,$(APC_GUARD_CASES))) $(BUILD_DIR)/supervisor-pe-fixture.exe
+	@set -e; for name in $(APC_GUARD_CASES); do \
+	  timeout 20s "$(BUILD_DIR)/supervisor-pe-apc-$name-test" "$(BUILD_DIR)/supervisor-pe-fixture.exe"; \
+	done
+
 $(BUILD_DIR):
 	mkdir -p "$@"
 
