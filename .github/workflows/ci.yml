@@ -125,6 +125,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Independently diagnose PE async APC frame SEH on Fedora
+        run: make -j2 check-pe-async-special-apc-seh
       - name: Build RPM and run its check section
         run: |
           rpm_topdir="$PWD/build-rpm"
