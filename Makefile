@@ -99,6 +99,19 @@ $(BUILD_DIR)/supervisor-pe-thread-test: tests/pe/supervisor_pe_thread_test.c tes
 check-pe-thread-supervisor: $(BUILD_DIR)/supervisor-pe-thread-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 	timeout 20s $(BUILD_DIR)/supervisor-pe-thread-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 
+# Test-only, real PE32+ callback with an injected completion mismatch.
+# Must prove that an already-mutated guest PC/XSTATE is never released.
+$(BUILD_DIR)/supervisor-pe-apc-failure-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/pe -Isrc/runtime -Isrc/supervisor -Itests/pe \
+	    $(WARN_CFLAGS) $(CFLAGS) -DNT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH=1 $(LDFLAGS) \
+	    tests/pe/supervisor_pe_thread_test.c src/supervisor/nt_thread_supervisor.c \
+	    src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c \
+	    src/runtime/guest_boundary_import.S -pthread $(LDLIBS) -o "$@"
+
+.PHONY: check-pe-thread-supervisor-apc-failure
+check-pe-thread-supervisor-apc-failure: $(BUILD_DIR)/supervisor-pe-apc-failure-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-failure-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+
 $(BUILD_DIR):
 	mkdir -p "$@"
 
