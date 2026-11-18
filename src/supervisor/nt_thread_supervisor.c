@@ -161,12 +161,16 @@ int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
     struct iovec vec = {.iov_base = &desired, .iov_len = sizeof(desired)};
     const int write_result =
         ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_PRSTATUS, &vec);
+#ifndef NT_SUP_TEST_FORCE_RAX_ROLLBACK_FAILURE
     const int write_errno = write_result == -1 ? errno : EPROTO;
+#endif
     struct user_regs_struct verified = {0};
     const bool readback = write_result == 0 && vec.iov_len == sizeof(desired) &&
                           nt_supervisor_get_registers(sup, &verified) == 0;
+#ifndef NT_SUP_TEST_FORCE_RAX_ROLLBACK_FAILURE
     const int failure_errno = write_result == -1 ? write_errno :
         (vec.iov_len != sizeof(desired) || readback ? EPROTO : errno);
+#endif
 #ifdef NT_SUP_TEST_FORCE_RAX_VERIFY_MISMATCH
     /* Test-only negative path, never controlled by the guest or environment. */
     extern _Atomic uint32_t nt_sup_test_rax_verify_corrupted;
