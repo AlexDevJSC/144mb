@@ -236,6 +236,26 @@ int main(void)
     nt_guest_boundary_guest_leave();
     if (nt_guest_boundary_seh_caller_pc(synthetic) != synthetic)
         return 27;
+    /* Multiple real CPU faults are recoverable when no HOST import
+     * frame exists. The exception dispatcher is HOST until the Win64
+     * handler chooses a reviewed PE RIP; software nonlocal escape
+     * remains permanently poisoned instead. */
+    nt_guest_boundary_guest_enter();
+    if (!nt_guest_boundary_signal_guest_phase() ||
+        nt_guest_boundary_begin_guest_hardware_seh(0x500000u) ||
+        !nt_guest_boundary_begin_guest_hardware_seh(0x400100u) ||
+        nt_guest_boundary_signal_guest_phase() ||
+        nt_guest_boundary_begin_guest_hardware_seh(0x400100u) ||
+        !nt_guest_boundary_finish_guest_hardware_seh(0x400200u) ||
+        !nt_guest_boundary_signal_guest_phase() ||
+        !nt_guest_boundary_begin_guest_hardware_seh(0x400300u) ||
+        !nt_guest_boundary_finish_guest_hardware_seh(0x400400u))
+        return 21;
+    nt_guest_boundary_mark_nonlocal_transfer();
+    if (nt_guest_boundary_begin_guest_hardware_seh(0x400500u) ||
+        nt_guest_boundary_finish_guest_hardware_seh(0x400500u))
+        return 22;
+    nt_guest_boundary_guest_leave();
     puts("PASS guest/host import ABI: Microsoft x64 8-argument stack, XMM float, "
          "nested callbacks with host mutex, nonlocal poison, pinned-DLL manifest, per-thread phases and revocation");
     return 0;
