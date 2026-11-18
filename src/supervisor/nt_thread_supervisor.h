@@ -9,6 +9,18 @@
 #include "ntnative/guest_boundary.h"
 #include "ntnative/guest_boundary_runtime.h"
 
+/* Supervisor-only translation of a real kernel signal-delivery stop
+ * from pinned PE guest instructions. This does NOT run guest VEH/SEH.
+ * It is diagnostic evidence for fail-closed APC aborts and a future
+ * authenticated exception dispatch protocol. No PE controls these fields. */
+struct nt_supervisor_guest_fault {
+    bool valid;
+    int linux_signal, linux_code;
+    uint32_t nt_status;
+    uint32_t information_count;
+    uintptr_t instruction, fault_address, information[2];
+};
+
 /* Experimental Linux AMD64 supervisor, not a Win32 API implementation.
  * Only a direct, live child of this caller can be supervised; `tid` must
  * belong to that child. All operations are synchronous and single-owner.
@@ -27,6 +39,7 @@ struct nt_thread_supervisor {
     /* Fatal CONTEXT rollback failed. This is irreversible until the
      * pidfd confirms process death. Never CONT or DETACH this tracee. */
     bool compromised;
+    struct nt_supervisor_guest_fault last_guest_fault;
 };
 
 void nt_supervisor_init(struct nt_thread_supervisor *sup);
@@ -60,6 +73,17 @@ int nt_supervisor_interrupt_guest(struct nt_thread_supervisor *sup,
 int nt_supervisor_get_guest_context(struct nt_thread_supervisor *sup,
                                     const struct nt_supervisor_guest_scope *scope,
                                     struct user_regs_struct *out);
+/* Only for a REAL pending synchronous CPU fault (PTRACE_GETSIGINFO).
+ * Requires stopped live pidfd-pinned child, stable parent-owned PE scope,
+ * correct GS/TEB, positive kernel si_code and matching pending signal.
+ * User-directed kill/tgkill, synthetic INT3 and host ELF faults refuse.
+ * Pure observation: does not redirect RIP, CONT, DETACH or claim that
+ * hardware SEH has run. */
+int nt_supervisor_get_guest_hardware_fault(
+    struct nt_thread_supervisor *sup,
+    const struct nt_supervisor_guest_scope *scope,
+    struct nt_supervisor_guest_fault *out);
+
 int nt_supervisor_set_guest_rax(struct nt_thread_supervisor *sup,
                                 const struct nt_supervisor_guest_scope *scope,
                                 uint64_t value);
