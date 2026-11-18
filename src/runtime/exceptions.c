@@ -377,6 +377,14 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
                                        struct nt_context64 *context,
                                        struct nt_dispatcher_context *dispatch)
 {
+    if (record && record->code == UINT32_C(0xe14400af))
+        (void)fprintf(stderr,
+            "APC-SEH handler entered: frame=0x%llx pc=0x%llx scope=%p stack=0x%llx..0x%llx target=0x%llx\\n",
+            (unsigned long long)frame,
+            (unsigned long long)(dispatch ? dispatch->pc : 0),
+            dispatch ? dispatch->handler_data : NULL,
+            (unsigned long long)stack_low, (unsigned long long)stack_high,
+            (unsigned long long)(dispatch ? dispatch->target : 0));
     uint64_t base;
     if (record == NULL || context == NULL || dispatch == NULL || dispatch->context == NULL || seh.end == 0 ||
         stack_low == 0 || frame < stack_low || frame >= stack_high || dispatch->frame != frame ||
@@ -391,6 +399,8 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
     if (table == NULL)
         goto invalid;
     const uint32_t count = load_dword(table);
+    if (record->code == UINT32_C(0xe14400af))
+        (void)fprintf(stderr, "APC-SEH scope data offset=0x%x entries=%u\\n", offset, count);
     if (count > MAX_SEH_SCOPES || dispatch->scope_index > count ||
         image_bytes(offset, 4 + (size_t)count * 16) == NULL)
         goto invalid;
@@ -408,6 +418,10 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
     const bool unwinding = (record->flags & SEH_UNWIND_FLAGS) != 0;
     for (uint32_t i = dispatch->scope_index; i < count; ++i) {
         const struct seh_scope scope = read_scope(table, i);
+        if (record->code == UINT32_C(0xe14400af))
+            (void)fprintf(stderr,
+                "APC-SEH scope[%u] pc=0x%x begin=0x%x end=0x%x handler=0x%x target=0x%x unwinding=%u\\n",
+                i, pc, scope.begin, scope.end, scope.handler, scope.target, (unsigned)unwinding);
         if (pc < scope.begin || pc >= scope.end)
             continue;
         if (unwinding) {
@@ -448,6 +462,8 @@ int32_t NT_MS_ABI nt_C_specific_handler(struct nt_exception_record *record, uint
     return SEH_CONTINUE_SEARCH;
 
 invalid:
+    if (record && record->code == UINT32_C(0xe14400af))
+        (void)fprintf(stderr, "APC-SEH handler rejected invalid metadata/scope\\n");
     nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
     return SEH_CONTINUE_SEARCH;
 }
