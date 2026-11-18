@@ -221,6 +221,20 @@ uint32_t nt_guest_boundary_host_nesting(void)
 {
     return host_import_depth;
 }
+/* The ordinary PE runner may be launched without the opt-in external
+ * ptrace supervisor. Its local guest depth is still trustworthy at the
+ * import-return gate, but the shared phase stays UNREGISTERED. This
+ * predicate must NEVER be substituted for ptrace ownership/GS checks:
+ * it is only for same-thread, synchronous APC callback invocation. */
+bool nt_guest_boundary_special_apc_allowed(void)
+{
+    if (guest_entry_depth == 0 || host_import_depth != 0 ||
+        nonlocal_poisoned || shadow_stack_unsafe())
+        return false;
+    return current_slot == NULL ||
+           nt_guest_boundary_current_phase() == NT_GUEST_BOUNDARY_GUEST;
+}
+
 /* The only safe decision after a known exception/longjmp can bypass
  * a previously installed trampoline return slot is to deny suspension
  * for the remainder of this particular thread. We never fabricate a
