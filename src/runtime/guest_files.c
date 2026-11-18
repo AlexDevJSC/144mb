@@ -5520,23 +5520,46 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    pthread_mutex_lock(&file_lock);
-    const struct guest_file *entry = find_handle(handle);
-    const bool exists = entry != NULL;
-    const bool enabled = exists && entry->overlapped_io;
-    const uintptr_t completion_port = enabled ? entry->completion_port : 0;
-    const uintptr_t completion_key = enabled ? entry->completion_key : 0;
-    pthread_mutex_unlock(&file_lock);
+    const bool remote=nt_fs4_remote_handle(handle);
+    bool exists=false, enabled=false;
+    uintptr_t completion_port=0,completion_key=0;
+    if (remote) {
+        exists=nt_fs4_remote_valid(handle);
+        enabled=exists && nt_fs4_remote_overlapped(handle);
+        if (enabled)
+            (void)nt_fs4_remote_completion(handle,&completion_port,&completion_key);
+    } else {
+        pthread_mutex_lock(&file_lock);
+        const struct guest_file *entry=find_handle(handle);
+        exists=entry!=NULL;
+        enabled=exists && entry->overlapped_io;
+        if (enabled) {
+            completion_port=entry->completion_port;
+            completion_key=entry->completion_key;
+        }
+        pthread_mutex_unlock(&file_lock);
+    }
     if (!enabled) {
         nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
         return 0;
     }
-    const int fd = duplicate_handle(handle, write_access ? FILE_WRITE : FILE_READ);
-    if (fd < 0)
-        return file_result(fd, false);
-    const uintptr_t event = completion->event & ~(uintptr_t)1;
+    int fd=-1;
+    uintptr_t remote_copy=0;
+    if (remote) {
+        remote_copy=nt_fs4_remote_duplicate(handle);
+        if (remote_copy==UINTPTR_MAX)
+            return 0;
+    } else {
+        fd=duplicate_handle(handle,write_access ? FILE_WRITE : FILE_READ);
+        if (fd<0)
+            return file_result(fd,false);
+    }
+    const uintptr_t event=completion->event & ~(uintptr_t)1;
     if (event && !nt_ResetEvent(event)) {
-        close(fd);
+        if (remote)
+            (void)nt_fs4_remote_close(remote_copy);
+        else
+            close(fd);
         return 0;
     }
 
@@ -5569,7 +5592,7 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
             .owner_handle = handle, .owner_pid = getpid(), .owner_tid = gettid(),
             .completion_port = (completion->event & 1) ? 0 : completion_port,
             .completion_key = completion_key,
-            .fd = fd, .buffer = buffer,
+            .fd = fd, .remote_handle = remote_copy, .buffer = buffer,
             .size = size, .offset = (off_t)offset, .write_access = write_access,
             .completion = completion, .event = event
         };
@@ -5579,7 +5602,10 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     }
     pthread_mutex_unlock(&async_lock);
     if (slot < 0) {
-        close(fd);
+        if (remote)
+            (void)nt_fs4_remote_close(remote_copy);
+        else
+            close(fd);
         nt_SetLastError(slot == -2 ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
@@ -5597,11 +5623,35 @@ static int32_t file_io(uintptr_t handle, void *buffer, uint32_t size,
     if (done)
         *done = 0;
     if (nt_fs4_remote_handle(handle)) {
-        if (overlap != NULL) {
-            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        if (size && !buffer) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
             return 0;
         }
-        return nt_fs4_remote_io(handle, buffer, size, done, writing);
+        if (overlap) {
+            if (nt_fs4_remote_overlapped(handle))
+                return begin_overlapped(handle,buffer,size,overlap,writing);
+            const uint64_t at=(uint64_t)overlap->offset_high<<32 | overlap->offset;
+            if (at>INT64_MAX || size>INT64_MAX-at) {
+                nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const uintptr_t event=overlap->event & ~(uintptr_t)1;
+            if (event && !nt_ResetEvent(event))
+                return 0;
+            uint32_t transferred=0;
+            const bool ok=nt_fs4_remote_io_at(handle,buffer,size,&transferred,
+                                               writing,at)!=0;
+            overlap->internal=ok ? NT_ERROR_SUCCESS : nt_GetLastError();
+            overlap->internal_high=transferred;
+            if (done) *done=transferred;
+            if (event) (void)nt_SetEvent(event);
+            return ok;
+        }
+        if (nt_fs4_remote_overlapped(handle)) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        return nt_fs4_remote_io(handle,buffer,size,done,writing);
     }
     if ((done == NULL && overlap == NULL) || (size && buffer == NULL)) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
@@ -5716,11 +5766,17 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
 static int32_t cancel_queued_io(uintptr_t handle, struct nt_overlapped *completion,
                                 bool issuing_thread_only)
 {
-    pthread_mutex_lock(&file_lock);
-    const struct guest_file *entry = find_handle(handle);
-    const bool exists = entry != NULL;
-    const bool enabled = exists && entry->overlapped_io;
-    pthread_mutex_unlock(&file_lock);
+    bool exists=false, enabled=false;
+    if (nt_fs4_remote_handle(handle)) {
+        exists=nt_fs4_remote_valid(handle);
+        enabled=exists && nt_fs4_remote_overlapped(handle);
+    } else {
+        pthread_mutex_lock(&file_lock);
+        const struct guest_file *entry=find_handle(handle);
+        exists=entry!=NULL;
+        enabled=exists && entry->overlapped_io;
+        pthread_mutex_unlock(&file_lock);
+    }
     if (!enabled) {
         nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
         return 0;
@@ -5748,7 +5804,10 @@ static int32_t cancel_queued_io(uintptr_t handle, struct nt_overlapped *completi
     pthread_mutex_unlock(&async_lock);
 
     for (size_t i = 0; i < count; ++i) {
-        close(cancelled[i].fd);
+        if (cancelled[i].remote_handle)
+            (void)nt_fs4_remote_close(cancelled[i].remote_handle);
+        else
+            close(cancelled[i].fd);
         if (cancelled[i].event)
             (void)nt_SetEvent(cancelled[i].event);
         if (cancelled[i].completion_port)
@@ -5784,10 +5843,17 @@ int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped 
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    const int fd = duplicate_handle(handle, 0);
-    if (fd < 0)
-        return file_result(fd, false);
-    close(fd);
+    if (nt_fs4_remote_handle(handle)) {
+        if (!nt_fs4_remote_valid(handle)) {
+            nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+            return 0;
+        }
+    } else {
+        const int fd=duplicate_handle(handle,0);
+        if (fd<0)
+            return file_result(fd,false);
+        close(fd);
+    }
     pthread_mutex_lock(&async_lock);
     uintptr_t status = __atomic_load_n(&overlap->internal, __ATOMIC_ACQUIRE);
     while (status == NT_ERROR_IO_PENDING && wait) {
