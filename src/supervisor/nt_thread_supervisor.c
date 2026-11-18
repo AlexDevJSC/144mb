@@ -99,8 +99,6 @@ int nt_supervisor_interrupt(struct nt_thread_supervisor *sup, unsigned timeout_m
     if (ptrace(PTRACE_INTERRUPT, sup->tid, NULL, NULL) == -1) return -1;
     uint64_t deadline = mono_ms() + timeout_ms;
     for (;;) {
-        if (nt_supervisor_apc_interrupted(cancel, peer_fd))
-            return nt_supervisor_apc_fail_closed(sup, ECANCELED);
         int status = 0;
         pid_t observed = waitpid(sup->tid, &status, __WALL | WNOHANG);
         if (observed == sup->tid) {
@@ -393,6 +391,8 @@ int nt_supervisor_invoke_trusted_guest_apc_guarded(
 
     const uint64_t deadline = mono_ms() + timeout_ms;
     for (;;) {
+        if (nt_supervisor_apc_interrupted(cancel, peer_fd))
+            return nt_supervisor_apc_fail_closed(sup, ECANCELED);
         int status = 0;
         pid_t observed = waitpid(sup->tid, &status, __WALL | WNOHANG);
         if (observed == sup->tid) {
