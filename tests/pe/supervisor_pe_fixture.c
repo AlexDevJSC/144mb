@@ -13,6 +13,19 @@
 __attribute__((ms_abi, noinline, noreturn))
 void supervisor_pe_apc_callback(struct nt_supervisor_pe_shared *shared)
 {
+    atomic_store_explicit(&shared->apc_entered, 1u, memory_order_release);
+    const uint32_t mode =
+        atomic_load_explicit(&shared->apc_mode, memory_order_acquire);
+    if (mode == 1u) {
+        /* Intentionally never return until the parent releases the hold.
+         * Cancellation or disconnect must NOT resume this altered RIP/RSP. */
+        while (atomic_load_explicit(&shared->apc_hold, memory_order_acquire))
+            __asm__ volatile ("pause" ::: "memory");
+    } else if (mode == 2u) {
+        /* Real CPU guest-code exception. Must cause a ptrace SIGILL stop,
+         * never be mistaken for APC completion. */
+        __asm__ volatile ("ud2" ::: "memory");
+    }
     atomic_fetch_add_explicit(&shared->apc_delivered, 1u, memory_order_release);
     __asm__ volatile ("int3");
     __builtin_unreachable();
