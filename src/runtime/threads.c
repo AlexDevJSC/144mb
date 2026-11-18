@@ -504,17 +504,6 @@ static nt_status queue_apc_common(uintptr_t handle,
 {
     if ((user == NULL) == (native == NULL))
         return NT_STATUS_INVALID_PARAMETER;
-    if (special) {
-        uintptr_t callback = 0;
-        _Static_assert(sizeof(callback) == sizeof(native) &&
-                       sizeof(callback) == sizeof(user), "PE32+ AMD64 pointers");
-        if (native != NULL)
-            memcpy(&callback, &native, sizeof(callback));
-        else
-            memcpy(&callback, &user, sizeof(callback));
-        if (!trusted_special_apc_entry(callback))
-            return NT_STATUS_NOT_SUPPORTED;
-    }
     pthread_mutex_lock(&wait_lock);
     struct guest_apc_queue *queue = NULL;
     nt_status status = NT_STATUS_SUCCESS;
@@ -543,7 +532,16 @@ static nt_status queue_apc_common(uintptr_t handle,
                               &wait_state(object)->apcs;
     }
     if (queue != NULL) {
-        if (queue->count >= MAX_PENDING_APC) {
+        uintptr_t callback = 0;
+        _Static_assert(sizeof(callback) == sizeof(native) &&
+                       sizeof(callback) == sizeof(user), "PE32+ AMD64 pointers");
+        if (native != NULL)
+            memcpy(&callback, &native, sizeof(callback));
+        else
+            memcpy(&callback, &user, sizeof(callback));
+        if (special && !trusted_special_apc_entry(callback)) {
+            status = NT_STATUS_NOT_SUPPORTED;
+        } else if (queue->count >= MAX_PENDING_APC) {
             status = NT_STATUS_NO_MEMORY;
         } else {
             struct guest_apc *apc = calloc(1, sizeof(*apc));
