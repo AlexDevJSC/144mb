@@ -29,7 +29,7 @@ DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
 else
 DOS83_FUSE_TARGET =
 endif
-RUNTIME_PARTS = guest_boundary exports system global_memory unicode crt crt_stdio guest_files user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
+RUNTIME_PARTS = guest_boundary exports system global_memory unicode crt crt_stdio guest_files fs4_remote user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry thread_broker_ipc thread_supervisor_control_server shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o $(BUILD_DIR)/runtime-thread-supervisor-core.o $(BUILD_DIR)/runtime-guest_boundary_import.o $(BUILD_DIR)/runtime-thread-supervisor-nt-bridge.o
@@ -222,7 +222,7 @@ $(BUILD_DIR)/runtime-shell.o: src/runtime/child_process.h src/runtime/dialogs.h 
 $(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o $(BUILD_DIR)/runtime-dialogs.o \
     $(BUILD_DIR)/runtime-console.o: src/runtime/console.h
 $(BUILD_DIR)/runtime-console.o: src/runtime/dialogs.h src/runtime/windesktop.h src/runtime/winbase.h src/runtime/winfile.h
-$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o: src/runtime/winfile.h
+$(BUILD_DIR)/runtime-exports.o $(BUILD_DIR)/runtime-guest_files.o: src/runtime/winfile.h src/runtime/fs4_remote.h
 $(BUILD_DIR)/runtime-process.o: src/runtime/winfile.h include/ntnative/guest_thread.h
 $(BUILD_DIR)/runtime-virtual_memory.o: src/runtime/virtual_memory.h
 $(BUILD_DIR)/runtime-nt_core_information.o: src/runtime/nt_core_information.h src/runtime/virtual_memory.h include/ntnative/guest_thread.h
@@ -520,6 +520,17 @@ check-fs4-readonly-session:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs4_readonly_session.py'
 
 check: check-fs4-readonly-session
+
+# Trusted Win32 HANDLE service worker, no physical backing FD passed to PE.
+$(BUILD_DIR)/nt-storage-handle-broker: src/tools/nt_storage_handle_broker.c $(RUNTIME_OBJECTS) src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-fs4-handle-broker
+check-fs4-handle-broker: $(BUILD_DIR)/nt-storage-handle-broker
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_handle_broker_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
+
+check: check-fs4-handle-broker
 
 .PHONY: check-fs4-service-supervisor
 check-fs4-service-supervisor:
@@ -1131,9 +1142,10 @@ endif
 # Explicit opt-in installer. Does NOT create a service account, migrate
 # backing, modify SELinux, enable units or grant client group membership.
 .PHONY: install-fs4-storage-service
-install-fs4-storage-service: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-mediator
+install-fs4-storage-service: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-storage-handle-broker
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-fuse" "$(DESTDIR)$(PREFIX)/bin/nt-dos83-fuse"
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-mediator" "$(DESTDIR)$(PREFIX)/bin/nt-dos83-mediator"
+	install -D -m 0755 "$(BUILD_DIR)/nt-storage-handle-broker" "$(DESTDIR)$(PREFIX)/bin/nt-storage-handle-broker"
 	install -D -m 0755 scripts/nt-storage-service.py "$(DESTDIR)$(PREFIX)/libexec/ntnative-storage-service"
 	install -D -m 0644 scripts/fs4_readonly_session.py "$(DESTDIR)$(PREFIX)/libexec/fs4_readonly_session.py"
 	install -D -m 0755 scripts/nt-storage-control.py "$(DESTDIR)$(PREFIX)/bin/nt-storage-control"

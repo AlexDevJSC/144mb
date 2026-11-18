@@ -614,16 +614,51 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
         }
     }
 
+    /* PE service mode never opens or binds a physical C: directory.
+     * The guest gets an isolated tmpfs for loader/runtime scratch and
+     * opens persistence only through the authenticated socket broker. */
+    const char *storage_socket = getenv("NT_FS4_PE_SERVICE_SOCKET");
+    const char *storage_uid = getenv("NT_FS4_PE_SERVICE_UID");
+    const bool service_pe = storage_socket && *storage_socket;
+    if (service_pe) {
+        struct stat info;
+        char *end_uid = NULL;
+        unsigned long uid = storage_uid ? strtoul(storage_uid, &end_uid, 10) : 0;
+        if (!storage_uid || !end_uid || *end_uid || uid == 0 ||
+            uid > UINT32_MAX || uid == (unsigned long)geteuid() ||
+            storage_socket[0] != '/' ||
+            lstat(storage_socket, &info) != 0 || !S_ISSOCK(info.st_mode) ||
+            !getenv("NT_FS_SERVICE") || strcmp(getenv("NT_FS_SERVICE"), "1") ||
+            !getenv("NT_FS_SUPERVISED") || strcmp(getenv("NT_FS_SUPERVISED"), "1") ||
+            getenv("NT_FS_LOWER") != NULL) {
+            fputs("Refusing untrusted PE storage IPC configuration\n", stderr);
+            return 2;
+        }
+        for (size_t i = 0; i < NT_USER_FOLDER_COUNT; ++i)
+            if (folders[i] != NULL) {
+                fputs("PE storage IPC forbids direct shared folder grants\n", stderr);
+                return 2;
+            }
+        for (size_t i = 0; i < 26; ++i)
+            if (requested_drives[i] != NULL) {
+                fputs("PE storage IPC forbids direct DOS drive grants\n", stderr);
+                return 2;
+            }
+        if (requested_unc_count) {
+            fputs("PE storage IPC forbids direct UNC grants\n", stderr);
+            return 2;
+        }
+    }
     const char *home = getenv("HOME");
-    int raw_profile = nt_open_guest_profile(getenv("XDG_STATE_HOME"), home);
-    if (raw_profile < 0) {
+    int raw_profile = service_pe ? -1 : nt_open_guest_profile(getenv("XDG_STATE_HOME"), home);
+    if (!service_pe && raw_profile < 0) {
         perror("Cannot prepare guest profile");
         return 2;
     }
     /* Tighten, never broaden, an explicit FileSystem supervisor launch:
      * the PE's actual C: grant must be the exact inode supervised by FUSE.
      * This is NOT authentication solely from environment variables. */
-    if (getenv("NT_FS_SUPERVISED") &&
+    if (!service_pe && getenv("NT_FS_SUPERVISED") &&
         strcmp(getenv("NT_FS_SUPERVISED"), "1") == 0) {
         const char *lower = getenv("NT_FS_LOWER");
         struct stat expected, actual;
@@ -642,13 +677,14 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
             return 2;
         }
     }
-    const int profile = inherit_mount_descriptor(raw_profile);
-    if (profile < 0) {
+    const int profile = service_pe ? -1 : inherit_mount_descriptor(raw_profile);
+    if (!service_pe && profile < 0) {
         perror("Cannot prepare guest profile descriptor");
         return 2;
     }
-    char profile_source[64];
-    snprintf(profile_source, sizeof(profile_source), "/proc/self/fd/%d", profile);
+    char profile_source[64] = {0};
+    if (!service_pe)
+        snprintf(profile_source, sizeof(profile_source), "/proc/self/fd/%d", profile);
     char *args[256];
     size_t n = 0;
 #define ADD(x) do { if (!add_arg(args, &n, 256, (char *)(x))) return 2; } while (0)
@@ -667,7 +703,15 @@ static int run_isolated(const char *path, const char *const folders[NT_USER_FOLD
     ADD("--ro-bind-try"); ADD("/etc/fonts"); ADD("/etc/fonts");
     ADD("--proc"); ADD("/proc"); ADD("--dev"); ADD("/dev");
     ADD("--tmpfs"); ADD("/tmp");
-    ADD("--bind"); ADD(profile_source); ADD("/game");
+    if (service_pe) {
+        ADD("--tmpfs"); ADD("/game");
+        ADD("--dir"); ADD("/run/ntnative-storage");
+        ADD("--ro-bind"); ADD(storage_socket); ADD("/run/ntnative-storage/socket");
+        ADD("--setenv"); ADD("NT_FS4_HANDLE_SOCKET"); ADD("/run/ntnative-storage/socket");
+        ADD("--setenv"); ADD("NT_FS4_SERVICE_UID"); ADD(storage_uid);
+    } else {
+        ADD("--bind"); ADD(profile_source); ADD("/game");
+    }
     ADD("--ro-bind"); ADD(absolute); ADD(inside);
     ADD("--ro-bind"); ADD(runner); ADD("/runner");
     /* The guest receives only the private Unix socket, never the host

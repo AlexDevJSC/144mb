@@ -250,6 +250,69 @@ def run_service_view(view: Path, program: list[str],
         stop_group(child)
 
 
+def handle_attestation(socket_path: str, service_user: str) -> None:
+    """The PE path needs a live v3 worker, not just v1 FUSE status."""
+    uid = pwd.getpwnam(service_user).pw_uid
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
+        conn.settimeout(5)
+        conn.connect(socket_path)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        conn.sendall(b'{"version":3,"op":"session"}')
+        payload, control, flags, _ = conn.recvmsg(
+            4096, socket.CMSG_SPACE(struct.calcsize("3i")))
+        identities = [struct.unpack("3i", item[:12])
+                      for level, kind, item in control
+                      if level == socket.SOL_SOCKET and
+                      kind == socket.SCM_CREDENTIALS and len(item) >= 12]
+        if (flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or
+                len(identities) != 1 or identities[0][1] != uid or
+                len(payload) != 32):
+            raise Refused("No trusted v3 PE storage HANDLE service")
+        magic, version, op, error, length, handle, nonce = struct.unpack(
+            "<IHHIIQQ", payload)
+        if (magic, version, op, error, length, handle) != (
+                0x34465348, 3, 0, 0, 0, 0) or not nonce:
+            raise Refused("Invalid v3 PE storage attestation")
+
+
+def run_service_pe(view: Path, program: list[str],
+                   socket_path: str, service_user: str) -> int:
+    """Experimental, explicit PE IPC mode: no physical C: backing bind."""
+    if os.geteuid() == 0:
+        raise Refused("Root PE session denied")
+    if not program or not program[0].lower().endswith(".exe"):
+        raise Refused("PE IPC requires an explicit .exe")
+    if not view.is_dir() or view.is_symlink():
+        raise Refused("Untrusted service FUSE mountpoint")
+    view = view.resolve(strict=True)
+    service_attestation(socket_path, service_user)
+    handle_attestation(socket_path, service_user)
+    if view.stat().st_uid != os.geteuid():
+        raise Refused("Service FUSE view not mapped to client UID")
+    if not os.access("/usr/bin/bwrap", os.X_OK):
+        raise Refused("Mandatory Bubblewrap unavailable")
+    runner = trusted_pe_runner()
+    identity = pwd.getpwnam(service_user).pw_uid
+    env = dict(os.environ)
+    env.pop("NT_FS_LOWER", None)
+    env["NT_FS_SUPERVISED"] = "1"
+    env["NT_FS_SERVICE"] = "1"
+    env["NT_FS4_PE_SERVICE_SOCKET"] = socket_path
+    env["NT_FS4_PE_SERVICE_UID"] = str(identity)
+    child = None
+    try:
+        child = subprocess.Popen([str(runner), "--", *program], env=env,
+                                 start_new_session=True)
+        while True:
+            status = child.poll()
+            if status is not None:
+                return 128-status if status < 0 else status
+            service_attestation(socket_path, service_user)
+            time.sleep(0.25)
+    finally:
+        stop_group(child)
+
+
 def run_session(lower: Path, view: Path, program: list[str],
                 pe_mode: bool = False) -> int:
     if os.geteuid() == 0:
@@ -372,6 +435,8 @@ def main(argv: list[str]) -> int:
                         help="expected dedicated-UID service identity")
     parser.add_argument("--pe", action="store_true",
                         help="launch a trusted PE runner under its own Bubblewrap sandbox")
+    parser.add_argument("--experimental-pe-ipc", action="store_true",
+                        help="opt in to restricted PE storage IPC (not general NTFS compatibility)")
     parser.add_argument("program", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     program = args.program[1:] if args.program[:1] == ["--"] else args.program
@@ -388,7 +453,13 @@ def main(argv: list[str]) -> int:
             if args.lower is not None:
                 raise Refused("Dedicated-UID mode must not receive a backing path")
             if args.pe:
-                raise Refused("PE storage IPC backend not implemented; refusing direct backing")
+                if not args.experimental_pe_ipc:
+                    raise Refused("PE storage IPC backend not implemented for general use; " 
+                                  "requires --experimental-pe-ipc")
+                return run_service_pe(Path(args.view), program,
+                                      args.service_socket, args.service_user)
+            if args.experimental_pe_ipc:
+                raise Refused("PE IPC opt-in requires --pe")
             return run_service_view(Path(args.view), program,
                                     args.service_socket, args.service_user)
         if args.lower is None:

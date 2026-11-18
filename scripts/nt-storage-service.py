@@ -118,7 +118,9 @@ def dispatch(request: object, *, mediator: str, backing: Path,
 
 
 def serve_one(conn: socket.socket, *, client_uid: int, mediator: str,
-              backing: Path, ready: bool) -> None:
+              backing: Path, ready: bool, handle_broker: str | None = None,
+              view: Path | None = None,
+              workers: list[subprocess.Popen] | None = None) -> None:
     conn.settimeout(2)
     _pid, uid, _gid = peer_identity(conn)
     if uid != client_uid:
@@ -132,6 +134,24 @@ def serve_one(conn: socket.socket, *, client_uid: int, mediator: str,
             request = json.loads(data.decode("utf-8"))
         except (UnicodeError, ValueError):
             raise Refused("Malformed request") from None
+        if request == {"version": 3, "op": "session"}:
+            if (not ready or handle_broker is None or view is None or
+                    workers is None or
+                    os.environ.get("NT_STORAGE_EXPERIMENTAL_HANDLES") != "1"):
+                raise Refused("Win32 HANDLE worker disabled")
+            # SO_PEERCRED above is kernel-authenticated. The per-client C
+            # worker inherits only the accepted socket, never a backing FD.
+            # Clear Python's nonblocking timeout before passing the socket.
+            conn.setblocking(True)
+            worker = subprocess.Popen([
+                handle_broker, "--root", str(backing),
+                "--fd", str(conn.fileno()), "--client-uid", str(client_uid),
+                "--view", str(view)
+            ], pass_fds=(conn.fileno(),), close_fds=True,
+               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+               stderr=subprocess.DEVNULL)
+            workers.append(worker)
+            return
         if request == {"version": 2, "op": "session"}:
             if not ready or os.environ.get("NT_STORAGE_EXPERIMENTAL_READONLY") != "1":
                 raise Refused("Experimental read-only session disabled")
@@ -160,7 +180,8 @@ def inherited_socket() -> socket.socket:
 
 
 def service(backing: Path, view: Path, *, client_uid: int, client_gid: int,
-            fuse: str, mediator: str, unmount: str) -> None:
+            fuse: str, mediator: str, unmount: str,
+            handle_broker: str | None = None) -> None:
     uid = os.geteuid()
     if uid == 0 or uid == client_uid or client_uid <= 0 or client_gid <= 0:
         raise Refused("Service requires its own non-root UID, distinct from clients")
@@ -171,6 +192,8 @@ def service(backing: Path, view: Path, *, client_uid: int, client_gid: int,
     if backing == exposed or backing in exposed.parents or exposed in backing.parents:
         raise Refused("Backing and public view must be disjoint")
     fuse, mediator, unmount = map(trusted_binary, (fuse, mediator, unmount))
+    if handle_broker is not None:
+        handle_broker = trusted_binary(handle_broker)
     if mounted_fuse(exposed):
         raise Refused("Refusing to take over a mounted view")
     # Startup recovery must resolve both DOS8.3 WAL and orphaned
@@ -206,8 +229,12 @@ def service(backing: Path, view: Path, *, client_uid: int, client_gid: int,
         else:
             raise Refused("FUSE mount was not established")
         listener = inherited_socket()
+        workers: list[subprocess.Popen] = []
         try:
             while not stopped:
+                workers[:] = [worker for worker in workers if worker.poll() is None]
+                if len(workers) >= 16:
+                    raise Refused("Too many active Win32 storage sessions")
                 if proc.poll() is not None or not mounted_fuse(exposed):
                     raise Refused("FUSE data plane lost; refusing future operations")
                 try:
@@ -216,9 +243,21 @@ def service(backing: Path, view: Path, *, client_uid: int, client_gid: int,
                     continue
                 with conn:
                     serve_one(conn, client_uid=client_uid,
-                              mediator=mediator, backing=backing, ready=True)
+                              mediator=mediator, backing=backing, ready=True,
+                              handle_broker=handle_broker, view=exposed,
+                              workers=workers)
         finally:
             listener.close()
+            # Closing/restarting service revokes every HANDLE session.
+            for worker in workers:
+                if worker.poll() is None:
+                    worker.terminate()
+            for worker in workers:
+                try:
+                    worker.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    worker.kill()
+                    worker.wait(timeout=2)
     finally:
         if mounted_fuse(exposed):
             subprocess.run([unmount, "-u", str(exposed)],
@@ -242,12 +281,14 @@ def main() -> int:
     parser.add_argument("--client-gid", type=int, required=True)
     parser.add_argument("--fuse", required=True)
     parser.add_argument("--mediator", required=True)
+    parser.add_argument("--handle-broker", help="root-installed v3 Win32 HANDLE worker")
     parser.add_argument("--unmount", default="/usr/bin/fusermount3")
     args = parser.parse_args()
     try:
         service(args.backing, args.view, client_uid=args.client_uid,
                 client_gid=args.client_gid, fuse=args.fuse,
-                mediator=args.mediator, unmount=args.unmount)
+                mediator=args.mediator, unmount=args.unmount,
+                handle_broker=args.handle_broker)
     except (OSError, Refused, subprocess.TimeoutExpired) as error:
         print("STORAGE REFUSED: " + str(error), file=sys.stderr)
         return 3

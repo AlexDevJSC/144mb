@@ -74,3 +74,61 @@ D. Matriz bajo apagados inesperados, recuperación, multicliente,
 regresión Windows y denegación del UID host no autorizado.
 
 No procede declarar terminado el aislamiento sin todos esos hitos.
+
+## Broker Win32 HANDLE v3 (18-11-2026)
+
+Nuevo proceso C de confianza `nt-storage-handle-broker` bajo el UID
+`ntnative-storage`: recibe el socket autenticado por SO_PEERCRED en el
+servicio y ejecuta las APIs Win32 reales `nt_CreateFileW`, `nt_ReadFile`,
+`nt_WriteFile`, `nt_CloseHandle`, `nt_DeleteFileW`, `nt_MoveFileExW`,
+`nt_SetEndOfFile` y `nt_LockFile/nt_UnlockFile`. De esta forma conserva
+el mismo sistema físico de leases OFD, delete-pending y WAL del runtime;
+**no** hay ficheros temporales ni envío de FD de backing por SCM_RIGHTS.
+
+El contrato binario fijo v3 se prueba con sockets Unix de tipo SEQPACKET.
+Cada conexión tiene nonce de sesión, como máximo 32 capacidades de handle
+aleatorias, 256 peticiones, 2048 bytes por E/S y 120 segundos de vida.
+Una petición con nonce incorrecto revoca la conexión. Las rutas C:/ se
+validan y el backend mantiene la restricción de raíz por FD del runtime.
+En producción consulta la vista FUSE viva en cada operación y el servicio
+mata trabajadores al detenerse. Los binarios confiables exigen propiedad
+root y no ser escribibles por clientes.
+
+**Desactivado por defecto:** requiere la opción explícita de administrador
+`NT_STORAGE_EXPERIMENTAL_HANDLES=1`. El PE aún **no utiliza** ese protocolo:
+ni el supervisor `--service-socket --pe` ni Bubblewrap levantan un PE usando
+esta vía. Integrar el adaptador PE, ampliar funciones (atributos, directory
+enumeration, reparse y ACL), probar 2/4 procesos y Fedora SELinux Enforcing
+son requisitos previos para habilitar cualquier modo PE generalista.
+
+## Lanzador PE experimental por IPC
+
+`nt-fs-supervisor --view /run/ntnative-storage/view --service-socket
+/run/ntnative-storage/control.sock --pe --experimental-pe-ipc -- game.exe`
+requiere el socket v1 autenticado, el handshake v3 activo con UID de
+servicio verificado mediante SCM_CREDENTIALS, FUSE vivo, Bubblewrap y la
+instalación administrada que permite `NT_STORAGE_EXPERIMENTAL_HANDLES=1`.
+No admite `--lower` ni comparte otros directorios/raíces DOS/UNC.
+
+El launcher crea `/game` con `--tmpfs`, monta sólo el ejecutable PE en
+lectura y un socket del broker en `/run/ntnative-storage/socket`. Ya no
+monta el C: físico en este modo. El runtime redirige CreateFile/ReadFile/
+WriteFile/CloseHandle/DeleteFile/MoveFile/SetEndOfFile/SetFilePointer/LockFile
+al IPC versionado. Algunas operaciones como FindFirstFile, atributos y
+security descriptors aún se rechazan explícitamente: sin ellas un PE real
+puede fallar en vez de fingir compatibilidad. El modo PE general sigue
+desactivado por defecto.
+
+Es imprescindible ejecutar pruebas adversarias en Fedora físico (SELinux
+Enforcing, montajes alternativos, cierres y reconexiones) antes de
+considerarlo seguro para uso de propósito general.
+
+## FUSE: leases OFD también para archivos no marcados
+
+En modo de servicio UID, FUSE adquiere ahora el registro OFD de FILE_SHARE
+para todos los opens/creates/truncates, sin depender de un xattr opt-in.
+Además usa direct_io y evita que la caché de página salte los chequeos de
+locks por rango. El nuevo test de C: PE debe comprobar conflictos cruzados
+con un cliente Linux de la vista física en Fedora; un CI sin montaje FUSE
+no prueba esta garantía. La ventana de creación antes de adquirir lease
+aún requiere una transacción unificada para poder declararse atómica.
