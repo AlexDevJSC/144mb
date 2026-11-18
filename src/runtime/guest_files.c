@@ -2860,6 +2860,8 @@ uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_
     }
     /* Events/semaphores/threads cannot be serialized as Linux file FDs:
      * fail the process creation, don't silently lose an inherited HANDLE. */
+    if (enabled && nt_fs4_remote_mode())
+        return NT_ERROR_NOT_SUPPORTED; /* no physical FD inheritance from service */
     if (enabled && nt_runtime_has_inheritable_waitables())
         return NT_ERROR_NOT_SUPPORTED;
     struct child_file_manifest *manifest = calloc(1, sizeof(*manifest));
@@ -3263,7 +3265,8 @@ int32_t NT_MS_ABI nt_GetProcessHandleCount(uintptr_t process, uint32_t *count)
         if (files[i].owner == WIN_HANDLE && files[i].handle != 0)
             ++handles;
     pthread_mutex_unlock(&file_lock);
-    *count = handles + nt_runtime_count_waitable_handles() +
+    *count = handles + (uint32_t)nt_fs4_remote_count() +
+             nt_runtime_count_waitable_handles() +
              (uint32_t)nt_runtime_section_handle_count() + (uint32_t)active_iocp_count();
     return 1;
 }
@@ -3313,6 +3316,17 @@ nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t sou
         return status;
     if ((options & ~7u) || (attributes & ~2u))
         return NT_STATUS_INVALID_PARAMETER;
+    if (nt_fs4_remote_handle(source)) {
+        /* Only same-process noninheritable SAME_ACCESS duplicates.
+         * Cross-session child inheritance requires an authenticated grant. */
+        if (options != 2u || attributes)
+            return NT_STATUS_NOT_SUPPORTED;
+        uintptr_t duplicated=nt_fs4_remote_duplicate(source);
+        if (duplicated==UINTPTR_MAX)
+            return NT_STATUS_UNSUCCESSFUL;
+        *target=duplicated;
+        return NT_STATUS_SUCCESS;
+    }
     if (options & 1u) {
         /* Don't create an alias when closing the protected source would
          * fail: CLOSE_SOURCE is not permitted to bypass handle protection. */
@@ -5222,6 +5236,14 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
  * Linux chmod flags and must never be silently claimed as supported. */
 static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
 {
+    if (nt_fs4_remote_mode()) {
+        char name[PATH_MAX];
+        if (!guest_path(input,name)) {
+            nt_SetLastError(path_error(errno,true));
+            return 0;
+        }
+        return nt_fs4_remote_set_attributes(name,attributes);
+    }
     if (!wal_healthy()) {
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return 0;
@@ -6858,8 +6880,12 @@ int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
                                          struct nt_file_attribute_data *info)
 {
     if (nt_fs4_remote_mode()) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
+        if (level != 0 || !info) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        char name[PATH_MAX];
+        return wide_path(path,name) && nt_fs4_remote_get_attributes(name,info);
     }
     if (level != 0 || info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
@@ -7019,8 +7045,14 @@ uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, str
                                        int32_t operation, void *filter, uint32_t flags)
 {
     if (nt_fs4_remote_mode()) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return UINTPTR_MAX;
+        if (!data || filter || (level != 0 && level != 1) ||
+            (operation != 0 && operation != 1) || (flags & ~2u)) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return UINTPTR_MAX;
+        }
+        char name[PATH_MAX];
+        return wide_path(path,name) ?
+               nt_fs4_remote_find_first(name,level,operation,flags,data) : UINTPTR_MAX;
     }
     if (data == NULL || (level != 0 && level != 1) || (operation != 0 && operation != 1) ||
         filter != NULL || (flags & ~2u) != 0) {
@@ -7085,6 +7117,8 @@ uintptr_t NT_MS_ABI nt_FindFirstFileW(const uint16_t *path, struct nt_find_data_
 
 int32_t NT_MS_ABI nt_FindNextFileW(uintptr_t handle, struct nt_find_data_w *data)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_find_next(handle,data);
     if (data == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -7159,6 +7193,8 @@ int32_t NT_MS_ABI nt_FindNextFileA(uintptr_t handle, struct nt_find_data_a *data
 
 int32_t NT_MS_ABI nt_FindClose(uintptr_t handle)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_find_close(handle);
     pthread_mutex_lock(&search_lock);
     struct directory_search *search = handle != 0 ? find_search(handle) : NULL;
     DIR *directory = search != NULL ? search->directory : NULL;
@@ -7286,6 +7322,8 @@ uint32_t NT_MS_ABI nt_GetFileSize(uintptr_t handle, uint32_t *high)
 int32_t NT_MS_ABI nt_GetFileInformationByHandle(uintptr_t handle,
                                                struct nt_handle_file_info *info)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_handle_info(handle,info);
     if (!info) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
