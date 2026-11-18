@@ -351,8 +351,6 @@ $(BUILD_DIR)/supervisor-context-rollback-fatal-test: tests/supervisor_context_ro
 check-supervisor-context-rollback: $(BUILD_DIR)/supervisor-context-rollback-ok-test $(BUILD_DIR)/supervisor-context-rollback-fatal-test
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-ok-test
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-fatal-test
-	timeout 20s $(BUILD_DIR)/supervisor-rax-rollback-ok-test
-	timeout 20s $(BUILD_DIR)/supervisor-rax-rollback-fatal-test
 
 $(BUILD_DIR)/supervisor-control-ipc-test: tests/supervisor_control_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_supervisor_control_server.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
@@ -562,6 +560,8 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 35s $(BUILD_DIR)/supervisor-control-ipc-test
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-ok-test
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-fatal-test
+	timeout 20s $(BUILD_DIR)/supervisor-rax-rollback-ok-test
+	timeout 20s $(BUILD_DIR)/supervisor-rax-rollback-fatal-test
 	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
 	timeout 30s $(BUILD_DIR)/runtime-supervisor-win32-test
 	timeout 20s $(BUILD_DIR)/guest-boundary-import-test
