@@ -526,6 +526,17 @@ check-fs4-ntfs-diff: $(BUILD_DIR)/fs4-ntfs-probe
 
 check: check-fs4-ntfs-diff
 
+# Native NT ACL descriptor engine: no POSIX chmod reinterpretation.
+$(BUILD_DIR)/nt-acl-engine-test: tests/nt_acl_engine_test.c src/runtime/nt_acl_engine.c src/runtime/nt_acl_engine.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) \
+	    tests/nt_acl_engine_test.c src/runtime/nt_acl_engine.c -o "$@"
+
+.PHONY: check-nt-acl-engine
+check-nt-acl-engine: $(BUILD_DIR)/nt-acl-engine-test
+	"$(BUILD_DIR)/nt-acl-engine-test"
+
+check: check-nt-acl-engine
+
 .PHONY: check-fs4-reparse-wal
 check-fs4-reparse-wal: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_reparse_symlink_wal.py "$(BUILD_DIR)/nt-dos83-mediator"
