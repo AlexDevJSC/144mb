@@ -52,6 +52,9 @@ static _Thread_local bool nonlocal_poisoned;
  * signal gate. Do NOT perform pthread operations or CET syscalls from
  * its signal handler. Never interpret this local bit as ptrace authority. */
 static _Thread_local volatile sig_atomic_t signal_guest_phase;
+/* Only CPU faults from an already trusted guest-only instruction may
+ * recover this phase; a nonlocal import escape remains poisoned forever. */
+static _Thread_local bool hardware_seh_guest_only;
 enum { MAX_IMPORT_NESTING = 128, MAX_GATED_TARGETS = 8192 };
 static _Thread_local uintptr_t host_return_stack[MAX_IMPORT_NESTING];
 
