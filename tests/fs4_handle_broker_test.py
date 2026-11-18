@@ -21,6 +21,7 @@ MAGIC, VERSION = 0x34465348, 3
 OPEN, READ, WRITE, CLOSE, DELETE, RENAME, TRUNCATE, LOCK, UNLOCK = range(1, 10)
 SEEK, SIZE = 10, 11
 ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE_AT, HANDLE_INFO = range(12, 21)
+NATIVE_QUERY, NATIVE_SET, NATIVE_FLUSH = 21, 22, 23
 
 class Broker:
     def __init__(self, root):
@@ -188,6 +189,37 @@ class FileSystem4Handles(unittest.TestCase):
             finally:
                 a.close()
                 b.close()
+
+    def test_native_query_set_and_flush_through_service(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-native-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            broker = Broker(root)
+            try:
+                err, handle, _, _ = broker.call(OPEN, b"C:/native.dat",
+                                               access=0xC0000000,
+                                               share=7, disposition=1)
+                self.assertEqual(err, 0)
+                self.assertEqual(broker.call(WRITE, b"ABCDEFG",
+                                             handle=handle)[0], 0)
+                err, _, status, data = broker.call(
+                    NATIVE_QUERY, handle=handle, access=5, size=24)
+                self.assertEqual((err, status, len(data)), (0, 0, 24))
+                self.assertEqual(struct.unpack_from("<q", data, 8)[0], 7)
+                self.assertEqual(broker.call(NATIVE_SET,
+                    struct.pack("<q", 2), handle=handle, access=14)[2], 0)
+                err, _, status, data = broker.call(
+                    NATIVE_QUERY, handle=handle, access=14, size=8)
+                self.assertEqual((err, status, struct.unpack("<q", data)[0]),
+                                 (0, 0, 2))
+                self.assertEqual(broker.call(NATIVE_SET,
+                    struct.pack("<q", 4), handle=handle, access=20)[2], 0)
+                self.assertEqual(broker.call(NATIVE_FLUSH,
+                                             handle=handle)[2], 0)
+                self.assertEqual(broker.call(CLOSE, handle=handle)[0], 0)
+                self.assertEqual((root/"native.dat").read_bytes(), b"ABCD")
+            finally:
+                broker.close()
 
     def test_sigkill_releases_remote_share_lease(self):
         with tempfile.TemporaryDirectory(prefix="fs4-kill-lease-") as temp:

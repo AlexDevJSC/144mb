@@ -28,7 +28,8 @@ enum { FS4_MAGIC=0x34465348u, FS4_VERSION=3, FS4_MAX=2048,
        FS4_LOCK=8, FS4_UNLOCK=9, FS4_SEEK=10, FS4_SIZE=11,
        FS4_ATTR_GET=12, FS4_ATTR_SET=13, FS4_FIND_FIRST=14,
        FS4_FIND_NEXT=15, FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
-       FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20 };
+       FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
+       FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23 };
 struct request {
     uint32_t magic;
     uint16_t version, op;
@@ -741,4 +742,51 @@ int32_t nt_fs4_remote_io_at(uintptr_t handle,void *data,uint32_t length,
     *done=total;
     pthread_mutex_unlock(&guard);
     return ok;
+}
+
+static nt_status native_transfer(uint16_t op,uintptr_t handle,
+                                  const void *input,uint32_t input_length,
+                                  void *output,uint32_t output_capacity,
+                                  uint32_t kind,uint32_t *received)
+{
+    if(received) *received=0;
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    if(!entry || entry->search) {
+        pthread_mutex_unlock(&guard);
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return NT_STATUS_INVALID_HANDLE;
+    }
+    struct reply reply={0};
+    bool ok=request(op,entry->cap,-1,kind,0,0,0,input,input_length,
+                    op==FS4_NATIVE_QUERY ? output_capacity : input_length,
+                    &reply,output,output_capacity);
+    if(!ok) {
+        pthread_mutex_unlock(&guard);
+        return NT_STATUS_UNSUCCESSFUL;
+    }
+    if(received) *received=reply.length;
+    const nt_status status=(nt_status)(uint32_t)reply.value;
+    pthread_mutex_unlock(&guard);
+    return status;
+}
+nt_status nt_fs4_remote_native_query(uintptr_t handle,void *buffer,
+                                    uint32_t capacity,uint32_t kind,
+                                    uint32_t *received)
+{
+    if(!buffer || (kind!=5 && kind!=14)) return NT_STATUS_INVALID_PARAMETER;
+    return native_transfer(FS4_NATIVE_QUERY,handle,NULL,0,buffer,
+                           capacity,kind,received);
+}
+nt_status nt_fs4_remote_native_set(uintptr_t handle,const void *buffer,
+                                  uint32_t size,uint32_t kind)
+{
+    if(!buffer || (kind==13 ? size!=1 :
+                   (kind==14 || kind==20) ? size!=8 : true))
+        return NT_STATUS_INVALID_PARAMETER;
+    return native_transfer(FS4_NATIVE_SET,handle,buffer,size,NULL,0,kind,NULL);
+}
+nt_status nt_fs4_remote_native_flush(uintptr_t handle)
+{
+    return native_transfer(FS4_NATIVE_FLUSH,handle,NULL,0,NULL,0,0,NULL);
 }

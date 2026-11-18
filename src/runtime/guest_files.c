@@ -6508,6 +6508,14 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
     if (length < needed)
         return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
 
+    if (nt_fs4_remote_handle(handle)) {
+        const uint32_t saved_last_error=nt_GetLastError();
+        uint32_t returned=0;
+        const nt_status status=nt_fs4_remote_native_query(handle,buffer,length,
+                                                          information_class,&returned);
+        nt_SetLastError(saved_last_error);
+        return nt_file_complete(io,status,status==NT_STATUS_SUCCESS ? returned : 0);
+    }
     const int fd = duplicate_handle(handle, 0);
     if (fd < 0)
         return nt_file_complete(io, nt_file_errno_status(errno), 0);
@@ -6555,6 +6563,22 @@ nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_statu
 {
     if (io == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
+    if (nt_fs4_remote_handle(handle)) {
+        if (buffer == NULL)
+            return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
+        if (information_class != FILE_DISPOSITION_INFORMATION_CLASS &&
+            information_class != FILE_POSITION_INFORMATION_CLASS &&
+            information_class != FILE_END_OF_FILE_INFORMATION_CLASS)
+            return nt_file_complete(io, NT_STATUS_INVALID_INFO_CLASS, 0);
+        const uint32_t needed=information_class == FILE_DISPOSITION_INFORMATION_CLASS ? 1 : 8;
+        if (length < needed)
+            return nt_file_complete(io, NT_STATUS_INFO_LENGTH_MISMATCH, 0);
+        const uint32_t saved_last_error=nt_GetLastError();
+        const nt_status status=nt_fs4_remote_native_set(handle,buffer,needed,
+                                                        information_class);
+        nt_SetLastError(saved_last_error);
+        return nt_file_complete(io,status,0);
+    }
     if (information_class == FILE_DISPOSITION_INFORMATION_CLASS) {
         if (buffer == NULL)
             return nt_file_complete(io, NT_STATUS_ACCESS_VIOLATION, 0);
@@ -6600,6 +6624,12 @@ nt_status NT_MS_ABI nt_NtFlushBuffersFile(uintptr_t handle, struct nt_io_status_
 {
     if (io == NULL)
         return NT_STATUS_ACCESS_VIOLATION;
+    if (nt_fs4_remote_handle(handle)) {
+        const uint32_t last_error=nt_GetLastError();
+        const nt_status status=nt_fs4_remote_native_flush(handle);
+        nt_SetLastError(last_error);
+        return nt_file_complete(io,status,0);
+    }
     /* Match Win32 FlushFileBuffers: a read-only guest HANDLE cannot flush. */
     const int fd = duplicate_handle(handle, FILE_WRITE);
     if (fd < 0)
@@ -6612,6 +6642,13 @@ nt_status NT_MS_ABI nt_NtFlushBuffersFile(uintptr_t handle, struct nt_io_status_
 
 int32_t NT_MS_ABI nt_FlushFileBuffers(uintptr_t handle)
 {
+    if (nt_fs4_remote_handle(handle)) {
+        const nt_status status=nt_fs4_remote_native_flush(handle);
+        if (status==NT_STATUS_SUCCESS)
+            return 1;
+        nt_SetLastError(nt_runtime_nt_error(status));
+        return 0;
+    }
     const int fd = duplicate_handle(handle, FILE_WRITE);
     return file_result(fd, fd >= 0 && fsync(fd) == 0);
 }
