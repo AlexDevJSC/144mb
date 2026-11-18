@@ -18,6 +18,7 @@
 #include <sys/syscall.h>
 #include <signal.h>
 #include <unistd.h>
+#include <time.h>
 
 _Static_assert(sizeof(struct nt_broker_rpc) == 48, "private RPC layout");
 _Static_assert(sizeof(struct nt_thread_broker_reply) == 32, "private reply layout");
@@ -45,9 +46,34 @@ static bool fd_seqpacket(int fd)
 }
 static bool read_ready_for(int fd, short events, int timeout_ms)
 {
-    struct pollfd p = {.fd = fd, .events = events};
-    const int n = poll(&p, 1, timeout_ms);
-    return n == 1 && (p.revents & events) != 0;
+    if (timeout_ms < 0)
+        return false;
+    struct timespec clock_now;
+    if (clock_gettime(CLOCK_MONOTONIC, &clock_now) != 0)
+        return false;
+    const uint64_t start_ms = (uint64_t)clock_now.tv_sec * 1000u +
+                              (uint64_t)clock_now.tv_nsec / 1000000u;
+    const uint64_t deadline = start_ms + (unsigned)timeout_ms;
+    int remaining = timeout_ms;
+    for (;;) {
+        struct pollfd p = {.fd = fd, .events = events};
+        const int n = poll(&p, 1, remaining);
+        if (n == 1)
+            return (p.revents & events) != 0 &&
+                   (p.revents & POLLNVAL) == 0;
+        if (n == 0 || (n < 0 && errno != EINTR))
+            return false;
+        /* Linux signals may interrupt poll even with SA_RESTART.
+         * They are not a transport/protocol error. Retry only until
+         * the ORIGINAL deadline; never extend RPC time on signals. */
+        if (clock_gettime(CLOCK_MONOTONIC, &clock_now) != 0)
+            return false;
+        const uint64_t now_ms = (uint64_t)clock_now.tv_sec * 1000u +
+                                (uint64_t)clock_now.tv_nsec / 1000000u;
+        if (now_ms >= deadline)
+            return false;
+        remaining = (int)(deadline - now_ms);
+    }
 }
 static bool read_ready(int fd, short events)
 {
@@ -170,6 +196,34 @@ bool nt_broker_server_handshake(int fd, const uint8_t secret[16])
     return send_packet(fd, &message, sizeof(message));
 }
 
+/* A 1-second quiet period is NOT an RPC error. The broker session owns
+ * long-lived NT thread capabilities, and a guest can execute for minutes
+ * without issuing a request. Watch BOTH the socket and the exact pidfd
+ * until a packet arrives, EOF is detected or the child actually exits.
+ * Keep bounded 4-second deadlines only on client request/reply. */
+static bool wait_for_authenticated_request(int fd,
+    const struct nt_thread_broker_registered_peer *peer)
+{
+    for (;;) {
+        struct pollfd watchers[2] = {
+            {.fd = fd, .events = POLLIN},
+            {.fd = peer->child_pidfd, .events = POLLIN}
+        };
+        const int ready = poll(watchers, 2, -1);
+        if (ready == -1 && errno == EINTR)
+            continue;
+        if (ready <= 0)
+            return false;
+        if (watchers[1].revents &
+            (POLLIN | POLLHUP | POLLERR | POLLNVAL))
+            return false; /* registered child has exited */
+        if (watchers[0].revents & POLLIN)
+            return true; /* recvmsg still verifies credentials + length */
+        if (watchers[0].revents & (POLLHUP | POLLERR | POLLNVAL))
+            return false; /* real channel failure, not idle timeout */
+    }
+}
+
 static bool receive_authenticated_rpc(int fd,
     const struct nt_thread_broker_registered_peer *peer,
     struct nt_broker_context_request *out, bool *has_context)
@@ -178,7 +232,7 @@ static bool receive_authenticated_rpc(int fd,
         return false;
     const int on = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) != 0 ||
-        !read_ready(fd, POLLIN))
+        !wait_for_authenticated_request(fd, peer))
         return false;
     struct nt_broker_context_request packet = {0};
     struct iovec body = {.iov_base = &packet, .iov_len = sizeof(packet)};

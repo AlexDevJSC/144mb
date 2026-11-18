@@ -10,12 +10,14 @@
 
 #include <asm/prctl.h>
 #include <sched.h>
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+#include <string.h>
 
 extern const char runtime_test_guest_begin[], runtime_test_guest_end[];
 static _Atomic uint64_t ticks;
@@ -69,13 +71,29 @@ static void NT_MS_ABI never_called_native_apc(void *a, void *b, void *c)
 }
 static int NT_MS_ABI test_entry(void)
 {
+    /* The controlled supervisor child MUST make Linux reject even a
+     * direct guest arch_prctl(SHSTK_ENABLE/DISABLE/LOCK/UNLOCK), without
+     * relying on CET hardware or a cooperative runtime API wrapper. */
+    for (unsigned cet = 0x5001u; cet <= 0x5004u; ++cet) {
+        errno = 0;
+        if (syscall(SYS_arch_prctl, cet, 0UL) != -1 || errno != EPERM)
+            return 38;
+    }
+    errno = 0;
+    if (syscall(SYS_arch_prctl, 0x5100u, 0UL) != -1 || errno != EPERM)
+        return 39; /* unknown future CET extension is fail closed */
+    unsigned long query = 0;
+    errno = 0;
+    if (syscall(SYS_arch_prctl, 0x5005u, &query) == -1 &&
+        errno == EPERM)
+        return 40; /* read-only CET status remains permitted */
     atomic_store(&ticks, 0);
     atomic_store(&entered, 0);
     atomic_store(&stop, 0);
     atomic_store(&host_phase, 0);
     atomic_store(&finish, 0);
     uint32_t tid = 0;
-    const uintptr_t thread = nt_CreateThread(NULL, 0, test_worker,
+    uintptr_t thread = nt_CreateThread(NULL, 0, test_worker,
                                               NULL, 0, &tid);
     if (!thread || !tid) return 10;
     for (int i = 0; i < 3000 && !atomic_load(&entered); ++i)
@@ -102,6 +120,20 @@ static int NT_MS_ABI test_entry(void)
     if (nt_NtSuspendThread(thread, &native_previous) != NT_STATUS_SUCCESS ||
         native_previous != 1)
         return 14;
+    /* Regression: TerminateThread is ONLY for CREATE_SUSPENDED startup
+     * gates. On a real kernel stop it must not reset the local count or
+     * strand the traced worker. Both public API forms must reject it. */
+    if (nt_TerminateThread(thread, 99) ||
+        nt_NtTerminateThread(thread, (nt_status)99) != NT_STATUS_NOT_SUPPORTED)
+        return 36;
+    /* Close the original HANDLE with a real tracer holding two nested
+     * stops. The duplicate must retain the canonical Windows object and
+     * allow a counted final resume; closing must not free its TID state. */
+    uintptr_t alias = 0;
+    if (nt_runtime_duplicate_waitable(thread, 0, 0, 2u, &alias) !=
+            NT_STATUS_SUCCESS || alias == 0 || !nt_CloseHandle(thread))
+        return 37;
+    thread = alias;
     _Alignas(16) struct nt_context64 context = {0};
     context.flags = 0x100003u;
     if (!nt_GetThreadContext(thread, &context) ||

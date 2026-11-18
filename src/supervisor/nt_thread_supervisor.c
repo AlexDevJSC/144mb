@@ -148,6 +148,7 @@ int nt_supervisor_get_registers(struct nt_thread_supervisor *sup, struct user_re
 
 int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
 {
+    if (sup && sup->compromised) { errno = EPERM; return -1; }
     struct user_regs_struct regs;
     if (nt_supervisor_get_registers(sup, &regs)) return -1;
     regs.rax = value;
@@ -159,6 +160,7 @@ int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
 
 int nt_supervisor_continue(struct nt_thread_supervisor *sup)
 {
+    if (sup && sup->compromised) { errno = EPERM; return -1; }
     if (!sup || !sup->seized || !sup->stopped) { errno = EINVAL; return -1; }
     if (ptrace(PTRACE_CONT, sup->tid, NULL,
                (void *)(uintptr_t)sup->pending_signal) == -1)
@@ -170,6 +172,7 @@ int nt_supervisor_continue(struct nt_thread_supervisor *sup)
 
 int nt_supervisor_detach(struct nt_thread_supervisor *sup)
 {
+    if (sup && sup->compromised) { errno = EPERM; return -1; }
     if (!sup || !sup->seized || !sup->stopped) { errno = EINVAL; return -1; }
     if (ptrace(PTRACE_DETACH, sup->tid, NULL,
                (void *)(uintptr_t)sup->pending_signal) == -1)
@@ -280,6 +283,7 @@ int nt_supervisor_invoke_trusted_guest_apc(
     uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
     const _Atomic uint32_t *guest_completion, unsigned timeout_ms)
 {
+    if (sup && sup->compromised) { errno = EPERM; return -1; }
     if (!sup || !sup->stopped || !scope || !guest_completion ||
         guest_entry < scope->code_begin || guest_entry >= scope->code_end ||
         guest_stack_top < (uintptr_t)0x10000 || timeout_ms == 0 ||
@@ -381,12 +385,44 @@ static void nt_supervisor_reset_owned(struct nt_thread_supervisor *sup)
         (void)close(sup->pidfd);
     nt_supervisor_init(sup);
 }
+int nt_supervisor_terminate_compromised_child(struct nt_thread_supervisor *sup)
+{
+    if (!sup || !sup->seized || sup->pidfd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Do this BEFORE issuing the signal; even an error must not allow
+     * the caller to resume regs whose rollback was never verified. */
+    sup->compromised = true;
+#if defined(SYS_pidfd_send_signal)
+    return (int)syscall(SYS_pidfd_send_signal, sup->pidfd, SIGKILL, NULL, 0);
+#else
+    errno = ENOTSUP;
+    return -1; /* Never substitute a recyclable raw Linux PID. */
+#endif
+}
+
 int nt_supervisor_abort_child(struct nt_thread_supervisor *sup)
 {
     if (!sup) { errno = EINVAL; return -1; }
     if (!sup->seized || sup->exited) {
         nt_supervisor_reset_owned(sup);
         return 0;
+    }
+    if (sup->compromised) {
+        /* SIGKILL is already pending (or must be re-issued) to a PID
+         * fixed by pidfd. PTRACE_DETACH would otherwise permit execution
+         * of registers that we have NOT been able to restore.
+         * Poll a kernel-owned pidfd, never infer exit from a PID value. */
+        struct pollfd watcher = {.fd = sup->pidfd, .events = POLLIN};
+        if (sup->pidfd >= 0 && poll(&watcher, 1, 0) == 1 &&
+            (watcher.revents & POLLIN) != 0) {
+            nt_supervisor_reset_owned(sup);
+            return 0;
+        }
+        (void)nt_supervisor_terminate_compromised_child(sup);
+        errno = EBUSY;
+        return -1; /* Keep PTRACE_O_EXITKILL armed until tracer exits. */
     }
     if (!sup->stopped)
         (void)nt_supervisor_interrupt(sup, 500);

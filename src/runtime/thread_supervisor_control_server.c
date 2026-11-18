@@ -4,6 +4,7 @@
 #include "ntnative/guest_boundary_runtime.h"
 #include "../supervisor/nt_supervisor_nt_bridge.h"
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/types.h>
 #include <stdatomic.h>
@@ -31,7 +32,17 @@ static void release_state(struct supervisor_state *state)
     if (!state || !state->active) return;
     /* Requires the same broker pthread that originally called SEIZE;
      * ptrace requests are NOT transferable to another Linux thread. */
-    (void)nt_supervisor_abort_child(&state->tracer);
+    if (state->nt.unsafe_register_state ||
+        state->tracer.compromised) {
+        /* A successful SIGKILL send is NOT proof that this traced
+         * thread has exited: do not PTRACE_DETACH it in that window.
+         * Keep EXITKILL and the pidfd pinned until death is visible. */
+        (void)nt_supervisor_terminate_compromised_child(&state->tracer);
+        if (nt_supervisor_abort_child(&state->tracer) != 0)
+            return;
+    } else {
+        (void)nt_supervisor_abort_child(&state->tracer);
+    }
     *state = (struct supervisor_state){0};
 }
 
@@ -48,8 +59,21 @@ void nt_supervisor_control_server_destroy(
     struct nt_supervisor_control_server *owner)
 {
     if (!owner) return;
-    for (unsigned i = 0; i < MAX_SUPERVISED_THREADS; ++i)
-        release_state(&owner->threads[i]);
+    for (unsigned i = 0; i < MAX_SUPERVISED_THREADS; ++i) {
+        struct supervisor_state *state = &owner->threads[i];
+        release_state(state);
+        if (state->active && state->tracer.compromised) {
+            /* Last resort on broker EOF: do not detach. This broker
+             * pthread exits immediately after destroy(), so the kernel
+             * enforces PTRACE_O_EXITKILL if SIGKILL was delayed. Close
+             * our owned fd without releasing ptrace ownership. */
+            (void)nt_supervisor_terminate_compromised_child(&state->tracer);
+            if (state->tracer.pidfd >= 0) {
+                (void)close(state->tracer.pidfd);
+                state->tracer.pidfd = -1;
+            }
+        }
+    }
     free(owner);
 }
 
@@ -139,6 +163,10 @@ nt_status nt_supervisor_control_server_call(
         return NT_STATUS_INVALID_PARAMETER;
 
     struct supervisor_state *state = find_state(owner, identity);
+    if (state && state->nt.unsafe_register_state) {
+        release_state(state);
+        return NT_STATUS_THREAD_IS_TERMINATING;
+    }
     if (!state && operation != NT_BROKER_RPC_SUP_SUSPEND)
         return NT_STATUS_NOT_SUPPORTED;
     if (!state) {
@@ -211,6 +239,10 @@ nt_status nt_supervisor_control_server_call(
     }
     case NT_BROKER_RPC_SUP_SET_CONTEXT:
         result = nt_supervisor_nt_set_context(&state->nt, input);
+        if (state->nt.unsafe_register_state) {
+            release_state(state); /* PIDFD kill; never unsafe DETACH. */
+            result = NT_STATUS_THREAD_IS_TERMINATING;
+        }
         break;
     default: break;
     }

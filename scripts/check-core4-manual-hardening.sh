@@ -15,15 +15,21 @@ fi
 
 printf '%s\n' '[Core4] Compiling the manual regression targets'
 make -j2 build/supervisor-control-ipc-test \
+          build/supervisor-context-rollback-ok-test \
+          build/supervisor-context-rollback-fatal-test \
           build/runtime-supervisor-win32-test \
+          build/thread-broker-ipc-test \
           build/broker-transport-failure-test \
           build/guest-boundary-import-test \
           build/guest-boundary-cet-test \
           build/pe-async-supervisor-host \
           build/async-supervisor-fixture.exe
 
-printf '%s\n' '[Core4] Protocol corruption, FXSAVE, boundary and Windows PE regression'
+printf '%s\n' '[Core4] Protocol corruption, idle persistence, FXSAVE and Windows PE'
+timeout 15s build/thread-broker-ipc-test
 timeout 35s build/broker-transport-failure-test
+timeout 20s build/supervisor-context-rollback-ok-test
+timeout 20s build/supervisor-context-rollback-fatal-test
 timeout 20s build/guest-boundary-import-test
 timeout 10s build/guest-boundary-cet-test
 timeout 30s build/runtime-supervisor-win32-test

@@ -170,8 +170,13 @@ static _Noreturn void child_client(int fd, unsigned mode)
         if (suspended != NT_STATUS_SUCCESS || previous != 0)
             _exit(27);
         const uint64_t frozen = atomic_load(&data->ticks);
-        sleep_ms(20);
-        if (atomic_load(&data->ticks) != frozen)
+        /* An authenticated broker has no 1s idle expiry. In mode 1,
+         * keep a real tracee stopped with ZERO RPC activity for >1.2s.
+         * The old timeout incorrectly closed the session and detached
+         * the worker. A subsequent nested suspend must still succeed. */
+        sleep_ms(mode == 1 ? 1350 : 20);
+        if (atomic_load(&data->ticks) != frozen ||
+            !nt_broker_client_is_attached())
             _exit(28);
         if (mode == 2) {
             /* Abrupt authenticated EOF while a real tracee is stopped:
@@ -358,7 +363,7 @@ int main(void)
     puts("PASS authenticated control IPC: opt-in only, persistent nested "
          "suspension, real AMD64 CONTEXT GET/SET/restore, unsupported groups, "
          "queued Linux SIGUSR1 preserved, HOST-phase denial, no stale leases, "
-         "EOF cleanup, 32 attach cycles, pinned startup DLL allow, "
+         "EOF cleanup, idle >1.3s with ptrace stop, 32 attach cycles, pinned startup DLL allow, "
          "dynamic DLL and real RW→RX JIT denial, FXSAVE read-only");
     return 0;
 }

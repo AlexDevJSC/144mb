@@ -27,6 +27,7 @@ on:
       - 'include/ntnative/guest_boundary_runtime.h'
       - 'tests/guest_boundary_import_test.c'
       - 'tests/supervisor_control_ipc_test.c'
+      - 'tests/supervisor_context_rollback_fault_test.c'
       - 'tests/thread_broker_transport_failure_test.c'
       - 'src/pe/dll_graph.c'
       - 'src/pe/dll_graph.h'
@@ -66,6 +67,7 @@ on:
       - 'include/ntnative/guest_boundary_runtime.h'
       - 'tests/guest_boundary_import_test.c'
       - 'tests/supervisor_control_ipc_test.c'
+      - 'tests/supervisor_context_rollback_fault_test.c'
       - 'tests/thread_broker_transport_failure_test.c'
       - 'src/pe/dll_graph.c'
       - 'src/pe/dll_graph.h'
@@ -105,6 +107,8 @@ jobs:
         run: make -j2 check-broker-transport-failure
       - name: Prove authenticated suspend, context and signal lifecycle
         run: make -j2 check-supervisor-control-ipc
+      - name: Verify CONTEXT GPR readback, rollback and pidfd-only fatal recovery
+        run: make -j2 check-supervisor-context-rollback
       - name: Repeat supervisor control lifecycle with UBSan
         run: |
           make -j2 BUILD_DIR=build-supervisor-control-ubsan \

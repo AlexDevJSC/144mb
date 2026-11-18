@@ -317,6 +317,23 @@ check-guest-boundary: $(BUILD_DIR)/guest-boundary-import-test $(BUILD_DIR)/guest
 	timeout 20s $(BUILD_DIR)/guest-boundary-import-test
 	timeout 10s $(BUILD_DIR)/guest-boundary-cet-test
 
+# Separate test-only builds: fault hooks must never reach runtime objects.
+$(BUILD_DIR)/supervisor-context-rollback-ok-test: tests/supervisor_context_rollback_fault_test.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/supervisor/nt_supervisor_nt_bridge.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) \
+	    -DNT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH=1 $(LDFLAGS) \
+	    $(filter %.c %.S,$^) -pthread -o "$@"
+
+$(BUILD_DIR)/supervisor-context-rollback-fatal-test: tests/supervisor_context_rollback_fault_test.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/supervisor/nt_supervisor_nt_bridge.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) \
+	    -DNT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH=1 \
+	    -DNT_SUP_TEST_FORCE_GPR_ROLLBACK_FAILURE=1 $(LDFLAGS) \
+	    $(filter %.c %.S,$^) -pthread -o "$@"
+
+.PHONY: check-supervisor-context-rollback
+check-supervisor-context-rollback: $(BUILD_DIR)/supervisor-context-rollback-ok-test $(BUILD_DIR)/supervisor-context-rollback-fatal-test
+	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-ok-test
+	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-fatal-test
+
 $(BUILD_DIR)/supervisor-control-ipc-test: tests/supervisor_control_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_supervisor_control_server.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
@@ -499,7 +516,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
-check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/broker-transport-failure-test $(BUILD_DIR)/supervisor-control-ipc-test $(BUILD_DIR)/runtime-supervisor-win32-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/guest-boundary-import-test $(BUILD_DIR)/guest-boundary-cet-test $(BUILD_DIR)/inherited-file-test \
+check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/broker-transport-failure-test $(BUILD_DIR)/supervisor-control-ipc-test $(BUILD_DIR)/supervisor-context-rollback-ok-test $(BUILD_DIR)/supervisor-context-rollback-fatal-test $(BUILD_DIR)/runtime-supervisor-win32-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/guest-boundary-import-test $(BUILD_DIR)/guest-boundary-cet-test $(BUILD_DIR)/inherited-file-test \
        $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/section-memory-test $(BUILD_DIR)/nt-object-broker $(BUILD_DIR)/object-broker-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator
@@ -523,6 +540,8 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 25s $(BUILD_DIR)/supervisor-authenticated-ipc-test
 	timeout 35s $(BUILD_DIR)/broker-transport-failure-test
 	timeout 35s $(BUILD_DIR)/supervisor-control-ipc-test
+	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-ok-test
+	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-fatal-test
 	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
 	timeout 30s $(BUILD_DIR)/runtime-supervisor-win32-test
 	timeout 20s $(BUILD_DIR)/guest-boundary-import-test
@@ -583,10 +602,12 @@ check-pe-image: $(BUILD_DIR)/pe-image-test
 
 # Real Windows PE32+ integration for the opt-in authenticated supervisor.
 # This does NOT enable ptrace control in the normal PE launcher.
-$(BUILD_DIR)/async-supervisor-fixture.exe: tests/pe/async_supervisor_fixture.c | $(BUILD_DIR)
+$(BUILD_DIR)/async-supervisor-fixture.exe: tests/pe/async_supervisor_fixture.c $(BUILD_DIR)/guest_companion.dll | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) -fno-builtin \
 	    -fno-tree-loop-distribute-patterns $(PE_FIXTURE_LDFLAGS) \
-	    -o "$@" "$<" -lntdll -lkernel32
+	    -o "$@" "$<" $(BUILD_DIR)/fixture-guest_companion.a -lntdll -lkernel32 -lgcc
+	# libgcc provides the real x64 __chkstk_ms stack-guard probing helper
+	# for the large Windows CONTEXT locals. Do not replace it with a stub.
 
 $(BUILD_DIR)/pe-async-supervisor-host: tests/pe/async_supervisor_host.c src/pe/image.c src/pe/dll_graph.c $(RUNTIME_OBJECTS) \
     $(PE_IMAGE_HEADERS) src/pe/dll_graph.h src/runtime/compat.h src/runtime/sync.h include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)

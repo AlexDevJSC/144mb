@@ -29,6 +29,8 @@ nt_status nt_supervisor_nt_suspend_thread(struct nt_supervisor_nt_thread *state,
                                           uint32_t *previous)
 {
     if (!state || !state->tracer) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SUSPEND_RESUME))
         return NT_STATUS_ACCESS_DENIED;
     if (state->suspend_count == NT_SUP_MAX_SUSPEND)
@@ -49,6 +51,8 @@ nt_status nt_supervisor_nt_resume_thread(struct nt_supervisor_nt_thread *state,
                                          uint32_t *previous)
 {
     if (!state || !state->tracer) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SUSPEND_RESUME))
         return NT_STATUS_ACCESS_DENIED;
     if (state->suspend_count != 0 && !state->tracer->stopped)
@@ -74,6 +78,8 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
                                        struct nt_context64 *context)
 {
     if (!state || !state->tracer || !context) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_GET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
     const uint32_t supported = NT_SUP_CONTEXT_CONTROL |
@@ -149,6 +155,8 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
                                        const struct nt_context64 *context)
 {
     if (!state || !state->tracer || !context) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
     /* A general CONTEXT_CONTROL/SEGMENTS/FP rewrite is not safe yet:
@@ -176,11 +184,55 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
     altered.r13 = context->r13;
     altered.r14 = context->r14;
     altered.r15 = context->r15;
+    /* No reported success without a second kernel-owned GETREGSET.
+     * A write can fail after an ambiguous partial mutation, or the
+     * kernel can normalise a requested register value. Both require
+     * verification before the child is ever allowed to run again. */
+    state->unsafe_register_state = true;
     struct iovec io = {.iov_base = &altered, .iov_len = sizeof(altered)};
+    const bool wrote = ptrace(PTRACE_SETREGSET, state->tracer->tid,
+                   (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
+                   io.iov_len == sizeof(altered);
+    struct user_regs_struct verified = {0};
+    const bool readback = wrote &&
+        nt_supervisor_get_registers(state->tracer, &verified) == 0;
+#ifdef NT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH
+    /* Compiled ONLY into the dedicated negative-test binary, not exposed
+     * as a Windows API/environment switch or a production build flag.
+     * The kernel really received the write; simulate a corrupt readback. */
+    extern _Atomic uint32_t nt_sup_test_verify_corrupted;
+    if (readback) {
+        verified.rax ^= UINT64_C(1);
+        atomic_fetch_add_explicit(&nt_sup_test_verify_corrupted, 1,
+                                  memory_order_relaxed);
+    }
+#endif
+    if (readback &&
+        memcmp(&verified, &altered, sizeof(altered)) == 0) {
+        state->unsafe_register_state = false;
+        return NT_STATUS_SUCCESS;
+    }
+
+    /* Best effort rollback while the same tracee is still STOPPED.
+     * The result is safe only if the *original* entire register set
+     * can be read back byte-for-byte. Otherwise the parent must
+     * terminate this exact pidfd-pinned guest, never PTRACE_DETACH. */
+#ifndef NT_SUP_TEST_FORCE_GPR_ROLLBACK_FAILURE
+    struct iovec undo = {.iov_base = &original, .iov_len = sizeof(original)};
     if (ptrace(PTRACE_SETREGSET, state->tracer->tid,
-               (void *)(uintptr_t)NT_PRSTATUS, &io) == -1)
-        return translate_ptrace_error(errno);
-    return NT_STATUS_SUCCESS;
+               (void *)(uintptr_t)NT_PRSTATUS, &undo) == 0 &&
+        undo.iov_len == sizeof(original) &&
+        nt_supervisor_get_registers(state->tracer, &verified) == 0 &&
+        memcmp(&verified, &original, sizeof(original)) == 0) {
+        state->unsafe_register_state = false;
+    }
+#else
+    /* Separate fatal-path test: simulate both a corrupt readback and
+     * an impossible rollback. No resume is permitted after this point. */
+#endif
+    if (state->unsafe_register_state)
+        state->tracer->compromised = true;
+    return NT_STATUS_NOT_SUPPORTED;
 }
 
 nt_status nt_supervisor_nt_queue_trusted_apc(struct nt_supervisor_nt_thread *state,
@@ -189,6 +241,8 @@ nt_status nt_supervisor_nt_queue_trusted_apc(struct nt_supervisor_nt_thread *sta
                                              const _Atomic uint32_t *completion)
 {
     if (!state || !state->tracer || !completion) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
     if (state->suspend_count != 0) return NT_STATUS_NOT_SUPPORTED;

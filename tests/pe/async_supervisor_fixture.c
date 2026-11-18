@@ -32,6 +32,18 @@ __declspec(dllimport) LONG NTAPI NtResumeThread(HANDLE, ULONG *);
 __declspec(dllimport) LONG NTAPI NtGetContextThread(HANDLE, PCONTEXT);
 __declspec(dllimport) LONG NTAPI NtSetContextThread(HANDLE, const CONTEXT *);
 
+/* Actual PE32+ code from a companion DLL statically imported at startup.
+ * This must use the parent-owned, pinned DLL manifest instead of the
+ * executable's primary .text range. No runtime-native function pointers. */
+__declspec(dllimport) int WINAPI GuestHotLoop(volatile LONG *, const volatile LONG *);
+static volatile LONG dll_ticks, dll_release;
+static DWORD WINAPI dll_worker(void *unused)
+{
+    (void)unused;
+    return (DWORD)GuestHotLoop(&dll_ticks, &dll_release);
+}
+
+
 static volatile LONG ticks;
 static volatile LONG go;
 static DWORD WINAPI worker(void *arg)
@@ -118,5 +130,35 @@ int import_fixture_entry(void)
         !GetExitCodeThread(thread, &exit_code) || exit_code != 0x144 ||
         !CloseHandle(thread))
         return 23;
+
+    /* Distinct real DLL .text stop: the PE executable is not on the
+     * whitelist for this instruction pointer. The parent must have
+     * captured its pinned initial import before fork. */
+    dll_ticks = dll_release = 0;
+    HANDLE dll_thread = CreateThread(NULL, 0, dll_worker, NULL, 0, &id);
+    if (!dll_thread || !id) return 38;
+    for (unsigned spin = 0; !dll_ticks && spin < 1000000; ++spin) Sleep(0);
+    if (!dll_ticks) return 39;
+    if (SuspendThread(dll_thread) != 0) return 40;
+    const LONG frozen_dll = dll_ticks;
+    Sleep(35);
+    if (dll_ticks != frozen_dll) return 41;
+    CONTEXT from_dll = {0};
+    from_dll.ContextFlags = CONTEXT_CONTROL;
+    if (NtGetContextThread(dll_thread, &from_dll) != 0 || from_dll.Rip == 0)
+        return 42;
+    int (WINAPI *export_address)(volatile LONG *, const volatile LONG *) =
+        GuestHotLoop;
+    uintptr_t trusted_dll_entry = 0;
+    memcpy(&trusted_dll_entry, &export_address, sizeof(trusted_dll_entry));
+    if (from_dll.Rip < trusted_dll_entry ||
+        from_dll.Rip >= trusted_dll_entry + 4096)
+        return 43; /* prove RIP is in the actual guest DLL, not the EXE */
+    if (ResumeThread(dll_thread) != 1) return 44;
+    dll_release = 1;
+    if (WaitForSingleObject(dll_thread, 4000) != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(dll_thread, &exit_code) || exit_code != 0x177 ||
+        !CloseHandle(dll_thread))
+        return 45;
     return 0;
 }

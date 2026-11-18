@@ -248,6 +248,13 @@ uintptr_t nt_guest_boundary_import_enter(uintptr_t target, uintptr_t return_pc)
 }
 uintptr_t nt_guest_boundary_import_leave(void)
 {
+    /* CET may be enabled by native code while the import call is in
+     * progress, i.e. after the gate checked it on entry. Returning via
+     * the ordinary-stack trampoline would then contradict SHSTK and
+     * could corrupt protected control flow. Kill only this guest.
+     * Never disable shadow stacks to manufacture compatibility. */
+    if (shadow_stack_unsafe())
+        _Exit(142);
     if (host_import_depth == 0)
         _Exit(141);
     const uintptr_t ret = host_return_stack[--host_import_depth];

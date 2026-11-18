@@ -15,6 +15,11 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <sys/prctl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -486,6 +491,49 @@ void nt_runtime_enable_supervisor_ipc(void)
     supervisor_ipc_requested = true;
 }
 
+/* The opt-in asynchronous supervisor permits stops only if every
+ * native import can prove its unwind behavior. CET SHSTK cannot change
+ * underneath a return-address-rewriting import gate. SHSTK_STATUS is
+ * read-only and remains available; mutating/future SHSTK requests are
+ * rejected in the child kernel, including direct guest syscall attempts.
+ * This is installed ONLY in a trusted supervisor-enabled fixture process,
+ * not in normal user applications and not in the parent supervisor. */
+static bool install_supervised_cet_seccomp(void)
+{
+#if defined(__linux__) && defined(__x86_64__) && defined(SYS_arch_prctl)
+    const struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 offsetof(struct seccomp_data, nr)),
+        /* Reject x32 syscall-number bit instead of permitting a second
+         * ABI to bypass the arch_prctl argument check. */
+        BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, UINT32_C(0x40000000), 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_arch_prctl, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 offsetof(struct seccomp_data, args[0])),
+        /* Permit the kernel-owned read-only status query only. Unknown
+         * future codes in the SHSTK namespace remain denied as well. */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, UINT32_C(0x5005), 2, 0),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, UINT32_C(0x5000), 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program = {
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+        .filter = (struct sock_filter *)filter
+    };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) != 0)
+        return false;
+    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0;
+#else
+    return false; /* Fail closed if this kernel lacks the enforcement. */
+#endif
+}
+
 static _Noreturn void finish_worker(uint32_t code)
 {
     ssize_t result;
@@ -533,6 +581,11 @@ bool nt_runtime_run_fixture(nt_int_callback entry, uint32_t *exit_code)
     if (child == 0) {
         close(channel[0]);
         worker_status_fd = channel[1];
+        /* Never authorise an async stop if this child cannot enforce a
+         * fixed CET policy against direct guest syscalls. */
+        if (supervisor_thread_control_requested &&
+            !install_supervised_cet_seccomp())
+            _Exit(EXIT_FAILURE);
         nt_guest_boundary_install_child_session(boundary);
         if (supervisor_ipc_requested) {
             close(supervisor_socket[0]);

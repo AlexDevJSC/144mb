@@ -24,6 +24,9 @@ struct nt_thread_supervisor {
      * exactly once on CONT or DETACH, never silently suppress it. */
     int pending_signal;
     bool exited;
+    /* Fatal CONTEXT rollback failed. This is irreversible until the
+     * pidfd confirms process death. Never CONT or DETACH this tracee. */
+    bool compromised;
 };
 
 void nt_supervisor_init(struct nt_thread_supervisor *sup);
@@ -74,6 +77,11 @@ int nt_supervisor_invoke_trusted_guest_apc(
  * tracee cannot safely be detached, SIGKILL is sent ONLY through the
  * pidfd pinned to this exact direct child. Returns 0 on clean detach,
  * -1 if emergency termination was required or could not be confirmed. */
+/* A failed CONTEXT rollback cannot be safely detached. Mark the
+ * tracee compromised and SIGKILL only the exact pinned pidfd. If a
+ * process exit is not yet confirmed, PTRACE_O_EXITKILL remains armed:
+ * NO CONT, NO DETACH, no raw-PID kill, and no false clean teardown. */
+int nt_supervisor_terminate_compromised_child(struct nt_thread_supervisor *sup);
 int nt_supervisor_abort_child(struct nt_thread_supervisor *sup);
 void nt_supervisor_release(struct nt_thread_supervisor *sup);
 #endif

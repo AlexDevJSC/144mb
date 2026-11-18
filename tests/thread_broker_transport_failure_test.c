@@ -17,6 +17,12 @@
 #include <time.h>
 #include <unistd.h>
 
+static volatile sig_atomic_t signal_seen;
+static void harmless_signal(int signum)
+{
+    (void)signum;
+    signal_seen = 1;
+}
 static int ready(int fd)
 {
     struct pollfd p = {.fd=fd, .events=POLLIN};
@@ -56,9 +62,24 @@ static int fake_reply(int fd, uint32_t pid, int mode, unsigned step)
 }
 static int child_case(int fd, int mode)
 {
+    if (mode == 5) {
+        struct sigaction action = {.sa_handler = harmless_signal};
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGUSR1, &action, NULL) != 0)
+            return 19;
+    }
     if (!nt_broker_client_attach(fd)) return 10;
     struct nt_broker_thread_info id = {.guest_thread_id = 0x51515151u};
     const uint64_t fake_capability = UINT64_C(0x4141414141414141);
+    if (mode == 5) {
+        if (!nt_broker_client_supervisor_query(fake_capability,
+                NT_BROKER_SUPERVISOR_GET_CONTEXT, &id) ||
+            id.guest_process_id != (uint32_t)getpid() ||
+            signal_seen != 1 || !nt_broker_client_is_attached())
+            return 20;
+        nt_broker_client_detach();
+        return 0;
+    }
     if (mode == 4) {
         _Alignas(16) struct nt_context64 context = {0};
         context.flags = UINT32_C(0x100003);
@@ -122,6 +143,14 @@ static int run_case(int mode)
         if (mode == 4 &&
             request.request.operation != NT_BROKER_RPC_SUP_GET_CONTEXT)
             return 5;
+        if (mode == 5) {
+            /* SIGUSR1 interrupts the client's poll in a real process.
+             * A valid authenticated reply within the original timeout
+             * must still complete without losing the IPC session. */
+            delay_ms(65);
+            if (kill(child, SIGUSR1) != 0) return 8;
+            delay_ms(135);
+        }
         if (!fake_reply(fd[0], (uint32_t)child, mode, (unsigned)step) &&
             mode != 3)
             return 6;
@@ -138,9 +167,9 @@ static int run_case(int mode)
 int main(void)
 {
     alarm(35);
-    for (int mode=0; mode<5; ++mode)
+    for (int mode=0; mode<6; ++mode)
         if (run_case(mode)) return 1;
     puts("PASS broker transport: oversized/denied/bad-magic/late/short-CONTEXT "
-         "packets fail closed and leave outputs untouched");
+         "packets fail closed; EINTR with valid reply preserves the session");
     return 0;
 }
