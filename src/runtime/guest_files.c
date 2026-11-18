@@ -2687,7 +2687,10 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
      * per-inode lease. Rename uses the same order and cannot publish an
      * intermediate name while create/truncate is acquiring its lease. */
     int mutation_guard = -1;
-    if (disposition != OPEN_EXISTING) {
+    /* The dedicated-UID WAL is currently an authority for C: only.
+     * Creating private registry state on an unrelated D:/UNC grant is
+     * unsafe and breaks its existing cleanup/lifecycle contract. */
+    if (disposition != OPEN_EXISTING && private_c_path(path)) {
         mutation_guard = nt_runtime_begin_namespace_mutation(path);
         if (mutation_guard < 0) {
             const int denied = errno ? errno : EUCLEAN;
