@@ -362,6 +362,18 @@ $(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
 
+# Pure, host-only Linux signal/NTSTATUS classifier. Link without the
+# real Windows runtime so spoofing and access-bit regressions fail loudly.
+$(BUILD_DIR)/guest-hardware-fault-test: tests/guest_hardware_fault_test.c src/runtime/guest_hardware_fault.c src/runtime/guest_hardware_fault.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_hardware_fault_test.c src/runtime/guest_hardware_fault.c -pthread -o "$@"
+
+.PHONY: check-hardware-fault-classifier
+check-hardware-fault-classifier: $(BUILD_DIR)/guest-hardware-fault-test
+	timeout 10s $(BUILD_DIR)/guest-hardware-fault-test
+
+check: check-hardware-fault-classifier
+
 $(BUILD_DIR)/guest-boundary-cet-test: tests/guest_boundary_cet_test.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -DNT_TEST_FORCE_CET_SHSTK=1 $(LDFLAGS) \
 	    tests/guest_boundary_cet_test.c src/runtime/guest_boundary.c \
@@ -1019,9 +1031,19 @@ $(BUILD_DIR)/fixture-seh.a: tests/pe/seh.def | $(BUILD_DIR)
 $(BUILD_DIR)/seh-fixture.exe: tests/pe/seh_fixture.S $(BUILD_DIR)/fixture-seh.a | $(BUILD_DIR)
 	$(MINGW_CC) -nostdlib $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lkernel32
 
-check-pe-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe
+$(BUILD_DIR)/hardware-seh-fixture.exe: tests/pe/hardware_seh_fixture.S $(BUILD_DIR)/fixture-seh.a | $(BUILD_DIR)
+	$(MINGW_CC) -nostdlib $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lkernel32
+
+.PHONY: check-pe-hardware-seh
+check-pe-hardware-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/hardware-seh-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/hardware-seh-fixture.exe
+
+check-pe-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe $(BUILD_DIR)/hardware-seh-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/hardware-seh-fixture.exe
 
 $(BUILD_DIR)/child-parent-fixture.exe: tests/pe/child_process_fixture.c $(BUILD_DIR)/fixture-nt_core.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< $(BUILD_DIR)/fixture-nt_core.a -lkernel32
