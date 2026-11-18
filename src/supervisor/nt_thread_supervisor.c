@@ -404,8 +404,14 @@ int nt_supervisor_invoke_trusted_guest_apc(
                 read_xstate.iov_len = xstate_size;
                 if (ptrace(PTRACE_GETREGSET, sup->tid,
                            (void *)(uintptr_t)NT_X86_XSTATE, &read_xstate) == -1 ||
-                    read_xstate.iov_len != xstate_size ||
-                    memcmp(observed_xstate, xstate, xstate_size) != 0)
+                    read_xstate.iov_len != xstate_size)
+                    return nt_supervisor_apc_fail_closed(sup, EPROTO);
+#ifdef NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH
+                /* Test-only, injected after real XSTATE restoration/readback.
+                 * The guest must not resume if even one byte differs. */
+                observed_xstate[0] ^= UINT8_C(1);
+#endif
+                if (memcmp(observed_xstate, xstate, xstate_size) != 0)
                     return nt_supervisor_apc_fail_closed(sup, EPROTO);
                 if (nt_supervisor_continue(sup))
                     return nt_supervisor_apc_fail_closed(sup, errno);
