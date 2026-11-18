@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "guest_hardware_fault.h"
+#include "guest_xstate_policy.h"
 #include "compat.h"
 #include "ntnative/guest_boundary_runtime.h"
 
@@ -120,8 +121,19 @@ bool nt_guest_hardware_fault_translate(int signal, int code, unsigned long err,
     }
 }
 
+/* Diagnostic markers are emitted only by the isolated regression
+ * build. Signal handlers must never call stdio, backtrace or malloc. */
+#ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
+static _Thread_local volatile sig_atomic_t denied_at;
+#endif
 static _Noreturn void fail_closed(int signal)
 {
+#ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
+    char message[] = "hardware signal denied at gate 0\\n";
+    message[31] = (char)('0' + denied_at);
+    const ssize_t written = write(STDERR_FILENO, message, sizeof(message) - 1);
+    (void)written;
+#endif
     /* _Exit is async-signal-safe. Do not reinstall handlers, detach a
      * ptrace target or retry the instruction with ambiguous registers. */
     _Exit(128 + signal);
@@ -166,6 +178,9 @@ static _Noreturn void dispatch_guest_fault(void)
 
 static void guest_fault_signal(int sig, siginfo_t *information, void *frame)
 {
+#ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
+    denied_at = 1;
+#endif
     if (!information || !frame || !pending.armed || pending.pending ||
         !nt_guest_boundary_signal_guest_phase())
         fail_closed(sig);
@@ -175,12 +190,18 @@ static void guest_fault_signal(int sig, siginfo_t *information, void *frame)
     /* The image grants are installed and immutable before any guest
      * instruction executes. Reject a host ELF PC even if the phase was
      * corrupted; this guard NEVER trusts an arbitrary guest-provided FD. */
+#ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
+    denied_at = 2;
+#endif
     if (!nt_guest_boundary_get_image_range(&start, &end) ||
         pc < start || pc >= end || information->si_code <= 0 ||
         !ucontext->uc_mcontext.fpregs)
         fail_closed(sig);
     uint32_t code = 0, count = 0;
     uintptr_t arguments[2] = {0};
+#ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
+    denied_at = 3;
+#endif
     if (!nt_guest_hardware_fault_translate(sig, information->si_code,
            (unsigned long)ucontext->uc_mcontext.gregs[REG_ERR],
            (uintptr_t)information->si_addr, &code, &count, arguments))
@@ -197,6 +218,9 @@ static void guest_fault_signal(int sig, siginfo_t *information, void *frame)
      * NT CONTEXT restore, XRSTOR restores guest YMM/AVX registers. */
     if (little32(fp + 464) == UINT32_C(0x46505853)) {
         const uint32_t bytes = little32(fp + 480);
+#ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
+        denied_at = 4;
+#endif
         if (bytes < 576 || bytes > XSAVE_MAX_BYTES)
             fail_closed(sig);
         /* Linux's XSAVE header starts immediately after the 512-byte
@@ -212,8 +236,17 @@ static void guest_fault_signal(int sig, siginfo_t *information, void *frame)
         const uint64_t supported =
             UINT64_C(0x3) | UINT64_C(1) << 2 |
             UINT64_C(1) << 5 | UINT64_C(1) << 6 |
-            UINT64_C(1) << 7; /* x87, SSE, AVX, AVX512 SIMD only */
-        if ((active & ~supported) || (compacted & UINT64_C(0x8000000000000000)))
+            UINT64_C(1) << 7 | UINT64_C(1) << 9;
+        /* PKRU is an OS-managed XSTATE feature: permit it only when
+         * the saved kernel value exactly matches the running thread.
+         * NEVER restore PKRU on a host dispatcher stack. */
+#ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
+        denied_at = 5;
+#endif
+        if ((active & ~supported) ||
+            (compacted & UINT64_C(0x8000000000000000)) ||
+            ((active & (UINT64_C(1) << 9)) &&
+             !nt_guest_xstate_pkru_matches(fp, bytes)))
             fail_closed(sig);
         xstate_size = bytes;
         has_xsave = true;
@@ -317,6 +350,16 @@ void nt_runtime_guest_hardware_fault_restore_extended(void)
     if (!slot->pending)
         return;
     if (slot->has_xsave) {
+        /* A callback may execute WRPKRU. Resume is forbidden if it
+         * changes guest/host memory-access rights. Only SIMD can be
+         * restored on this temporary ELF dispatcher stack. */
+        const volatile unsigned char *fp = slot->xstate;
+        uint64_t features = 0;
+        for (unsigned j = 0; j < 8; ++j)
+            features |= (uint64_t)fp[512 + j] << (8 * j);
+        if ((features & (UINT64_C(1) << 9)) &&
+            !nt_guest_xstate_pkru_matches(fp, slot->xstate_size))
+            fail_closed(SIGSEGV);
         uint32_t xcr0_low = 0, xcr0_high = 0;
         __asm__ __volatile__("xgetbv" : "=a"(xcr0_low),
                              "=d"(xcr0_high) : "c"(0));

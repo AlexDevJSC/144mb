@@ -35,6 +35,10 @@ jobs:
       # Check our real kernel-signal-to-PE SEH contract independently of
       # preexisting APC/VEH regressions, so a failing legacy test cannot
       # hide its actual result.
+      - name: Prove special APC delivery during import-free Win64 PE busy loop
+        run: make -j2 check-pe-async-special-apc
+      - name: Prove frame-based Win64 SEH recovery inside a remotely delivered special APC
+        run: make -j2 check-pe-async-special-apc-seh
       - name: Prove genuine CPU faults recover in a Win64 PE SEH frame
         run: make -j2 check-pe-hardware-seh
       # CI should fail at the REAL PE regression instead of compiling
@@ -121,6 +125,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Independently diagnose PE async APC frame SEH on Fedora
+        run: make -j2 check-pe-async-special-apc-seh
       - name: Build RPM and run its check section
         run: |
           rpm_topdir="$PWD/build-rpm"

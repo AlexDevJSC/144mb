@@ -134,6 +134,9 @@ static _Thread_local struct guest_apc_queue primary_apcs, primary_special_apcs;
  * boundary. Dispatch pending APCs only after the current callback returns
  * or when a later unrelated safe-point is reached. */
 static _Thread_local bool special_apc_dispatching;
+/* Weak in narrow standalone thread tests which link no PE signal gateway. */
+extern bool nt_runtime_guest_async_apc_nudge(pthread_t target)
+    __attribute__((weak));
 static _Thread_local bool primary_alerted;
 static _Thread_local uint16_t *primary_thread_description;
 static _Thread_local uint16_t primary_thread_group;
@@ -459,6 +462,15 @@ static void invoke_apc(struct guest_apc *apc)
     free(apc);
 }
 
+/* Async-signal-safe read of a TLS atomic flag. The signal handler NEVER
+ * consumes the APC or touches wait_lock. It merely redirects control to
+ * the trusted runtime's preallocated dispatch stack. */
+bool nt_runtime_special_apc_pending_signal(void)
+{
+    return atomic_load_explicit(&current_special_apcs()->available,
+                                memory_order_acquire);
+}
+
 /* Called ONLY by the protected PE import-return boundary, after it
  * verified the final host import has returned, no host mutex is owned
  * by this gate, and GS still belongs to the guest. This is a guest-safe
@@ -570,9 +582,31 @@ static nt_status queue_apc_common(uintptr_t handle,
                     queue->head = apc;
                 queue->tail = apc;
                 ++queue->count;
-                if (special)
+                if (special) {
                     atomic_store_explicit(&queue->available, true,
                                           memory_order_release);
+                    /* Signal only the canonical owned guest pthread, not
+                     * a Win32 HANDLE, Linux TID supplied by PE or a
+                     * cross-process broker identity. Keep wait_lock while
+                     * taking the pthread reference: the target cannot
+                     * retire its canonical THREAD slot before nudge.
+                     * The handler never locks this mutex. A signal in
+                     * HOST phase is harmless: the already queued APC
+                     * remains for the next safe import-return point. */
+                    if (nt_runtime_guest_async_apc_nudge != NULL) {
+                        if (handle == UINTPTR_MAX - 1)
+                            (void)nt_runtime_guest_async_apc_nudge(pthread_self());
+                        else {
+                            struct waitable *target = find_waitable(handle);
+                            if (target != NULL && target->kind == THREAD &&
+                                wait_state(target)->started &&
+                                wait_state(target)->teb_base != 0 &&
+                                !wait_state(target)->signaled)
+                                (void)nt_runtime_guest_async_apc_nudge(
+                                    wait_state(target)->host);
+                        }
+                    }
+                }
                 pthread_cond_broadcast(&wait_changed);
             }
         }
