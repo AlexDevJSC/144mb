@@ -29,6 +29,8 @@ nt_status nt_supervisor_nt_suspend_thread(struct nt_supervisor_nt_thread *state,
                                           uint32_t *previous)
 {
     if (!state || !state->tracer) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SUSPEND_RESUME))
         return NT_STATUS_ACCESS_DENIED;
     if (state->suspend_count == NT_SUP_MAX_SUSPEND)
@@ -49,6 +51,8 @@ nt_status nt_supervisor_nt_resume_thread(struct nt_supervisor_nt_thread *state,
                                          uint32_t *previous)
 {
     if (!state || !state->tracer) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SUSPEND_RESUME))
         return NT_STATUS_ACCESS_DENIED;
     if (state->suspend_count != 0 && !state->tracer->stopped)
@@ -74,6 +78,8 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
                                        struct nt_context64 *context)
 {
     if (!state || !state->tracer || !context) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_GET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
     const uint32_t supported = NT_SUP_CONTEXT_CONTROL |
@@ -149,6 +155,8 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
                                        const struct nt_context64 *context)
 {
     if (!state || !state->tracer || !context) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
     /* A general CONTEXT_CONTROL/SEGMENTS/FP rewrite is not safe yet:
@@ -233,6 +241,8 @@ nt_status nt_supervisor_nt_queue_trusted_apc(struct nt_supervisor_nt_thread *sta
                                              const _Atomic uint32_t *completion)
 {
     if (!state || !state->tracer || !completion) return NT_STATUS_INVALID_PARAMETER;
+    if (state->tracer->compromised || state->unsafe_register_state)
+        return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
     if (state->suspend_count != 0) return NT_STATUS_NOT_SUPPORTED;
