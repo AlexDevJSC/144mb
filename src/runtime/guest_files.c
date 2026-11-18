@@ -813,6 +813,42 @@ bool nt_runtime_namespace_mutation_admissible(const char *input)
     return ok;
 }
 
+/* Hold the same WAL flock used by MoveFileEx while a FUSE callback changes
+ * a directory entry. Without a retained lock, the admission test and the
+ * POSIX syscall are a TOCTOU window across processes. */
+int nt_runtime_begin_namespace_mutation(const char *input)
+{
+    char normalized[PATH_MAX];
+    if (!guest_path(input, normalized))
+        return -1;
+    const char *relative = normalized;
+    int root = duplicate_root(&relative);
+    if (root < 0)
+        return -1;
+    struct dos83_wal wal;
+    bool admitted = wal_open(root, &wal);
+    int error = errno;
+    close(root);
+    if (!admitted) {
+        errno = error;
+        return -1;
+    }
+    if (!wal_empty(&wal)) {
+        error = errno;
+        wal_close(&wal);
+        errno = error;
+        return -1;
+    }
+    close(wal.directory);
+    return wal.fd; /* LOCK_EX remains held until end() */
+}
+
+void nt_runtime_end_namespace_mutation(int guard)
+{
+    if (guard >= 0)
+        close(guard);
+}
+
 bool nt_runtime_refresh_dos83_path(const char *input)
 {
     char normalized[PATH_MAX], leaf[NAME_MAX + 1], alias[14];

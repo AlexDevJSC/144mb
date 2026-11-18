@@ -46,3 +46,16 @@ make check
 
 No declarar FileSystem4 100% hasta cerrar los defectos de integridad e
 interconexión. Las pruebas físicas corresponden al paso final separado.
+
+## Serialización de mutaciones FUSE (18-11-2026)
+
+En modo mediado, `fs_create`, `fs_mkdir`, `fs_link`, `fs_open(O_TRUNC)` y
+`fs_truncate` adquieren ahora el `flock(LOCK_EX)` del **mismo WAL físico**
+antes de comprobar su estado, y lo mantienen hasta terminar el cambio POSIX.
+Esto elimina la ventana entre una simple consulta y la mutación respecto a
+otros procesos que respetan el WAL, incluidos `MoveFileEx` y recovery.
+
+**Límite contractual:** un proceso Linux ajeno a la mediación puede modificar
+el árbol sin tomar ese lock; una caída durante una operación directa FUSE
+no tiene todavía un journal de creación/truncado/retiro específico.
+La corrección NO afirma serialización universal ni rollback de datos.

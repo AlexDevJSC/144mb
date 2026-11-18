@@ -21,6 +21,11 @@ void nt_runtime_release_linux_nt_lease(int *lease);
  * renames; it is best-effort, not an atomic interception of host writes. */
 /* Host-only pre-mutation WAL admission. Not an atomic transaction lock. */
 bool nt_runtime_namespace_mutation_admissible(const char *path);
+/* This returned descriptor keeps the per-grant WAL flock until end() and
+ * makes a FUSE POSIX mutation atomic with respect to cooperative renames.
+ * It does NOT journal an interrupted direct create/mkdir/truncate. */
+int nt_runtime_begin_namespace_mutation(const char *path);
+void nt_runtime_end_namespace_mutation(int guard);
 bool nt_runtime_refresh_dos83_path(const char *path);
 bool nt_runtime_reconcile_host_rename(const char *old_path, const char *new_path);
 /* Host-only recovery. Replays only unambiguous, checksummed pending C:

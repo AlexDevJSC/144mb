@@ -227,7 +227,7 @@ static int guest_wide(const char *path, uint16_t wide[PATH_MAX])
 
 /* Preflight is deliberately before lower_open/mkdirat/linkat/ftruncate,
  * never only an alias refresh after the mutation. */
-static int guest_mutation_admit(const char *path)
+static int guest_mutation_begin(const char *path)
 {
     if (!relpath(path))
         return -(errno ? errno : EINVAL);
@@ -235,9 +235,10 @@ static int guest_mutation_admit(const char *path)
     int n = snprintf(dos, sizeof(dos), "C:%s", path);
     if (n <= 0 || n >= (int)sizeof(dos))
         return -ENAMETOOLONG;
-    if (!nt_runtime_namespace_mutation_admissible(dos))
+    int guard = nt_runtime_begin_namespace_mutation(dos);
+    if (guard < 0)
         return -(errno ? errno : EUCLEAN);
-    return 0;
+    return guard;
 }
 
 static int guest_refresh(const char *path)
@@ -363,24 +364,27 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
     /* Never truncate before share admission: a Windows handle can reject
      * this write, and a rejected FUSE open must not mutate the file. */
     const bool truncate = (fi->flags & O_TRUNC) != 0;
-    if (truncate) {
-        int admit = guest_mutation_admit(path);
-        if (admit)
-            return admit;
-    }
+    int guard = truncate ? guest_mutation_begin(path) : -1;
+    if (truncate && guard < 0)
+        return guard;
     int fd = lower_open(path, fi->flags & ~(O_CREAT | O_EXCL | O_TRUNC), 0);
-    if (fd < 0)
-        return -errno;
+    if (fd < 0) {
+        int error = errno;
+        nt_runtime_end_namespace_mutation(guard);
+        return -error;
+    }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         int error = errno ? errno : EACCES;
         close(fd);
+        nt_runtime_end_namespace_mutation(guard);
         return -error;
     }
     int marked = nt_runtime_nt_file_marker(fd);
     if (marked < 0) {
         int error = errno;
         close(fd);
+        nt_runtime_end_namespace_mutation(guard);
         return -error;
     }
     int lease = -1;
@@ -405,6 +409,7 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         if (lease >= 0)
             nt_runtime_release_linux_nt_lease(&lease);
         close(fd);
+        nt_runtime_end_namespace_mutation(guard);
         return error;
     }
     /* Marked NT files must bypass the FUSE page cache: otherwise a
@@ -414,6 +419,7 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         fi->keep_cache = 0;
     }
     fi->fh = (uint64_t)fd;
+    nt_runtime_end_namespace_mutation(guard);
     return 0;
 }
 
@@ -421,9 +427,9 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
-    int admit = guest_mutation_admit(path);
-    if (admit)
-        return admit;
+    int guard = guest_mutation_begin(path);
+    if (guard < 0)
+        return guard;
     pthread_mutex_lock(&namespace_lock);
     /* FUSE create receives an inode mode (S_IFREG | permissions).
      * openat2 rejects file-type bits in open_how.mode with EINVAL. */
@@ -441,6 +447,7 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     if (!error)
         fi->fh = (uint64_t)fd;
     pthread_mutex_unlock(&namespace_lock);
+    nt_runtime_end_namespace_mutation(guard);
     return error;
 }
 
@@ -506,13 +513,16 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
         return -EACCES;
     if (size < 0)
         return -EINVAL;
-    int admit = guest_mutation_admit(path);
-    if (admit)
-        return admit;
+    int guard = guest_mutation_begin(path);
+    if (guard < 0)
+        return guard;
     const bool borrowed = fi != NULL;
     int fd = borrowed ? (int)fi->fh : lower_open(path, O_WRONLY, 0);
-    if (fd < 0)
-        return -errno;
+    if (fd < 0) {
+        int cause = errno;
+        nt_runtime_end_namespace_mutation(guard);
+        return -cause;
+    }
     int lease = -1;
     int marked = borrowed ? (view_lease_active(fd) ? 1 : 0) :
                             nt_runtime_nt_file_marker(fd);
@@ -530,6 +540,7 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
     nt_runtime_release_linux_nt_lease(&lease);
     if (!borrowed)
         close(fd);
+    nt_runtime_end_namespace_mutation(guard);
     return error;
 }
 
@@ -537,9 +548,9 @@ static int fs_mkdir(const char *path, mode_t mode)
 {
     if (!service_authorized())
         return -EACCES;
-    int admit = guest_mutation_admit(path);
-    if (admit)
-        return admit;
+    int guard = guest_mutation_begin(path);
+    if (guard < 0)
+        return guard;
     pthread_mutex_lock(&namespace_lock);
     char name[NAME_MAX + 1];
     int parent = lower_parent(path, name);
@@ -554,6 +565,7 @@ static int fs_mkdir(const char *path, mode_t mode)
     if (parent >= 0)
         close(parent);
     pthread_mutex_unlock(&namespace_lock);
+    nt_runtime_end_namespace_mutation(guard);
     return error;
 }
 
@@ -624,9 +636,9 @@ static int fs_link(const char *from, const char *to)
 {
     if (!service_authorized())
         return -EACCES;
-    int admit = guest_mutation_admit(to);
-    if (admit)
-        return admit;
+    int guard = guest_mutation_begin(to);
+    if (guard < 0)
+        return guard;
     pthread_mutex_lock(&namespace_lock);
     char old_name[NAME_MAX + 1], new_name[NAME_MAX + 1];
     int old_parent = lower_parent(from, old_name);
@@ -644,6 +656,7 @@ static int fs_link(const char *from, const char *to)
     if (new_parent >= 0)
         close(new_parent);
     pthread_mutex_unlock(&namespace_lock);
+    nt_runtime_end_namespace_mutation(guard);
     return error;
 }
 
