@@ -605,15 +605,22 @@ static void complete_software_capture(struct nt_context64 *context)
 
 static _Noreturn void resume_software(const struct nt_context64 *context, struct software_exception *previous)
 {
-    if (!software_code(context->rip) || !software_stack_pointer(context->rsp))
+    if (!software_code(context->rip) || !software_stack_pointer(context->rsp)) {
+        (void)fprintf(stderr, "SEH resume scope denied RIP=0x%llx RSP=0x%llx\\n",
+                      (unsigned long long)context->rip,
+                      (unsigned long long)context->rsp);
         software_failure(STATUS_INVALID_TARGET);
+    }
     /* A kernel CPU fault from a proved guest-only RIP has no
      * abandoned host import, and its handler may safely reauthorise
      * the PE boundary after selecting a guest RIP. General software
      * RaiseException/RtlUnwind still poison nonlocal host transfers. */
     if (active_software != NULL && active_software->hardware) {
-        if (!nt_guest_boundary_finish_guest_hardware_seh(context->rip))
+        if (!nt_guest_boundary_finish_guest_hardware_seh(context->rip)) {
+            (void)fprintf(stderr, "SEH guest-only phase resume denied RIP=0x%llx\\n",
+                          (unsigned long long)context->rip);
             software_failure(STATUS_INVALID_TARGET);
+        }
     } else if (active_software != NULL && active_software->reconciled_import) {
         /* Only the one audited naked RaiseException import was bypassed.
          * Every other ELF stack frame or callback still fails closed. */
@@ -649,6 +656,8 @@ static _Noreturn void dispatch_exception_common(
         if (!reconciled_import)
             nt_guest_boundary_mark_nonlocal_transfer();
     } else if (!nt_guest_boundary_begin_guest_hardware_seh(origin->rip)) {
+        (void)fprintf(stderr, "SEH guest-only CPU entry denied RIP=0x%llx\\n",
+                      (unsigned long long)origin->rip);
         software_failure(STATUS_INVALID_TARGET);
     }
     complete_software_capture(origin);
