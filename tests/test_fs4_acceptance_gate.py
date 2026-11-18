@@ -42,6 +42,17 @@ class AcceptanceGatesTests(unittest.TestCase):
             capture_output=True)
         self.assertEqual(denied_ci.returncode, 3)
 
+    def test_selinux_evidence_requires_explicit_physical_operator(self):
+        script = ROOT / "scripts" / "fedora-fs4-selinux-evidence.sh"
+        self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
+        no_argument = subprocess.run(["bash", str(script)], capture_output=True)
+        self.assertEqual(no_argument.returncode, 2)
+        ci = subprocess.run(
+            ["bash", str(script), "--physical-confirmed"],
+            env={"PATH": "/usr/bin:/bin", "CI": "true"},
+            capture_output=True)
+        self.assertEqual(ci.returncode, 3)
+
     def test_reference_is_validated_not_assumed(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "reference.json"
