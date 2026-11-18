@@ -793,6 +793,26 @@ static int confined_open(int root, const char *path, int flags, unsigned int mod
 /* Host-only entrypoints: enforce the same granted-root descriptor
  * confinement as Win32 APIs. The watcher passes UTF-8 DOS paths; it must
  * never feed arbitrary absolute Linux paths through these functions. */
+/* Deny direct FUSE namespace mutations before their first POSIX syscall
+ * when a grant's WAL remains uncertain. Does not replace a process-wide
+ * transaction lock or protect direct outside writers. */
+bool nt_runtime_namespace_mutation_admissible(const char *input)
+{
+    char normalized[PATH_MAX];
+    if (!guest_path(input, normalized))
+        return false;
+    const char *relative = normalized;
+    int root = duplicate_root(&relative);
+    if (root < 0)
+        return false;
+    bool ok = wal_namespace_ready(root);
+    int saved = errno;
+    close(root);
+    if (!ok)
+        errno = saved ? saved : EUCLEAN;
+    return ok;
+}
+
 bool nt_runtime_refresh_dos83_path(const char *input)
 {
     char normalized[PATH_MAX], leaf[NAME_MAX + 1], alias[14];

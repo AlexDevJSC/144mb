@@ -19,6 +19,8 @@ void nt_runtime_release_linux_nt_lease(int *lease);
 /* Host-only, UTF-8 DOS paths (e.g. C:\\dir\\file). These are not Win32
  * exports. The inotify consumer uses the second entrypoint AFTER external
  * renames; it is best-effort, not an atomic interception of host writes. */
+/* Host-only pre-mutation WAL admission. Not an atomic transaction lock. */
+bool nt_runtime_namespace_mutation_admissible(const char *path);
 bool nt_runtime_refresh_dos83_path(const char *path);
 bool nt_runtime_reconcile_host_rename(const char *old_path, const char *new_path);
 /* Host-only recovery. Replays only unambiguous, checksummed pending C:
