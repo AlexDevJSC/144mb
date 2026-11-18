@@ -25,6 +25,14 @@ _Static_assert(sizeof(struct nt_thread_broker_reply) == 32, "private reply layou
 _Static_assert(sizeof(struct nt_broker_hello) == 24, "private hello layout");
 
 static pthread_mutex_t client_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Independent of client_lock: a trusted runtime thread must be able to
+ * shut down a blocked RPC while its owner holds client_lock. The abort
+ * mutex pins the socket's lifetime so a recycled integer FD can NEVER
+ * refer to an unrelated guest or host resource during cancellation.
+ * Lock order: client_lock -> client_abort_lock; never the reverse. */
+static pthread_mutex_t client_abort_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool client_rpc_inflight;
+static bool client_rpc_aborted;
 static int client_socket = -1;
 static uint8_t client_secret[16];
 static const uint32_t read_rights =
@@ -99,16 +107,57 @@ static bool receive_exact_reply(int fd, void *out, size_t size, int timeout_ms)
            (packet.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) == 0;
 }
 
+/* Only the RPC owner holds client_lock. A cancellation thread holds
+ * only client_abort_lock, can interrupt poll/recv via shutdown, and never
+ * closes the FD while the RPC owner might still use its integer value. */
+static void begin_client_rpc_locked(void)
+{
+    pthread_mutex_lock(&client_abort_lock);
+    client_rpc_inflight = true;
+    client_rpc_aborted = false;
+    pthread_mutex_unlock(&client_abort_lock);
+}
+
+static bool finish_client_rpc_locked(void)
+{
+    pthread_mutex_lock(&client_abort_lock);
+    const bool aborted = client_rpc_aborted;
+    client_rpc_inflight = false;
+    client_rpc_aborted = false;
+    pthread_mutex_unlock(&client_abort_lock);
+    return aborted;
+}
+
+/* This operation can run on another trusted host thread while the owner
+ * is inside sendmsg/poll/recvmsg (with client_lock HELD). It revokes the
+ * entire ambiguous session: a late reply must not be consumed as an ACK.
+ * Returns false when no RPC is in flight, never acts on an arbitrary FD. */
+bool nt_broker_client_abort_inflight(void)
+{
+    pthread_mutex_lock(&client_abort_lock);
+    const bool active = client_rpc_inflight && client_socket >= 0;
+    if (active) {
+        client_rpc_aborted = true;
+        (void)shutdown(client_socket, SHUT_RDWR);
+    }
+    pthread_mutex_unlock(&client_abort_lock);
+    return active;
+}
+
 /* Caller holds client_lock. An ambiguous mutation ACK is irrevocable:
  * detach the socket so the parent broker revokes capabilities and
  * releases any stopped tracees on EOF. Never accept a late packet. */
 static void abandon_client_session_locked(void)
 {
+    pthread_mutex_lock(&client_abort_lock);
     if (client_socket >= 0) {
         (void)shutdown(client_socket, SHUT_RDWR);
         (void)close(client_socket);
         client_socket = -1;
     }
+    client_rpc_inflight = false;
+    client_rpc_aborted = false;
+    pthread_mutex_unlock(&client_abort_lock);
     memset(client_secret, 0, sizeof(client_secret));
 }
 
@@ -618,7 +667,11 @@ bool nt_broker_client_attach(int fd)
     pthread_mutex_lock(&client_lock);
     bool okay = client_socket < 0;
     if (okay) {
+        pthread_mutex_lock(&client_abort_lock);
         client_socket = fd;
+        client_rpc_inflight = false;
+        client_rpc_aborted = false;
+        pthread_mutex_unlock(&client_abort_lock);
         memcpy(client_secret, hello.secret, 16);
     }
     pthread_mutex_unlock(&client_lock);
@@ -627,12 +680,12 @@ bool nt_broker_client_attach(int fd)
 
 void nt_broker_client_detach(void)
 {
+    /* Unlike a blocking detach, first interrupt the in-flight poll from
+     * another thread. The RPC owner still closes the socket after seeing
+     * that its request/reply was ambiguous. */
+    (void)nt_broker_client_abort_inflight();
     pthread_mutex_lock(&client_lock);
-    if (client_socket >= 0) {
-        close(client_socket);
-        client_socket = -1;
-    }
-    memset(client_secret, 0, sizeof(client_secret));
+    abandon_client_session_locked();
     pthread_mutex_unlock(&client_lock);
 }
 
@@ -649,8 +702,11 @@ static bool client_rpc(uint32_t operation, uint32_t tid, uint32_t access,
         };
         memcpy(request.secret, client_secret, 16);
         struct nt_thread_broker_reply response = {0};
-        const bool valid = send_packet(client_socket, &request, sizeof(request)) &&
-            receive_exact_reply(client_socket, &response, sizeof(response), 4000) &&
+        begin_client_rpc_locked();
+        const bool received = send_packet(client_socket, &request, sizeof(request)) &&
+            receive_exact_reply(client_socket, &response, sizeof(response), 4000);
+        const bool canceled = finish_client_rpc_locked();
+        const bool valid = received && !canceled &&
             response.magic == NT_THREAD_BROKER_MAGIC &&
             response.process_id != 0;
         /* Remote QUERY/OPEN intentionally returns the *target* child's
@@ -805,6 +861,7 @@ static nt_status control_rpc(uint32_t op, uint64_t cap, uint32_t flags,
         memcpy(request.request.secret, client_secret, sizeof(client_secret));
         if (input != NULL)
             request.context = *input;
+        begin_client_rpc_locked();
         const bool sent = input != NULL ?
             send_packet(client_socket, &request, sizeof(request)) :
             send_packet(client_socket, &request.request, sizeof(request.request));
@@ -814,8 +871,10 @@ static nt_status control_rpc(uint32_t op, uint64_t cap, uint32_t flags,
         struct nt_broker_context_reply reply = {0};
         const size_t expected = op == NT_BROKER_RPC_SUP_GET_CONTEXT ?
             sizeof(reply) : sizeof(reply.reply);
-        const bool transport_valid =
-            sent && receive_exact_reply(client_socket, &reply, expected, 4000) &&
+        const bool received =
+            sent && receive_exact_reply(client_socket, &reply, expected, 4000);
+        const bool canceled = finish_client_rpc_locked();
+        const bool transport_valid = received && !canceled &&
             reply.reply.magic == NT_THREAD_BROKER_MAGIC &&
             reply.reply.process_id == (uint32_t)getpid();
         if (!transport_valid) {
