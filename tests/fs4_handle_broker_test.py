@@ -241,7 +241,12 @@ class FileSystem4Handles(unittest.TestCase):
             root = Path(temp) / "C"
             root.mkdir(mode=0o700)
             (root / "file.txt").write_bytes(b"LOCKED")
-            a, b = Broker(root), Broker(root)
+            a = Broker(root)
+            try:
+                b = Broker(root)
+            except BaseException:
+                a.close()
+                raise
             try:
                 err, handle, _, _ = a.call(OPEN, b"C:/file.txt", access=0x80000000,
                                             share=0, disposition=3)
@@ -296,7 +301,12 @@ class FileSystem4Handles(unittest.TestCase):
             root = Path(temp) / "C"
             root.mkdir(mode=0o700)
             (root / "lease.dat").write_bytes(b"SAFE")
-            first, second = Broker(root), Broker(root)
+            first = Broker(root)
+            try:
+                second = Broker(root)
+            except BaseException:
+                first.close()
+                raise
             killed = False
             try:
                 err, handle, _, _ = first.call(OPEN, b"C:/lease.dat",
@@ -324,7 +334,12 @@ class FileSystem4Handles(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="fs4-create-race-") as temp:
             root = Path(temp) / "C"
             root.mkdir(mode=0o700)
-            first, second = Broker(root), Broker(root)
+            first = Broker(root)
+            try:
+                second = Broker(root)
+            except BaseException:
+                first.close()
+                raise
             start = threading.Barrier(3)
             results = []
             def create(client):
