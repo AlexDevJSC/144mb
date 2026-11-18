@@ -1132,9 +1132,11 @@ check-pe-preflight: $(BUILD_DIR)/pe-import-audit $(PE_ISOLATED_FIXTURES) $(BUILD
 	$(BUILD_DIR)/pe-import-audit --verify $(PE_ISOLATED_FIXTURES) $(BUILD_DIR)/lstrcmp-fixture.exe
 	@status=0; $(BUILD_DIR)/pe-import-audit --verify $(BUILD_DIR)/missing-import-fixture.exe \
 	    > $(BUILD_DIR)/missing-import-audit.log 2>&1 || status=$?; \
-	    if [ "$status" -ne 1 ] || ! grep -q 'MissingNtNativeApi' $(BUILD_DIR)/missing-import-audit.log; then \
+	    if [ "$status" -ne 1 ] || \
+	       ! grep -Eq '^unresolved[[:space:]]+KERNEL32[.]dll[[:space:]]+MissingNtNativeApi$' $(BUILD_DIR)/missing-import-audit.log || \
+	       ! grep -Eq '^1 direct imports, 0 with native equivalents, 1 unresolved' $(BUILD_DIR)/missing-import-audit.log; then \
 	        cat $(BUILD_DIR)/missing-import-audit.log; \
-	        echo "FAIL: auditor did not reject unsupported KERNEL32 import" >&2; exit 1; \
+	        echo "FAIL: auditor must return exactly 1 for the missing KERNEL32.dll!MissingNtNativeApi (not PE parse exit 2)" >&2; exit 1; \
 	    fi; \
 	    echo "PASS PE import preflight rejects a genuinely missing runtime API"
 
