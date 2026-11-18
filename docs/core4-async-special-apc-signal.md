@@ -113,6 +113,44 @@ el TID de destino, finaliza el bucle y devuelve el control al
 hilo original. Cualquier entrega solo a import-return o en
 hilo equivocado falla.
 
+## Corrección del puente nativo y XSTATE (18 de noviembre)
+
+Los runs especializados sobre CI Linux mostraron que la presencia del
+componente PKRU en el XSAVE del kernel no implica que el programa haya
+cambiado sus permisos. El helper revisado
+`src/runtime/guest_xstate_policy.h` usa el descriptor CPUID XSTATE
+subleaf 9 y RDPKRU para aceptar **solo** el PKRU guardado que coincida
+con el PKRU corriente de ese mismo hilo. Se comprueba de nuevo tras el
+callback. Nunca ejecutamos XRSTOR con la máscara PKRU desde la pila
+anfitriona ni aceptamos un cambio de permisos del callback.
+La CI especializada de
+[44316321810](https://github.com/AlexDevJSC/144mb/actions/runs/44316321810)
+acreditó que las pruebas de fallos CPU reales, entrega de señal
+asíncrona en bucle sin imports y supervisor terminaron con éxito.
+
+El PE independiente con `NT_TEST_ASYNC_SEH` mostró un segundo límite
+real: `__C_specific_handler` se llamaba desde el despachador ELF a
+través del thunk de importación Win64, por lo que el retorno sintético
+apuntaba al propio host. La nueva ruta
+`verified_c_specific_import_thunk` verifica las instrucciones
+`FF 25 disp32` dentro del alcance ejecutable PE, la dirección de IAT
+validada y el destino exacto del export nativo
+`vcruntime140.dll!__C_specific_handler`. **Únicamente ese handler
+resource-free** se invoca directamente desde el despachador, sin
+fabricar un desenrollado de un frame ELF. La
+[CI 44317135537](https://github.com/AlexDevJSC/144mb/actions/runs/44317135537)
+demostró la recuperación SEH de callback APC bajo ese contrato acotado.
+En ese mismo run falló una prueba previa de RtlUnwind(Ex), por lo que
+no se declara CI general verde. Se incorporó una reconciliación
+específica de los imports naked y auditados `RtlUnwind(Ex)`,
+manteniendo el rechazo de imports y callbacks con recursos host.
+Exigir nueva prueba real antes de aceptar ese último cambio.
+
+Las trazas instrumentadas de la regresión de hardware se compilan solo
+con `NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS`; no se activan en el runtime
+distribuido. No se relaja el contrato de señales ajenas a invitado,
+direcciones dinámicas sin registrar ni cambios PKRU.
+
 ## Pendientes obligatorios
 
 - No hay garantía frente a ejecución maliciosa que cambie su
