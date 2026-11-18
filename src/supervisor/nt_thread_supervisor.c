@@ -330,10 +330,12 @@ int nt_supervisor_get_guest_hardware_fault(
             errno = ENOTSUP; return -1;
         }
         fault.nt_status = UINT32_C(0xc0000005); /* ACCESS_VIOLATION */
-        fault.information_count = 2;
-        fault.information[0] = (regs.err & 0x10u) ? 8u :
-                               ((regs.err & 0x2u) ? 1u : 0u);
-        fault.information[1] = (uintptr_t)info.si_addr;
+        /* Linux ptrace NT_PRSTATUS user_regs_struct does NOT expose the
+         * x86 page-fault ERR register. SIGINFO yields CR2/si_addr, but
+         * NOT read/write/execute semantics. Do not manufacture the
+         * Windows ExceptionInformation[0] access kind: 0 parameters
+         * explicitly means an incomplete EXCEPTION_RECORD pending a
+         * guest-context fault handler that can inspect kernel ucontext. */
         break;
     case SIGILL:
         fault.nt_status = info.si_code == ILL_PRVOPC ||
@@ -358,9 +360,7 @@ int nt_supervisor_get_guest_hardware_fault(
             fault.nt_status = UINT32_C(0x80000002); /* DATATYPE_MISALIGNMENT */
         } else if (info.si_code == BUS_ADRERR) {
             fault.nt_status = UINT32_C(0xc0000005);
-            fault.information_count = 2;
-            fault.information[0] = 0;
-            fault.information[1] = (uintptr_t)info.si_addr;
+            /* PTRACE_GETSIGINFO alone cannot prove read vs write. */
         } else {
             errno = ENOTSUP; return -1;
         }
