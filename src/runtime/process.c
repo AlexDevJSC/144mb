@@ -205,6 +205,12 @@ static struct nt_guest_unicode_string process_string(uint16_t *buffer)
  * bridge; full runtime links it as a normal component. */
 extern bool nt_runtime_guest_hardware_fault_thread_attach(void)
     __attribute__((weak));
+extern bool nt_runtime_guest_hardware_fault_install(void)
+    __attribute__((weak));
+extern bool nt_runtime_guest_async_apc_install(void)
+    __attribute__((weak));
+extern bool nt_runtime_guest_async_apc_thread_attach(void)
+    __attribute__((weak));
 
 bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t module,
                                    const struct nt_guest_tls *initial)
