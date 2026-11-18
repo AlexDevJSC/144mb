@@ -109,6 +109,8 @@ jobs:
         run: make -j2 check-supervisor-control-ipc
       - name: Verify CONTEXT GPR readback, rollback and pidfd-only fatal recovery
         run: make -j2 check-supervisor-context-rollback
+      - name: Verify direct RAX readback, rollback and pidfd-only fatal recovery
+        run: make -j2 check-supervisor-rax-rollback
       - name: Repeat supervisor control lifecycle with UBSan
         run: |
           make -j2 BUILD_DIR=build-supervisor-control-ubsan \
