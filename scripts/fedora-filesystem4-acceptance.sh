@@ -107,6 +107,8 @@ check 'Filesystem regressions with WAL, PE and FUSE' \
          check-dos83-mediator check-fs-supervisor check-fs-backing-audit
 check 'Mandatory mounted FUSE+Landlock under SELinux Enforcing' \
     bash scripts/fedora-p2-3-acceptance.sh
+check 'Dedicated UID service + mounted FUSE + v3 HANDLE IPC under Enforcing' \
+    python3 scripts/fedora-fs4-service-acceptance.py
 check 'FileSystem3 physical compatibility and PE isolation gate' \
     bash scripts/fedora-filesystem-acceptance.sh --physical-confirmed
 
