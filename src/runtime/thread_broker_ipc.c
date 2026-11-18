@@ -18,6 +18,7 @@
 #include <sys/syscall.h>
 #include <signal.h>
 #include <unistd.h>
+#include <time.h>
 
 _Static_assert(sizeof(struct nt_broker_rpc) == 48, "private RPC layout");
 _Static_assert(sizeof(struct nt_thread_broker_reply) == 32, "private reply layout");
@@ -45,9 +46,34 @@ static bool fd_seqpacket(int fd)
 }
 static bool read_ready_for(int fd, short events, int timeout_ms)
 {
-    struct pollfd p = {.fd = fd, .events = events};
-    const int n = poll(&p, 1, timeout_ms);
-    return n == 1 && (p.revents & events) != 0;
+    if (timeout_ms < 0)
+        return false;
+    struct timespec clock_now;
+    if (clock_gettime(CLOCK_MONOTONIC, &clock_now) != 0)
+        return false;
+    const uint64_t start_ms = (uint64_t)clock_now.tv_sec * 1000u +
+                              (uint64_t)clock_now.tv_nsec / 1000000u;
+    const uint64_t deadline = start_ms + (unsigned)timeout_ms;
+    int remaining = timeout_ms;
+    for (;;) {
+        struct pollfd p = {.fd = fd, .events = events};
+        const int n = poll(&p, 1, remaining);
+        if (n == 1)
+            return (p.revents & events) != 0 &&
+                   (p.revents & POLLNVAL) == 0;
+        if (n == 0 || (n < 0 && errno != EINTR))
+            return false;
+        /* Linux signals may interrupt poll even with SA_RESTART.
+         * They are not a transport/protocol error. Retry only until
+         * the ORIGINAL deadline; never extend RPC time on signals. */
+        if (clock_gettime(CLOCK_MONOTONIC, &clock_now) != 0)
+            return false;
+        const uint64_t now_ms = (uint64_t)clock_now.tv_sec * 1000u +
+                                (uint64_t)clock_now.tv_nsec / 1000000u;
+        if (now_ms >= deadline)
+            return false;
+        remaining = (int)(deadline - now_ms);
+    }
 }
 static bool read_ready(int fd, short events)
 {
