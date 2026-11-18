@@ -5,6 +5,7 @@
  * Failure cannot be misreported as a normal QueueUserAPC delivery. */
 #include <windows.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 struct async_target {
     volatile uint32_t in_guest_spin;
