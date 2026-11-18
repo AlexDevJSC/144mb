@@ -15,6 +15,8 @@ static _Thread_local struct nt_guest_thread *current_guest_thread;
 
 extern void nt_runtime_guest_hardware_fault_thread_detach(void)
     __attribute__((weak));
+extern void nt_runtime_guest_async_apc_thread_detach(void)
+    __attribute__((weak));
 
 struct nt_guest_thread *nt_guest_thread_current(void)
 {
