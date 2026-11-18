@@ -78,6 +78,14 @@ int main(int argc, char **argv)
         (void)nt_RemoveDirectoryW(dir);
         return 3;
     }
+    uint32_t acl_needed = 0;
+    uint8_t acl_descriptor[256] = {0};
+    (void)nt_GetFileSecurityW(original, 7u, NULL, 0, &acl_needed);
+    const bool acl_descriptor_readable = acl_needed >= 20u &&
+        acl_needed <= sizeof(acl_descriptor) &&
+        nt_GetFileSecurityW(original, 7u, acl_descriptor,
+                            (uint32_t)sizeof(acl_descriptor), &acl_needed) &&
+        acl_descriptor[0] == 1u && (acl_descriptor[3] & 0x80u) != 0;
     const bool case_insensitive = probe_bytes_match(upper, bytes,
                                                      sizeof(bytes)-1);
     uint16_t shortpath[512] = {0};
@@ -104,12 +112,17 @@ int main(int argc, char **argv)
            "\"short_path_generated\":%s,"
            "\"hardlink_created\":null,"
            "\"hardlink_readable\":null,"
+           "\"acl_descriptor_readable\":%s,"
+           "\"acl_explicit_deny_enforced\":null,"
+           "\"junction_reparse_visible\":null,"
+           "\"symlink_reparse_visible\":null,"
            "\"short_path\":null,"
            "\"probe_cleaned_up\":%s}\n",
            case_insensitive ? "true" : "false",
            rename_preserves_content ? "true" : "false",
            readonly ? "true" : "false",
            short_generated ? "true" : "false",
+           acl_descriptor_readable ? "true" : "false",
            cleaned ? "true" : "false");
     return cleaned ? 0 : 3;
 }

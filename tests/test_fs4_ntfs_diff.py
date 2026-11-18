@@ -32,6 +32,24 @@ class NTFSReferenceDiffTests(unittest.TestCase):
         self.assertEqual(set(result["unverified"]),
                          {"hardlink_created", "hardlink_readable"})
 
+    def test_advanced_comparison_requires_v2_and_does_not_fake_parity(self):
+        self.assertFalse(compare(self.win, dict(self.nt, hardlink_created=True,
+                                               hardlink_readable=True))["complete"])
+        self.win["schema"] = "filesystem4-windows-reference-v2"
+        self.win.update(acl_descriptor_readable=True,
+                        acl_explicit_deny_enforced=True,
+                        junction_reparse_visible=True,
+                        symlink_reparse_visible=None)
+        self.nt["acl_descriptor_readable"] = True
+        report = compare(self.win, self.nt)
+        self.assertFalse(report["complete"])
+        self.assertTrue(report["advanced_reference_present"])
+        self.assertIn("acl_explicit_deny_enforced", report["unverified"])
+        self.assertIn("symlink_reparse_visible", report["unverified"])
+        self.nt["acl_explicit_deny_enforced"] = "unsupported"
+        with self.assertRaises(ValueError):
+            compare(self.win, self.nt)
+
     def test_failing_case_insensitivity_is_detected(self):
         self.nt["case_insensitive_exact_name"] = False
         result = compare(self.win, self.nt)

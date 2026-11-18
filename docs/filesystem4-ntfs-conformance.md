@@ -45,3 +45,22 @@ siendo legible. No se introducen nuevos tags ni nuevas rutas.
 
 Este documento no asigna porcentajes ni garantiza Windows compatibility
 más allá de los fixtures ejecutados.
+
+## Matriz diferencial v2 — ACL y reparse (18-11-2026)
+
+La captura Windows real se amplía con lectura de propietario del descriptor,
+prueba reversible de ACE de denegación sobre un archivo descartable y
+comprobación de presencia de reparse de junction y symbolic link. El
+capturador registra `null` cuando el host no puede probar una función por
+falta de privilegios; no equivale a `false` ni a PASS.
+
+El probe NT144 comprueba `GetFileSecurityW(OWNER|GROUP|DACL)` y su
+`SECURITY_DESCRIPTOR_RELATIVE`. Las ACE de denegación explícita, las
+junctions y los symlinks todavía permanecen sin fixture comparable (`null`).
+El comparador v2 **no** declara equivalencia global mientras falte una
+observación o una referencia Windows v2. El esquema histórico v1 sigue
+siendo legible, pero nunca satisface `complete` de la matriz avanzada.
+
+Esto crea una puerta de medición, NO implementa ACL NTFS completas ni
+una equivalencia de reparse/seguridad; no ejecutar el script de Windows
+fuera de una máquina NTFS real y un directorio de prueba desechable.

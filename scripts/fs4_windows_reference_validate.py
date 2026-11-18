@@ -13,7 +13,8 @@ def check(path: str) -> dict:
     record = json.loads(source.read_text(encoding="utf-8-sig"))
     if not isinstance(record, dict):
         raise ValueError("Reference must be a JSON object")
-    if record.get("schema") != "filesystem4-windows-reference-v1":
+    if record.get("schema") not in ("filesystem4-windows-reference-v1",
+                                    "filesystem4-windows-reference-v2"):
         raise ValueError("Wrong Windows reference schema")
     if record.get("volume_filesystem") != "NTFS":
         raise ValueError("Reference must report actual NTFS")
@@ -23,6 +24,14 @@ def check(path: str) -> dict:
                  "short_path_generated"):
         if type(record.get(name)) is not bool:
             raise ValueError(f"Missing or invalid boolean: {name}")
+    if record["schema"] == "filesystem4-windows-reference-v2":
+        for name in ("acl_descriptor_readable",
+                     "acl_explicit_deny_enforced",
+                     "junction_reparse_visible",
+                     "symlink_reparse_visible"):
+            if name not in record or (record[name] is not None and
+                                     type(record[name]) is not bool):
+                raise ValueError(f"Invalid v2 advanced NTFS field: {name}")
     if record.get("short_path") is not None and (
         not isinstance(record["short_path"], str) or
         len(record["short_path"]) > 32768

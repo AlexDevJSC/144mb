@@ -68,8 +68,69 @@ try {
                           [IO.FileAttributes]::ReadOnly) -ne 0)
     [IO.File]::SetAttributes($target, [IO.FileAttributes]::Normal)
 
+    # Additional NTFS checks: evidence only, never claim full ACL equivalence.
+    $aclDescriptorReadable = $null
+    try {
+        $security = Get-Acl -LiteralPath $first -ErrorAction Stop
+        $aclDescriptorReadable = -not [string]::IsNullOrWhiteSpace($security.Owner)
+    } catch {}
+
+    $aclExplicitDenyEnforced = $null
+    $aclProbe = Join-Path $folder 'aclWriteDenyReference.txt'
+    [IO.File]::WriteAllText($aclProbe, 'keep')
+    $originalAcl = $null
+    try {
+        $originalAcl = Get-Acl -LiteralPath $aclProbe -ErrorAction Stop
+        $candidateAcl = Get-Acl -LiteralPath $aclProbe -ErrorAction Stop
+        $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $who, [Security.AccessControl.FileSystemRights]::WriteData,
+            [Security.AccessControl.AccessControlType]::Deny)
+        $candidateAcl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $aclProbe -AclObject $candidateAcl -ErrorAction Stop
+        try {
+            $stream = [IO.File]::Open($aclProbe, [IO.FileMode]::Open,
+                                      [IO.FileAccess]::Write)
+            $stream.Dispose()
+            $aclExplicitDenyEnforced = $false
+        } catch [UnauthorizedAccessException] {
+            $aclExplicitDenyEnforced = $true
+        }
+    } catch {
+        $aclExplicitDenyEnforced = $null
+    } finally {
+        if ($originalAcl) {
+            try { Set-Acl -LiteralPath $aclProbe -AclObject $originalAcl -ErrorAction Stop } catch {}
+        }
+    }
+
+    $junctionReparseVisible = $null
+    $symlinkReparseVisible = $null
+    $reparseTarget = Join-Path $folder 'reparseTarget'
+    [IO.Directory]::CreateDirectory($reparseTarget) | Out-Null
+    $junction = Join-Path $folder 'junctionReference'
+    try {
+        New-Item -ItemType Junction -Path $junction -Target $reparseTarget -ErrorAction Stop | Out-Null
+        $junctionReparseVisible = (([IO.File]::GetAttributes($junction) -band
+                                  [IO.FileAttributes]::ReparsePoint) -ne 0)
+    } catch {} finally {
+        if (Test-Path -LiteralPath $junction) {
+            try { [IO.Directory]::Delete($junction) } catch {}
+        }
+    }
+    $symlink = Join-Path $folder 'symlinkReference'
+    try {
+        New-Item -ItemType SymbolicLink -Path $symlink -Target $reparseTarget -ErrorAction Stop | Out-Null
+        $symlinkReparseVisible = (([IO.File]::GetAttributes($symlink) -band
+                                 [IO.FileAttributes]::ReparsePoint) -ne 0)
+    } catch {} finally {
+        if (Test-Path -LiteralPath $symlink) {
+            try { [IO.Directory]::Delete($symlink) } catch {}
+        }
+    }
+
     $result = [ordered]@{
-        schema = 'filesystem4-windows-reference-v1'
+        schema = 'filesystem4-windows-reference-v2'
         captured_utc = [DateTime]::UtcNow.ToString('o')
         os = [Environment]::OSVersion.VersionString
         volume_filesystem = $volume.FileSystem
@@ -79,6 +140,10 @@ try {
         hardlink_created = [bool]$hardlinkCreated
         hardlink_readable = [bool]$hardlinkContentsSame
         readonly_attribute_visible = [bool]$readOnlyReported
+        acl_descriptor_readable = $aclDescriptorReadable
+        acl_explicit_deny_enforced = $aclExplicitDenyEnforced
+        junction_reparse_visible = $junctionReparseVisible
+        symlink_reparse_visible = $symlinkReparseVisible
         short_path = $shortName
         short_path_generated = [bool]($shortName -and
                                        $shortName.ToUpperInvariant().Contains('~'))
