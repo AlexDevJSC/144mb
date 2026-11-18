@@ -836,9 +836,17 @@ check-pe-console: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/console-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/console-fixture.exe
 
-$(BUILD_DIR)/displayconfig-fixture.exe: tests/pe/displayconfig_fixture.c | $(BUILD_DIR)
+# GCC 16 emits an out-of-line memset for aggregate initialization
+# even with -ffreestanding. No Windows CRT may be linked into fixtures.
+# The implementation itself is compiled without loop-to-memset lowering.
+$(BUILD_DIR)/fixture-memory.o: tests/pe/fixture_memory.c | $(BUILD_DIR)
+	$(MINGW_CC) -std=c17 -Wall -Wextra -Wpedantic -Werror -O2 \
+	    -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
+	    -fno-stack-protector -c "$<" -o "$@"
+
+$(BUILD_DIR)/displayconfig-fixture.exe: tests/pe/displayconfig_fixture.c $(BUILD_DIR)/fixture-memory.o | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
-	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -luser32
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -luser32
 
 check-pe-displayconfig: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/displayconfig-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
@@ -1064,7 +1072,7 @@ check-pe-memory: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/virtual-memory-fixtu
 $(BUILD_DIR)/fixture-ws2_32.a: tests/pe/ws2_32.def | $(BUILD_DIR)
 	$(MINGW_DLLTOOL) -d "$<" -l "$@"
 
-$(BUILD_DIR)/native-services.exe: tests/pe/native_services_fixture.c $(BUILD_DIR)/fixture-ws2_32.a $(BUILD_DIR)/fixture-comctl32.a | $(BUILD_DIR)
+$(BUILD_DIR)/native-services.exe: tests/pe/native_services_fixture.c $(BUILD_DIR)/fixture-ws2_32.a $(BUILD_DIR)/fixture-comctl32.a $(BUILD_DIR)/fixture-memory.o | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
 	    $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lbcrypt -lshell32 -lole32 -luser32 -lgdi32 -lmsimg32 -ladvapi32 -limm32 -lkernel32
 
