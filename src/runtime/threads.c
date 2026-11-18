@@ -603,9 +603,11 @@ nt_status NT_MS_ABI nt_NtQueueApcThread(uintptr_t thread, guest_native_apc routi
                                 (uintptr_t)first, (uintptr_t)second);
 }
 
-/* A NULL reserve behaves exactly as NtQueueApcThread. A special APC
- * (reserve=1) requires interrupting a thread even outside alertable waits;
- * no safe mechanism exists here, so refuse it instead of faking delivery. */
+/* Reserve==0 preserves the normal alertable-APC contract. Reserve==1
+ * queues a distinct special APC, but ONLY for a pinned executable PE
+ * callback and a target with a live TEB: it runs on that thread's next
+ * safe Win64 import return, not at an arbitrary interrupted instruction.
+ * Other nonzero reservations fail rather than silently downgrade. */
 nt_status NT_MS_ABI nt_NtQueueApcThreadEx(uintptr_t thread, uintptr_t reserve,
                                          guest_native_apc routine,
                                          void *context, void *first, void *second)
