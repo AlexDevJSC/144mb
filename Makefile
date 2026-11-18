@@ -136,7 +136,7 @@ $(BUILD_DIR)/supervisor-pe-apc-$(1)-test: tests/pe/supervisor_pe_thread_test.c t
 	    $(WARN_CFLAGS) $(CFLAGS) -DNT_SUP_TEST_APC_$(2)=1 $(LDFLAGS) \
 	    tests/pe/supervisor_pe_thread_test.c src/supervisor/nt_thread_supervisor.c \
 	    src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c \
-	    src/runtime/guest_boundary_import.S -pthread $(LDLIBS) -o "$@"
+	    src/runtime/guest_boundary_import.S -pthread $(LDLIBS) -o "$(BUILD_DIR)/supervisor-pe-apc-$(1)-test"
 endef
 
 $(eval $(call APC_GUARD_FIXTURE,cancel,CANCEL))
@@ -147,9 +147,11 @@ $(eval $(call APC_GUARD_FIXTURE,pre-cancel,PRE_CANCEL))
 
 .PHONY: check-pe-thread-supervisor-apc-guards
 check-pe-thread-supervisor-apc-guards: $(addprefix $(BUILD_DIR)/supervisor-pe-apc-,$(addsuffix -test,$(APC_GUARD_CASES))) $(BUILD_DIR)/supervisor-pe-fixture.exe
-	@set -e; for name in $(APC_GUARD_CASES); do \
-	  timeout 20s "$(BUILD_DIR)/supervisor-pe-apc-$name-test" "$(BUILD_DIR)/supervisor-pe-fixture.exe"; \
-	done
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-cancel-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-disconnect-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-signal-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-exception-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-pre-cancel-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 
 $(BUILD_DIR):
 	mkdir -p "$@"
