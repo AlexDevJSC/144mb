@@ -35,6 +35,8 @@ jobs:
       # Check our real kernel-signal-to-PE SEH contract independently of
       # preexisting APC/VEH regressions, so a failing legacy test cannot
       # hide its actual result.
+      - name: Prove special APC delivery during import-free Win64 PE busy loop
+        run: make -j2 check-pe-async-special-apc
       - name: Prove genuine CPU faults recover in a Win64 PE SEH frame
         run: make -j2 check-pe-hardware-seh
       # CI should fail at the REAL PE regression instead of compiling
