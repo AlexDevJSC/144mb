@@ -109,6 +109,51 @@ class Security(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 client.recv(4096)
 
+    def test_v2_real_socket_auth_and_handle_scope(self):
+        """Test v2 through serve_one, not just the session helper."""
+        import threading
+        import base64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "C"
+            root.mkdir(mode=0o700)
+            (root / "safe.bin").write_bytes(b"UID SERVICE")
+            with socket_pair() as (server, client):
+                client.sendall(b'{"version":2,"op":"session"}')
+                faults = []
+                def serve():
+                    try:
+                        service.serve_one(server, client_uid=os.geteuid(),
+                                          mediator="unused", backing=root, ready=True)
+                    except BaseException as exc:
+                        faults.append(exc)
+                thread = threading.Thread(target=serve, daemon=True)
+                thread.start()
+                welcome = json.loads(client.recv(4096))
+                self.assertTrue(welcome["readonly"])
+                sess = welcome["session"]
+                def ask(operation, **kwargs):
+                    payload = dict(version=2, session=sess, op=operation, **kwargs)
+                    client.sendall(json.dumps(payload).encode("utf-8"))
+                    return json.loads(client.recv(4096))
+                opened = ask("open", path="C:/safe.bin")
+                self.assertTrue(opened["ok"])
+                value = ask("read", handle=opened["handle"], offset=0, size=11)
+                self.assertEqual(base64.b64decode(value["data_b64"]), b"UID SERVICE")
+                self.assertFalse(ask("write", handle=opened["handle"],
+                                     data_b64="WA==")["ok"])
+                self.assertTrue(ask("end")["ok"])
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive())
+                self.assertFalse(faults)
+
+            with socket_pair() as (server, client):
+                client.sendall(b'{"version":2,"op":"session"}')
+                service.serve_one(server, client_uid=os.geteuid() + 1,
+                                  mediator="unused", backing=root, ready=True)
+                client.settimeout(1)
+                with self.assertRaises(TimeoutError):
+                    client.recv(4096)
+
     def test_bad_packet_rejected(self):
         for packet in (b"", b"this is not JSON", b"{" + b"a" * 5000):
             with socket_pair() as (server, client):
