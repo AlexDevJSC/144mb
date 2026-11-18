@@ -368,11 +368,18 @@ $(BUILD_DIR)/guest-hardware-fault-test: tests/guest_hardware_fault_test.c src/ru
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    tests/guest_hardware_fault_test.c src/runtime/guest_hardware_fault.c -pthread -o "$@"
 
-.PHONY: check-hardware-fault-classifier
+$(BUILD_DIR)/guest-hardware-fault-signal-test: tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c src/runtime/guest_hardware_fault.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c -pthread -o "$@"
+
+.PHONY: check-hardware-fault-classifier check-hardware-fault-signals
 check-hardware-fault-classifier: $(BUILD_DIR)/guest-hardware-fault-test
 	timeout 10s $(BUILD_DIR)/guest-hardware-fault-test
 
-check: check-hardware-fault-classifier
+check-hardware-fault-signals: $(BUILD_DIR)/guest-hardware-fault-signal-test
+	timeout 15s $(BUILD_DIR)/guest-hardware-fault-signal-test
+
+check: check-hardware-fault-classifier check-hardware-fault-signals
 
 $(BUILD_DIR)/guest-boundary-cet-test: tests/guest_boundary_cet_test.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -DNT_TEST_FORCE_CET_SHSTK=1 $(LDFLAGS) \
