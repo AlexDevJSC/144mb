@@ -204,6 +204,38 @@ int main(void)
     nt_guest_boundary_guest_leave();
     if (nt_guest_boundary_special_apc_allowed())
         return 20;
+    /* A direct, known PE RaiseException import may have its return slot
+     * rewritten by our gate. Only one non-nested host frame may be
+     * translated back to the loader-proven PE address. No generic ELF
+     * stack traversal or callback under a held host mutex is allowed. */
+    void (*epilogue)(void) = nt_guest_boundary_import_return;
+    uintptr_t synthetic = 0;
+    memcpy(&synthetic, &epilogue, sizeof(synthetic));
+    if (nt_guest_boundary_seh_caller_pc(synthetic) != synthetic)
+        return 21;
+    nt_guest_boundary_guest_enter();
+    const uintptr_t approved = 0x400100u;
+    const uintptr_t unapproved = 0x500100u;
+    if (nt_guest_boundary_import_enter(1, approved) != 1 ||
+        nt_guest_boundary_seh_caller_pc(synthetic) != approved ||
+        nt_guest_boundary_seh_caller_pc(synthetic + 1) != synthetic + 1)
+        return 22;
+    if (nt_guest_boundary_import_enter(1, approved) != 1 ||
+        nt_guest_boundary_seh_caller_pc(synthetic) != synthetic)
+        return 23;
+    if (nt_guest_boundary_import_leave() != approved ||
+        nt_guest_boundary_seh_caller_pc(synthetic) != approved)
+        return 24;
+    if (nt_guest_boundary_import_leave() != approved ||
+        nt_guest_boundary_seh_caller_pc(synthetic) != synthetic)
+        return 25;
+    if (nt_guest_boundary_import_enter(1, unapproved) != 1 ||
+        nt_guest_boundary_seh_caller_pc(synthetic) != synthetic ||
+        nt_guest_boundary_import_leave() != unapproved)
+        return 26;
+    nt_guest_boundary_guest_leave();
+    if (nt_guest_boundary_seh_caller_pc(synthetic) != synthetic)
+        return 27;
     puts("PASS guest/host import ABI: Microsoft x64 8-argument stack, XMM float, "
          "nested callbacks with host mutex, nonlocal poison, pinned-DLL manifest, per-thread phases and revocation");
     return 0;
