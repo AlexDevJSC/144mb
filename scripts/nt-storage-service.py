@@ -3,10 +3,13 @@
 """Dedicated-UID storage owner for the opted-in POSIX FUSE data plane.
 
 The authenticated AF_UNIX control plane NEVER transfers backing FDs.
-No PE runtime is allowed to run under the storage identity; a PE IPC file
-backend is a separate, still unimplemented milestone.
+No PE runtime is allowed to run under the storage identity. Experimental
+v2 read-only handle sessions exist; a writable NT/Win32 PE adapter remains
+unimplemented and no fallback to direct backing is allowed.
 """
 from __future__ import annotations
+
+from fs4_readonly_session import run_readonly_session
 
 import argparse
 import json
@@ -129,6 +132,11 @@ def serve_one(conn: socket.socket, *, client_uid: int, mediator: str,
             request = json.loads(data.decode("utf-8"))
         except (UnicodeError, ValueError):
             raise Refused("Malformed request") from None
+        if request == {"version": 2, "op": "session"}:
+            if not ready:
+                raise Refused("Storage view not ready")
+            run_readonly_session(conn, backing)
+            return
         reply = dispatch(request, mediator=mediator, backing=backing,
                          live_mount=ready)
     except (Refused, OSError) as error:
