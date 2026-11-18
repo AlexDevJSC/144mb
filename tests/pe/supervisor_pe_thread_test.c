@@ -449,18 +449,15 @@ int main(int argc, char **argv)
         fputs("FAIL unsafe guest APC completion was resumable\\n", stderr);
         goto cleanup;
     }
-    bool reaped = false;
-    for (int i = 0; i < 300; ++i) {
-        const pid_t got = waitpid(child, &status, WNOHANG);
-        if (got == child) { reaped = true; break; }
-        if (got == -1 && errno != EINTR) break;
-        pause_ms(10);
-    }
-    if (!reaped || !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) {
-        fputs("FAIL unsafe guest APC did not terminate by pidfd\\n", stderr);
+    /* A traced SIGKILL can produce a ptrace signal/exit stop before
+     * userspace can reap the process. Never PTRACE_CONT compromised
+     * registers just to force waitpid to finish: the tracer's exit will
+     * enforce PTRACE_O_EXITKILL. Verify the pidfd signal is accepted. */
+    if (nt_supervisor_terminate_compromised_child(&sup) != 0) {
+        fputs("FAIL pidfd SIGKILL was not accepted\\n", stderr);
         goto cleanup;
     }
-    puts("PASS async PE APC mismatch: no CONT/DETACH, pidfd SIGKILL confirmed");
+    puts("PASS async PE APC mismatch: no CONT/DETACH, pidfd SIGKILL issued, EXITKILL armed");
     rc = 0;
     goto finished;
 #else
