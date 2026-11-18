@@ -151,6 +151,20 @@ static DWORD WINAPI worker(void *unused)
     if (!modern(special_user_apc, GetCurrentThread(), 0x77au, 1) ||
         special_count != 2u || NtTestAlert() != STATUS_OK)
         return 38;
+    /* A malformed flag and a callback outside the parent's pinned PE
+     * executable range must never be scheduled or executed. */
+    SetLastError(0);
+    if (modern(special_user_apc, GetCurrentThread(), 0x77au, 2) ||
+        GetLastError() != ERROR_INVALID_PARAMETER)
+        return 86;
+    union { uintptr_t address; PAPCFUNC callback; } invalid = {
+        .address = (uintptr_t)0x12345u
+    };
+    SetLastError(0);
+    if (modern(invalid.callback, GetCurrentThread(), 0x77au, 1) ||
+        GetLastError() != ERROR_NOT_SUPPORTED)
+        return 87;
+
     /* A continuable software exception in the APC uses existing
      * guest VEH/SEH dispatch. Run it LAST: a non-local restore must
      * poison the host-import boundary against future async ptrace. */
@@ -337,6 +351,8 @@ int import_fixture_entry(void)
         GetLastError() != ERROR_ACCESS_DENIED ||
         NtQueueApcThread(restricted, native_apc, NULL, NULL, NULL) != STATUS_ACCESS_DENIED ||
         NtQueueApcThreadEx(restricted, NULL, native_apc, NULL, NULL, NULL) != STATUS_ACCESS_DENIED ||
+        NtQueueApcThreadEx(restricted, (HANDLE)(uintptr_t)1,
+                           special_native_apc, NULL, NULL, NULL) != STATUS_ACCESS_DENIED ||
         NtAlertThread(restricted) != STATUS_ACCESS_DENIED ||
         NtAlertResumeThread(restricted, NULL) != STATUS_ACCESS_DENIED)
         return 12;
