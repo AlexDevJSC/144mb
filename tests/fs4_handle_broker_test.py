@@ -17,6 +17,7 @@ REQ = struct.Struct("<IHHQqIIIIIIQ")
 REP = struct.Struct("<IHHIIQQ")
 MAGIC, VERSION = 0x34465348, 3
 OPEN, READ, WRITE, CLOSE, DELETE, RENAME, TRUNCATE, LOCK, UNLOCK = range(1, 10)
+ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE_AT, HANDLE_INFO = range(12, 21)
 
 class Broker:
     def __init__(self, root):
@@ -82,6 +83,82 @@ class FileSystem4Handles(unittest.TestCase):
                 self.assertFalse((root.parent / "escape").exists())
             finally:
                 b.close()
+
+    def test_enumeration_attributes_and_search_capability_lifetime(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-attrs-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            (root / "first.txt").write_bytes(b"FIRST")
+            (root / "second.txt").write_bytes(b"SECOND")
+            (root / "other.bin").write_bytes(b"BIN")
+            broker = Broker(root)
+            try:
+                err, _, _, attrs = broker.call(ATTR_GET, b"C:/first.txt")
+                self.assertEqual(err, 0)
+                self.assertEqual(len(attrs), 36)
+                flags = struct.unpack_from("<I", attrs, 0)[0]
+                self.assertNotEqual(flags & 0x80, 0)  # NORMAL
+                self.assertEqual(broker.call(ATTR_SET, b"C:/first.txt", flags=1)[0], 0)
+                err, _, _, attrs = broker.call(ATTR_GET, b"C:/first.txt")
+                self.assertEqual(err, 0)
+                self.assertEqual(struct.unpack_from("<I", attrs)[0] & 1, 1)
+                self.assertEqual(broker.call(ATTR_SET, b"C:/first.txt", flags=0x80)[0], 0)
+
+                err, search, _, result = broker.call(FIND_FIRST, b"C:/*.txt")
+                self.assertEqual(err, 0)
+                self.assertNotEqual(search, 0)
+                seen = set()
+                while True:
+                    self.assertEqual(len(result), 592)
+                    name = result[44:44 + 520].decode("utf-16le").split("\0")[0]
+                    seen.add(name)
+                    err, _, _, result = broker.call(FIND_NEXT, handle=search)
+                    if err == 18:  # ERROR_NO_MORE_FILES
+                        break
+                    self.assertEqual(err, 0)
+                self.assertEqual(seen, {"first.txt", "second.txt"})
+                self.assertEqual(broker.call(CLOSE, handle=search)[0], 87)
+                self.assertEqual(broker.call(FIND_CLOSE, handle=search)[0], 0)
+                self.assertNotEqual(broker.call(FIND_NEXT, handle=search)[0], 0)
+                self.assertEqual(broker.call(FIND_FIRST, b"C:/../*", flags=0)[0], 87)
+            finally:
+                broker.close()
+
+    def test_positional_io_duplicate_and_same_file_offset(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-positional-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            broker = Broker(root)
+            try:
+                err, handle, _, _ = broker.call(OPEN, b"C:/data.bin",
+                                                access=0xC0000000,
+                                                share=7, disposition=1)
+                self.assertEqual(err, 0)
+                self.assertEqual(broker.call(WRITE, b"012345", handle=handle)[0], 0)
+                err, _, count, data = broker.call(READ_AT, handle=handle,
+                                                  offset=1, size=3)
+                self.assertEqual((err, count, data), (0, 3, b"123"))
+                self.assertEqual(broker.call(WRITE_AT, b"XX", handle=handle,
+                                              offset=2)[0], 0)
+                err, _, count, data = broker.call(READ, handle=handle, size=2)
+                self.assertEqual((err, count, data), (0, 0, b""))  # cursor still EOF
+                err, duplicate, _, _ = broker.call(DUPLICATE, handle=handle,
+                                                    flags=2)
+                self.assertEqual(err, 0)
+                self.assertNotEqual(duplicate, handle)
+                self.assertNotEqual(broker.call(DUPLICATE, handle=handle,
+                                                 flags=2, share=1)[0], 0)
+                self.assertEqual(broker.call(CLOSE, handle=handle)[0], 0)
+                err, _, count, data = broker.call(READ_AT, handle=duplicate,
+                                                  offset=0, size=6)
+                self.assertEqual((err, count, data), (0, 6, b"01XX45"))
+                err, _, _, info = broker.call(HANDLE_INFO, handle=duplicate)
+                self.assertEqual(err, 0)
+                self.assertEqual(len(info), 52)
+                self.assertEqual(broker.call(CLOSE, handle=duplicate)[0], 0)
+                self.assertEqual((root / "data.bin").read_bytes(), b"01XX45")
+            finally:
+                broker.close()
 
     def test_shared_lease_conflict_and_process_exit_release(self):
         with tempfile.TemporaryDirectory(prefix="fs4-lease-") as temp:
