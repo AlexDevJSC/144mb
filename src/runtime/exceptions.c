@@ -467,6 +467,12 @@ static _Thread_local struct software_exception *active_software;
 extern bool nt_runtime_guest_hardware_fault_install(void) __attribute__((weak));
 extern void nt_runtime_guest_hardware_fault_restore_extended(void)
     __attribute__((weak));
+/* A special APC may run on a preallocated, guard-paged runtime dispatch
+ * stack while the interrupted PE loop has a separate guest RSP.
+ * SEH should unwind the APC's actual PE frames on that stack, but must
+ * NEVER invent unwind metadata for a host ELF caller. */
+extern bool nt_runtime_guest_async_apc_stack_for_current(uintptr_t *low,
+    size_t *size) __attribute__((weak));
 
 typedef int32_t (NT_MS_ABI *software_handler)(struct nt_exception_record *, uint64_t,
                                              struct nt_context64 *, struct nt_dispatcher_context *);
@@ -513,7 +519,16 @@ bool nt_runtime_enable_software_seh(uint32_t begin, uint32_t end,
 static bool prepare_software_stack(void)
 {
     pthread_attr_t attr;
-    if (!image.code_end || pthread_getattr_np(pthread_self(), &attr) != 0)
+    if (!image.code_end)
+        return false;
+    uintptr_t apc_low = 0;
+    size_t apc_size = 0;
+    if (nt_runtime_guest_async_apc_stack_for_current != NULL &&
+        nt_runtime_guest_async_apc_stack_for_current(&apc_low, &apc_size))
+        return nt_runtime_set_unwind_stack((void *)apc_low, apc_size) &&
+               nt_runtime_set_seh_dispatch(image.code_begin, image.code_end,
+                                           selected_software_handler);
+    if (pthread_getattr_np(pthread_self(), &attr) != 0)
         return false;
     void *low = NULL;
     size_t size = 0;
