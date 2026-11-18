@@ -64,6 +64,13 @@ void nt_broker_server_loop(int fd,
 bool nt_broker_client_is_attached(void);
 bool nt_broker_client_attach(int fd);
 void nt_broker_client_detach(void);
+/* Trusted-runtime emergency cancellation of a request already executing
+ * against the authenticated parent broker. Thread-safe even while another
+ * thread holds the serial RPC mutex. Shutdowns the session, never a raw
+ * process/thread or guest-provided FD. False if no RPC is in flight.
+ * Cancellation is irrevocable: all leases become stale; no partial
+ * mutation result or late ACK may be exposed as success. */
+bool nt_broker_client_abort_inflight(void);
 bool nt_broker_client_register_thread(uint32_t thread_id);
 void nt_broker_client_unregister_thread(uint32_t thread_id);
 bool nt_broker_client_open(uint32_t thread_id, uint32_t access,
