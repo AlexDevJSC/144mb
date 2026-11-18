@@ -91,6 +91,23 @@ static struct supervisor_state *find_state(
     return NULL;
 }
 
+void nt_supervisor_control_server_abort_unacked_context(
+    struct nt_supervisor_control_server *owner,
+    const struct nt_broker_thread_info *identity)
+{
+    if (!owner || !identity)
+        return;
+    struct supervisor_state *state = find_state(owner, identity);
+    if (!state || !state->tracer.seized || state->tracer.exited)
+        return;
+    /* The kernel had accepted and verified a changed NT CONTEXT, but
+     * the requester disconnected before acknowledging it. Detaching
+     * would resume user code with a mutation the caller cannot confirm.
+     * Bind SIGKILL to the original direct child pidfd, never a raw TID. */
+    state->nt.unsafe_register_state = true;
+    (void)nt_supervisor_terminate_compromised_child(&state->tracer);
+}
+
 static struct supervisor_state *allocate_state(
     struct nt_supervisor_control_server *owner)
 {
