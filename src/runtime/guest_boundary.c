@@ -236,6 +236,15 @@ bool nt_guest_boundary_signal_guest_phase(void)
 {
     return signal_guest_phase != 0;
 }
+bool nt_guest_boundary_signal_guest_code(uintptr_t pc)
+{
+    if (pc >= trusted_code_begin && pc < trusted_code_end)
+        return true;
+    for (size_t i = 0; i < startup_code_count; ++i)
+        if (pc >= startup_code[i].begin && pc < startup_code[i].end)
+            return true;
+    return false;
+}
 /* The ordinary PE runner may be launched without the opt-in external
  * ptrace supervisor. Its local guest depth is still trustworthy at the
  * import-return gate, but the shared phase stays UNREGISTERED. This
