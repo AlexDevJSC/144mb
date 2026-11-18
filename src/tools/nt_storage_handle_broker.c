@@ -30,7 +30,10 @@ enum { FS4_MAGIC = 0x34465348u, FS4_VERSION = 3, FS4_DATA_MAX = 2048,
 enum { FS4_HELLO = 0, FS4_OPEN = 1, FS4_READ = 2, FS4_WRITE = 3,
        FS4_CLOSE = 4, FS4_DELETE = 5, FS4_RENAME = 6,
        FS4_TRUNCATE = 7, FS4_LOCK = 8, FS4_UNLOCK = 9,
-       FS4_SEEK = 10, FS4_SIZE = 11 };
+       FS4_SEEK = 10, FS4_SIZE = 11, FS4_ATTR_GET=12,
+       FS4_ATTR_SET=13, FS4_FIND_FIRST=14, FS4_FIND_NEXT=15,
+       FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
+       FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20 };
 struct fs4_request {
     uint32_t magic;
     uint16_t version, op;
@@ -48,7 +51,7 @@ struct fs4_reply {
 _Static_assert(sizeof(struct fs4_request) == 56, "FS4 request ABI");
 _Static_assert(sizeof(struct fs4_reply) == 32, "FS4 reply ABI");
 
-struct session_handle { uint64_t capability; uintptr_t native; };
+struct session_handle { uint64_t capability; uintptr_t native; bool search; };
 struct session { int socket_fd; const char *view; bool offline_test;
                  uint64_t nonce; struct session_handle entries[FS4_HANDLE_MAX]; };
 
@@ -215,40 +218,153 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         }
         free_slot->native = native;
         free_slot->capability = capability;
+        free_slot->search = false;
         result.handle = capability;
         result.error = NT_ERROR_SUCCESS;
         break;
     }
     case FS4_READ:
-    case FS4_WRITE: {
-        if (!slot || q->size > FS4_DATA_MAX ||
-            n != (q->op == FS4_WRITE ? q->size : 0u) ||
-            q->offset < -1)
+    case FS4_WRITE:
+    case FS4_READ_AT:
+    case FS4_WRITE_AT: {
+        const bool writing=q->op==FS4_WRITE || q->op==FS4_WRITE_AT;
+        const bool positional=q->op==FS4_READ_AT || q->op==FS4_WRITE_AT;
+        if (!slot || slot->search || q->size>FS4_DATA_MAX ||
+            n != (writing ? q->size : 0u) ||
+            (positional ? (q->offset<0 || q->offset>INT64_MAX-(int64_t)q->size) :
+                          q->offset!=-1))
             break;
-        if (q->offset >= 0 &&
-            !nt_SetFilePointerEx(slot->native, q->offset, NULL, 0)) {
-            result.error = nt_GetLastError();
-            break;
+        /* OVERLAPPED on a synchronous service HANDLE is immediate and
+         * positional, preserving its shared file cursor. No guest pointer
+         * is transferred into the service process. */
+        struct nt_overlapped position={0};
+        if (positional) {
+            position.offset=(uint32_t)q->offset;
+            position.offset_high=(uint32_t)((uint64_t)q->offset>>32);
         }
-        const bool ok = q->op == FS4_READ ?
-            nt_ReadFile(slot->native, output, q->size, &done, NULL) :
-            nt_WriteFile(slot->native, payload, q->size, &done, NULL);
-        result.error = ok ? NT_ERROR_SUCCESS : nt_GetLastError();
+        const bool ok=writing ?
+            nt_WriteFile(slot->native,payload,q->size,&done,
+                         positional ? &position : NULL) :
+            nt_ReadFile(slot->native,output,q->size,&done,
+                        positional ? &position : NULL);
+        result.error=ok ? NT_ERROR_SUCCESS : nt_GetLastError();
         if (ok) {
-            result.value = done;
-            if (q->op == FS4_READ)
-                result.length = done;
+            result.value=done;
+            if (!writing)
+                result.length=done;
         }
         break;
     }
     case FS4_CLOSE:
-        if (!slot || n || q->size)
+        if (!slot || slot->search || n || q->size)
             break;
         result.error = nt_CloseHandle(slot->native) ? NT_ERROR_SUCCESS :
                        nt_GetLastError();
         slot->capability = 0;
         slot->native = 0;
         break;
+    case FS4_ATTR_GET: {
+        if (n!=q->size || !to_wide(payload,n,path) || q->handle)
+            break;
+        struct nt_file_attribute_data info={0};
+        if (!nt_GetFileAttributesExW(path,0,&info))
+            result.error=nt_GetLastError();
+        else {
+            memcpy(output,&info,sizeof(info));
+            result.length=sizeof(info);
+            result.error=NT_ERROR_SUCCESS;
+        }
+        break;
+    }
+    case FS4_ATTR_SET:
+        if (n!=q->size || !to_wide(payload,n,path) || q->handle)
+            break;
+        result.error=nt_SetFileAttributesW(path,q->flags) ?
+                     NT_ERROR_SUCCESS : nt_GetLastError();
+        break;
+    case FS4_FIND_FIRST: {
+        if (n!=q->size || !to_wide(payload,n,path) || q->handle)
+            break;
+        struct session_handle *free_slot=NULL;
+        for (size_t i=0;i<FS4_HANDLE_MAX;i++)
+            if (!s->entries[i].capability && !free_slot)
+                free_slot=&s->entries[i];
+        if (!free_slot) { result.error=NT_ERROR_NOT_ENOUGH_MEMORY; break; }
+        struct nt_find_data_w item={0};
+        uintptr_t native=nt_FindFirstFileExW(path,(int32_t)q->access,&item,
+                                              (int32_t)q->share,NULL,q->flags);
+        if (native==UINTPTR_MAX) { result.error=nt_GetLastError(); break; }
+        uint64_t cap=0;bool unique=false;
+        for (int attempt=0;attempt<8;attempt++)
+            if (entropy(&cap) && !lookup(s,cap)) {unique=true;break;}
+        if (!unique) {
+            (void)nt_FindClose(native);
+            result.error=NT_ERROR_GEN_FAILURE;break;
+        }
+        free_slot->native=native;free_slot->capability=cap;
+        free_slot->search=true;
+        memcpy(output,&item,sizeof(item));
+        result.length=sizeof(item);result.handle=cap;
+        result.error=NT_ERROR_SUCCESS;
+        break;
+    }
+    case FS4_FIND_NEXT: {
+        if (!slot || !slot->search || n || q->size)
+            break;
+        struct nt_find_data_w item={0};
+        if (!nt_FindNextFileW(slot->native,&item)) {
+            result.error=nt_GetLastError();break;
+        }
+        memcpy(output,&item,sizeof(item));
+        result.length=sizeof(item);result.error=NT_ERROR_SUCCESS;
+        break;
+    }
+    case FS4_FIND_CLOSE:
+        if (!slot || !slot->search || n || q->size)
+            break;
+        result.error=nt_FindClose(slot->native) ?
+                     NT_ERROR_SUCCESS : nt_GetLastError();
+        slot->capability=0;slot->native=0;slot->search=false;
+        break;
+    case FS4_HANDLE_INFO: {
+        if (!slot || slot->search || n || q->size)
+            break;
+        struct nt_handle_file_info info={0};
+        if (!nt_GetFileInformationByHandle(slot->native,&info))
+            result.error=nt_GetLastError();
+        else {
+            memcpy(output,&info,sizeof(info));
+            result.length=sizeof(info);result.error=NT_ERROR_SUCCESS;
+        }
+        break;
+    }
+    case FS4_DUPLICATE: {
+        if (!slot || slot->search || n || q->size ||
+            q->flags!=2u || q->share!=0)
+            break;
+        /* Same-process noninheritable SAME_ACCESS only. Physical FDs
+         * NEVER transfer to the guest or an arbitrary child process. */
+        struct session_handle *free_slot=NULL;
+        for(size_t i=0;i<FS4_HANDLE_MAX;i++)
+            if(!s->entries[i].capability && !free_slot)
+                free_slot=&s->entries[i];
+        if (!free_slot) {result.error=NT_ERROR_NOT_ENOUGH_MEMORY;break;}
+        uintptr_t duplicate=0;
+        if(!nt_DuplicateHandle(nt_GetCurrentProcess(),slot->native,
+                               nt_GetCurrentProcess(),&duplicate,0,0,2)) {
+            result.error=nt_GetLastError();break;
+        }
+        uint64_t cap=0;bool unique=false;
+        for(int attempt=0;attempt<8;attempt++)
+            if(entropy(&cap) && !lookup(s,cap)) {unique=true;break;}
+        if(!unique) {
+            (void)nt_CloseHandle(duplicate);
+            result.error=NT_ERROR_GEN_FAILURE;break;
+        }
+        free_slot->native=duplicate;free_slot->capability=cap;
+        free_slot->search=false;result.handle=cap;
+        result.error=NT_ERROR_SUCCESS;break;
+    }
     case FS4_DELETE:
         if (n != q->size || !to_wide(payload, n, path))
             break;
@@ -269,7 +385,7 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         break;
     }
     case FS4_TRUNCATE:
-        if (!slot || n || q->size || q->offset < -1)
+        if (!slot || slot->search || n || q->size || q->offset < -1)
             break;
         if (q->offset >= 0 &&
             !nt_SetFilePointerEx(slot->native, q->offset, NULL, 0)) {
@@ -281,7 +397,7 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         break;
     case FS4_SEEK: {
         int64_t position = -1;
-        if (!slot || n || q->size || q->flags > 2)
+        if (!slot || slot->search || n || q->size || q->flags > 2)
             break;
         bool success = nt_SetFilePointerEx(slot->native, q->offset,
                                             &position, q->flags) != 0;
@@ -292,7 +408,7 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
     }
     case FS4_SIZE: {
         int64_t size = -1;
-        if (!slot || n || q->size)
+        if (!slot || slot->search || n || q->size)
             break;
         bool success = nt_GetFileSizeEx(slot->native, &size) != 0;
         result.error = success ? NT_ERROR_SUCCESS : nt_GetLastError();
@@ -302,7 +418,7 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
     }
     case FS4_LOCK:
     case FS4_UNLOCK:
-        if (!slot || n || q->offset < 0 || q->size == 0)
+        if (!slot || slot->search || n || q->offset < 0 || q->size == 0)
             break;
         result.error = (q->op == FS4_LOCK ?
                         nt_LockFile(slot->native, (uint32_t)q->offset,
@@ -349,7 +465,10 @@ static int serve(struct session *s)
     }
     for (size_t i = 0; i < FS4_HANDLE_MAX; ++i)
         if (s->entries[i].capability) {
-            (void)nt_CloseHandle(s->entries[i].native);
+            if (s->entries[i].search)
+                (void)nt_FindClose(s->entries[i].native);
+            else
+                (void)nt_CloseHandle(s->entries[i].native);
             s->entries[i].capability = 0;
         }
     return 0;

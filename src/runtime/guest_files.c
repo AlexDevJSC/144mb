@@ -2201,6 +2201,21 @@ uintptr_t NT_MS_ABI nt_CreateIoCompletionPort(uintptr_t file, uintptr_t existing
     if (!port)
         return 0;
 
+    if (nt_fs4_remote_handle(file)) {
+        pthread_mutex_lock(&iocp_lock);
+        const bool port_valid=find_iocp_port(port)!=NULL;
+        pthread_mutex_unlock(&iocp_lock);
+        const bool accepted=port_valid &&
+            nt_fs4_remote_associate_iocp(file,port,completion_key);
+        if (!accepted) {
+            if (created)
+                (void)close_iocp_port(port);
+            if (!port_valid)
+                nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        return port;
+    }
     pthread_mutex_lock(&file_lock);
     pthread_mutex_lock(&iocp_lock);
     struct guest_file *entry = find_handle(file);
@@ -2505,7 +2520,7 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     /* In PE service mode, the HANDLE never opens the Linux backing here.
      * The dedicated-UID Win32 broker owns its real FD and share leases. */
     if (nt_fs4_remote_mode()) {
-        if ((flags & (FILE_FLAG_OVERLAPPED | FILE_FLAG_OPEN_REPARSE_POINT |
+        if ((flags & (FILE_FLAG_OPEN_REPARSE_POINT |
                       FILE_FLAG_BACKUP_SEMANTICS)) != 0 ||
             (attributes != NULL && attributes->inherit)) {
             nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
@@ -2860,6 +2875,8 @@ uint32_t nt_runtime_snapshot_inherited_files(bool enabled, struct nt_child_file_
     }
     /* Events/semaphores/threads cannot be serialized as Linux file FDs:
      * fail the process creation, don't silently lose an inherited HANDLE. */
+    if (enabled && nt_fs4_remote_mode())
+        return NT_ERROR_NOT_SUPPORTED; /* no physical FD inheritance from service */
     if (enabled && nt_runtime_has_inheritable_waitables())
         return NT_ERROR_NOT_SUPPORTED;
     struct child_file_manifest *manifest = calloc(1, sizeof(*manifest));
@@ -3131,6 +3148,8 @@ bool nt_runtime_restore_inherited_files(int manifest_fd)
 
 int32_t NT_MS_ABI nt_GetHandleInformation(uintptr_t handle, uint32_t *flags)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_get_flags(handle,flags);
     if (!flags) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -3227,6 +3246,8 @@ int32_t NT_MS_ABI nt_CreatePipe(uintptr_t *reader, uintptr_t *writer,
 
 int32_t NT_MS_ABI nt_SetHandleInformation(uintptr_t handle, uint32_t mask, uint32_t flags)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_set_flags(handle,mask,flags);
     if (((mask | flags) & ~(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE)) != 0) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -3263,7 +3284,8 @@ int32_t NT_MS_ABI nt_GetProcessHandleCount(uintptr_t process, uint32_t *count)
         if (files[i].owner == WIN_HANDLE && files[i].handle != 0)
             ++handles;
     pthread_mutex_unlock(&file_lock);
-    *count = handles + nt_runtime_count_waitable_handles() +
+    *count = handles + (uint32_t)nt_fs4_remote_count() +
+             nt_runtime_count_waitable_handles() +
              (uint32_t)nt_runtime_section_handle_count() + (uint32_t)active_iocp_count();
     return 1;
 }
@@ -3313,6 +3335,17 @@ nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t sou
         return status;
     if ((options & ~7u) || (attributes & ~2u))
         return NT_STATUS_INVALID_PARAMETER;
+    if (nt_fs4_remote_handle(source)) {
+        /* Only same-process noninheritable SAME_ACCESS duplicates.
+         * Cross-session child inheritance requires an authenticated grant. */
+        if (options != 2u || attributes)
+            return NT_STATUS_NOT_SUPPORTED;
+        uintptr_t duplicated=nt_fs4_remote_duplicate(source);
+        if (duplicated==UINTPTR_MAX)
+            return NT_STATUS_UNSUCCESSFUL;
+        *target=duplicated;
+        return NT_STATUS_SUCCESS;
+    }
     if (options & 1u) {
         /* Don't create an alias when closing the protected source would
          * fail: CLOSE_SOURCE is not permitted to bypass handle protection. */
@@ -5222,6 +5255,14 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
  * Linux chmod flags and must never be silently claimed as supported. */
 static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
 {
+    if (nt_fs4_remote_mode()) {
+        char name[PATH_MAX];
+        if (!guest_path(input,name)) {
+            nt_SetLastError(path_error(errno,true));
+            return 0;
+        }
+        return nt_fs4_remote_set_attributes(name,attributes);
+    }
     if (!wal_healthy()) {
         nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return 0;
@@ -5391,6 +5432,7 @@ struct async_request {
     pid_t owner_pid, owner_tid;
     uintptr_t completion_port, completion_key;
     int fd;
+    uintptr_t remote_handle; /* duplicated service capability pins I/O lifetime */
     void *buffer;
     uint32_t size;
     off_t offset;
@@ -5440,18 +5482,31 @@ static void *async_worker_loop(void *argument)
 
         ssize_t result = -1;
         int error = 0;
-        if (!range_unlocked(job.fd, (uint64_t)job.offset, job.size, job.write_access)) {
-            error = errno;
+        if (job.remote_handle) {
+            uint32_t transferred = 0;
+            const bool success = nt_fs4_remote_io_at(job.remote_handle,
+                        job.buffer, job.size, &transferred, job.write_access,
+                        (uint64_t)job.offset) != 0;
+            error = success ? 0 : (int)nt_GetLastError();
+            result = success ? (ssize_t)transferred : -1;
+            /* The source guest may have closed its HANDLE, but this
+             * independently duplicated capability keeps its OFD lease. */
+            (void)nt_fs4_remote_close(job.remote_handle);
         } else {
-            do {
-                result = job.write_access ?
-                    pwrite(job.fd, job.buffer, job.size, job.offset) :
-                    pread(job.fd, job.buffer, job.size, job.offset);
-            } while (result < 0 && errno == EINTR);
-            error = errno;
+            if (!range_unlocked(job.fd, (uint64_t)job.offset, job.size, job.write_access)) {
+                error = errno;
+            } else {
+                do {
+                    result = job.write_access ?
+                        pwrite(job.fd, job.buffer, job.size, job.offset) :
+                        pread(job.fd, job.buffer, job.size, job.offset);
+                } while (result < 0 && errno == EINTR);
+                error = errno;
+            }
+            close(job.fd);
         }
-        close(job.fd);
         const uint32_t status = result >= 0 ? NT_ERROR_SUCCESS :
+            job.remote_handle ? (uint32_t)error :
             error == EAGAIN ? NT_ERROR_LOCK_VIOLATION : path_error(error, false);
         pthread_mutex_lock(&async_lock);
         __atomic_store_n(&job.completion->internal_high,
@@ -5484,23 +5539,46 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    pthread_mutex_lock(&file_lock);
-    const struct guest_file *entry = find_handle(handle);
-    const bool exists = entry != NULL;
-    const bool enabled = exists && entry->overlapped_io;
-    const uintptr_t completion_port = enabled ? entry->completion_port : 0;
-    const uintptr_t completion_key = enabled ? entry->completion_key : 0;
-    pthread_mutex_unlock(&file_lock);
+    const bool remote=nt_fs4_remote_handle(handle);
+    bool exists=false, enabled=false;
+    uintptr_t completion_port=0,completion_key=0;
+    if (remote) {
+        exists=nt_fs4_remote_valid(handle);
+        enabled=exists && nt_fs4_remote_overlapped(handle);
+        if (enabled)
+            (void)nt_fs4_remote_completion(handle,&completion_port,&completion_key);
+    } else {
+        pthread_mutex_lock(&file_lock);
+        const struct guest_file *entry=find_handle(handle);
+        exists=entry!=NULL;
+        enabled=exists && entry->overlapped_io;
+        if (enabled) {
+            completion_port=entry->completion_port;
+            completion_key=entry->completion_key;
+        }
+        pthread_mutex_unlock(&file_lock);
+    }
     if (!enabled) {
         nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
         return 0;
     }
-    const int fd = duplicate_handle(handle, write_access ? FILE_WRITE : FILE_READ);
-    if (fd < 0)
-        return file_result(fd, false);
-    const uintptr_t event = completion->event & ~(uintptr_t)1;
+    int fd=-1;
+    uintptr_t remote_copy=0;
+    if (remote) {
+        remote_copy=nt_fs4_remote_duplicate(handle);
+        if (remote_copy==UINTPTR_MAX)
+            return 0;
+    } else {
+        fd=duplicate_handle(handle,write_access ? FILE_WRITE : FILE_READ);
+        if (fd<0)
+            return file_result(fd,false);
+    }
+    const uintptr_t event=completion->event & ~(uintptr_t)1;
     if (event && !nt_ResetEvent(event)) {
-        close(fd);
+        if (remote)
+            (void)nt_fs4_remote_close(remote_copy);
+        else
+            close(fd);
         return 0;
     }
 
@@ -5533,7 +5611,7 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
             .owner_handle = handle, .owner_pid = getpid(), .owner_tid = gettid(),
             .completion_port = (completion->event & 1) ? 0 : completion_port,
             .completion_key = completion_key,
-            .fd = fd, .buffer = buffer,
+            .fd = fd, .remote_handle = remote_copy, .buffer = buffer,
             .size = size, .offset = (off_t)offset, .write_access = write_access,
             .completion = completion, .event = event
         };
@@ -5543,7 +5621,10 @@ static int32_t begin_overlapped(uintptr_t handle, void *buffer, uint32_t size,
     }
     pthread_mutex_unlock(&async_lock);
     if (slot < 0) {
-        close(fd);
+        if (remote)
+            (void)nt_fs4_remote_close(remote_copy);
+        else
+            close(fd);
         nt_SetLastError(slot == -2 ? NT_ERROR_INVALID_PARAMETER : NT_ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
@@ -5561,11 +5642,35 @@ static int32_t file_io(uintptr_t handle, void *buffer, uint32_t size,
     if (done)
         *done = 0;
     if (nt_fs4_remote_handle(handle)) {
-        if (overlap != NULL) {
-            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        if (size && !buffer) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
             return 0;
         }
-        return nt_fs4_remote_io(handle, buffer, size, done, writing);
+        if (overlap) {
+            if (nt_fs4_remote_overlapped(handle))
+                return begin_overlapped(handle,buffer,size,overlap,writing);
+            const uint64_t at=(uint64_t)overlap->offset_high<<32 | overlap->offset;
+            if (at>INT64_MAX || size>INT64_MAX-at) {
+                nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const uintptr_t event=overlap->event & ~(uintptr_t)1;
+            if (event && !nt_ResetEvent(event))
+                return 0;
+            uint32_t transferred=0;
+            const bool ok=nt_fs4_remote_io_at(handle,buffer,size,&transferred,
+                                               writing,at)!=0;
+            overlap->internal=ok ? NT_ERROR_SUCCESS : nt_GetLastError();
+            overlap->internal_high=transferred;
+            if (done) *done=transferred;
+            if (event) (void)nt_SetEvent(event);
+            return ok;
+        }
+        if (nt_fs4_remote_overlapped(handle)) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        return nt_fs4_remote_io(handle,buffer,size,done,writing);
     }
     if ((done == NULL && overlap == NULL) || (size && buffer == NULL)) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
@@ -5680,11 +5785,17 @@ int32_t NT_MS_ABI nt_WriteFile(uintptr_t handle, const void *buffer, uint32_t si
 static int32_t cancel_queued_io(uintptr_t handle, struct nt_overlapped *completion,
                                 bool issuing_thread_only)
 {
-    pthread_mutex_lock(&file_lock);
-    const struct guest_file *entry = find_handle(handle);
-    const bool exists = entry != NULL;
-    const bool enabled = exists && entry->overlapped_io;
-    pthread_mutex_unlock(&file_lock);
+    bool exists=false, enabled=false;
+    if (nt_fs4_remote_handle(handle)) {
+        exists=nt_fs4_remote_valid(handle);
+        enabled=exists && nt_fs4_remote_overlapped(handle);
+    } else {
+        pthread_mutex_lock(&file_lock);
+        const struct guest_file *entry=find_handle(handle);
+        exists=entry!=NULL;
+        enabled=exists && entry->overlapped_io;
+        pthread_mutex_unlock(&file_lock);
+    }
     if (!enabled) {
         nt_SetLastError(exists ? NT_ERROR_NOT_SUPPORTED : NT_ERROR_INVALID_HANDLE);
         return 0;
@@ -5712,7 +5823,10 @@ static int32_t cancel_queued_io(uintptr_t handle, struct nt_overlapped *completi
     pthread_mutex_unlock(&async_lock);
 
     for (size_t i = 0; i < count; ++i) {
-        close(cancelled[i].fd);
+        if (cancelled[i].remote_handle)
+            (void)nt_fs4_remote_close(cancelled[i].remote_handle);
+        else
+            close(cancelled[i].fd);
         if (cancelled[i].event)
             (void)nt_SetEvent(cancelled[i].event);
         if (cancelled[i].completion_port)
@@ -5748,10 +5862,17 @@ int32_t NT_MS_ABI nt_GetOverlappedResult(uintptr_t handle, struct nt_overlapped 
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    const int fd = duplicate_handle(handle, 0);
-    if (fd < 0)
-        return file_result(fd, false);
-    close(fd);
+    if (nt_fs4_remote_handle(handle)) {
+        if (!nt_fs4_remote_valid(handle)) {
+            nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+            return 0;
+        }
+    } else {
+        const int fd=duplicate_handle(handle,0);
+        if (fd<0)
+            return file_result(fd,false);
+        close(fd);
+    }
     pthread_mutex_lock(&async_lock);
     uintptr_t status = __atomic_load_n(&overlap->internal, __ATOMIC_ACQUIRE);
     while (status == NT_ERROR_IO_PENDING && wait) {
@@ -6858,8 +6979,12 @@ int32_t NT_MS_ABI nt_GetFileAttributesExW(const uint16_t *path, int32_t level,
                                          struct nt_file_attribute_data *info)
 {
     if (nt_fs4_remote_mode()) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
+        if (level != 0 || !info) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        char name[PATH_MAX];
+        return wide_path(path,name) && nt_fs4_remote_get_attributes(name,info);
     }
     if (level != 0 || info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
@@ -7019,8 +7144,14 @@ uintptr_t NT_MS_ABI nt_FindFirstFileExW(const uint16_t *path, int32_t level, str
                                        int32_t operation, void *filter, uint32_t flags)
 {
     if (nt_fs4_remote_mode()) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return UINTPTR_MAX;
+        if (!data || filter || (level != 0 && level != 1) ||
+            (operation != 0 && operation != 1) || (flags & ~2u)) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return UINTPTR_MAX;
+        }
+        char name[PATH_MAX];
+        return wide_path(path,name) ?
+               nt_fs4_remote_find_first(name,level,operation,flags,data) : UINTPTR_MAX;
     }
     if (data == NULL || (level != 0 && level != 1) || (operation != 0 && operation != 1) ||
         filter != NULL || (flags & ~2u) != 0) {
@@ -7085,6 +7216,8 @@ uintptr_t NT_MS_ABI nt_FindFirstFileW(const uint16_t *path, struct nt_find_data_
 
 int32_t NT_MS_ABI nt_FindNextFileW(uintptr_t handle, struct nt_find_data_w *data)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_find_next(handle,data);
     if (data == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -7159,6 +7292,8 @@ int32_t NT_MS_ABI nt_FindNextFileA(uintptr_t handle, struct nt_find_data_a *data
 
 int32_t NT_MS_ABI nt_FindClose(uintptr_t handle)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_find_close(handle);
     pthread_mutex_lock(&search_lock);
     struct directory_search *search = handle != 0 ? find_search(handle) : NULL;
     DIR *directory = search != NULL ? search->directory : NULL;
@@ -7214,6 +7349,10 @@ _Static_assert(sizeof(struct standard_file_info) == 24, "FILE_STANDARD_INFO layo
 
 int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind, void *info, uint32_t size)
 {
+    if (nt_fs4_remote_handle(handle)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
     if (info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -7286,6 +7425,8 @@ uint32_t NT_MS_ABI nt_GetFileSize(uintptr_t handle, uint32_t *high)
 int32_t NT_MS_ABI nt_GetFileInformationByHandle(uintptr_t handle,
                                                struct nt_handle_file_info *info)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_handle_info(handle,info);
     if (!info) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
