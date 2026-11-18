@@ -53,7 +53,7 @@ instrucción PE interrumpida y progreso sin espera alertable.
 La segunda añade una macro **exclusivamente de compilación de tests**
 que altera la comprobación de finalización después del INT3 real,
 cuando el estado GPR/XSTATE ya ha sido reemplazado. La regresión
-exige error, prohibición de CONT/DETACH y muerte por pidfd SIGKILL.
+exige error, prohibición de CONT/DETACH, solicitud SIGKILL aceptada por el\n`pidfd` y mantenimiento de `PTRACE_O_EXITKILL` hasta terminar el trazador.\nLa prueba no finge que un `waitpid` intermedio con `WIFSTOPPED` sea\nconfirmación de muerte: esa comprobación terminal continúa pendiente.
 
 El workflow experimental ejecuta ambas. Compilar no equivale a aprobar:
 registrar PASS de la CI del último commit, y **INCOMPLETE** si
