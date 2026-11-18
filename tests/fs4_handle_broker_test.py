@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Win32 runtime HANDLEs over per-client binary IPC, no shared backing FDs."""
 import os
+import signal
+import threading
 from pathlib import Path
 import secrets
 import socket
@@ -186,6 +188,66 @@ class FileSystem4Handles(unittest.TestCase):
             finally:
                 a.close()
                 b.close()
+
+    def test_sigkill_releases_remote_share_lease(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-kill-lease-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            (root / "lease.dat").write_bytes(b"SAFE")
+            first, second = Broker(root), Broker(root)
+            killed = False
+            try:
+                err, handle, _, _ = first.call(OPEN, b"C:/lease.dat",
+                                                access=0x80000000,
+                                                share=0, disposition=3)
+                self.assertEqual(err, 0)
+                self.assertEqual(second.call(OPEN, b"C:/lease.dat",
+                    access=0x80000000, share=7, disposition=3)[0], 32)
+                os.kill(first.process.pid, signal.SIGKILL)
+                first.process.wait(timeout=5)
+                first.client.close()
+                killed = True
+                self.assertNotEqual(first.process.returncode, 0)
+                err, available, _, _ = second.call(
+                    OPEN, b"C:/lease.dat", access=0x80000000,
+                    share=7, disposition=3)
+                self.assertEqual(err, 0, "SIGKILL leaked physical OFD lease")
+                self.assertEqual(second.call(CLOSE, handle=available)[0], 0)
+                self.assertEqual((root / "lease.dat").read_bytes(), b"SAFE")
+            finally:
+                if not killed:
+                    first.close()
+                second.close()
+
+    def test_concurrent_create_new_is_single_winner(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-create-race-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            first, second = Broker(root), Broker(root)
+            start = threading.Barrier(3)
+            results = []
+            def create(client):
+                start.wait(timeout=5)
+                results.append((client, client.call(
+                    OPEN, b"C:/contended.bin", access=0xC0000000,
+                    share=7, disposition=1)))
+            try:
+                a = threading.Thread(target=create, args=(first,))
+                b = threading.Thread(target=create, args=(second,))
+                a.start(); b.start(); start.wait(timeout=5)
+                a.join(timeout=8); b.join(timeout=8)
+                self.assertFalse(a.is_alive() or b.is_alive(),
+                                 "stalled physical WAL/lease lock ordering")
+                self.assertEqual(len(results), 2)
+                self.assertEqual(sum(reply[0] == 0 for _, reply in results), 1)
+                for broker, reply in results:
+                    if reply[0] == 0:
+                        self.assertEqual(broker.call(CLOSE,
+                                                     handle=reply[1])[0], 0)
+                self.assertTrue((root / "contended.bin").is_file())
+            finally:
+                first.close()
+                second.close()
 
     def test_wrong_session_nonce_revokes_handles_and_socket(self):
         with tempfile.TemporaryDirectory(prefix="fs4-nonce-") as temp:
