@@ -287,3 +287,38 @@ La siguiente fase prudente es la aceptación física y una matriz
 diferencial contra Windows sobre casos exactos, **antes** de activar
 supervisión asíncrona por defecto. Si el anfitrión no permite
 `ptrace`/Bubblewrap, registrar **INCOMPLETE**, no **PASS**.
+
+## Revisión adicional: escritura RAX directa con verificación de retorno (18-11-2026)
+
+La ruta experimental `nt_supervisor_set_rax`, utilizada por fixtures de
+supervisión `ptrace`, antes devolvía éxito tras `PTRACE_SETREGSET` sin
+demostrar que todo el registro observable coincidiera. También podía fallar
+después de una mutación parcial y dejar `PTRACE_CONT/DETACH` disponibles.
+Esta debilidad no formaba parte de la API Win32 pública.
+
+Ahora conserva una instantánea GPR completa del kernel, escribe RAX,
+ejecuta `PTRACE_GETREGSET` y compara toda la estructura. Si falla
+la escritura o la comprobación, restaura y vuelve a leer el GPR original.
+**Solo** se permite volver a continuar/desadjuntar al hijo cuando el
+rollback se demuestra exacto. Si la restauración es indeterminada,
+`compromised` queda irrevocable y se solicita `SIGKILL` al hijo
+fijado por `pidfd`; el supervisor no libera una traza con registros
+inciertos. El helper directo continúa limitado a pruebas controladas,
+no se conecta al lanzador público.
+
+`make check-supervisor-rax-rollback` compila dos variantes de una
+prueba Linux con un hijo real: fallo de readback y rollback exacto, y
+fallo deliberado de rollback que exige cuarentena + terminación
+confirmada. La inyección se compila con macros **solo en los tests**,
+no mediante parámetros del invitado. Estas dos variantes también se
+incluyen en `make check` y en la CI especializada. No sustituyen la
+aceptación Fedora física ni verifican una APC/CONTEXT arbitraria.
+
+**Escala de madurez heredada de FileSystem 4:** 100 % exige alcance
+implementado, integrado y probado automáticamente; las pruebas
+físicas de Fedora constituyen una puerta separada. Este cambio
+endurece un contrato existente pero no completa CONTROL/RIP/RSP,
+FP/XSTATE, APC generales, aislamiento de PE maliciosos ni seguridad
+NT. Por ello **componente 4: 96 % → 96 % (+0 puntos)**;
+solo se actualizará la valoración si la CI realmente valida nuevos
+contratos o se cierran funcionalidades pendientes.
