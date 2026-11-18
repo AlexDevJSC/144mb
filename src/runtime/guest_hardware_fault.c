@@ -130,7 +130,8 @@ static _Noreturn void fail_closed(int signal)
 #ifdef NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS
     char message[] = "hardware signal denied at gate 0\\n";
     message[31] = (char)('0' + denied_at);
-    (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+    const ssize_t written = write(STDERR_FILENO, message, sizeof(message) - 1);
+    (void)written;
 #endif
     /* _Exit is async-signal-safe. Do not reinstall handlers, detach a
      * ptrace target or retry the instruction with ambiguous registers. */
