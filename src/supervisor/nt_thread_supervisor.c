@@ -272,11 +272,24 @@ int nt_supervisor_set_guest_rax(struct nt_thread_supervisor *sup,
 }
 
 
+/* An APC has changed the interrupted guest's CPU state. If anything
+ * after that write is ambiguous, it is unsafe to DETACH or CONT: only the
+ * exact direct child identified by pidfd may be terminated. */
+static int nt_supervisor_apc_fail_closed(struct nt_thread_supervisor *sup,
+                                         int failure)
+{
+    if (sup && sup->seized && !sup->exited)
+        (void)nt_supervisor_terminate_compromised_child(sup);
+    errno = failure ? failure : EPROTO;
+    return -1;
+}
+
 /* INT3-terminated, trusted-fixture-only special APC proof. A complete
  * register+XSTATE round trip is required: restoring integer registers
  * alone after a callback would silently corrupt interrupted AVX code.
  * This is not safe for arbitrary Windows images, SEH, or host callbacks;
- * only a reviewed, import-free PE with an isolated APC stack may call it. */
+ * only a reviewed, import-free PE with an isolated APC stack may call it.
+ * Any unprovable mutation terminates ONLY the pidfd-pinned child. */
 int nt_supervisor_invoke_trusted_guest_apc(
     struct nt_thread_supervisor *sup,
     const struct nt_supervisor_guest_scope *scope,
@@ -304,6 +317,7 @@ int nt_supervisor_invoke_trusted_guest_apc(
     /* Bound state capture by 64 KiB, aligned for XSAVE. An unavailable
      * XSTATE GET/SET is a hard failure; do not silently degrade to FPREGS. */
     _Alignas(64) unsigned char xstate[65536];
+    _Alignas(64) unsigned char observed_xstate[65536];
     struct iovec state = {.iov_base = xstate, .iov_len = sizeof(xstate)};
     if (ptrace(PTRACE_GETREGSET, sup->tid, (void *)(uintptr_t)NT_X86_XSTATE,
                &state) == -1)
@@ -312,12 +326,19 @@ int nt_supervisor_invoke_trusted_guest_apc(
         errno = EPROTO;
         return -1;
     }
-    struct iovec restore = {.iov_base = xstate, .iov_len = state.iov_len};
-    /* Prove that this kernel accepts restoring the full xstate BEFORE
-     * changing the guest's PC; never begin injection on partial support. */
+    const size_t xstate_size = state.iov_len;
+    struct iovec restore = {.iov_base = xstate, .iov_len = xstate_size};
+    /* This first SETREGSET is itself potentially mutating, even though the
+     * value came from the kernel: verify exact readback before changing RIP.
+     * A short transfer, normalization or unavailable XSTATE is not PASS. */
     if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_X86_XSTATE,
-               &restore) == -1)
-        return -1;
+               &restore) == -1 || restore.iov_len != xstate_size)
+        return nt_supervisor_apc_fail_closed(sup, EPROTO);
+    struct iovec read_xstate = {.iov_base = observed_xstate, .iov_len = xstate_size};
+    if (ptrace(PTRACE_GETREGSET, sup->tid, (void *)(uintptr_t)NT_X86_XSTATE,
+               &read_xstate) == -1 || read_xstate.iov_len != xstate_size ||
+        memcmp(observed_xstate, xstate, xstate_size) != 0)
+        return nt_supervisor_apc_fail_closed(sup, EPROTO);
 
     struct user_regs_struct inserted = original;
     inserted.rip = (uint64_t)guest_entry;
@@ -327,50 +348,82 @@ int nt_supervisor_invoke_trusted_guest_apc(
     inserted.rcx = (uint64_t)guest_argument;
     struct iovec gpr = {.iov_base = &inserted, .iov_len = sizeof(inserted)};
     if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_PRSTATUS,
-               &gpr) == -1)
-        return -1;
+               &gpr) == -1 || gpr.iov_len != sizeof(inserted))
+        return nt_supervisor_apc_fail_closed(sup, EPROTO);
+    struct user_regs_struct verified_regs;
+    if (nt_supervisor_get_registers(sup, &verified_regs) ||
+        memcmp(&verified_regs, &inserted, sizeof(inserted)) != 0)
+        return nt_supervisor_apc_fail_closed(sup, EPROTO);
     if (nt_supervisor_continue(sup))
-        return -1;
+        return nt_supervisor_apc_fail_closed(sup, errno);
 
     const uint64_t deadline = mono_ms() + timeout_ms;
     for (;;) {
         int status = 0;
         pid_t observed = waitpid(sup->tid, &status, __WALL | WNOHANG);
         if (observed == sup->tid) {
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                sup->exited = true;
+                sup->seized = false;
+                errno = ESRCH;
+                return -1;
+            }
             if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP &&
                 ((unsigned)status >> 16) == 0) {
                 sup->stopped = true;
+                sup->pending_signal = 0; /* Synthetic INT3 stays in supervisor. */
                 struct user_regs_struct trap;
                 if (nt_supervisor_get_guest_context(sup, scope, &trap))
-                    return -1;
-                if (atomic_load_explicit(guest_completion, memory_order_acquire) != before + 1) {
-                    errno = EPROTO;
-                    return -1;
-                }
-                /* INT3 has been intercepted, never deliver SIGTRAP to
-                 * the guest. Restore XSTATE before original integer regs. */
-                restore.iov_len = state.iov_len;
-                if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_X86_XSTATE,
-                           &restore) == -1)
-                    return -1;
+                    return nt_supervisor_apc_fail_closed(sup, errno);
+                uint32_t delivered =
+                    atomic_load_explicit(guest_completion, memory_order_acquire);
+#ifdef NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH
+                /* Test-only injection after a REAL PE INT3 and mutable
+                 * GPR/XSTATE; never enabled in runtime production builds. */
+                delivered ^= UINT32_C(1);
+#endif
+                if (delivered != before + UINT32_C(1))
+                    return nt_supervisor_apc_fail_closed(sup, EPROTO);
+
+                /* Restore XSTATE FIRST, then the original GPRs, and prove
+                 * exact readback of both before allowing guest execution. */
+                restore.iov_len = xstate_size;
+                if (ptrace(PTRACE_SETREGSET, sup->tid,
+                           (void *)(uintptr_t)NT_X86_XSTATE, &restore) == -1 ||
+                    restore.iov_len != xstate_size)
+                    return nt_supervisor_apc_fail_closed(sup, EPROTO);
                 gpr.iov_base = &original;
                 gpr.iov_len = sizeof(original);
-                if (ptrace(PTRACE_SETREGSET, sup->tid, (void *)(uintptr_t)NT_PRSTATUS,
-                           &gpr) == -1)
-                    return -1;
-                return nt_supervisor_continue(sup);
+                if (ptrace(PTRACE_SETREGSET, sup->tid,
+                           (void *)(uintptr_t)NT_PRSTATUS, &gpr) == -1 ||
+                    gpr.iov_len != sizeof(original))
+                    return nt_supervisor_apc_fail_closed(sup, EPROTO);
+                if (nt_supervisor_get_registers(sup, &verified_regs) ||
+                    memcmp(&verified_regs, &original, sizeof(original)) != 0)
+                    return nt_supervisor_apc_fail_closed(sup, EPROTO);
+                read_xstate.iov_len = xstate_size;
+                if (ptrace(PTRACE_GETREGSET, sup->tid,
+                           (void *)(uintptr_t)NT_X86_XSTATE, &read_xstate) == -1 ||
+                    read_xstate.iov_len != xstate_size ||
+                    memcmp(observed_xstate, xstate, xstate_size) != 0)
+                    return nt_supervisor_apc_fail_closed(sup, EPROTO);
+                if (nt_supervisor_continue(sup))
+                    return nt_supervisor_apc_fail_closed(sup, errno);
+                return 0;
             }
-            /* Stop from any other signal, exit or ptrace event is never
-             * interpreted as APC completion or silently suppressed. */
-            errno = EPROTO;
-            return -1;
+            /* Unexpected signal or ptrace event while running injected
+             * code. Never deliver it to an overwritten RIP/RSP. */
+            if (WIFSTOPPED(status))
+                sup->stopped = true;
+            return nt_supervisor_apc_fail_closed(sup, EPROTO);
         }
-        if (observed < 0)
-            return -1;
-        if (mono_ms() >= deadline) {
-            errno = ETIMEDOUT;
-            return -1;
+        if (observed < 0) {
+            if (errno == EINTR)
+                continue;
+            return nt_supervisor_apc_fail_closed(sup, errno);
         }
+        if (mono_ms() >= deadline)
+            return nt_supervisor_apc_fail_closed(sup, ETIMEDOUT);
         const struct timespec pause = {.tv_nsec = 1000000L};
         (void)nanosleep(&pause, NULL);
     }
