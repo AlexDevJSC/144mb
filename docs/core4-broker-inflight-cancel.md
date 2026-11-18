@@ -66,15 +66,44 @@ Las suites especializadas del supervisor ejecutan este test. Debe
 anotarse el identificador de CI y el estado del último commit antes
 de darlo por validado.
 
+## Cierre de ACK ambiguo de SET_CONTEXT en el broker padre
+
+La ruta del **padre** se refuerza además de la cancelación del cliente:
+si un `NT_BROKER_RPC_SUP_SET_CONTEXT` autenticado consigue escribir
+y verificar un CONTEXT pero el socket ya presenta
+`POLLRDHUP/POLLHUP/POLLERR` antes de responder, o si falla el envío
+de la respuesta, el broker no entrega un falso éxito. Invoca
+`nt_supervisor_control_server_abort_unacked_context` sobre la
+identidad NT ya comprobada (TID + generación), marca el tracee como
+`compromised` y envía `SIGKILL` **solo al `pidfd` del hijo directo**.
+No permite `PTRACE_DETACH` con registros modificados sin ACK;
+`PTRACE_O_EXITKILL` permanece armado durante la salida del trazador.
+
+La regresión de integración usa un proceso Linux real con un hilo
+guest registrado, su TEB/GS, un `PTRACE_INTERRUPT` real y una escritura
+`PTRACE_SETREGSET` verificada. Un hook de compilación **solo para
+tests** publica una barrera después de esa escritura y antes del ACK.
+El proceso cliente la observa y cierra la sesión desde otro pthread.
+La prueba exige muerte del hijo por `SIGKILL`, no una finalización
+ordinaria ni un `PTRACE_DETACH`. El hook se excluye por completo de los
+objetos de producción.
+
+```sh
+make -j2 check-supervisor-control-lost-ack
+```
+
+No se afirma que un `PTRACE_INTERRUPT` ya en curso se interrumpa
+instantáneamente: esta garantía es una recuperación de un ACK perdido
+**después** de que `SET_CONTEXT` haya sido aplicado y verificado.
+
 ## Contratos aún NO completados
 
-1. **Cancelación remota del `ptrace` ya ejecutándose en el broker.**
-   Este cambio corta inmediatamente la espera del cliente y fuerza
-   desconexión/revocación, pero la operación padre puede estar dentro
-   de `PTRACE_INTERRUPT` o de su timeout acotado. No se publica
-   equivocadamente un resultado NT exitoso. Para cancelación física
-   instantánea hace falta un protocolo servidor de transición
-   abortable que preserve estados de suspensión y `CONTEXT`.
+1. **Cancelación instantánea de `ptrace` durante su ejecución.**
+   El cliente cancela la espera RPC y el padre ahora pone en cuarentena
+   un `SET_CONTEXT` aplicado si se pierde su ACK, pero una operación
+   `PTRACE_INTERRUPT` puede continuar hasta su plazo acotado. Para
+   abortarla inmediatamente faltan checkpoints de cancelación en el
+   supervisor y una transición de suspensión/reanudación transaccional.
 2. **APC especiales genéricas de Windows.** `QueueUserAPC2` special y
    `NtQueueApcThreadEx` special siguen rechazadas en runtime; no
    se inyecta código de PE arbitrario sin preservar pila, XSTATE,
