@@ -8,6 +8,7 @@
 #include "nt_services.h"
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -60,7 +61,80 @@ static int fake_reply(int fd, uint32_t pid, int mode, unsigned step)
     return send(fd, &reply, sizeof(reply), MSG_DONTWAIT | MSG_NOSIGNAL) ==
            (ssize_t)sizeof(reply);
 }
-static int child_case(int fd, int mode)
+/* This is a *real* two-thread client: a worker holds the serial RPC
+ * lock while waiting for the parent, and the other thread must revoke
+ * its live session without waiting for the 4-second RPC timeout. The
+ * fake parent keeps the socket OPEN throughout the test. */
+struct cancel_case {
+    bool mutation;
+    uint64_t capability;
+    bool query_success;
+    nt_status control_status;
+    struct nt_broker_thread_info identity;
+    uint32_t previous;
+};
+static void *blocking_client_request(void *argument)
+{
+    struct cancel_case *item = argument;
+    if (item->mutation) {
+        item->control_status = nt_broker_client_supervisor_suspend(
+            item->capability, &item->previous);
+    } else {
+        item->query_success = nt_broker_client_supervisor_query(
+            item->capability, NT_BROKER_SUPERVISOR_GET_CONTEXT, &item->identity);
+    }
+    return NULL;
+}
+static int cancel_live_rpc(int notify_fd, int mode)
+{
+    struct cancel_case item = {
+        .mutation = mode == 7,
+        .control_status = NT_STATUS_NOT_SUPPORTED,
+        .capability = UINT64_C(0x4141414141414141),
+        .identity = {.guest_thread_id = 0x51515151u},
+        .previous = 0x5a5a5a5au
+    };
+    pthread_t worker;
+    if (pthread_create(&worker, NULL, blocking_client_request, &item) != 0)
+        return 21;
+    /* The parent writes only AFTER recvmsg read the request. It does not
+     * send a fake reply, EOF or a signal: only the explicit abort/detach
+     * can wake the blocked socket before the 4s timeout. */
+    char signal = 0;
+    if (read(notify_fd, &signal, 1) != 1 || signal != 'R')
+        return 22;
+    if (mode == 6) {
+        if (!nt_broker_client_abort_inflight())
+            return 23;
+    } else {
+        /* A concurrent detach MUST wake the worker instead of waiting
+         * for it to exhaust the old receive timeout. */
+        nt_broker_client_detach();
+    }
+    if (pthread_join(worker, NULL) != 0)
+        return 24;
+    const bool attached_after = nt_broker_client_is_attached();
+    const bool lingering_request = nt_broker_client_abort_inflight();
+    if (item.query_success ||
+        item.control_status != NT_STATUS_NOT_SUPPORTED ||
+        item.identity.guest_thread_id != 0x51515151u ||
+        item.previous != 0x5a5a5a5au ||
+        attached_after || lingering_request) {
+        fprintf(stderr, "FAIL cancel flags mode=%d success=%d status=%08x tid=%08x prev=%08x attached=%d inflight=%d\\n",
+                mode, (int)item.query_success, (unsigned)item.control_status,
+                item.identity.guest_thread_id, item.previous,
+                (int)attached_after, (int)lingering_request);
+        return 25;
+    }
+    if (nt_broker_client_supervisor_query(item.capability,
+            NT_BROKER_SUPERVISOR_GET_CONTEXT, &item.identity) ||
+        item.identity.guest_thread_id != 0x51515151u)
+        return 26;
+    nt_broker_client_detach();
+    return 0;
+}
+
+static int child_case(int fd, int mode, int notify_fd)
 {
     if (mode == 5) {
         struct sigaction action = {.sa_handler = harmless_signal};
@@ -69,6 +143,8 @@ static int child_case(int fd, int mode)
             return 19;
     }
     if (!nt_broker_client_attach(fd)) return 10;
+    if (mode == 6 || mode == 7)
+        return cancel_live_rpc(notify_fd, mode);
     struct nt_broker_thread_info id = {.guest_thread_id = 0x51515151u};
     const uint64_t fake_capability = UINT64_C(0x4141414141414141);
     if (mode == 5) {
@@ -119,13 +195,18 @@ static int run_case(int mode)
     int fd[2] = {-1,-1};
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, fd) != 0)
         return 1;
+    int notice[2] = {-1,-1};
+    if ((mode == 6 || mode == 7) && pipe(notice) != 0)
+        return 2;
     const pid_t child = fork();
     if (child < 0) return 2;
     if (child == 0) {
         close(fd[0]);
-        _exit(child_case(fd[1], mode));
+        if (notice[1] >= 0) close(notice[1]);
+        _exit(child_case(fd[1], mode, notice[0]));
     }
     close(fd[1]);
+    if (notice[0] >= 0) close(notice[0]);
     struct nt_broker_hello hello = {
         .magic = NT_THREAD_BROKER_MAGIC, .version = NT_BROKER_RPC_VERSION
     };
@@ -151,12 +232,45 @@ static int run_case(int mode)
             if (kill(child, SIGUSR1) != 0) return 8;
             delay_ms(135);
         }
-        if (!fake_reply(fd[0], (uint32_t)child, mode, (unsigned)step) &&
-            mode != 3)
+        if (mode == 6 || mode == 7) {
+            if (request.request.operation !=
+                (mode == 7 ? NT_BROKER_RPC_SUP_SUSPEND :
+                             NT_BROKER_RPC_SUP_QUERY))
+                return 9;
+            /* The fake parent stays alive and connected, without
+             * replying. Notify child that the request was received. */
+            if (write(notice[1], "R", 1) != 1) return 10;
+            close(notice[1]);
+            notice[1] = -1;
+        } else if (!fake_reply(fd[0], (uint32_t)child, mode,
+                               (unsigned)step) && mode != 3) {
             return 6;
+        }
+    }
+    int status = 0;
+    if (mode == 6 || mode == 7) {
+        bool finished = false;
+        for (unsigned elapsed = 0; elapsed < 1500; elapsed += 10) {
+            const pid_t got = waitpid(child, &status, WNOHANG);
+            if (got == child) { finished = true; break; }
+            if (got < 0 && errno != EINTR) return 11;
+            delay_ms(10);
+        }
+        if (!finished) {
+            fprintf(stderr, "FAIL cancel RPC remained blocked mode=%d\\n", mode);
+            (void)kill(child, SIGKILL);
+            (void)waitpid(child, &status, 0);
+            close(fd[0]);
+            return 12;
+        }
+        close(fd[0]);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "FAIL in-flight cancel mode=%d exit=%d\\n", mode, status);
+            return 13;
+        }
+        return 0;
     }
     close(fd[0]);
-    int status = 0;
     if (waitpid(child, &status, 0) != child ||
         !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         fprintf(stderr, "FAIL IPC corrupted reply mode=%d exit=%d\n", mode, status);
@@ -167,9 +281,10 @@ static int run_case(int mode)
 int main(void)
 {
     alarm(35);
-    for (int mode=0; mode<6; ++mode)
+    for (int mode=0; mode<8; ++mode)
         if (run_case(mode)) return 1;
     puts("PASS broker transport: oversized/denied/bad-magic/late/short-CONTEXT "
-         "packets fail closed; EINTR with valid reply preserves the session");
+         "packets fail closed; EINTR preserves session; concurrent abort/detach "
+         "interrupt in-flight RPC without a late ACK or mutated outputs");
     return 0;
 }

@@ -17,6 +17,13 @@ void nt_supervisor_control_server_revoke_tid(
     struct nt_supervisor_control_server *, uint32_t tid);
 void nt_supervisor_control_server_destroy(
     struct nt_supervisor_control_server *);
+/* A verified SET_CONTEXT became ambiguous after a lost client ACK.
+ * Caller has already authenticated/resolved this generation-pinned
+ * identity. Do not detach a tracee with unacknowledged register changes:
+ * quarantine and SIGKILL only its pinned direct child via pidfd. */
+void nt_supervisor_control_server_abort_unacked_context(
+    struct nt_supervisor_control_server *,
+    const struct nt_broker_thread_info *);
 nt_status nt_supervisor_control_server_call(
     struct nt_supervisor_control_server *,
     const struct nt_thread_broker_registered_peer *,

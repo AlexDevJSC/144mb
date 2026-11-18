@@ -107,6 +107,8 @@ jobs:
         run: make -j2 check-broker-transport-failure
       - name: Prove authenticated suspend, context and signal lifecycle
         run: make -j2 check-supervisor-control-ipc
+      - name: Quarantine real modified CONTEXT after lost authenticated ACK
+        run: make -j2 check-supervisor-control-lost-ack
       - name: Verify CONTEXT GPR readback, rollback and pidfd-only fatal recovery
         run: make -j2 check-supervisor-context-rollback
       - name: Verify direct RAX readback, rollback and pidfd-only fatal recovery

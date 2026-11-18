@@ -3,6 +3,34 @@
 Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-order.md):
 **4 → 1 → 5 → 2 → 3 → 6 → 7** (nueva instrucción expresa del 14-11-2026; el orden original era 4 → 5 → 2 → 3 → 1 → 6 → 7). **Esta fase permanece activa** y el cargador PE/DLL no empieza hasta que se satisfagan los criterios de salida.
 
+## Continuación 18-11-2026: revocación durante RPC del broker (#178)
+
+La entrega posterior a la [PR #177](https://github.com/AlexDevJSC/144mb/pull/177)
+aborda un bloqueo transversal del **problema 5**: el cliente del broker
+puede cancelar una petición autenticada en curso desde otro pthread,
+sin aguardar los cuatro segundos del timeout original ni aceptar
+respuestas tardías. `nt_broker_client_detach()` también solicita aborto
+antes de adquirir el mutex del RPC; el propio propietario serializado
+cierra el socket sin arriesgar una reutilización de FD.
+
+Además, ante un `SET_CONTEXT` ya escrito y verificado por el supervisor,
+si el cliente desconecta **antes del ACK**, el proceso padre pone en
+cuarentena ese TID generacional y solicita la muerte del hijo por
+`pidfd`: no desadjunta ni reanuda un contexto modificado sin
+confirmación. La prueba específica usa un proceso/hilo reales y una
+barrera únicamente compilada en el fixture negativo.
+
+**Esto no implementa APC especiales para PE arbitrarios** ni la
+traducción universal de `SIGSEGV/SIGILL` a excepciones SEH del invitado.
+El broker aún puede completar hasta su timeout una operación `ptrace`
+iniciada antes de recibir cancelación: la nueva garantía es revocación
+y cuarentena de las mutaciones con ACK perdido, no preempción ilimitada.
+Véase [contrato de cancelación](core4-broker-inflight-cancel.md).
+
+**Madurez del componente 4: 96 % → 96 % (+0 puntos)**;
+`main` seguirá sin cerrar el componente hasta demostrar el resto de
+contratos NT y su validación Windows/Fedora correspondiente.
+
 ## Actualización 18-11-2026: problema 5, APC avanzada experimental
 
 Después del cierre contractual acotado del problema 6, se trabaja en el

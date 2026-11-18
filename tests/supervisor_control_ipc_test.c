@@ -24,9 +24,27 @@
 #include <unistd.h>
 
 extern const char control_loop_begin[], control_loop_end[];
+#ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
+/* Linked only into the negative integration binary; never production. */
+extern void nt_broker_test_set_context_ack_gate(_Atomic uint32_t *gate);
+struct update_request {
+    uint64_t capability;
+    _Alignas(16) struct nt_context64 context;
+};
+static void *background_context_write(void *data)
+{
+    const struct update_request *request = data;
+    (void)nt_broker_client_supervisor_set_context(request->capability,
+                                                   &request->context);
+    return NULL;
+}
+#endif
 struct shared {
     struct nt_guest_boundary_session session;
     _Atomic uint32_t tid, ready, stop, host_phase, finish, seen_signal;
+#ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
+    _Atomic uint32_t context_ack_ready;
+#endif
     uint32_t test_mode;
     _Atomic uint64_t ticks;
 };
@@ -178,6 +196,38 @@ static _Noreturn void child_client(int fd, unsigned mode)
         if (atomic_load(&data->ticks) != frozen ||
             !nt_broker_client_is_attached())
             _exit(28);
+#ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
+        if (mode == 6) {
+            /* The broker has stopped this REAL worker and holds its ptrace
+             * ownership. A context mutation occurs on a background child
+             * pthread, then the child closes the channel precisely AFTER
+             * the parent verified SETREGSET but BEFORE replying. */
+            _Alignas(16) struct nt_context64 context = {0};
+            context.flags = 0x100002u; /* AMD64 INTEGER */
+            if (nt_broker_client_supervisor_get_context(capability, &context) !=
+                    NT_STATUS_SUCCESS)
+                _exit(71);
+            struct update_request update = {.capability = capability};
+            update.context = context;
+            update.context.rax ^= UINT64_C(0x1122334455667788);
+            pthread_t writer;
+            if (pthread_create(&writer, NULL, background_context_write, &update) != 0)
+                _exit(72);
+            for (int j = 0; j < 2500 &&
+                 !atomic_load_explicit(&data->context_ack_ready,
+                                       memory_order_acquire); ++j)
+                sleep_ms(1);
+            if (!atomic_load_explicit(&data->context_ack_ready,
+                                      memory_order_acquire))
+                _exit(73);
+            /* Closing this channel before the server ACK is the fault.
+             * Parent MUST pidfd-kill the child. We must never return
+             * successfully from this scenario. */
+            nt_broker_client_detach();
+            sleep_ms(1200);
+            _exit(74);
+        }
+#endif
         if (mode == 2) {
             /* Abrupt authenticated EOF while a real tracee is stopped:
              * parent must revoke and detach without leaving a frozen TID. */
@@ -338,13 +388,34 @@ static int run_one(unsigned mode)
             };
     }
     memcpy(peer.secret, secret, sizeof(secret));
+#ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
+    if (mode == 6)
+        nt_broker_test_set_context_ack_gate(&data->context_ack_ready);
+#endif
     /* server_main owns MAP_SHARED after start */
     if (!nt_broker_server_start(sockets[0], &peer) ||
         !nt_broker_server_handshake(sockets[0], secret))
         return 5;
     int status = 0;
-    if (waitpid(child, &status, 0) != child ||
-        !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    if (waitpid(child, &status, 0) != child)
+        return 6;
+#ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
+    if (mode == 6) {
+        /* The parent broker worker is allowed to munmap its own guest
+         * session on EOF. Do not read data[] after the killed child was
+         * reaped: the separate ACK gate was already checked by the child
+         * before it closed the authenticated connection. */
+        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) {
+            fprintf(stderr, "FAIL lost-ACK SET_CONTEXT was not pidfd killed: %d\n",
+                    status);
+            return 7;
+        }
+        nt_broker_unregister_child(child, generation);
+        close(pidfd);
+        return 0;
+    }
+#endif
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         fprintf(stderr, "FAIL control ipc child exit: enabled=%d status=%d\n",
                 mode, status);
         return 6;
@@ -358,6 +429,12 @@ static int run_one(unsigned mode)
 int main(void)
 {
     alarm(35);
+#ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
+    if (run_one(6)) return 1;
+    puts("PASS authenticated broker: lost SET_CONTEXT ACK quarantines a real "
+         "ptrace-stopped guest, pidfd SIGKILL, never unsafe DETACH");
+    return 0;
+#else
     if (run_one(0) || run_one(1) || run_one(2) ||
         run_one(3) || run_one(4) || run_one(5)) return 1;
     puts("PASS authenticated control IPC: opt-in only, persistent nested "
@@ -366,4 +443,5 @@ int main(void)
          "EOF cleanup, idle >1.3s with ptrace stop, 32 attach cycles, pinned startup DLL allow, "
          "dynamic DLL and real RW→RX JIT denial, FXSAVE read-only");
     return 0;
+#endif
 }
