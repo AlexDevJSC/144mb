@@ -45,15 +45,13 @@ un hilo parado con registros no restaurados.
 ```sh
 make -j2 check-pe-thread-supervisor
 make -j2 check-pe-thread-supervisor-apc-failure
+make -j2 check-pe-thread-supervisor-apc-xstate-failure
 ```
 
 Ambas usan PE32+ auténtico construido en la propia compilación Linux.
 La primera valida ejecución de APC sobre hilo invitado, retorno a la
 instrucción PE interrumpida y progreso sin espera alertable.
-La segunda añade una macro **exclusivamente de compilación de tests**
-que altera la comprobación de finalización después del INT3 real,
-cuando el estado GPR/XSTATE ya ha sido reemplazado. La regresión
-exige error, prohibición de CONT/DETACH, solicitud SIGKILL aceptada por el\n`pidfd` y mantenimiento de `PTRACE_O_EXITKILL` hasta terminar el trazador.\nLa prueba no finge que un `waitpid` intermedio con `WIFSTOPPED` sea\nconfirmación de muerte: esa comprobación terminal continúa pendiente.
+Las dos pruebas negativas usan macros **exclusivamente de compilación de\ntests**. Una altera la comprobación de finalización después de un\nINT3 real, con el GPR/XSTATE del invitado ya reemplazado. La otra\ncorrompe un byte del readback final de XSTATE después de las escrituras\nde restauración. Ambas exigen error, prohibición de CONT/DETACH, solicitud SIGKILL aceptada por el\n`pidfd` y mantenimiento de `PTRACE_O_EXITKILL` hasta terminar el trazador.\nLa prueba no finge que un `waitpid` intermedio con `WIFSTOPPED` sea\nconfirmación de muerte: esa comprobación terminal continúa pendiente.
 
 El workflow experimental ejecuta ambas. Compilar no equivale a aprobar:
 registrar PASS de la CI del último commit, y **INCOMPLETE** si
