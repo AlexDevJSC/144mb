@@ -457,7 +457,14 @@ static int serve(struct session *s)
         size_t n = 0;
         if (!receive_request(s->socket_fd, &request, payload, &n))
             break;
+        /* Cross-process gate is held until the real open/create/delete,
+         * share lease and WAL work have ALL completed. FUSE takes the
+         * identical gate before the same operations. */
+        int admission=nt_runtime_begin_service_admission();
+        if (admission<0)
+            break; /* connection closes; never retry without mediation */
         const struct fs4_reply reply = dispatch(s, &request, payload, n, output);
+        nt_runtime_end_service_admission(admission);
         if (!send_reply(s, &reply, reply.length ? output : NULL))
             break;
         if (request.nonce != s->nonce || request.magic != FS4_MAGIC)
