@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -35,6 +36,16 @@ static bool client_rpc_inflight;
 static bool client_rpc_aborted;
 static int client_socket = -1;
 static uint8_t client_secret[16];
+
+#ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
+/* Only linked into the dedicated test binary; a kernel-confirmed, truly
+ * suspended guest must reach this gate before its client disconnects. */
+static _Atomic uint32_t *test_context_ack_gate;
+void nt_broker_test_set_context_ack_gate(_Atomic uint32_t *gate)
+{
+    test_context_ack_gate = gate;
+}
+#endif
 static const uint32_t read_rights =
     NT_BROKER_QUERY_INFORMATION | NT_BROKER_QUERY_LIMITED_INFORMATION;
 
@@ -644,6 +655,15 @@ void nt_broker_server_loop(int fd,
             request.operation == NT_BROKER_RPC_SUP_SET_CONTEXT &&
             response.status == NT_STATUS_SUCCESS &&
             info.guest_thread_id != 0 && info.generation != 0;
+#ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
+        if (unacked_context && test_context_ack_gate != NULL) {
+            atomic_store_explicit(test_context_ack_gate, 1u, memory_order_release);
+            /* The test client waits for this exact point, then closes
+             * during the pause. Production builds omit this entire hook. */
+            const struct timespec pause = {.tv_nsec = 400000000L};
+            (void)nanosleep(&pause, NULL);
+        }
+#endif
         if (broker_peer_disconnected(fd)) {
             if (unacked_context)
                 nt_supervisor_control_server_abort_unacked_context(control, &info);
