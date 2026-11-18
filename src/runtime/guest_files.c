@@ -6557,6 +6557,65 @@ nt_status NT_MS_ABI nt_NtQueryInformationFile(uintptr_t handle, struct nt_io_sta
 
 static int32_t set_file_disposition(uintptr_t handle, bool deleting);
 
+/* Single physical WAL/lease path for both Win32 SetEndOfFile and native
+ * FileEndOfFileInformation. Prevent a concurrent FUSE namespace rename
+ * crossing the truncation syscall. No raw pathname re-open of the inode.
+ * Keep local file_lock before the WAL lock, matching CreateFile/MoveFile. */
+static bool truncate_guest_handle(uintptr_t handle, off_t length, bool at_cursor)
+{
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file=find_handle(handle);
+    int err=0;
+    if (!file)
+        err=EBADF;
+    else if (!(file->access & FILE_WRITE) || !file->path)
+        err=EACCES;
+    int guard=-1, fd=-1;
+    if (!err) {
+        guard=nt_runtime_begin_namespace_mutation(file->path);
+        if (guard<0)
+            err=errno ? errno : EUCLEAN;
+    }
+    if (!err) {
+        fd=fcntl(file->fd,F_DUPFD_CLOEXEC,3);
+        if (fd<0)
+            err=errno;
+    }
+    if (!err && at_cursor) {
+        length=lseek(fd,0,SEEK_CUR);
+        if (length<0)
+            err=errno;
+    }
+    if (!err && length<0)
+        err=EINVAL;
+    if (!err) {
+        /* NT byte-range locks apply to length changes as well as writes.
+         * The query covers [0, EOF) including any locks past the new EOF. */
+        struct flock block={.l_type=F_WRLCK,.l_whence=SEEK_SET,
+                            .l_start=0,.l_len=0};
+        if (fcntl(fd,F_OFD_GETLK,&block)<0)
+            err=errno;
+        else if (block.l_type!=F_UNLCK)
+            err=EAGAIN;
+    }
+    if (!err && ftruncate(fd,length)<0)
+        err=errno;
+    if (!err && !wal_sync_pinned(fd,false))
+        err=errno ? errno : EIO;
+    if (err==EIO)
+        (void)wal_poison(err);
+    if (fd>=0)
+        close(fd);
+    if (guard>=0)
+        nt_runtime_end_namespace_mutation(guard);
+    pthread_mutex_unlock(&file_lock);
+    if (err) {
+        errno=err;
+        return false;
+    }
+    return true;
+}
+
 nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_status_block *io,
                                               const void *buffer, uint32_t length,
                                               uint32_t information_class)
@@ -6607,17 +6666,18 @@ nt_status NT_MS_ABI nt_NtSetInformationFile(uintptr_t handle, struct nt_io_statu
     if (info.current_byte_offset < 0)
         return nt_file_complete(io, NT_STATUS_INVALID_PARAMETER, 0);
 
-    const int fd = duplicate_handle(handle, information_class == FILE_END_OF_FILE_INFORMATION_CLASS ?
-                                    FILE_WRITE : 0);
+    if (information_class == FILE_END_OF_FILE_INFORMATION_CLASS) {
+        const bool success=truncate_guest_handle(handle,(off_t)info.current_byte_offset,false);
+        return nt_file_complete(io,success ? NT_STATUS_SUCCESS :
+                                nt_file_errno_status(errno),0);
+    }
+    const int fd = duplicate_handle(handle, 0);
     if (fd < 0)
         return nt_file_complete(io, nt_file_errno_status(errno), 0);
-
-    const bool success = information_class == FILE_POSITION_INFORMATION_CLASS ?
-                         lseek(fd, (off_t)info.current_byte_offset, SEEK_SET) >= 0 :
-                         ftruncate(fd, (off_t)info.current_byte_offset) == 0;
-    const int error = errno;
+    const bool success=lseek(fd,(off_t)info.current_byte_offset,SEEK_SET)>=0;
+    const int error=errno;
     (void)close(fd);
-    return nt_file_complete(io, success ? NT_STATUS_SUCCESS : nt_file_errno_status(error), 0);
+    return nt_file_complete(io,success ? NT_STATUS_SUCCESS : nt_file_errno_status(error),0);
 }
 
 nt_status NT_MS_ABI nt_NtFlushBuffersFile(uintptr_t handle, struct nt_io_status_block *io)
@@ -6694,9 +6754,10 @@ int32_t NT_MS_ABI nt_SetEndOfFile(uintptr_t handle)
 {
     if (nt_fs4_remote_handle(handle))
         return nt_fs4_remote_truncate(handle);
-    const int fd = duplicate_handle(handle, FILE_WRITE);
-    const off_t position = fd >= 0 ? lseek(fd, 0, SEEK_CUR) : -1;
-    return file_result(fd, position >= 0 && ftruncate(fd, position) == 0);
+    const bool success=truncate_guest_handle(handle,0,true);
+    if (!success)
+        nt_SetLastError(path_error(errno,false));
+    return success;
 }
 
 uint32_t NT_MS_ABI nt_GetFileType(uintptr_t handle)
