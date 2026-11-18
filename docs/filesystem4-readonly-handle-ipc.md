@@ -18,3 +18,13 @@ truncado, borrado, ACL, share-leases NT ni semántica NTFS completa. El
 lanzamiento PE con servicio sigue rechazado. Aceptación de seguridad requiere
 nuevos tests de credenciales, reinicios, Fedora real con SELinux y, antes de
 escritura, transacciones y leases compartidos con FUSE.
+
+## Admisión de seguridad adicional
+
+En instalación real el protocolo v2 está **desactivado por defecto**;
+sólo una configuración explícita y experimental del administrador
+(`NT_STORAGE_EXPERIMENTAL_READONLY=1` en el servicio) lo habilita.
+El canal rechaza archivos marcados como `user.ntnative.fs_compat` y
+cualquier error al comprobar ese xattr: sin contrato NT FILE_SHARE no puede
+leerlos eludiendo los leases autoritativos. Esta restricción es temporal,
+no un reemplazo del backend NT que falta.

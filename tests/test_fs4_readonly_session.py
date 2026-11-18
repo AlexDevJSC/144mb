@@ -26,6 +26,12 @@ class ReadonlySessionTest(unittest.TestCase):
             (root/"dir").mkdir()
             (root/"dir"/"two.txt").write_bytes(b"DATA")
             (root/"escape").symlink_to("/etc/passwd")
+            (root/"marked.txt").write_bytes(b"NT-marked")
+            marker_supported = True
+            try:
+                os.setxattr(root/"marked.txt","user.ntnative.fs_compat",b"1")
+            except OSError:
+                marker_supported = False
             server,client=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
             faults=[]
             def worker():
@@ -45,6 +51,8 @@ class ReadonlySessionTest(unittest.TestCase):
                 self.assertTrue(opened["ok"])
                 h=opened["handle"]
                 self.assertEqual(base64.b64decode(send("read",handle=h,offset=1,size=4)["data_b64"]),b"ELLO")
+                if marker_supported:
+                    self.assertFalse(send("open",path="C:/marked.txt")["ok"])
                 for req in (("open",dict(path="C:/escape")),
                             ("open",dict(path="C:/dir")),
                             ("write",dict(handle=h,data_b64="WA==")),
