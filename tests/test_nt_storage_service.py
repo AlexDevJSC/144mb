@@ -156,6 +156,43 @@ class Security(unittest.TestCase):
                 with self.assertRaises(TimeoutError):
                     client.recv(4096)
 
+    def test_v3_ipc_opt_in_and_fd_only_handoff(self):
+        """The service does not spawn a trusted Win32 broker by default."""
+        packet = b'{"version":3,"op":"session"}'
+        with socket_pair() as (server, client):
+            client.sendall(packet)
+            with mock.patch.object(service.subprocess, "Popen") as spawned:
+                service.serve_one(server, client_uid=os.geteuid(),
+                                  mediator="unused", backing=Path("/secret"),
+                                  ready=True, handle_broker="/usr/bin/trusted",
+                                  view=Path("/view"), workers=[])
+                reply = json.loads(client.recv(4096))
+                self.assertFalse(reply["ok"])
+                spawned.assert_not_called()
+
+        with socket_pair() as (server, client):
+            client.sendall(packet)
+            active = []
+            with mock.patch.dict(os.environ, {"NT_STORAGE_EXPERIMENTAL_HANDLES": "1"}), \
+                 mock.patch.object(service.subprocess, "Popen") as spawned:
+                service.serve_one(server, client_uid=os.geteuid(),
+                                  mediator="unused", backing=Path("/secret"),
+                                  ready=True, handle_broker="/usr/bin/trusted",
+                                  view=Path("/view"), workers=active)
+                spawned.assert_called_once()
+                argv = spawned.call_args.args[0]
+                self.assertEqual(argv, ["/usr/bin/trusted", "--root", "/secret",
+                                         "--fd", str(server.fileno()),
+                                         "--client-uid", str(os.geteuid()),
+                                         "--view", "/view"])
+                self.assertEqual(spawned.call_args.kwargs["pass_fds"],
+                                 (server.fileno(),))
+                self.assertEqual(len(active), 1)
+                # No root FD or backing filename is sent over the socket.
+                client.settimeout(0.1)
+                with self.assertRaises(TimeoutError):
+                    client.recv(4096)
+
     def test_bad_packet_rejected(self):
         for packet in (b"", b"this is not JSON", b"{" + b"a" * 5000):
             with socket_pair() as (server, client):
