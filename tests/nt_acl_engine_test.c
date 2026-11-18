@@ -41,6 +41,7 @@ int main(void) {
     sd[28+1]=1|8;
     assert(nt_acl_access_check(sd,68,&token,3,&granted)==NT_ACL_DENIED);
     sd[28+1]=1;
+    sd[48+1]=1; /* also object-only; intermediate directories inherit-only */
     uint8_t inherited[96]={0};size_t needed=0;
     assert(nt_acl_inherit_dacl(sd,68,true,inherited,sizeof(inherited),&needed)==NT_ACL_ALLOWED);
     assert(needed==48 && inherited[0]==2 && inherited[4]==2);
