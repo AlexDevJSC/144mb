@@ -130,13 +130,15 @@ static DWORD WINAPI worker(void *unused)
 struct multi_apc_target {
     HANDLE ready;
     DWORD thread_id;
-    DWORD user_seen, native_seen, calls;
+    DWORD user_seen, native_seen, calls, ordered;
 };
 static void CALLBACK multi_user_apc(ULONG_PTR argument)
 {
     struct multi_apc_target *target = (struct multi_apc_target *)argument;
     if (!target) return;
     target->user_seen = GetCurrentThreadId();
+    if (target->calls == 0u)
+        target->ordered = 1u;
     ++target->calls;
 }
 static void NTAPI multi_native_apc(void *context, void *first, void *second)
@@ -145,6 +147,8 @@ static void NTAPI multi_native_apc(void *context, void *first, void *second)
     if (!target || first != (void *)(uintptr_t)0x515u ||
         second != (void *)(uintptr_t)0x616u) return;
     target->native_seen = GetCurrentThreadId();
+    if (target->calls == 1u && target->ordered == 1u)
+        target->ordered = 2u;
     ++target->calls;
 }
 static DWORD WINAPI multi_apc_worker(void *argument)
@@ -157,7 +161,8 @@ static DWORD WINAPI multi_apc_worker(void *argument)
         return 72;
     if (SleepEx(INFINITE, TRUE) != WAIT_IO_COMPLETION)
         return 73;
-    if (target->calls != 2u || target->user_seen != target->thread_id ||
+    if (target->calls != 2u || target->ordered != 2u ||
+        target->user_seen != target->thread_id ||
         target->native_seen != target->thread_id)
         return 74;
     return 0x177u;
