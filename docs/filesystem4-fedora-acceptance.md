@@ -29,13 +29,13 @@ make, GCC, python3, xattrs, fuse3/fusermount3, bubblewrap, entorno
 gráfico de pruebas si corresponde y los paquetes de compilación del
 README de la revisión:
 
-    git checkout feature/filesystem4-integrated-validation-20261117
+    git checkout <commit-a-auditar>
     bash scripts/fedora-filesystem4-acceptance.sh --physical-confirmed --windows-reference /ruta/fs4-windows-reference.json
 
-La rama integrada suma el modo PE de la PR #153 y la corrección de
-supervisor/FUSE de la PR #150. En esta rama el script ejecuta también
-una sesión PE aislada sobre un perfil C: **descartable**, sin utilizar
-ni sobrescribir los datos personales de C: del usuario.
+La revisión auditada incluye la ruta PE supervisada sobre un perfil C:
+**descartable**; el modo histórico de PE supervisado y el nuevo servicio
+UID no son equivalentes. El script ejecuta ambas comprobaciones por
+separado y no utiliza ni sobrescribe el C: personal del operador.
 
 También se puede ejecutar sin --windows-reference para obtener un
 informe parcial, pero el código de salida 3 indica INCOMPLETE.
@@ -63,9 +63,10 @@ La herramienta:
 3. P3: ejecutar mismo fixture de operaciones en Windows real y en NT144:
    comparar archivos, nombres cortos, atributos, errores, ACL y
    reparse; anotar divergencias sin descartarlas por falta de paridad.
-4. P4: demostrar con un **UID distinto** denegación directa del backing
-   bajo SELinux Enforcing; el prototipo actual **no tiene servicio UID**
-   y esta prueba no puede aprobarse hasta que se implemente.
+4. P4: demostrar con un **segundo UID** que el backing físico no se puede
+   abrir y que la vista FUSE rechaza al cliente no autorizado. Existe un
+   servicio de UID dedicado, pero aún falta verificarlo en Fedora físico y
+   distinguir una denegación DAC de una debida a la política SELinux.
 5. P5: simultaneidad de varios clientes PE/FUSE, caída de FUSE, cierre
    del supervisor, comprobación de limpieza de montajes y descriptores
    heredados; revisar AVC de SELinux y síntomas de corrupción.
@@ -109,3 +110,37 @@ y reinicio. Una denegación provocada por DAC no certifica SELinux.
 Evidencia: esta sesión no dispone de Fedora físico. El entorno del asistente
 es Debian 13 sin /dev/fuse ni /sys/fs/selinux/enforce. Validación física:
 NO EJECUTADA. No desactivar SELinux para pasar el gate.
+El entrypoint de aceptación de servicio requiere explícitamente el parámetro --physical-confirmed, rechaza CI y no retorna PASS al faltar SELinux, FUSE o el broker v3.
+
+
+## Paso 4. Evidencia SELinux de administrador (18-11-2026)
+
+Después de ejecutar la batería física bajo **un usuario normal**, el operador
+recopila contextos y AVC como administrador, **sin desactivar SELinux ni alterar
+DAC, policy, etiquetas, montajes o registros de auditoría**:
+
+    sudo bash scripts/fedora-fs4-selinux-evidence.sh --physical-confirmed
+
+El script exige Fedora x86-64, `getenforce=Enforcing` y
+`/sys/fs/selinux/enforce=1`; rechaza GitHub Actions, CI y ejecución sin
+confirmación expresa. Es de **solo lectura** sobre el sistema probado.
+
+La evidencia se guarda con permisos 0600 bajo
+`/var/log/ntnative-storage/fs4-selinux-XXXXXXXX.log`, accesible inicialmente
+solo por root. Incluye contexto de procesos (scontext), etiquetas físicas
+(tcontext), política esperada según matchpathcon, UID/modo DAC,
+estado systemd, origen de la vista FUSE, estado de auditd y las entradas
+AVC/USER_AVC del día. El volcado AVC puede contener **eventos de otros
+programas**: revisar, limitar y anonimizar antes de compartirlo.
+
+El responsable debe correlacionar hora, `pid`, `comm`, `scontext`,
+`tcontext`, `tclass`, permisos solicitados y `permissive` con cada
+prueba negativa. Una denegación por DAC no demuestra una política SELinux,
+y **la ausencia de AVC tampoco demuestra confinamiento**. Si no se dispone
+de `ausearch`, `auditctl`, `matchpathcon` o permisos de auditoría,
+el informe marca la captura incompleta; no afirma aceptación.
+
+La validación humana, segunda identidad UID, reinicio/corte eléctrico en
+volumen descartable y comparación real Windows NTFS siguen pendientes hasta
+disponer de sus registros. No sustituir esta evidencia por la CI de Fedora RPM,
+que corre en contenedor y no certifica SELinux Enforcing físico.

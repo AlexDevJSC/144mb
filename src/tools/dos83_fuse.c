@@ -33,6 +33,7 @@
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -536,10 +537,15 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
-    int guard = guest_mutation_begin(path);
-    if (guard < 0)
-        return guard;
+    /* Acquire process-local namespace_lock before physical WAL, matching
+     * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
+     * two concurrent FUSE callbacks during namespace mutations. */
     pthread_mutex_lock(&namespace_lock);
+    int guard = guest_mutation_begin(path);
+    if (guard < 0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return guard;
+    }
     if (service_mode) {
         int result = fs_create_staged_service(path, mode, fi);
         pthread_mutex_unlock(&namespace_lock);
@@ -683,10 +689,15 @@ static int fs_mkdir(const char *path, mode_t mode)
 {
     if (!service_authorized())
         return -EACCES;
-    int guard = guest_mutation_begin(path);
-    if (guard < 0)
-        return guard;
+    /* Acquire process-local namespace_lock before physical WAL, matching
+     * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
+     * two concurrent FUSE callbacks during namespace mutations. */
     pthread_mutex_lock(&namespace_lock);
+    int guard = guest_mutation_begin(path);
+    if (guard < 0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return guard;
+    }
     char name[NAME_MAX + 1];
     int parent = lower_parent(path, name);
     int error = parent < 0 ? -errno : 0;
@@ -776,10 +787,15 @@ static int fs_link(const char *from, const char *to)
      * dedicated-UID namespace. Legacy non-service remains unchanged. */
     if (service_mode)
         return -EOPNOTSUPP;
-    int guard = guest_mutation_begin(to);
-    if (guard < 0)
-        return guard;
+    /* Acquire process-local namespace_lock before physical WAL, matching
+     * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
+     * two concurrent FUSE callbacks during namespace mutations. */
     pthread_mutex_lock(&namespace_lock);
+    int guard = guest_mutation_begin(to);
+    if (guard < 0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return guard;
+    }
     char old_name[NAME_MAX + 1], new_name[NAME_MAX + 1];
     int old_parent = lower_parent(from, old_name);
     int new_parent = lower_parent(to, new_name);
@@ -996,6 +1012,64 @@ static const struct fuse_operations ops = {
 
 /* Deterministic smoke of lower descriptor confinement even on CI runners
  * with /dev/fuse unavailable. This does NOT validate kernel FUSE mounting. */
+/* Deterministic concurrent callback regression: mixed Win32-bridged
+ * unlink/rmdir against WAL-staged FUSE create/mkdir. Both must acquire
+ * namespace_lock before the global WAL or they can deadlock (ABBA). */
+struct fs4_mutator_trial { int worker, error; };
+static void *fs4_mutator_trial_run(void *input)
+{
+    struct fs4_mutator_trial *trial = input;
+    for (int i = 0; i < 8; ++i) {
+        char path[128];
+        int n = snprintf(path, sizeof(path), "/FS4ConcurrentMutation%dItem%d",
+                         trial->worker, i);
+        if (n <= 0 || (size_t)n >= sizeof(path)) {
+            trial->error = EINVAL;
+            return NULL;
+        }
+        if (trial->worker == 0) {
+            struct fuse_file_info file = {.flags = O_WRONLY};
+            int code = fs_create(path, 0600, &file);
+            if (!code)
+                code = fs_release(path, &file);
+            if (!code)
+                code = fs_unlink(path);
+            if (code) {
+                trial->error = code;
+                return NULL;
+            }
+        } else {
+            int code = fs_mkdir(path, 0700);
+            if (!code)
+                code = fs_rmdir(path);
+            if (code) {
+                trial->error = code;
+                return NULL;
+            }
+        }
+    }
+    return NULL;
+}
+
+static bool fs4_selftest_lock_order(void)
+{
+    struct fs4_mutator_trial one={.worker=0}, two={.worker=1};
+    pthread_t a, b;
+    if (pthread_create(&a,NULL,fs4_mutator_trial_run,&one)!=0)
+        return false;
+    if (pthread_create(&b,NULL,fs4_mutator_trial_run,&two)!=0) {
+        (void)pthread_join(a,NULL);
+        return false;
+    }
+    struct timespec limit;
+    if (clock_gettime(CLOCK_REALTIME,&limit)!=0)
+        return false;
+    limit.tv_sec+=15;
+    const int first=pthread_timedjoin_np(a,NULL,&limit);
+    const int second=pthread_timedjoin_np(b,NULL,&limit);
+    return first==0 && second==0 && !one.error && !two.error;
+}
+
 static int backend_selftest(void)
 {
     fs4_staging_selftest = true;
@@ -1145,6 +1219,11 @@ static int backend_selftest(void)
     }
     /* A corrupt WAL must deny direct FUSE namespace modifications BEFORE
      * the POSIX syscall. No kernel FUSE mount is needed to run this test. */
+    if (!fs4_selftest_lock_order()) {
+        fprintf(stderr, "FAIL: concurrent FUSE namespace/WAL lock inversion or mutation\n");
+        return 1;
+    }
+    printf("PASS concurrent FUSE create/mkdir versus delete/rmdir locks\n");
     const char *safe_name = "/FUSEWALSource.dat";
     int saved_fd = lower_open(safe_name, O_CREAT | O_EXCL | O_WRONLY, 0600);
     if (saved_fd < 0 || write(saved_fd, "SAFE", 4) != 4) {

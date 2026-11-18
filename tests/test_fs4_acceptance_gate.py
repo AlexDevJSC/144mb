@@ -27,6 +27,32 @@ class AcceptanceGatesTests(unittest.TestCase):
                             capture_output=True)
         self.assertEqual(ci.returncode, 3)
 
+    def test_service_physical_gate_cannot_be_pretended_in_ci(self):
+        script = ROOT / "scripts" / "fedora-fs4-service-acceptance.py"
+        syntax = subprocess.run(["python3", "-c",
+                                 "import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())",
+                                 str(script)])
+        self.assertEqual(syntax.returncode, 0)
+        missing_confirmation = subprocess.run(["python3", str(script)],
+                                               capture_output=True)
+        self.assertEqual(missing_confirmation.returncode, 2)
+        denied_ci = subprocess.run(
+            ["python3", str(script), "--physical-confirmed"],
+            env={"PATH": "/usr/bin:/bin", "CI": "true"},
+            capture_output=True)
+        self.assertEqual(denied_ci.returncode, 3)
+
+    def test_selinux_evidence_requires_explicit_physical_operator(self):
+        script = ROOT / "scripts" / "fedora-fs4-selinux-evidence.sh"
+        self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
+        no_argument = subprocess.run(["bash", str(script)], capture_output=True)
+        self.assertEqual(no_argument.returncode, 2)
+        ci = subprocess.run(
+            ["bash", str(script), "--physical-confirmed"],
+            env={"PATH": "/usr/bin:/bin", "CI": "true"},
+            capture_output=True)
+        self.assertEqual(ci.returncode, 3)
+
     def test_reference_is_validated_not_assumed(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "reference.json"

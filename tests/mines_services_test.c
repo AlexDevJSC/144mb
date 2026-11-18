@@ -335,7 +335,9 @@ static void check_drive_relative_cwds(void)
     CHECK(nt_runtime_set_drive_root('D', NULL));
     CHECK(!nt_CreateDirectoryA("D:orphan", NULL) &&
           last_error() == NT_ERROR_ACCESS_DENIED);
-    CHECK(rmdir(drive) == 0);
+    /* A participating NT worker may persist a private WAL/share gate
+     * for this drive. Only tests may remove the registry at teardown. */
+    CHECK(nt_test_cleanup_share_registry(drive) && rmdir(drive) == 0);
 }
 
 static void check_file_handles(void)
