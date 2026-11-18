@@ -138,14 +138,27 @@ int main(void)
     /* The requested mutation reached the kernel, but readback failed
      * and rollback was forced to fail. No DETACH of these regs is legal.
      * Only the pidfd-pinned child can be terminated. */
-    if (!thread.unsafe_register_state ||
-        nt_supervisor_terminate_compromised_child(&supervisor) != 0)
+    if (!thread.unsafe_register_state || !supervisor.compromised)
         goto cleanup;
+    errno = 0;
+    if (nt_supervisor_detach(&supervisor) != -1 || errno != EPERM)
+        goto cleanup;
+    errno = 0;
+    if (nt_supervisor_continue(&supervisor) != -1 || errno != EPERM)
+        goto cleanup;
+    if (nt_supervisor_nt_resume_thread(&thread, &previous) !=
+        NT_STATUS_THREAD_IS_TERMINATING)
+        goto cleanup;
+    if (nt_supervisor_terminate_compromised_child(&supervisor) != 0)
+        goto cleanup;
+    /* release() is not allowed to detach while SIGKILL is pending:
+     * PTRACE_O_EXITKILL remains armed until kernel confirms death. */
     nt_supervisor_release(&supervisor);
     if (!wait_for_exit(child, &status) ||
         !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL)
         goto cleanup;
-    puts("PASS supervisor fatal CONTEXT rollback: exact pidfd-child killed");
+    nt_supervisor_release(&supervisor); /* death now confirmed by pidfd */
+    puts("PASS fatal CONTEXT rollback: no CONT/DETACH, pidfd-SIGKILL confirmed");
 #else
     if (thread.unsafe_register_state)
         goto cleanup;
