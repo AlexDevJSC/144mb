@@ -50,6 +50,12 @@ static _Thread_local bool nonlocal_poisoned;
 enum { MAX_IMPORT_NESTING = 128, MAX_GATED_TARGETS = 8192 };
 static _Thread_local uintptr_t host_return_stack[MAX_IMPORT_NESTING];
 
+/* This hook is supplied by threads.c when the Win32 runtime is linked.
+ * Smaller standalone gate tests intentionally link without threads.c.
+ * Never invoke it from import_enter (host locks may be held), and never
+ * from a Linux signal handler. */
+extern void nt_runtime_special_apc_checkpoint(void) __attribute__((weak));
+
 struct gate_target { uintptr_t native, wrapper; };
 static struct gate_target gates[MAX_GATED_TARGETS];
 static size_t gate_count;
@@ -263,6 +269,13 @@ uintptr_t nt_guest_boundary_import_leave(void)
         publish_phase(NT_GUEST_BOUNDARY_GUEST);
     else
         publish_phase(NT_GUEST_BOUNDARY_HOST);
+    /* The host import has completed and its return-stack slot is gone.
+     * The return trampoline still preserves Win64 integer/XMM registers;
+     * dispatch at this point, not while the imported host routine owns
+     * its mutex or while an outer guest→host callback is active. */
+    if (host_import_depth == 0 && guest_entry_depth != 0 &&
+        !nonlocal_poisoned && nt_runtime_special_apc_checkpoint != NULL)
+        nt_runtime_special_apc_checkpoint();
     return ret;
 }
 
