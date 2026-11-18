@@ -449,6 +449,12 @@ check-fs4-storage-service:
 
 check: check-fs4-storage-service
 
+.PHONY: check-fs4-readonly-session
+check-fs4-readonly-session:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs4_readonly_session.py'
+
+check: check-fs4-readonly-session
+
 .PHONY: check-fs4-service-supervisor
 check-fs4-service-supervisor:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_service_supervisor.py'
@@ -497,6 +503,40 @@ check-dos83-sigkill: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediat
 	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
 
 check: check-dos83-sigkill
+
+.PHONY: check-dos83-alias-durability
+check-dos83-alias-durability: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_alias_sigkill.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-alias-durability
+
+.PHONY: check-dos83-wal-io-failure
+check-dos83-wal-io-failure: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_wal_io_failure.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-wal-io-failure
+
+.PHONY: check-dos83-pending-delete-durability
+check-dos83-pending-delete-durability: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_pending_delete_sigkill.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-pending-delete-durability
+
+.PHONY: check-dos83-namespace-durability
+check-dos83-namespace-durability: $(BUILD_DIR)/nt-dos83-mediator $(BUILD_DIR)/nt-dos83-mediator-crash
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_namespace_sigkill.py \
+	    "$(BUILD_DIR)/nt-dos83-mediator" "$(BUILD_DIR)/nt-dos83-mediator-crash"
+
+check: check-dos83-namespace-durability
+
+.PHONY: check-dos83-pending-wal-admission
+check-dos83-pending-wal-admission: $(BUILD_DIR)/nt-dos83-mediator
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/dos83_pending_wal_admission.py "$(BUILD_DIR)/nt-dos83-mediator"
+
+check: check-dos83-pending-wal-admission
 
 .PHONY: check-dos83-all-grants
 check-dos83-all-grants: $(BUILD_DIR)/nt-dos83-mediator
@@ -1023,6 +1063,7 @@ install-fs4-storage-service: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83-me
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-fuse" "$(DESTDIR)$(PREFIX)/bin/nt-dos83-fuse"
 	install -D -m 0755 "$(BUILD_DIR)/nt-dos83-mediator" "$(DESTDIR)$(PREFIX)/bin/nt-dos83-mediator"
 	install -D -m 0755 scripts/nt-storage-service.py "$(DESTDIR)$(PREFIX)/libexec/ntnative-storage-service"
+	install -D -m 0644 scripts/fs4_readonly_session.py "$(DESTDIR)$(PREFIX)/libexec/fs4_readonly_session.py"
 	install -D -m 0755 scripts/nt-storage-control.py "$(DESTDIR)$(PREFIX)/bin/nt-storage-control"
 	sed 's|@NT_PREFIX@|$(PREFIX)|g' packaging/systemd/ntnative-storage.service > "$(BUILD_DIR)/ntnative-storage.service"
 	install -D -m 0644 "$(BUILD_DIR)/ntnative-storage.service" "$(DESTDIR)/usr/lib/systemd/system/ntnative-storage.service"

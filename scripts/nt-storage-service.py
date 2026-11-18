@@ -3,10 +3,13 @@
 """Dedicated-UID storage owner for the opted-in POSIX FUSE data plane.
 
 The authenticated AF_UNIX control plane NEVER transfers backing FDs.
-No PE runtime is allowed to run under the storage identity; a PE IPC file
-backend is a separate, still unimplemented milestone.
+No PE runtime is allowed to run under the storage identity. Experimental
+v2 read-only handle sessions exist; a writable NT/Win32 PE adapter remains
+unimplemented and no fallback to direct backing is allowed.
 """
 from __future__ import annotations
+
+from fs4_readonly_session import run_readonly_session
 
 import argparse
 import json
@@ -129,6 +132,11 @@ def serve_one(conn: socket.socket, *, client_uid: int, mediator: str,
             request = json.loads(data.decode("utf-8"))
         except (UnicodeError, ValueError):
             raise Refused("Malformed request") from None
+        if request == {"version": 2, "op": "session"}:
+            if not ready:
+                raise Refused("Storage view not ready")
+            run_readonly_session(conn, backing)
+            return
         reply = dispatch(request, mediator=mediator, backing=backing,
                          live_mount=ready)
     except (Refused, OSError) as error:
@@ -165,10 +173,13 @@ def service(backing: Path, view: Path, *, client_uid: int, client_gid: int,
     fuse, mediator, unmount = map(trusted_binary, (fuse, mediator, unmount))
     if mounted_fuse(exposed):
         raise Refused("Refusing to take over a mounted view")
-    preflight = subprocess.run([mediator, "--root", str(backing), "--scan"],
-                               capture_output=True, timeout=30, check=False)
-    if preflight.returncode:
-        raise Refused("Pending DOS8.3 WAL cannot be safely recovered")
+    # Startup recovery must resolve both DOS8.3 WAL and orphaned
+    # FILE_DELETE_PENDING markers BEFORE the FUSE view becomes visible.
+    for operation in ("--recover", "--scan"):
+        preflight = subprocess.run([mediator, "--root", str(backing), operation],
+                                   capture_output=True, timeout=30, check=False)
+        if preflight.returncode:
+            raise Refused("FileSystem4 storage preflight refused " + operation)
 
     stopped = False
     def terminate(_signal: int, _frame: object) -> None:

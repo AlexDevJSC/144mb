@@ -225,6 +225,22 @@ static int guest_wide(const char *path, uint16_t wide[PATH_MAX])
     return 0;
 }
 
+/* Preflight is deliberately before lower_open/mkdirat/linkat/ftruncate,
+ * never only an alias refresh after the mutation. */
+static int guest_mutation_begin(const char *path)
+{
+    if (!relpath(path))
+        return -(errno ? errno : EINVAL);
+    char dos[PATH_MAX];
+    int n = snprintf(dos, sizeof(dos), "C:%s", path);
+    if (n <= 0 || n >= (int)sizeof(dos))
+        return -ENAMETOOLONG;
+    int guard = nt_runtime_begin_namespace_mutation(dos);
+    if (guard < 0)
+        return -(errno ? errno : EUCLEAN);
+    return guard;
+}
+
 static int guest_refresh(const char *path)
 {
     uint16_t wide[PATH_MAX];
@@ -348,19 +364,27 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
     /* Never truncate before share admission: a Windows handle can reject
      * this write, and a rejected FUSE open must not mutate the file. */
     const bool truncate = (fi->flags & O_TRUNC) != 0;
+    int guard = truncate ? guest_mutation_begin(path) : -1;
+    if (truncate && guard < 0)
+        return guard;
     int fd = lower_open(path, fi->flags & ~(O_CREAT | O_EXCL | O_TRUNC), 0);
-    if (fd < 0)
-        return -errno;
+    if (fd < 0) {
+        int error = errno;
+        nt_runtime_end_namespace_mutation(guard);
+        return -error;
+    }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         int error = errno ? errno : EACCES;
         close(fd);
+        nt_runtime_end_namespace_mutation(guard);
         return -error;
     }
     int marked = nt_runtime_nt_file_marker(fd);
     if (marked < 0) {
         int error = errno;
         close(fd);
+        nt_runtime_end_namespace_mutation(guard);
         return -error;
     }
     int lease = -1;
@@ -385,6 +409,7 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         if (lease >= 0)
             nt_runtime_release_linux_nt_lease(&lease);
         close(fd);
+        nt_runtime_end_namespace_mutation(guard);
         return error;
     }
     /* Marked NT files must bypass the FUSE page cache: otherwise a
@@ -394,6 +419,7 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
         fi->keep_cache = 0;
     }
     fi->fh = (uint64_t)fd;
+    nt_runtime_end_namespace_mutation(guard);
     return 0;
 }
 
@@ -401,6 +427,9 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    int guard = guest_mutation_begin(path);
+    if (guard < 0)
+        return guard;
     pthread_mutex_lock(&namespace_lock);
     /* FUSE create receives an inode mode (S_IFREG | permissions).
      * openat2 rejects file-type bits in open_how.mode with EINVAL. */
@@ -418,6 +447,7 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     if (!error)
         fi->fh = (uint64_t)fd;
     pthread_mutex_unlock(&namespace_lock);
+    nt_runtime_end_namespace_mutation(guard);
     return error;
 }
 
@@ -483,10 +513,16 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
         return -EACCES;
     if (size < 0)
         return -EINVAL;
+    int guard = guest_mutation_begin(path);
+    if (guard < 0)
+        return guard;
     const bool borrowed = fi != NULL;
     int fd = borrowed ? (int)fi->fh : lower_open(path, O_WRONLY, 0);
-    if (fd < 0)
-        return -errno;
+    if (fd < 0) {
+        int cause = errno;
+        nt_runtime_end_namespace_mutation(guard);
+        return -cause;
+    }
     int lease = -1;
     int marked = borrowed ? (view_lease_active(fd) ? 1 : 0) :
                             nt_runtime_nt_file_marker(fd);
@@ -504,6 +540,7 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
     nt_runtime_release_linux_nt_lease(&lease);
     if (!borrowed)
         close(fd);
+    nt_runtime_end_namespace_mutation(guard);
     return error;
 }
 
@@ -511,6 +548,9 @@ static int fs_mkdir(const char *path, mode_t mode)
 {
     if (!service_authorized())
         return -EACCES;
+    int guard = guest_mutation_begin(path);
+    if (guard < 0)
+        return guard;
     pthread_mutex_lock(&namespace_lock);
     char name[NAME_MAX + 1];
     int parent = lower_parent(path, name);
@@ -525,6 +565,7 @@ static int fs_mkdir(const char *path, mode_t mode)
     if (parent >= 0)
         close(parent);
     pthread_mutex_unlock(&namespace_lock);
+    nt_runtime_end_namespace_mutation(guard);
     return error;
 }
 
@@ -595,6 +636,9 @@ static int fs_link(const char *from, const char *to)
 {
     if (!service_authorized())
         return -EACCES;
+    int guard = guest_mutation_begin(to);
+    if (guard < 0)
+        return guard;
     pthread_mutex_lock(&namespace_lock);
     char old_name[NAME_MAX + 1], new_name[NAME_MAX + 1];
     int old_parent = lower_parent(from, old_name);
@@ -612,6 +656,7 @@ static int fs_link(const char *from, const char *to)
     if (new_parent >= 0)
         close(new_parent);
     pthread_mutex_unlock(&namespace_lock);
+    nt_runtime_end_namespace_mutation(guard);
     return error;
 }
 
@@ -947,6 +992,63 @@ static int backend_selftest(void)
         fprintf(stderr, "FAIL: marked lease release or delete\n");
         return 1;
     }
+    /* A corrupt WAL must deny direct FUSE namespace modifications BEFORE
+     * the POSIX syscall. No kernel FUSE mount is needed to run this test. */
+    const char *safe_name = "/FUSEWALSource.dat";
+    int saved_fd = lower_open(safe_name, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (saved_fd < 0 || write(saved_fd, "SAFE", 4) != 4) {
+        if (saved_fd >= 0) close(saved_fd);
+        fprintf(stderr, "FAIL: FUSE WAL admission setup\\n");
+        return 1;
+    }
+    close(saved_fd);
+    int registry_fd = openat(lower_root, ":ntnative-file-leases",
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (registry_fd < 0) return 1;
+    int wal_fd = openat(registry_fd, "dos83-rename-v1.wal",
+                        O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    close(registry_fd);
+    struct stat wal_st;
+    if (wal_fd < 0 || fstat(wal_fd, &wal_st) != 0 || wal_st.st_size != 0 ||
+        write(wal_fd, "BROKEN", 6) != 6 || fsync(wal_fd) != 0) {
+        if (wal_fd >= 0) close(wal_fd);
+        fprintf(stderr, "FAIL: corrupt WAL fixture\\n");
+        return 1;
+    }
+    const char *denied_name = "/FUSEWALForbidden.dat";
+    const char *denied_dir = "/FUSEWALForbiddenDir";
+    struct fuse_file_info create_req = {.flags = O_WRONLY};
+    struct fuse_file_info truncate_req = {.flags = O_WRONLY | O_TRUNC};
+    if (fs_create(denied_name, 0600, &create_req) >= 0 ||
+        fs_mkdir(denied_dir, 0700) >= 0 ||
+        fs_link(safe_name, denied_name) >= 0 ||
+        fs_truncate(safe_name, 0, NULL) >= 0 ||
+        fs_open(safe_name, &truncate_req) >= 0) {
+        fprintf(stderr, "FAIL: FUSE mutation bypasses corrupt WAL\\n");
+        close(wal_fd);
+        return 1;
+    }
+    int verify_fd = lower_open(safe_name, O_RDONLY, 0);
+    char verify_bytes[4];
+    bool preserved = verify_fd >= 0 && read(verify_fd, verify_bytes, 4) == 4 &&
+                     memcmp(verify_bytes, "SAFE", 4) == 0;
+    if (verify_fd >= 0) close(verify_fd);
+    int unexpected_fd = lower_open(denied_name, O_RDONLY, 0);
+    int unexpected_dir = lower_open(denied_dir, O_RDONLY | O_DIRECTORY, 0);
+    if (unexpected_fd >= 0) close(unexpected_fd);
+    if (unexpected_dir >= 0) close(unexpected_dir);
+    if (!preserved || unexpected_fd >= 0 || unexpected_dir >= 0 ||
+        ftruncate(wal_fd, 0) != 0 || fsync(wal_fd) != 0) {
+        fprintf(stderr, "FAIL: corrupt WAL mutation changed backing\\n");
+        close(wal_fd);
+        return 1;
+    }
+    close(wal_fd);
+    if (unlinkat(lower_root, safe_name + 1, 0) != 0) {
+        fprintf(stderr, "FAIL: FUSE WAL test cleanup\\n");
+        return 1;
+    }
+    printf("PASS FUSE fail-closed pre-mutation WAL admission\\n");
     printf("PASS NT opt-in share leases, pre-truncate denial, range locks, metadata isolation\n");
     printf("PASS FUSE callbacks, broker rename, alias persistence and confinement (mount not tested)\n");
     return 0;

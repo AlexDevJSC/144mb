@@ -37,6 +37,10 @@ static int write_guest_xattr(int fd, const char *name, const void *value, size_t
 static int clear_guest_xattr(int fd, const char *name);
 static int open_share_registry(const struct stat *info);
 static pthread_mutex_t dos83_lock = PTHREAD_MUTEX_INITIALIZER;
+/* An alias is durable only after its owner inode's metadata fsync.
+ * wal_sync_pinned is defined in the versioned journal include below. */
+static bool wal_sync_pinned(int path_fd, bool directory);
+static bool wal_healthy(void);
 
 static bool dos83_char(unsigned char c)
 {
@@ -199,6 +203,8 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
 {
     if (dos83_native(name, alias))
         return true;
+    if (!wal_healthy())
+        return false;
     pthread_mutex_lock(&dos83_lock);
     int fd = confined_open_raw(parent, name, O_PATH | O_NOFOLLOW, 0);
     if (fd < 0) {
@@ -249,6 +255,7 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
                 } else if (write_guest_xattr(fd, key, alias,
                                               strlen(alias) + 1) == 0) {
                     assigned = true;
+                    dos83_test_crash("alias-after-write");
                     /* Keep the legacy attribute solely as an optional
                      * diagnostic for single-link files. It is NOT a
                      * lookup key and does not affect alias correctness. */
@@ -273,6 +280,16 @@ static bool dos83_assign_at(int parent, const char *name, char alias[14])
         if (fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) != 0 ||
             current.st_dev != st.st_dev || current.st_ino != st.st_ino)
             error = EBUSY;
+    }
+    /* An xattr write that has reached the page cache is not a durable
+     * alias. A successful refresh/lookup must fsync the pinned owner,
+     * INCLUDING when retrying after an earlier failed sync. Never claim
+     * success if this barrier fails. */
+    if (!error) {
+        if (!wal_sync_pinned(fd, S_ISDIR(st.st_mode)))
+            error = errno;
+        else
+            dos83_test_crash("alias-after-fsync");
     }
     if (gate >= 0)
         close(gate);
@@ -332,6 +349,9 @@ static bool dos83_lock_pair(int source_parent, int dest_parent,
     return true;
 }
 
+/* Startup WAL admission also reaps durable FILE_DELETE_PENDING markers.
+ * Defined in guest_files.c after the per-inode registry helpers. */
+static bool fs4_recover_pending_deletes(int c_root);
 #include "dos83_wal.inc"
 
 /* Cooperating rename transaction. Stage the new xattr on the pinned

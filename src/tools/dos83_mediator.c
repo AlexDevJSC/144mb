@@ -429,7 +429,7 @@ static bool to_wide(const char *input, uint16_t *output, size_t capacity)
 int main(int argc, char **argv)
 {
     if (argc < 4 || strcmp(argv[1], "--root") != 0) {
-        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW | --replace OLD NEW\n", argv[0]);
+        fprintf(stderr, "Usage: %s --root DIR --watch | --scan | --recover | --recover-with-drive D_ROOT | --refresh DOS_PATH | --mark DOS_PATH | --reconcile OLD NEW | --move OLD NEW | --replace OLD NEW | --sequence-move A B C D | --deferred-delete PATH | --two-deferred-deletes A B | --create PATH | --truncate PATH | --mkdir PATH | --rmdir PATH | --delete PATH\n", argv[0]);
         return 2;
     }
     if (!nt_runtime_set_file_root(argv[2])) {
@@ -495,6 +495,74 @@ int main(int argc, char **argv)
         result = to_wide(argv[4], from, PATH_MAX) &&
                  to_wide(argv[5], to, PATH_MAX) &&
                  nt_MoveFileExW(from, to, flags) ? 0 : 1;
+    } else if (argc == 5 && (
+                   strcmp(argv[3], "--create") == 0 ||
+                   strcmp(argv[3], "--truncate") == 0 ||
+                   strcmp(argv[3], "--mkdir") == 0 ||
+                   strcmp(argv[3], "--rmdir") == 0 ||
+                   strcmp(argv[3], "--delete") == 0)) {
+        uint16_t path[PATH_MAX];
+        if (to_wide(argv[4], path, PATH_MAX)) {
+            if (strcmp(argv[3], "--mkdir") == 0)
+                result = nt_CreateDirectoryW(path, NULL) ? 0 : 1;
+            else if (strcmp(argv[3], "--rmdir") == 0)
+                result = nt_RemoveDirectoryW(path) ? 0 : 1;
+            else if (strcmp(argv[3], "--delete") == 0)
+                result = nt_DeleteFileW(path) ? 0 : 1;
+            else {
+                const uint32_t disposition =
+                    strcmp(argv[3], "--truncate") == 0 ? 5u : 1u;
+                uintptr_t fd = nt_CreateFileW(path,
+                    UINT32_C(0x40000000), NT_FS_SHARE_ALL,
+                    NULL, disposition, 0, 0);
+                result = fd != UINTPTR_MAX && nt_CloseHandle(fd) ? 0 : 1;
+            }
+        } else {
+            result = 1;
+        }
+    } else if ((argc == 5 && strcmp(argv[3], "--deferred-delete") == 0) ||
+               (argc == 6 && strcmp(argv[3], "--two-deferred-deletes") == 0)) {
+        /* Reproduce the actual Windows deferred-delete lifecycle, not a
+         * direct POSIX unlink bypassing the share-pending registry. */
+        bool all = true;
+        for (int i = 4; i < argc; ++i) {
+            uint16_t path[PATH_MAX];
+            if (!to_wide(argv[i], path, PATH_MAX)) {
+                all = false;
+                break;
+            }
+            const uintptr_t handle = nt_CreateFileW(
+                path, UINT32_C(0x80010000), NT_FS_SHARE_ALL,
+                NULL, 3, 0, 0);
+            if (handle == UINTPTR_MAX) {
+                all = false;
+                break;
+            }
+            const bool deletion = nt_DeleteFileW(path) != 0;
+            const bool closed = nt_CloseHandle(handle) != 0;
+            fprintf(stderr, "deferred delete %d: marked=%d closed=%d\n",
+                    i - 3, deletion ? 1 : 0, closed ? 1 : 0);
+            if (!deletion || !closed)
+                all = false;
+        }
+        result = all ? 0 : 1;
+    } else if (argc == 8 && strcmp(argv[3], "--sequence-move") == 0) {
+        /* Exercise two mutations in one process: a failed WAL clear must
+         * poison the process even if ftruncate already made the WAL appear
+         * empty in page cache. Never stop after the first failure. */
+        uint16_t a[PATH_MAX], b[PATH_MAX], c[PATH_MAX], d[PATH_MAX];
+        if (to_wide(argv[4], a, PATH_MAX) &&
+            to_wide(argv[5], b, PATH_MAX) &&
+            to_wide(argv[6], c, PATH_MAX) &&
+            to_wide(argv[7], d, PATH_MAX)) {
+            const bool first = nt_MoveFileExW(a, b, 0) != 0;
+            const bool second = nt_MoveFileExW(c, d, 0) != 0;
+            result = first && second ? 0 : 1;
+            fprintf(stderr, "sequence: first=%d second=%d\n",
+                    first ? 1 : 0, second ? 1 : 0);
+        } else {
+            result = 1;
+        }
     } else {
         fprintf(stderr, "Unsupported mode or argument count\n");
     }
