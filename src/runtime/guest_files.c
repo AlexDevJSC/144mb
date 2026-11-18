@@ -6613,8 +6613,28 @@ int32_t NT_MS_ABI nt_CreateSymbolicLinkW(const uint16_t *link_name,
     for (char *p = target; *p; ++p)
         if (*p == '\\')
             *p = '/';
-    const int result = symlinkat(target, parent, leaf);
-    const int error = errno;
+    /* Reparse creation must not race a WAL-backed rename on this grant.
+     * The held flock serializes cooperating writers; it does not journal
+     * symlinks or prevent raw POSIX writers outside the service UID. */
+    int guard = nt_runtime_begin_namespace_mutation(link);
+    if (guard < 0) {
+        const int cause = errno;
+        close(parent);
+        nt_SetLastError(path_error(cause ? cause : EUCLEAN, false));
+        return 0;
+    }
+    int result = symlinkat(target, parent, leaf);
+    int error = errno;
+    if (result == 0) {
+        dos83_test_crash("after-symlink-at");
+        if (!wal_sync_pinned(parent, true)) {
+            error = errno;
+            result = -1;
+        } else {
+            dos83_test_crash("after-symlink-parent-fsync");
+        }
+    }
+    nt_runtime_end_namespace_mutation(guard);
     close(parent);
     if (result != 0)
         nt_SetLastError(path_error(error, false));

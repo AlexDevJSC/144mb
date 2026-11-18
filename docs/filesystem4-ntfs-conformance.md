@@ -45,3 +45,34 @@ siendo legible. No se introducen nuevos tags ni nuevas rutas.
 
 Este documento no asigna porcentajes ni garantiza Windows compatibility
 más allá de los fixtures ejecutados.
+
+## Matriz diferencial v2 — ACL y reparse (18-11-2026)
+
+La captura Windows real se amplía con lectura de propietario del descriptor,
+prueba reversible de ACE de denegación sobre un archivo descartable y
+comprobación de presencia de reparse de junction y symbolic link. El
+capturador registra `null` cuando el host no puede probar una función por
+falta de privilegios; no equivale a `false` ni a PASS.
+
+El probe NT144 comprueba `GetFileSecurityW(OWNER|GROUP|DACL)` y su
+`SECURITY_DESCRIPTOR_RELATIVE`. Las ACE de denegación explícita, las
+junctions y los symlinks todavía permanecen sin fixture comparable (`null`).
+El comparador v2 **no** declara equivalencia global mientras falte una
+observación o una referencia Windows v2. El esquema histórico v1 sigue
+siendo legible, pero nunca satisface `complete` de la matriz avanzada.
+
+Esto crea una puerta de medición, NO implementa ACL NTFS completas ni
+una equivalencia de reparse/seguridad; no ejecutar el script de Windows
+fuera de una máquina NTFS real y un directorio de prueba desechable.
+
+## Reparse symlink / journal (18-11-2026)
+
+`CreateSymbolicLinkW` mantiene ahora el mismo `flock(LOCK_EX)` del WAL
+mientras ejecuta `symlinkat` y `fsync` del directorio padre. Una
+transacción anterior pendiente o corrupta bloquea la creación **antes** del
+syscall; una prueba de mediador verifica que conserva target/WAL. Mantiene
+la política exclusiva de targets relativos a archivos regulares existentes.
+
+No convierte symlinks Linux en tags NTFS arbitrarios, no implementa
+`FSCTL_DELETE_REPARSE_POINT` sobre un enlace POSIX y no garantiza rollback
+tras interrupción eléctrica entre la creación y el fsync.

@@ -10,6 +10,13 @@ from pathlib import Path
 import sys
 from fs4_windows_reference_validate import check as validate_windows
 
+ADVANCED_FIELDS = (
+    "acl_descriptor_readable",
+    "acl_explicit_deny_enforced",
+    "junction_reparse_visible",
+    "symlink_reparse_visible",
+)
+
 FIELDS = (
     "case_insensitive_exact_name",
     "rename_preserves_content",
@@ -42,12 +49,28 @@ def compare(windows: dict, nt144: dict) -> dict:
         else:
             diffs.append({"field": key, "windows_ntfs": left,
                           "nt144_runtime": right})
+    advanced = windows.get("schema") == "filesystem4-windows-reference-v2"
+    if advanced:
+        for key in ADVANCED_FIELDS:
+            left, right = windows.get(key), nt144.get(key)
+            if left is not None and type(left) is not bool:
+                raise ValueError(f"Invalid Windows advanced field {key}")
+            if right is not None and type(right) is not bool:
+                raise ValueError(f"Invalid NT144 advanced field {key}")
+            if left is None or right is None:
+                missing.append(key)
+            elif left == right:
+                matches.append(key)
+            else:
+                diffs.append({"field": key, "windows_ntfs": left,
+                              "nt144_runtime": right})
     return {
-        "schema": "filesystem4-ntfs-comparison-v1",
+        "schema": "filesystem4-ntfs-comparison-v2",
+        "advanced_reference_present": advanced,
         "matches": matches,
         "differences": diffs,
         "unverified": missing,
-        "complete": not diffs and not missing,
+        "complete": advanced and not diffs and not missing,
         "warning": "Operator must verify real Windows provenance, SELinux, power-loss and PE sandbox independently",
     }
 
