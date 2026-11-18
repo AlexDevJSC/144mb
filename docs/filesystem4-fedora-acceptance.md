@@ -109,3 +109,4 @@ y reinicio. Una denegación provocada por DAC no certifica SELinux.
 Evidencia: esta sesión no dispone de Fedora físico. El entorno del asistente
 es Debian 13 sin /dev/fuse ni /sys/fs/selinux/enforce. Validación física:
 NO EJECUTADA. No desactivar SELinux para pasar el gate.
+El entrypoint de aceptación de servicio requiere explícitamente el parámetro --physical-confirmed, rechaza CI y no retorna PASS al faltar SELinux, FUSE o el broker v3.
