@@ -50,8 +50,9 @@ original después de ejecutar la APC. El dispatcher:
 
 **Importante sobre SEH:** las excepciones software lanzadas mediante
 `RaiseException` dentro de una APC usan el mismo despachador VEH/SEH,
-`RtlCaptureContext` y `RtlRestoreContext` existente del PE. Hay
-regresión con un VEH real que devuelve `CONTINUE_EXECUTION`.
+`RtlCaptureContext` y `RtlRestoreContext` existente del PE. Se
+prueban **por separado** un VEH que devuelve `CONTINUE_EXECUTION` y
+una recuperación de frame SEH que hace `EXECUTE_HANDLER`.
 NO se capturan por esta entrega señales `SIGSEGV/SIGILL/SIGFPE` de
 Linux ni se implementan SEH universal, `__try/__except` en todo
 callback, unwinding a través de cualquier puente de importaciones,
@@ -78,6 +79,13 @@ ordinarios. Ahora prueba además:
   de TID y estado final.
 - Una excepción software `RaiseException` dentro del callback
   especial, manejada con VEH `EXCEPTION_CONTINUE_EXECUTION`.
+- **Un segundo PE32+ independiente** (`special_apc_seh_fixture.S`) que
+  solicita una APC especial sobre el mismo hilo sin espera alertable,
+  ejecuta `RaiseException` dentro de una rutina con unwind Win64
+  `.pdata/.xdata` y la recupera mediante el filtro incondicional
+  `__C_specific_handler` (SEH de frame). Si el import retorna por la
+  ruta normal en vez del handler, falla. Un contador del propio PE
+  confirma el único salto legítimo al handler.
 - Comportamiento negativo de HANDLE/scope protegido; variante sin
   cargador PE mantiene rechazo de especial.
 
