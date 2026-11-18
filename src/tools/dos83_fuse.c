@@ -253,7 +253,9 @@ static int guest_refresh(const char *path)
     int n = snprintf(dos, sizeof(dos), "C:%s", path);
     if (n <= 0 || n >= (int)sizeof(dos))
         return -ENAMETOOLONG;
-    if (!nt_runtime_refresh_dos83_path(dos))
+    /* The caller already owns the WAL flock; taking it again would
+     * deadlock on a second open-file description in this process. */
+    if (!nt_runtime_refresh_dos83_path_guarded(dos))
         return -(errno ? errno : EIO);
     return 0;
 }
@@ -357,7 +359,7 @@ static int fs_releasedir(const char *path, struct fuse_file_info *fi)
     return close((int)fi->fh) == 0 ? 0 : -errno;
 }
 
-static int fs_open(const char *path, struct fuse_file_info *fi)
+static int fs_open_impl(const char *path, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
@@ -429,7 +431,23 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
-static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_open(const char *path, struct fuse_file_info *fi)
+{
+    if (!service_mode)
+        return fs_open_impl(path, fi);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_open_impl(path, fi);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
+
+static int fs_create_impl(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
@@ -475,6 +493,22 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     return error;
 }
 
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
+{
+    if (!service_mode)
+        return fs_create_impl(path, mode, fi);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_create_impl(path, mode, fi);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
+
 static int fs_read(const char *path, char *buffer, size_t size,
                    off_t offset, struct fuse_file_info *fi)
 {
@@ -501,7 +535,7 @@ static int fs_write(const char *path, const char *buffer, size_t size,
     return count < 0 ? -errno : (int)count;
 }
 
-static int fs_release(const char *path, struct fuse_file_info *fi)
+static int fs_release_impl(const char *path, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
@@ -512,6 +546,22 @@ static int fs_release(const char *path, struct fuse_file_info *fi)
     nt_runtime_release_linux_nt_lease(&lease);
     return result == 0 ? 0 : -error;
 }
+
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_release(const char *path, struct fuse_file_info *fi)
+{
+    if (!service_mode)
+        return fs_release_impl(path, fi);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_release_impl(path, fi);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
 
 static int fs_flush(const char *path, struct fuse_file_info *fi)
 {
@@ -531,7 +581,7 @@ static int fs_fsync(const char *path, int datasync, struct fuse_file_info *fi)
     return result == 0 ? 0 : -errno;
 }
 
-static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
+static int fs_truncate_impl(const char *path, off_t size, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
@@ -570,7 +620,23 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
     return error;
 }
 
-static int fs_mkdir(const char *path, mode_t mode)
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
+{
+    if (!service_mode)
+        return fs_truncate_impl(path, size, fi);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_truncate_impl(path, size, fi);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
+
+static int fs_mkdir_impl(const char *path, mode_t mode)
 {
     if (!service_authorized())
         return -EACCES;
@@ -595,6 +661,22 @@ static int fs_mkdir(const char *path, mode_t mode)
     return error;
 }
 
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_mkdir(const char *path, mode_t mode)
+{
+    if (!service_mode)
+        return fs_mkdir_impl(path, mode);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_mkdir_impl(path, mode);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
+
 static int fs_mknod(const char *path, mode_t mode, dev_t dev)
 {
     if (!service_authorized())
@@ -609,7 +691,7 @@ static int fs_mknod(const char *path, mode_t mode, dev_t dev)
     return result;
 }
 
-static int fs_unlink(const char *path)
+static int fs_unlink_impl(const char *path)
 {
     if (!service_authorized())
         return -EACCES;
@@ -623,7 +705,23 @@ static int fs_unlink(const char *path)
     return result;
 }
 
-static int fs_rmdir(const char *path)
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_unlink(const char *path)
+{
+    if (!service_mode)
+        return fs_unlink_impl(path);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_unlink_impl(path);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
+
+static int fs_rmdir_impl(const char *path)
 {
     if (!service_authorized())
         return -EACCES;
@@ -637,7 +735,23 @@ static int fs_rmdir(const char *path)
     return result;
 }
 
-static int fs_rename(const char *from, const char *to, unsigned int flags)
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_rmdir(const char *path)
+{
+    if (!service_mode)
+        return fs_rmdir_impl(path);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_rmdir_impl(path);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
+
+static int fs_rename_impl(const char *from, const char *to, unsigned int flags)
 {
     if (!service_authorized())
         return -EACCES;
@@ -658,7 +772,23 @@ static int fs_rename(const char *from, const char *to, unsigned int flags)
     return result;
 }
 
-static int fs_link(const char *from, const char *to)
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_rename(const char *from, const char *to, unsigned int flags)
+{
+    if (!service_mode)
+        return fs_rename_impl(from, to, flags);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_rename_impl(from, to, flags);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
+
+static int fs_link_impl(const char *from, const char *to)
 {
     if (!service_authorized())
         return -EACCES;
@@ -685,6 +815,22 @@ static int fs_link(const char *from, const char *to)
     nt_runtime_end_namespace_mutation(guard);
     return error;
 }
+
+/* Service admission is an exclusive kernel flock shared by ALL broker
+ * workers and the dedicated-UID FUSE process. Keep it across open,
+ * lease acquisition/release, namespace mutation and WAL barriers. */
+static int fs_link(const char *from, const char *to)
+{
+    if (!service_mode)
+        return fs_link_impl(from, to);
+    int admission=nt_runtime_begin_service_admission();
+    if(admission<0)
+        return -(errno ? errno : EACCES);
+    int result=fs_link_impl(from, to);
+    nt_runtime_end_service_admission(admission);
+    return result;
+}
+
 
 static int fs_statfs(const char *path, struct statvfs *st)
 {
