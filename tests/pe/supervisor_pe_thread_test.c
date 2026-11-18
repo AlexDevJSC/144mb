@@ -429,10 +429,41 @@ int main(int argc, char **argv)
         fputs("FAIL cannot prepare controlled guest APC\\n", stderr);
         goto cleanup;
     }
+#if !defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) && \
+    !defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
     const uint64_t guest_before_apc = atomic_load(&shared->guest_ticks);
-    if (nt_supervisor_nt_queue_trusted_apc(&nt, apc_entry, apc_stack_top,
+#endif
+    const nt_status apc_status =
+        nt_supervisor_nt_queue_trusted_apc(&nt, apc_entry, apc_stack_top,
                                             (uintptr_t)shared,
-                                            &shared->apc_delivered) != NT_STATUS_SUCCESS) {
+                                            &shared->apc_delivered);
+#if defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) || \
+    defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
+    /* The real PE callback reaches INT3. A test-only completion mismatch
+     * or corrupted XSTATE verification MUST quarantine the tracee;
+     * never resume its potentially mutated registers. */
+    errno = 0;
+    if (apc_status == NT_STATUS_SUCCESS || !sup.compromised ||
+        atomic_load_explicit(&shared->apc_delivered,
+                             memory_order_acquire) != 1u ||
+        nt_supervisor_continue(&sup) != -1 || errno != EPERM ||
+        nt_supervisor_detach(&sup) != -1 || errno != EPERM) {
+        fputs("FAIL unsafe guest APC completion was resumable\\n", stderr);
+        goto cleanup;
+    }
+    /* A traced SIGKILL can produce a ptrace signal/exit stop before
+     * userspace can reap the process. Never PTRACE_CONT compromised
+     * registers just to force waitpid to finish: the tracer's exit will
+     * enforce PTRACE_O_EXITKILL. Verify the pidfd signal is accepted. */
+    if (nt_supervisor_terminate_compromised_child(&sup) != 0) {
+        fputs("FAIL pidfd SIGKILL was not accepted\\n", stderr);
+        goto cleanup;
+    }
+    puts("PASS async PE APC mismatch: no CONT/DETACH, pidfd SIGKILL issued, EXITKILL armed");
+    rc = 0;
+    goto finished;
+#else
+    if (apc_status != NT_STATUS_SUCCESS) {
         fputs("FAIL supervised NT special APC delivery\\n", stderr);
         goto cleanup;
     }
@@ -441,6 +472,7 @@ int main(int argc, char **argv)
         fputs("FAIL guest did not resume after asynchronous APC\\n", stderr);
         goto cleanup;
     }
+#endif
     if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &rejected) ||
         nt_supervisor_detach(&sup)) {
         perror("FAIL PE detach"); goto cleanup;
