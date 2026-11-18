@@ -92,7 +92,7 @@ int main(void)
         goto cleanup;
     }
 
-    struct user_regs_struct original = {0}, after = {0};
+    struct user_regs_struct original = {0};
     if (nt_supervisor_get_registers(&sup, &original) != 0) {
         perror("FAIL initial registers");
         goto cleanup;
@@ -126,6 +126,7 @@ int main(void)
     nt_supervisor_release(&sup); /* pidfd signalled, safe to relinquish */
     puts("PASS direct RAX: failed rollback quarantined and pidfd killed child");
 #else
+    struct user_regs_struct after = {0};
     if (write_error != EPROTO || sup.compromised ||
         nt_supervisor_get_registers(&sup, &after) != 0 ||
         memcmp(&original, &after, sizeof(original)) != 0) {
