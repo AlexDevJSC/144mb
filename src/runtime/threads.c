@@ -463,9 +463,7 @@ static void invoke_apc(struct guest_apc *apc)
 void nt_runtime_special_apc_checkpoint(void)
 {
     if (special_apc_dispatching ||
-        nt_guest_boundary_host_nesting() != 0 ||
-        nt_guest_boundary_nonlocal_poisoned() ||
-        nt_guest_boundary_current_phase() != NT_GUEST_BOUNDARY_GUEST ||
+        !nt_guest_boundary_special_apc_allowed() ||
         nt_guest_thread_teb() == NULL)
         return;
     special_apc_dispatching = true;
