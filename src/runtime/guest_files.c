@@ -633,6 +633,11 @@ static bool dos83_test_io_error(const char *phase)
 #define dos83_test_io_error(phase) (false)
 #endif
 
+/* An admitted FUSE namespace callback already owns the physical WAL
+ * exclusive lock. It must not attempt to acquire dos83_lock after WAL:
+ * rename acquires the locks in the opposite order. The per-directory
+ * registry flock still serializes alias assignment across processes. */
+static _Thread_local unsigned int fs4_wal_guard_depth;
 #include "dos83_alias.inc"
 
 /* Exact spelling wins, including a symlink (the actual open rejects it).
@@ -841,13 +846,17 @@ int nt_runtime_begin_namespace_mutation(const char *input)
         return -1;
     }
     close(wal.directory);
+    ++fs4_wal_guard_depth;
     return wal.fd; /* LOCK_EX remains held until end() */
 }
 
 void nt_runtime_end_namespace_mutation(int guard)
 {
-    if (guard >= 0)
+    if (guard >= 0) {
         close(guard);
+        if (fs4_wal_guard_depth > 0)
+            --fs4_wal_guard_depth;
+    }
 }
 
 bool nt_runtime_refresh_dos83_path(const char *input)

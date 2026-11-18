@@ -429,6 +429,78 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
+/* Dedicated storage UID uses staged inode publication. */
+/* Publish the inode only AFTER it holds a compatible OFD FILE_SHARE
+ * lease. A normal O_CREAT makes the inode visible before share admission:
+ * a concurrent PE CreateFile can open it during that interval. O_TMPFILE
+ * requires backing filesystem support; there is NO unsafe fallback.
+ * The WAL guard is owned by the caller through the final alias refresh. */
+static int fs_create_staged_service(const char *path, mode_t mode,
+                                    struct fuse_file_info *fi)
+{
+    char name[NAME_MAX + 1];
+    int parent = lower_parent(path, name);
+    if (parent < 0)
+        return -errno;
+    const int access_mode = fi->flags & O_ACCMODE;
+    if (access_mode != O_WRONLY && access_mode != O_RDWR) {
+        close(parent);
+        return -EINVAL;
+    }
+    int fd = openat(parent, ".", O_TMPFILE | O_CLOEXEC | access_mode,
+                    mode & 07777);
+    if (fd < 0) {
+        int error = -errno;
+        close(parent);
+        return error;
+    }
+    const uint32_t access = access_mode == O_RDWR ?
+                            NT_FS_READ | NT_FS_WRITE : NT_FS_WRITE;
+    int lease = nt_runtime_acquire_linux_nt_lease(fd, access, NT_FS_SHARE_ALL);
+    int error = lease < 0 ? -errno : 0;
+    if (!error) {
+        error = view_lease_add(fd, lease);
+        if (!error)
+            lease = -1; /* lifecycle transferred to FUSE view registry */
+    }
+    bool published = false;
+    if (!error) {
+        if (linkat(fd, "", parent, name, AT_EMPTY_PATH) < 0)
+            error = -errno;
+        else
+            published = true;
+    }
+    if (!error && fsync(fd) != 0)
+        error = -errno;
+    if (!error && fsync(parent) != 0)
+        error = -errno;
+    if (!error)
+        error = guest_refresh(path);
+    if (error) {
+        if (published) {
+            /* Refuse to remove another inode if an external writer changed
+             * the name while the alias/WAL transaction was in progress. */
+            struct stat expected, current;
+            if (fstat(fd, &expected) == 0 &&
+                fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+                expected.st_dev == current.st_dev &&
+                expected.st_ino == current.st_ino)
+                (void)unlinkat(parent, name, 0);
+        }
+        if (lease >= 0)
+            nt_runtime_release_linux_nt_lease(&lease);
+        int registry_lease = view_lease_take(fd);
+        nt_runtime_release_linux_nt_lease(&registry_lease);
+        close(fd);
+    } else {
+        fi->fh = (uint64_t)fd;
+        fi->direct_io = 1;
+        fi->keep_cache = 0;
+    }
+    close(parent);
+    return error;
+}
+
 static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
@@ -437,6 +509,12 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     if (guard < 0)
         return guard;
     pthread_mutex_lock(&namespace_lock);
+    if (service_mode) {
+        int result = fs_create_staged_service(path, mode, fi);
+        pthread_mutex_unlock(&namespace_lock);
+        nt_runtime_end_namespace_mutation(guard);
+        return result;
+    }
     /* FUSE create receives an inode mode (S_IFREG | permissions).
      * openat2 rejects file-type bits in open_how.mode with EINVAL. */
     int fd = lower_open(path, fi->flags | O_CREAT | O_EXCL, mode & 07777);
