@@ -401,8 +401,11 @@ static int run_one(unsigned mode)
         return 6;
 #ifdef NT_BROKER_TEST_DELAY_CONTEXT_ACK
     if (mode == 6) {
-        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL ||
-            !atomic_load_explicit(&data->context_ack_ready, memory_order_acquire)) {
+        /* The parent broker worker is allowed to munmap its own guest
+         * session on EOF. Do not read data[] after the killed child was
+         * reaped: the separate ACK gate was already checked by the child
+         * before it closed the authenticated connection. */
+        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) {
             fprintf(stderr, "FAIL lost-ACK SET_CONTEXT was not pidfd killed: %d\n",
                     status);
             return 7;
