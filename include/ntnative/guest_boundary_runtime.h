@@ -78,6 +78,9 @@ bool nt_guest_boundary_special_apc_allowed(void);
  * was entered from a reviewed PE entry and no import/ELF frame is active.
  * Does not grant ptrace rights or any cross-thread authority. */
 bool nt_guest_boundary_signal_guest_phase(void);
+/* Async-signal-safe read of immutable preflight PE .text grants (including
+ * pinned startup DLLs); JIT and LoadLibrary-after-start are denied. */
+bool nt_guest_boundary_signal_guest_code(uintptr_t pc);
 /* Any nonlocal exception/longjmp that may bypass an import epilogue
  * permanently disables asynchronous stops on that TID until teardown.
  * The runtime must NOT attempt to reconstruct abandoned host locks or
