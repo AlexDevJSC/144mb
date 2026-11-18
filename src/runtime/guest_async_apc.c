@@ -182,6 +182,9 @@ static void install_once_fn(void)
     const int target = SIGRTMIN + 4;
     if (target > SIGRTMAX)
         return;
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0 || page > 65536)
+        return;
     struct sigaction old = {0};
     if (sigaction(target, NULL, &old) != 0 ||
         old.sa_handler != SIG_DFL)
@@ -191,9 +194,6 @@ static void install_once_fn(void)
     act.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&act.sa_mask);
     if (sigaction(target, &act, NULL) != 0)
-        return;
-    long page = sysconf(_SC_PAGESIZE);
-    if (page <= 0 || page > 65536)
         return;
     page_size = (size_t)page;
     apc_signal_number = target;
@@ -249,7 +249,7 @@ bool nt_runtime_guest_async_apc_nudge(pthread_t target)
 
 bool nt_runtime_guest_async_apc_stack_for_current(uintptr_t *low, size_t *size)
 {
-    const uintptr_t frame = (uintptr_t)&frame;
+    const uintptr_t frame = (uintptr_t)__builtin_frame_address(0);
     if (!low || !size || !slot.pending ||
         frame < slot.stack_low ||
         frame >= slot.stack_low + slot.stack_bytes)
