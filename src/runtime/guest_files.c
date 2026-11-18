@@ -2683,7 +2683,23 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
                                 (write_access ? FILE_WRITE : 0) |
                                 ((desired & UINT32_C(0x00010000)) ? FILE_DELETE : 0);
     pthread_mutex_lock(&file_lock);
+    /* Shared lock ordering: local file_lock, then physical WAL, then
+     * per-inode lease. Rename uses the same order and cannot publish an
+     * intermediate name while create/truncate is acquiring its lease. */
+    int mutation_guard = -1;
+    if (disposition != OPEN_EXISTING) {
+        mutation_guard = nt_runtime_begin_namespace_mutation(path);
+        if (mutation_guard < 0) {
+            const int denied = errno ? errno : EUCLEAN;
+            pthread_mutex_unlock(&file_lock);
+            close(parent);
+            free(saved_path);
+            nt_SetLastError(path_error(denied, false));
+            return UINTPTR_MAX;
+        }
+    }
     if (!wal_healthy() && disposition != OPEN_EXISTING) {
+        nt_runtime_end_namespace_mutation(mutation_guard);
         pthread_mutex_unlock(&file_lock);
         close(parent);
         free(saved_path);
@@ -2746,6 +2762,7 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
             }
         }
     }
+    nt_runtime_end_namespace_mutation(mutation_guard);
     pthread_mutex_unlock(&file_lock);
     close(parent);
     free(saved_path);
