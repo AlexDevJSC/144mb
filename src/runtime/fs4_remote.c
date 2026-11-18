@@ -49,6 +49,7 @@ struct remote_entry {
     uintptr_t guest;
     uint64_t cap;
     bool search, overlapped;
+    uint32_t handle_flags; /* no cross-process inheritance yet */
     uintptr_t completion_port, completion_key;
 };
 static pthread_mutex_t guard=PTHREAD_MUTEX_INITIALIZER;
@@ -125,6 +126,63 @@ bool nt_fs4_remote_overlapped(uintptr_t handle)
     bool allowed=entry && !entry->search && entry->overlapped;
     pthread_mutex_unlock(&guard);
     return allowed;
+}
+
+int32_t nt_fs4_remote_get_flags(uintptr_t handle,uint32_t *flags)
+{
+    if(!flags) {nt_SetLastError(NT_ERROR_INVALID_PARAMETER);return 0;}
+    pthread_mutex_lock(&guard);
+    const struct remote_entry *entry=find_entry(handle);
+    bool ok=entry && !entry->search;
+    if(ok) *flags=entry->handle_flags;
+    pthread_mutex_unlock(&guard);
+    if(!ok) nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return ok;
+}
+int32_t nt_fs4_remote_set_flags(uintptr_t handle,uint32_t mask,uint32_t flags)
+{
+    /* HANDLE_FLAG_INHERIT requires a sealed, authenticated IPC child ticket;
+     * never fake successful remote inheritance with a host FD snapshot. */
+    if((mask|flags)&~3u || (mask&1u && flags&1u)) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    bool ok=entry && !entry->search;
+    if(ok) entry->handle_flags=(entry->handle_flags&~mask)|(flags&mask);
+    pthread_mutex_unlock(&guard);
+    if(!ok) nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return ok;
+}
+int32_t nt_fs4_remote_associate_iocp(uintptr_t handle,
+                                      uintptr_t port,uintptr_t key)
+{
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    bool ok=entry && !entry->search && entry->overlapped &&
+            !entry->completion_port;
+    if(ok) {
+        entry->completion_port=port;
+        entry->completion_key=key;
+    }
+    pthread_mutex_unlock(&guard);
+    if(!ok) nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+    return ok;
+}
+int32_t nt_fs4_remote_completion(uintptr_t handle,
+                                  uintptr_t *port,uintptr_t *key)
+{
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    bool ok=entry && !entry->search && entry->overlapped;
+    if(ok) {
+        if(port) *port=entry->completion_port;
+        if(key) *key=entry->completion_key;
+    }
+    pthread_mutex_unlock(&guard);
+    if(!ok) nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    return ok;
 }
 
 size_t nt_fs4_remote_count(void)
@@ -240,7 +298,8 @@ static bool request(uint16_t operation,uint64_t handle,int64_t offset,
         nt_SetLastError(NT_ERROR_BROKEN_PIPE);
         return false;
     }
-    if (length>FS4_MAX || size>FS4_MAX) {
+    if (length>FS4_MAX ||
+        (size>FS4_MAX && operation!=FS4_LOCK && operation!=FS4_UNLOCK)) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return false;
     }
@@ -321,6 +380,11 @@ int32_t nt_fs4_remote_close(uintptr_t handle)
     if (!entry) {
         pthread_mutex_unlock(&guard);
         nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if (entry->handle_flags & 2u) { /* HANDLE_FLAG_PROTECT_FROM_CLOSE */
+        pthread_mutex_unlock(&guard);
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return 0;
     }
     struct reply response;
@@ -457,7 +521,8 @@ int32_t nt_fs4_remote_truncate(uintptr_t handle)
 int32_t nt_fs4_remote_lock(uintptr_t handle,uint64_t offset,uint64_t length,
                            bool unlock)
 {
-    if (offset>INT64_MAX || !length) {
+    if (offset>INT64_MAX || !length || length>INT64_MAX ||
+        length>INT64_MAX-offset) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }

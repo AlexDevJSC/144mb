@@ -15,6 +15,10 @@ bool nt_fs4_remote_handle(uintptr_t handle);
 bool nt_fs4_remote_search(uintptr_t handle);
 bool nt_fs4_remote_valid(uintptr_t handle);
 bool nt_fs4_remote_overlapped(uintptr_t handle);
+int32_t nt_fs4_remote_get_flags(uintptr_t handle,uint32_t *flags);
+int32_t nt_fs4_remote_set_flags(uintptr_t handle,uint32_t mask,uint32_t flags);
+int32_t nt_fs4_remote_associate_iocp(uintptr_t handle,uintptr_t port,uintptr_t key);
+int32_t nt_fs4_remote_completion(uintptr_t handle,uintptr_t *port,uintptr_t *key);
 size_t nt_fs4_remote_count(void);
 uintptr_t nt_fs4_remote_open(const char *path, uint32_t access,
                             uint32_t share, uint32_t disposition,
