@@ -414,6 +414,18 @@ $(BUILD_DIR)/supervisor-control-ipc-test: tests/supervisor_control_ipc_test.c sr
 check-supervisor-control-ipc: $(BUILD_DIR)/supervisor-control-ipc-test
 	timeout 35s $(BUILD_DIR)/supervisor-control-ipc-test
 
+# Explicit fault build: delay ACK only after parent verified a real
+# ptrace SET_CONTEXT. The child closes its authenticated channel during
+# that precise gap; no such hook exists in production runtime objects.
+$(BUILD_DIR)/supervisor-control-ipc-lost-ack-test: tests/supervisor_control_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_supervisor_control_server.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor \
+	    $(WARN_CFLAGS) $(CFLAGS) -DNT_BROKER_TEST_DELAY_CONTEXT_ACK=1 $(LDFLAGS) \
+	    $(filter %.c %.S,$^) -pthread -o "$@"
+
+.PHONY: check-supervisor-control-lost-ack
+check-supervisor-control-lost-ack: $(BUILD_DIR)/supervisor-control-ipc-lost-ack-test
+	timeout 25s $(BUILD_DIR)/supervisor-control-ipc-lost-ack-test
+
 $(BUILD_DIR)/broker-transport-failure-test: tests/thread_broker_transport_failure_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
