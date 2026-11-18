@@ -53,6 +53,9 @@ struct guest_apc {
 struct guest_apc_queue {
     struct guest_apc *head, *tail;
     uint32_t count;
+    /* Only special queues consult this lock-free indicator from the PE
+     * import-return path. Mutation remains serialized by wait_lock. */
+    _Atomic bool available;
 };
 /* The bounded Linux backend can boost a guest by one Linux nice step
  * and automatically restore its original base after a monotonic deadline.
@@ -409,6 +412,9 @@ static struct guest_apc *pop_apc_queue_locked(struct guest_apc_queue *queue)
         if (queue->head == NULL)
             queue->tail = NULL;
         --queue->count;
+        if (queue->count == 0)
+            atomic_store_explicit(&queue->available, false,
+                                  memory_order_release);
         apc->next = NULL;
     }
     return apc;
@@ -462,8 +468,14 @@ static void invoke_apc(struct guest_apc *apc)
  * Any nonlocal unwinding poisons the guest/host gate fail-closed. */
 void nt_runtime_special_apc_checkpoint(void)
 {
-    if (special_apc_dispatching ||
-        !nt_guest_boundary_special_apc_allowed() ||
+    if (special_apc_dispatching)
+        return;
+    /* Most imported Win32 calls have no pending APC. Avoid taking
+     * wait_lock (and a second CET probe) on every PE import. */
+    if (!atomic_load_explicit(&current_special_apcs()->available,
+                              memory_order_acquire))
+        return;
+    if (!nt_guest_boundary_special_apc_allowed() ||
         nt_guest_thread_teb() == NULL)
         return;
     special_apc_dispatching = true;
@@ -492,6 +504,8 @@ static void clear_apcs_locked(struct guest_apc_queue *queue)
         free(apc);
         apc = next;
     }
+    /* Accesses are serialized by wait_lock; publish empty before the
+     * underlying thread slot can be recycled. */
     *queue = (struct guest_apc_queue){0};
 }
 
@@ -556,6 +570,9 @@ static nt_status queue_apc_common(uintptr_t handle,
                     queue->head = apc;
                 queue->tail = apc;
                 ++queue->count;
+                if (special)
+                    atomic_store_explicit(&queue->available, true,
+                                          memory_order_release);
                 pthread_cond_broadcast(&wait_changed);
             }
         }
