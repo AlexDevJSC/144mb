@@ -458,8 +458,15 @@ struct software_exception {
     struct nt_context64 *origin;
     struct software_exception *previous;
     unsigned int depth;
+    bool hardware; /* origin RIP is faulting instruction, not return PC */
 };
 static _Thread_local struct software_exception *active_software;
+
+/* Optional in minimal isolated exception tests; production PE runtime
+ * supplies a kernel signal bridge with a dedicated host dispatch stack. */
+extern bool nt_runtime_guest_hardware_fault_install(void) __attribute__((weak));
+extern void nt_runtime_guest_hardware_fault_restore_extended(void)
+    __attribute__((weak));
 
 typedef int32_t (NT_MS_ABI *software_handler)(struct nt_exception_record *, uint64_t,
                                              struct nt_context64 *, struct nt_dispatcher_context *);
@@ -495,7 +502,12 @@ bool nt_runtime_enable_software_seh(uint32_t begin, uint32_t end,
     image.code_end = end;
     image.readable = readable;
     image.opaque = opaque;
-    return true;
+    /* Signal handlers are installed only after the loader has validated
+     * and pinned executable Win64 unwind data, never by a PE import.
+     * A denied install prevents running a guest that falsely believes
+     * it can recover CPU faults. */
+    return nt_runtime_guest_hardware_fault_install == NULL ||
+           nt_runtime_guest_hardware_fault_install();
 }
 
 static bool prepare_software_stack(void)
@@ -521,11 +533,16 @@ static bool software_stack_pointer(uint64_t rsp)
     return stack_low && rsp >= stack_low + 8 && rsp < stack_high && (rsp & 7u) == 0;
 }
 
-static bool software_frame(uint32_t type, struct nt_context64 *next, struct nt_dispatcher_context *dispatch)
+static bool software_frame(uint32_t type, struct nt_context64 *next,
+                           struct nt_dispatcher_context *dispatch,
+                           bool faulting_instruction)
 {
     const uint64_t rsp = next->rsp;
-    /* RIP points after a call. The byte before it belongs to the caller's scope. */
-    const uint64_t pc = next->rip - 1;
+    /* Software RtlCaptureContext sees a return PC; a hardware kernel
+     * ucontext sees the exact faulting instruction. The FIRST frame must
+     * use RIP, but every parent frame still has a return address (RIP-1).
+     * Mixing these conventions misses valid __C_specific_handler scopes. */
+    const uint64_t pc = next->rip - (faulting_instruction ? 0u : 1u);
     if (!software_code(pc) || !software_stack_pointer(rsp))
         return false;
     *dispatch = (struct nt_dispatcher_context){.pc = pc, .base = image.base, .frame = rsp, .context = next};
@@ -569,17 +586,24 @@ static _Noreturn void resume_software(const struct nt_context64 *context, struct
         software_failure(STATUS_INVALID_TARGET);
     nt_guest_boundary_mark_nonlocal_transfer();
     active_software = previous;
+    /* The Linux kernel supplied XSTATE at the signal. Restore extended
+     * YMM/ZMM components immediately before the assembly final GPR/FXSAVE
+     * restore. A VEH may modify the basic Win64 CONTEXT floating fields;
+     * FXRSTOR must still take precedence for those basic fields. */
+    if (nt_runtime_guest_hardware_fault_restore_extended != NULL)
+        nt_runtime_guest_hardware_fault_restore_extended();
     nt_restore_software_context(context);
 }
 
-_Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint32_t code, uint32_t flags,
-                                             uint32_t count, const uintptr_t *arguments)
+static _Noreturn void dispatch_exception_common(
+    struct nt_context64 *origin, uint32_t code, uint32_t flags,
+    uint32_t count, const uintptr_t *arguments, bool hardware)
 {
-    /* The Win64 IAT gate rewrites the immediate return address to a
-     * host trampoline. Recover only the reviewed direct PE import's real
-     * return PC, before poisoning all subsequent async stops. Never
-     * synthesize an ELF unwind for callbacks nested under host locks. */
-    origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
+    /* A SOFTWARE RaiseException crosses the Win64 IAT return gate; the
+     * recorded PC can be its synthetic ELF trampoline. A CPU hardware
+     * fault originates at the real guest instruction; never rewrite it. */
+    if (!hardware)
+        origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
     nt_guest_boundary_mark_nonlocal_transfer();
     complete_software_capture(origin);
     const bool ready = prepare_software_stack();
@@ -589,8 +613,11 @@ _Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint3
         record.count = count > 15 ? 15 : count;
         memcpy(record.information, arguments, record.count * sizeof(*arguments));
     }
-    struct software_exception state = {.origin = origin, .previous = active_software,
-                                        .depth = active_software ? active_software->depth + 1 : 1};
+    struct software_exception state = {
+        .origin = origin, .previous = active_software,
+        .depth = active_software ? active_software->depth + 1 : 1,
+        .hardware = hardware
+    };
     if (state.depth > SOFTWARE_MAX_NESTING)
         software_failure(STATUS_BAD_STACK);
     active_software = &state;
@@ -607,7 +634,8 @@ _Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint3
     if (ready) {
         for (size_t i = 0; i < SOFTWARE_MAX_FRAMES; ++i) {
             struct nt_dispatcher_context dispatch;
-            if (!software_frame(SOFTWARE_EHANDLER, &next, &dispatch))
+            if (!software_frame(SOFTWARE_EHANDLER, &next, &dispatch,
+                                hardware && i == 0))
                 break;
             if (dispatch.handler && invoke_software_handler(&dispatch, &record, origin) == SEH_CONTINUE_EXECUTION) {
                 if (record.flags & SOFTWARE_NONCONTINUABLE)
@@ -622,6 +650,22 @@ _Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint3
         resume_software(origin, state.previous);
     }
     software_failure(code);
+}
+
+/* Existing software RaiseException path and new CPU kernel fault path
+ * share exactly the same guest VEH -> Win64 frame SEH -> unhandled
+ * exception ordering. The hardware path differs solely in PC semantics
+ * and the provenance of the captured CONTEXT. */
+_Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin,
+    uint32_t code, uint32_t flags, uint32_t count, const uintptr_t *arguments)
+{
+    dispatch_exception_common(origin, code, flags, count, arguments, false);
+}
+
+_Noreturn void nt_dispatch_hardware_exception(struct nt_context64 *origin,
+    uint32_t code, uint32_t count, const uintptr_t *arguments)
+{
+    dispatch_exception_common(origin, code, 0, count, arguments, true);
 }
 
 static _Noreturn void software_unwind(struct nt_context64 *origin, uint64_t frame, uint64_t target,
@@ -640,7 +684,10 @@ static _Noreturn void software_unwind(struct nt_context64 *origin, uint64_t fram
     for (size_t i = 0; i < SOFTWARE_MAX_FRAMES; ++i) {
         struct nt_context64 current = next;
         struct nt_dispatcher_context dispatch;
-        if (!software_frame(SOFTWARE_UHANDLER, &next, &dispatch))
+        const bool hardware_first = i == 0 && active_software &&
+            active_software->hardware && active_software->origin == origin;
+        if (!software_frame(SOFTWARE_UHANDLER, &next, &dispatch,
+                            hardware_first))
             break;
         if (frame && dispatch.frame > frame)
             software_failure(STATUS_INVALID_TARGET);
