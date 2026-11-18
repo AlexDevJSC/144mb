@@ -199,6 +199,22 @@ static void guest_fault_signal(int sig, siginfo_t *information, void *frame)
         const uint32_t bytes = little32(fp + 480);
         if (bytes < 576 || bytes > XSAVE_MAX_BYTES)
             fail_closed(sig);
+        /* Linux's XSAVE header starts immediately after the 512-byte
+         * FXSAVE legacy area. XCOMP_BV bit63 means a compacted layout,
+         * which XRSTOR (as opposed to XRSTORS) cannot consume. An
+         * active PKRU, AMX, MPX or unknown feature must never be restored
+         * on a host dispatch stack with different memory permissions. */
+        uint64_t active = 0, compacted = 0;
+        for (unsigned j = 0; j < 8; ++j) {
+            active |= (uint64_t)fp[512 + j] << (8 * j);
+            compacted |= (uint64_t)fp[520 + j] << (8 * j);
+        }
+        const uint64_t supported =
+            UINT64_C(0x3) | UINT64_C(1) << 2 |
+            UINT64_C(1) << 5 | UINT64_C(1) << 6 |
+            UINT64_C(1) << 7; /* x87, SSE, AVX, AVX512 SIMD only */
+        if ((active & ~supported) || (compacted & UINT64_C(0x8000000000000000)))
+            fail_closed(sig);
         xstate_size = bytes;
         has_xsave = true;
     }
@@ -301,11 +317,21 @@ void nt_runtime_guest_hardware_fault_restore_extended(void)
     if (!slot->pending)
         return;
     if (slot->has_xsave) {
-        uint32_t eax = 0, edx = 0;
-        __asm__ __volatile__("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
-        __asm__ __volatile__("xrstor64 (%0)" : :
-                             "r"(slot->xstate), "a"(eax), "d"(edx) :
-                             "memory");
+        uint32_t xcr0_low = 0, xcr0_high = 0;
+        __asm__ __volatile__("xgetbv" : "=a"(xcr0_low),
+                             "=d"(xcr0_high) : "c"(0));
+        /* Never restore PKRU or other access-control features while
+         * still running on the host SEH dispatch stack. FXRSTOR in the
+         * final assembly gate restores x87 and XMM, while XRSTOR here
+         * handles only upper YMM/ZMM/AVX512 registers. */
+        const uint32_t simd_mask =
+            (1u << 2) | (1u << 5) | (1u << 6) | (1u << 7);
+        const uint32_t eax = xcr0_low & simd_mask;
+        (void)xcr0_high;
+        if (eax)
+            __asm__ __volatile__("xrstor64 (%0)" : :
+                                 "r"(slot->xstate), "a"(eax), "d"(0u) :
+                                 "memory");
     }
     slot->pending = 0;
 }
