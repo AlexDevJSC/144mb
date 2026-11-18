@@ -367,10 +367,16 @@ int import_fixture_entry(void)
         ResumeThread(thread) != 1)
         return 15;
     DWORD code = 0;
-    if (WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 ||
-        !GetExitCodeThread(thread, &code) || code != 0x144u ||
-        apc_count != 2 || callback_ok != 2 || callback_thread != tid || worker_id != tid)
+    if (WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0)
         return 16;
+    if (!GetExitCodeThread(thread, &code))
+        return 86;
+    if (code != 0x144u)
+        return code > 0 && code < 86u ? (int)code : 87;
+    if (apc_count != 2) return 88;
+    if (callback_ok != 2) return 89;
+    if (callback_thread != tid) return 90;
+    if (worker_id != tid) return 91;
 
     if (QueueUserAPC(single_apc, thread, 0x143u) != 0 ||
         NtAlertThread(thread) != STATUS_THREAD_IS_TERMINATING)
