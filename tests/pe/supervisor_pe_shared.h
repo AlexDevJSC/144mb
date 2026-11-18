@@ -13,6 +13,12 @@ struct nt_supervisor_pe_shared {
     _Atomic uintptr_t apc_entry;
     _Atomic uintptr_t apc_stack_top;
     _Atomic uint32_t apc_delivered;
+    /* Experimental APC disturbance fixtures. All fields are MAP_SHARED,
+     * but only the trusted parent supplies the actual cancellation gate. */
+    _Atomic uint32_t apc_entered;
+    _Atomic uint32_t apc_hold;
+    _Atomic uint32_t apc_mode; /* 0=normal, 1=hold, 2=PE UD2 exception */
+    _Atomic uint32_t apc_cancel;
     _Atomic uintptr_t host_callback;
     _Atomic uint32_t request_host_call;
     _Atomic uint32_t host_call_entered;

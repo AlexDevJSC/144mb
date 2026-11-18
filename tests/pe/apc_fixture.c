@@ -124,6 +124,85 @@ static DWORD WINAPI worker(void *unused)
     return 0x144;
 }
 
+/* Four concurrent PE Win32 threads independently consume two queued APCs,
+ * preserving target identity and FIFO without signal-handler callbacks.
+ * This exercises the production ordinary APC queue, NOT special APC. */
+struct multi_apc_target {
+    HANDLE ready;
+    DWORD thread_id;
+    DWORD user_seen, native_seen, calls, ordered;
+};
+static void CALLBACK multi_user_apc(ULONG_PTR argument)
+{
+    struct multi_apc_target *target = (struct multi_apc_target *)argument;
+    if (!target) return;
+    target->user_seen = GetCurrentThreadId();
+    if (target->calls == 0u)
+        target->ordered = 1u;
+    ++target->calls;
+}
+static void NTAPI multi_native_apc(void *context, void *first, void *second)
+{
+    struct multi_apc_target *target = context;
+    if (!target || first != (void *)(uintptr_t)0x515u ||
+        second != (void *)(uintptr_t)0x616u) return;
+    target->native_seen = GetCurrentThreadId();
+    if (target->calls == 1u && target->ordered == 1u)
+        target->ordered = 2u;
+    ++target->calls;
+}
+static DWORD WINAPI multi_apc_worker(void *argument)
+{
+    struct multi_apc_target *target = argument;
+    target->thread_id = GetCurrentThreadId();
+    if (!SetEvent(target->ready))
+        return 71;
+    /* Windows may dispatch several queued user APCs in one alertable
+     * wait; this runtime currently consumes one callback per wake. Do
+     * not require exactly two wake-ups to prove FIFO and target identity. */
+    for (unsigned wake = 0; wake < 2 && target->calls < 2u; ++wake)
+        if (SleepEx(5000, TRUE) != WAIT_IO_COMPLETION)
+            return 72;
+    if (target->calls != 2u || target->ordered != 2u ||
+        target->user_seen != target->thread_id ||
+        target->native_seen != target->thread_id)
+        return 74;
+    return 0x177u;
+}
+static int test_apc_concurrent_threads(void)
+{
+    enum { APC_THREADS = 4 };
+    struct multi_apc_target targets[APC_THREADS] = {{0}};
+    HANDLE handles[APC_THREADS] = {0};
+    DWORD ids[APC_THREADS] = {0};
+    for (int i = 0; i < APC_THREADS; ++i) {
+        targets[i].ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!targets[i].ready) return 75;
+        handles[i] = CreateThread(NULL, 0, multi_apc_worker, &targets[i], 0, &ids[i]);
+        if (!handles[i] || ids[i] == 0 ||
+            WaitForSingleObject(targets[i].ready, 5000) != WAIT_OBJECT_0)
+            return 76;
+    }
+    for (int i = 0; i < APC_THREADS; ++i)
+        if (!QueueUserAPC(multi_user_apc, handles[i],
+                          (ULONG_PTR)&targets[i]))
+            return 77;
+    for (int i = 0; i < APC_THREADS; ++i)
+        if (NtQueueApcThreadEx(handles[i], NULL, multi_native_apc,
+                               &targets[i], (void *)(uintptr_t)0x515u,
+                               (void *)(uintptr_t)0x616u) != STATUS_OK)
+            return 78;
+    for (int i = 0; i < APC_THREADS; ++i) {
+        DWORD code = 0;
+        if (WaitForSingleObject(handles[i], 5000) != WAIT_OBJECT_0 ||
+            !GetExitCodeThread(handles[i], &code) || code != 0x177u ||
+            targets[i].calls != 2u || targets[i].thread_id != ids[i] ||
+            !CloseHandle(handles[i]) || !CloseHandle(targets[i].ready))
+            return 79;
+    }
+    return 0;
+}
+
 /* A real cross-thread alert wakes the target's alertable NT wait, without
  * delivering any APC and without sending pthread signals or SIGSTOP. */
 static DWORD WINAPI alert_worker(void *data)
@@ -209,5 +288,5 @@ int import_fixture_entry(void)
         return 48;
     if (!CloseHandle(gated) || !CloseHandle(ready))
         return 49;
-    return 0;
+    return test_apc_concurrent_threads();
 }

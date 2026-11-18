@@ -48,10 +48,17 @@ make -j2 check-pe-thread-supervisor-apc-failure
 make -j2 check-pe-thread-supervisor-apc-xstate-failure
 ```
 
-Ambas usan PE32+ auténtico construido en la propia compilación Linux.
+Las tres pruebas de referencia iniciales usan PE32+ auténtico construido en la propia compilación Linux.
 La primera valida ejecución de APC sobre hilo invitado, retorno a la
 instrucción PE interrumpida y progreso sin espera alertable.
-Las dos pruebas negativas usan macros **exclusivamente de compilación de\ntests**. Una altera la comprobación de finalización después de un\nINT3 real, con el GPR/XSTATE del invitado ya reemplazado. La otra\ncorrompe un byte del readback final de XSTATE después de las escrituras\nde restauración. Ambas exigen error, prohibición de CONT/DETACH, solicitud SIGKILL aceptada por el\n`pidfd` y mantenimiento de `PTRACE_O_EXITKILL` hasta terminar el trazador.\nLa prueba no finge que un `waitpid` intermedio con `WIFSTOPPED` sea\nconfirmación de muerte: esa comprobación terminal continúa pendiente.
+Las dos pruebas negativas usan macros **exclusivamente de compilación de
+tests**. Una altera la comprobación de finalización después de un
+INT3 real, con el GPR/XSTATE del invitado ya reemplazado. La otra
+corrompe un byte del readback final de XSTATE después de las escrituras
+de restauración. Ambas exigen error, prohibición de CONT/DETACH, solicitud SIGKILL aceptada por el
+`pidfd` y mantenimiento de `PTRACE_O_EXITKILL` hasta terminar el trazador.
+La prueba no finge que un `waitpid` intermedio con `WIFSTOPPED` sea
+confirmación de muerte: esa comprobación terminal continúa pendiente.
 
 El workflow experimental ejecuta ambas. Compilar no equivale a aprobar:
 registrar PASS de la CI del último commit, y **INCOMPLETE** si
@@ -74,3 +81,53 @@ la suite. No se lanza ni instala nada en el equipo Fedora del usuario.
   objetos NT entre procesos (problemas 4/3).
 - **Puerta Fedora física:** pendiente y separada del trabajo de desarrollo;
   ninguna prueba omitida se presenta como aprobada.
+
+## Continuación del problema 5 — cancelación y perturbaciones controladas
+
+La variante `nt_supervisor_invoke_trusted_guest_apc_guarded` acepta **solo
+desde el supervisor de pruebas** un indicador atómico de cancelación y
+un descriptor de socket `SOCK_SEQPACKET` propiedad del supervisor.
+Se evalúan sin adquirir mutex del invitado. El método anterior se mantiene
+como wrapper sin guardas, y las exportaciones Win32 siguen intactas.
+
+- **Cancelación antes de mutar:** devuelve `ECANCELED` sin terminar al
+  hijo. El caller todavía conserva un thread stop de `ptrace` y solo
+  puede reanudar después de comprobar que no se modificó su contexto.
+- **Cancelación o cierre del peer tras mutar:** activa cuarentena,
+  `pidfd_send_signal(SIGKILL)` y veto irreversible de CONT/DETACH.
+  Ninguna devolución exitosa puede interpretarse como APC cancelada y
+  reanudada sin probar el estado de GPR/XSTATE.
+- **Señales y excepciones:** una señal real `SIGUSR1` dirigida al TID
+  o una instrucción PE real `UD2` (stop `SIGILL`) durante la APC se
+  tratan como finalizaciones **anómalas**, no como el INT3 contractual.
+  Ninguna de esas pruebas demuestra entrega de SEH arbitraria.
+- **Concurrencia:** la prueba PE de APC ordinarias crea cuatro threads
+  Win32 reales simultáneamente, con dos APC diferentes por thread,
+  comprobación de identidad y orden de cada cola. Es cobertura de la
+  ruta ordinaria en producción, NO habilitación de APC especial
+  concurrente sobre cuatro hilos del mismo proceso.
+
+Pruebas nuevas:
+
+```sh
+make -j2 check-pe-thread-supervisor-apc-guards
+make -j2 check-pe-apc
+```
+
+Los cinco subcasos del primer objetivo son cancelación posterior a
+la mutación, desconexión del socket, `SIGUSR1` dirigido,
+`UD2/SIGILL` del PE, y cancelación previa segura. Se ejecutan
+mediante las compilaciones de pruebas del supervisor, nunca mediante
+opciones del PE arbitrario.
+
+**No resuelto todavía:** integrar una autorización por HWND/HANDLE
+y RPC generacional para APC especial de Windows arbitrario, cancelación
+en el broker real cuando RPC queda bloqueado, excepciones/SEH y unwind
+del callback, restauración segura de stack/RSP para código externo,
+procesos e hilos PE múltiples con APC especiales simultáneas y
+terminal `waitpid` tras pérdida del trazador. Esos contratos requieren
+otras fases de contexto/supervisión y no se implementan falsamente.
+
+El nivel del componente 4 **permanece 96 % → 96 % (+0 pp)** hasta
+cerrar un contrato Win32 general probado. La aceptación de Fedora
+físico permanece separada de CI, como definía FileSystem 4.

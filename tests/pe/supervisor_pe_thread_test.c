@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -210,6 +211,42 @@ static bool wait_for_value(const _Atomic uint32_t *value, uint32_t expected)
     return false;
 }
 
+#if defined(NT_SUP_TEST_APC_CANCEL) || \
+    defined(NT_SUP_TEST_APC_DISCONNECT) || \
+    defined(NT_SUP_TEST_APC_SIGNAL)
+/* The observer is a separate Linux thread. It never performs ptrace.
+ * It waits until the *real PE callback* is executing on its alternate
+ * stack, then cancels, disconnects or sends a directed Linux signal. */
+struct apc_disturbance {
+    struct nt_supervisor_pe_shared *shared;
+    pid_t child, tid;
+    int peer_fd;
+    _Atomic uint32_t triggered;
+};
+static void *apc_disturbance_main(void *data)
+{
+    struct apc_disturbance *task = data;
+    for (int attempt = 0; attempt < 3000; ++attempt) {
+        if (atomic_load_explicit(&task->shared->apc_entered,
+                                 memory_order_acquire) != 0) {
+#ifdef NT_SUP_TEST_APC_CANCEL
+            atomic_store_explicit(&task->shared->apc_cancel, 1u,
+                                  memory_order_release);
+#elif defined(NT_SUP_TEST_APC_DISCONNECT)
+            if (shutdown(task->peer_fd, SHUT_RDWR) != 0) return NULL;
+#elif defined(NT_SUP_TEST_APC_SIGNAL)
+            if (syscall(SYS_tgkill, task->child, task->tid, SIGUSR1) != 0)
+                return NULL;
+#endif
+            atomic_store_explicit(&task->triggered, 1u, memory_order_release);
+            return NULL;
+        }
+        pause_ms(1);
+    }
+    return NULL;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -234,6 +271,10 @@ int main(int argc, char **argv)
     int rc = 1, status = 0;
     struct nt_thread_supervisor sup;
     nt_supervisor_init(&sup);
+#ifdef NT_SUP_TEST_APC_DISCONNECT
+    int apc_pair[2] = {-1, -1};
+#endif
+
     pid_t tid = 0;
     if (!read_child_tid(ready[0], &tid)) {
         fputs("FAIL PE guest thread did not initialize\n", stderr);
@@ -429,47 +470,137 @@ int main(int argc, char **argv)
         fputs("FAIL cannot prepare controlled guest APC\\n", stderr);
         goto cleanup;
     }
-#if !defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) && \
-    !defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
+#if defined(NT_SUP_TEST_APC_CANCEL) || defined(NT_SUP_TEST_APC_DISCONNECT) || \
+    defined(NT_SUP_TEST_APC_SIGNAL)
+    atomic_store_explicit(&shared->apc_hold, 1u, memory_order_release);
+    atomic_store_explicit(&shared->apc_mode, 1u, memory_order_release);
+    struct apc_disturbance disturbance = {
+        .shared = shared, .child = child, .tid = tid, .peer_fd = -1
+    };
+#ifdef NT_SUP_TEST_APC_DISCONNECT
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, apc_pair) != 0) {
+        perror("FAIL APC disconnect socketpair");
+        goto cleanup;
+    }
+    disturbance.peer_fd = apc_pair[1];
+#endif
+    pthread_t disturbance_thread;
+    if (pthread_create(&disturbance_thread, NULL,
+                       apc_disturbance_main, &disturbance) != 0) {
+        fputs("FAIL APC disturbance thread creation\n", stderr);
+        goto cleanup;
+    }
+#elif defined(NT_SUP_TEST_APC_EXCEPTION)
+    atomic_store_explicit(&shared->apc_mode, 2u, memory_order_release);
+#elif defined(NT_SUP_TEST_APC_PRE_CANCEL)
+    atomic_store_explicit(&shared->apc_cancel, 1u, memory_order_release);
+#elif !defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) && \
+      !defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
     const uint64_t guest_before_apc = atomic_load(&shared->guest_ticks);
 #endif
+
+#if defined(NT_SUP_TEST_APC_CANCEL) || defined(NT_SUP_TEST_APC_PRE_CANCEL)
+    const _Atomic uint32_t *apc_cancel = &shared->apc_cancel;
+#else
+    const _Atomic uint32_t *apc_cancel = NULL;
+#endif
+#ifdef NT_SUP_TEST_APC_DISCONNECT
+    const int apc_peer_fd = apc_pair[0];
+#else
+    const int apc_peer_fd = -1;
+#endif
     const nt_status apc_status =
-        nt_supervisor_nt_queue_trusted_apc(&nt, apc_entry, apc_stack_top,
-                                            (uintptr_t)shared,
-                                            &shared->apc_delivered);
-#if defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) || \
-    defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
-    /* The real PE callback reaches INT3. A test-only completion mismatch
-     * or corrupted XSTATE verification MUST quarantine the tracee;
-     * never resume its potentially mutated registers. */
+        nt_supervisor_nt_queue_trusted_apc_guarded(
+            &nt, apc_entry, apc_stack_top, (uintptr_t)shared,
+            &shared->apc_delivered, apc_cancel, apc_peer_fd);
+
+#if defined(NT_SUP_TEST_APC_CANCEL) || defined(NT_SUP_TEST_APC_DISCONNECT) || \
+    defined(NT_SUP_TEST_APC_SIGNAL)
+    if (pthread_join(disturbance_thread, NULL) != 0 ||
+        atomic_load_explicit(&disturbance.triggered,
+                             memory_order_acquire) != 1u) {
+        fputs("FAIL APC concurrent disturbance not observed\n", stderr);
+        goto cleanup;
+    }
+#endif
+
+#ifdef NT_SUP_TEST_APC_PRE_CANCEL
+    /* No state mutation has occurred. A canceled request can be rejected
+     * without killing its child; the original PE may continue normally. */
+    const uint64_t before_cancel = atomic_load(&shared->guest_ticks);
+    if (apc_status == NT_STATUS_SUCCESS || sup.compromised ||
+        atomic_load(&shared->apc_entered) != 0 || !sup.stopped ||
+        nt_supervisor_continue(&sup) != 0 ||
+        !wait_for_guest_ticks(shared, before_cancel)) {
+        fputs("FAIL pre-mutation APC cancel corrupted a live guest\n", stderr);
+        goto cleanup;
+    }
+    if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &rejected) ||
+        nt_supervisor_detach(&sup)) {
+        fputs("FAIL pre-mutation cancel detach\n", stderr);
+        goto cleanup;
+    }
+    atomic_store_explicit(&shared->stop_requested, 1u, memory_order_release);
+    for (int i = 0; i < 300; ++i) {
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                puts("PASS APC pre-mutation cancellation: live PE safely resumes");
+                rc = 0;
+            }
+            goto finished;
+        }
+        if (got < 0 && errno != EINTR) break;
+        pause_ms(10);
+    }
+    fputs("FAIL PE process remained alive after clean cancel\n", stderr);
+    goto cleanup;
+#elif defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) || \
+    defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH) || \
+    defined(NT_SUP_TEST_APC_CANCEL) || \
+    defined(NT_SUP_TEST_APC_DISCONNECT) || \
+    defined(NT_SUP_TEST_APC_SIGNAL) || \
+    defined(NT_SUP_TEST_APC_EXCEPTION)
+    /* Any failure AFTER the injected PC/RSP is active is irreversible.
+     * Do not continue or detach; SIGKILL must target the pidfd child. */
     errno = 0;
     if (apc_status == NT_STATUS_SUCCESS || !sup.compromised ||
-        atomic_load_explicit(&shared->apc_delivered,
-                             memory_order_acquire) != 1u ||
         nt_supervisor_continue(&sup) != -1 || errno != EPERM ||
         nt_supervisor_detach(&sup) != -1 || errno != EPERM) {
-        fputs("FAIL unsafe guest APC completion was resumable\\n", stderr);
+        fputs("FAIL unsafe guest APC returned a resumable context\n", stderr);
         goto cleanup;
     }
-    /* A traced SIGKILL can produce a ptrace signal/exit stop before
-     * userspace can reap the process. Never PTRACE_CONT compromised
-     * registers just to force waitpid to finish: the tracer's exit will
-     * enforce PTRACE_O_EXITKILL. Verify the pidfd signal is accepted. */
+#if defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) || \
+    defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
+    if (atomic_load_explicit(&shared->apc_delivered,
+                             memory_order_acquire) != 1u) {
+        fputs("FAIL expected PE APC completion before fault injection\n", stderr);
+        goto cleanup;
+    }
+#else
+    if (atomic_load_explicit(&shared->apc_entered,
+                             memory_order_acquire) != 1u ||
+        atomic_load_explicit(&shared->apc_delivered,
+                             memory_order_acquire) != 0u) {
+        fputs("FAIL APC disturbance did not occur during PE callback\n", stderr);
+        goto cleanup;
+    }
+#endif
     if (nt_supervisor_terminate_compromised_child(&sup) != 0) {
-        fputs("FAIL pidfd SIGKILL was not accepted\\n", stderr);
+        fputs("FAIL pidfd SIGKILL was not accepted\n", stderr);
         goto cleanup;
     }
-    puts("PASS async PE APC mismatch: no CONT/DETACH, pidfd SIGKILL issued, EXITKILL armed");
+    puts("PASS trusted APC disturbance: no CONT/DETACH, pidfd SIGKILL issued, EXITKILL armed");
     rc = 0;
     goto finished;
 #else
     if (apc_status != NT_STATUS_SUCCESS) {
-        fputs("FAIL supervised NT special APC delivery\\n", stderr);
+        fputs("FAIL supervised NT special APC delivery\n", stderr);
         goto cleanup;
     }
     if (atomic_load_explicit(&shared->apc_delivered, memory_order_acquire) != 1u ||
         !wait_for_guest_ticks(shared, guest_before_apc)) {
-        fputs("FAIL guest did not resume after asynchronous APC\\n", stderr);
+        fputs("FAIL guest did not resume after asynchronous APC\n", stderr);
         goto cleanup;
     }
 #endif
@@ -501,6 +632,10 @@ cleanup:
     (void)kill(child, SIGKILL);
     (void)waitpid(child, &status, 0);
 finished:
+#ifdef NT_SUP_TEST_APC_DISCONNECT
+    if (apc_pair[0] >= 0) (void)close(apc_pair[0]);
+    if (apc_pair[1] >= 0) (void)close(apc_pair[1]);
+#endif
     if (ready[0] >= 0) (void)close(ready[0]);
     nt_supervisor_release(&sup);
     (void)munmap(shared, sizeof(*shared));
