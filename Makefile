@@ -29,7 +29,7 @@ DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
 else
 DOS83_FUSE_TARGET =
 endif
-RUNTIME_PARTS = guest_boundary exports system global_memory unicode crt crt_stdio guest_files fs4_remote user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
+RUNTIME_PARTS = guest_boundary guest_hardware_fault exports system global_memory unicode crt crt_stdio guest_files fs4_remote user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry thread_broker_ipc thread_supervisor_control_server shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o $(BUILD_DIR)/runtime-thread-supervisor-core.o $(BUILD_DIR)/runtime-guest_boundary_import.o $(BUILD_DIR)/runtime-thread-supervisor-nt-bridge.o
@@ -361,6 +361,25 @@ $(BUILD_DIR)/thread-broker-registry-test: tests/thread_broker_registry_test.c sr
 $(BUILD_DIR)/thread-broker-ipc-test: tests/thread_broker_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_broker_registry.h src/runtime/thread_broker_auth.h src/supervisor/nt_thread_supervisor.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
+
+# Pure, host-only Linux signal/NTSTATUS classifier. Link without the
+# real Windows runtime so spoofing and access-bit regressions fail loudly.
+$(BUILD_DIR)/guest-hardware-fault-test: tests/guest_hardware_fault_test.c src/runtime/guest_hardware_fault.c src/runtime/guest_hardware_fault.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_hardware_fault_test.c src/runtime/guest_hardware_fault.c -pthread -o "$@"
+
+$(BUILD_DIR)/guest-hardware-fault-signal-test: tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c src/runtime/guest_hardware_fault.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/guest_hardware_fault_signal_test.c src/runtime/guest_hardware_fault.c -pthread -o "$@"
+
+.PHONY: check-hardware-fault-classifier check-hardware-fault-signals
+check-hardware-fault-classifier: $(BUILD_DIR)/guest-hardware-fault-test
+	timeout 10s $(BUILD_DIR)/guest-hardware-fault-test
+
+check-hardware-fault-signals: $(BUILD_DIR)/guest-hardware-fault-signal-test
+	timeout 15s $(BUILD_DIR)/guest-hardware-fault-signal-test
+
+check: check-hardware-fault-classifier check-hardware-fault-signals
 
 $(BUILD_DIR)/guest-boundary-cet-test: tests/guest_boundary_cet_test.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S include/ntnative/guest_boundary_runtime.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(WARN_CFLAGS) $(CFLAGS) -DNT_TEST_FORCE_CET_SHSTK=1 $(LDFLAGS) \
@@ -1019,9 +1038,19 @@ $(BUILD_DIR)/fixture-seh.a: tests/pe/seh.def | $(BUILD_DIR)
 $(BUILD_DIR)/seh-fixture.exe: tests/pe/seh_fixture.S $(BUILD_DIR)/fixture-seh.a | $(BUILD_DIR)
 	$(MINGW_CC) -nostdlib $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lkernel32
 
-check-pe-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe
+$(BUILD_DIR)/hardware-seh-fixture.exe: tests/pe/hardware_seh_fixture.S $(BUILD_DIR)/fixture-seh.a | $(BUILD_DIR)
+	$(MINGW_CC) -nostdlib $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lkernel32
+
+.PHONY: check-pe-hardware-seh
+check-pe-hardware-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/hardware-seh-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/hardware-seh-fixture.exe
+
+check-pe-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe $(BUILD_DIR)/hardware-seh-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/seh-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/hardware-seh-fixture.exe
 
 $(BUILD_DIR)/child-parent-fixture.exe: tests/pe/child_process_fixture.c $(BUILD_DIR)/fixture-nt_core.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" $< $(BUILD_DIR)/fixture-nt_core.a -lkernel32

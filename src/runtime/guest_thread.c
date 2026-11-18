@@ -13,6 +13,9 @@
 static _Thread_local unsigned char *current_teb;
 static _Thread_local struct nt_guest_thread *current_guest_thread;
 
+extern void nt_runtime_guest_hardware_fault_thread_detach(void)
+    __attribute__((weak));
+
 struct nt_guest_thread *nt_guest_thread_current(void)
 {
     return current_guest_thread;
@@ -170,6 +173,10 @@ bool nt_guest_thread_leave(struct nt_guest_thread *state)
 {
     if (state == NULL || !state->entered || current_teb != state->teb)
         return false;
+    /* Revoke the kernel signal alt stack before destroying the TEB/TLS.
+     * The handler never accesses memory from a terminating guest thread. */
+    if (nt_runtime_guest_hardware_fault_thread_detach != NULL)
+        nt_runtime_guest_hardware_fault_thread_detach();
     if (syscall(SYS_arch_prctl, ARCH_SET_GS, state->saved_gs) != 0)
         return false;
     nt_guest_boundary_thread_detach();

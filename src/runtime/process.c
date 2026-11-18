@@ -201,6 +201,11 @@ static struct nt_guest_unicode_string process_string(uint16_t *buffer)
     };
 }
 
+/* Minimal direct process tests may link without the optional hardware
+ * bridge; full runtime links it as a normal component. */
+extern bool nt_runtime_guest_hardware_fault_thread_attach(void)
+    __attribute__((weak));
+
 bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t module,
                                    const struct nt_guest_tls *initial)
 {
@@ -238,7 +243,9 @@ bool nt_runtime_enter_guest_thread(struct nt_guest_thread *thread, uintptr_t mod
         (void)nt_guest_thread_leave(thread);
         return false;
     }
-    if (!nt_runtime_external_module_prepare_thread(thread)) {
+    if (!nt_runtime_external_module_prepare_thread(thread) ||
+        (nt_runtime_guest_hardware_fault_thread_attach != NULL &&
+         !nt_runtime_guest_hardware_fault_thread_attach())) {
         (void)nt_guest_thread_leave(thread);
         return false;
     }
