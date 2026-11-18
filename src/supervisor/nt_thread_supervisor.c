@@ -7,6 +7,7 @@
 #include <linux/elf.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -164,7 +165,8 @@ int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
     struct user_regs_struct verified = {0};
     const bool readback = write_result == 0 && vec.iov_len == sizeof(desired) &&
                           nt_supervisor_get_registers(sup, &verified) == 0;
-    const int read_errno = readback ? EPROTO : errno;
+    const int failure_errno = write_result == -1 ? write_errno :
+        (vec.iov_len != sizeof(desired) || readback ? EPROTO : errno);
 #ifdef NT_SUP_TEST_FORCE_RAX_VERIFY_MISMATCH
     /* Test-only negative path, never controlled by the guest or environment. */
     extern _Atomic uint32_t nt_sup_test_rax_verify_corrupted;
@@ -186,8 +188,7 @@ int nt_supervisor_set_rax(struct nt_thread_supervisor *sup, uint64_t value)
         undo.iov_len == sizeof(original) &&
         nt_supervisor_get_registers(sup, &verified) == 0 &&
         memcmp(&verified, &original, sizeof(original)) == 0) {
-        errno = write_result == -1 ? write_errno :
-                (readback ? EPROTO : read_errno);
+        errno = failure_errno;
         return -1;
     }
 #endif
