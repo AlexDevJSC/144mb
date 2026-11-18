@@ -14,6 +14,9 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+# importlib loads the service by file location: add the sibling directory
+# explicitly, as Python does when the installed script executes normally.
+sys.path.insert(0, str(ROOT / "scripts"))
 spec = importlib.util.spec_from_file_location("nt_storage_service",
                                              ROOT / "scripts/nt-storage-service.py")
 service = importlib.util.module_from_spec(spec)

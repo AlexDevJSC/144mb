@@ -83,7 +83,7 @@ try {
         $originalAcl = Get-Acl -LiteralPath $aclProbe -ErrorAction Stop
         $candidateAcl = Get-Acl -LiteralPath $aclProbe -ErrorAction Stop
         $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
             $who, [Security.AccessControl.FileSystemRights]::WriteData,
             [Security.AccessControl.AccessControlType]::Deny)
         $candidateAcl.AddAccessRule($rule)
