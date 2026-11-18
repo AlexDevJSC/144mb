@@ -55,6 +55,7 @@ static _Thread_local volatile sig_atomic_t signal_guest_phase;
 /* Only CPU faults from an already trusted guest-only instruction may
  * recover this phase; a nonlocal import escape remains poisoned forever. */
 static _Thread_local bool hardware_seh_guest_only;
+static _Thread_local bool software_seh_naked_import_only;
 enum { MAX_IMPORT_NESTING = 128, MAX_GATED_TARGETS = 8192 };
 static _Thread_local uintptr_t host_return_stack[MAX_IMPORT_NESTING];
 
