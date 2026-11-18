@@ -23,7 +23,37 @@ __declspec(dllimport) LONG NTAPI NtTestAlert(void);
 __declspec(dllimport) LONG NTAPI NtDelayExecution(BOOLEAN, const LARGE_INTEGER *);
 
 static volatile DWORD apc_count, callback_thread, callback_ok, worker_id;
-static volatile DWORD self_count;
+static volatile DWORD self_count, special_count, special_seh_count;
+static void NTAPI special_native_apc(void *context, void *first, void *second)
+{
+    if ((uintptr_t)context == 0x777u && (uintptr_t)first == 0x778u &&
+        (uintptr_t)second == 0x779u)
+        ++special_count;
+}
+static void CALLBACK special_user_apc(ULONG_PTR argument)
+{
+    if (argument == 0x77au)
+        ++special_count;
+}
+/* Reuse the runtime's existing PE RaiseException -> VEH -> CONTEXT
+ * restoration, rather than a Linux SIGSEGV handler. This tests a
+ * continuable Windows software exception *inside* an APC callback. */
+static LONG CALLBACK special_veh(PEXCEPTION_POINTERS pointers)
+{
+    if (pointers && pointers->ExceptionRecord &&
+        pointers->ExceptionRecord->ExceptionCode == 0xe14400a5u) {
+        ++special_seh_count;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void CALLBACK special_seh_apc(ULONG_PTR argument)
+{
+    if (argument == 0x77bu) {
+        RaiseException(0xe14400a5u, 0, 0, NULL);
+        ++special_seh_count;
+    }
+}
 static void CALLBACK single_apc(ULONG_PTR argument)
 {
     ++apc_count;
@@ -101,10 +131,13 @@ static DWORD WINAPI worker(void *unused)
         NtTestAlert() != STATUS_OK)
         return 35;
 
-    /* Reserve HANDLE 1 is a special APC (unsafe without asynchronous
-     * context transition). It must fail, not queue a fake normal APC. */
+    /* Guest-only, bounded delivery at the safe return from this NT
+     * import, without an alertable wait or hijacking a host mutex. */
     if (NtQueueApcThreadEx(GetCurrentThread(), (HANDLE)(uintptr_t)1,
-                           native_apc, NULL, NULL, NULL) != STATUS_NOT_SUPPORTED)
+                           special_native_apc, (void *)(uintptr_t)0x777u,
+                           (void *)(uintptr_t)0x778u,
+                           (void *)(uintptr_t)0x779u) != STATUS_OK ||
+        special_count != 1u || NtTestAlert() != STATUS_OK)
         return 36;
 
     typedef DWORD (WINAPI *queue_apc2)(PAPCFUNC, HANDLE, ULONG_PTR, DWORD);
@@ -115,11 +148,19 @@ static DWORD WINAPI worker(void *unused)
     if (modern == NULL || !modern(self_apc, GetCurrentThread(), 0x177u, 0) ||
         NtTestAlert() != STATUS_USER_APC || self_count != 4)
         return 37;
-    SetLastError(0);
-    if (modern(self_apc, GetCurrentThread(), 0x177u, 1) ||
-        GetLastError() != ERROR_NOT_SUPPORTED || NtTestAlert() != STATUS_OK)
+    if (!modern(special_user_apc, GetCurrentThread(), 0x77au, 1) ||
+        special_count != 2u || NtTestAlert() != STATUS_OK)
         return 38;
-    if (!CloseHandle(event))
+    /* A continuable software exception in the APC uses existing
+     * guest VEH/SEH dispatch. Run it LAST: a non-local restore must
+     * poison the host-import boundary against future async ptrace. */
+    void *veh = AddVectoredExceptionHandler(1, special_veh);
+    if (!veh)
+        return 39;
+    if (!modern(special_seh_apc, GetCurrentThread(), 0x77bu, 1) ||
+        special_seh_count != 2u)
+        return 40;
+    if (!RemoveVectoredExceptionHandler(veh) || !CloseHandle(event))
         return 31;
     return 0x144;
 }
