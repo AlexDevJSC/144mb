@@ -429,10 +429,42 @@ int main(int argc, char **argv)
         fputs("FAIL cannot prepare controlled guest APC\\n", stderr);
         goto cleanup;
     }
+#ifndef NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH
     const uint64_t guest_before_apc = atomic_load(&shared->guest_ticks);
-    if (nt_supervisor_nt_queue_trusted_apc(&nt, apc_entry, apc_stack_top,
+#endif
+    const nt_status apc_status =
+        nt_supervisor_nt_queue_trusted_apc(&nt, apc_entry, apc_stack_top,
                                             (uintptr_t)shared,
-                                            &shared->apc_delivered) != NT_STATUS_SUCCESS) {
+                                            &shared->apc_delivered);
+#ifdef NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH
+    /* The child executes its real imported-free PE callback and traps with
+     * INT3. A test-only readback mismatch then MUST kill the pidfd-pinned
+     * child instead of ever resuming the injected registers. */
+    errno = 0;
+    if (apc_status == NT_STATUS_SUCCESS || !sup.compromised ||
+        atomic_load_explicit(&shared->apc_delivered,
+                             memory_order_acquire) != 1u ||
+        nt_supervisor_continue(&sup) != -1 || errno != EPERM ||
+        nt_supervisor_detach(&sup) != -1 || errno != EPERM) {
+        fputs("FAIL unsafe guest APC completion was resumable\\n", stderr);
+        goto cleanup;
+    }
+    bool reaped = false;
+    for (int i = 0; i < 300; ++i) {
+        const pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) { reaped = true; break; }
+        if (got == -1 && errno != EINTR) break;
+        pause_ms(10);
+    }
+    if (!reaped || !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) {
+        fputs("FAIL unsafe guest APC did not terminate by pidfd\\n", stderr);
+        goto cleanup;
+    }
+    puts("PASS async PE APC mismatch: no CONT/DETACH, pidfd SIGKILL confirmed");
+    rc = 0;
+    goto finished;
+#else
+    if (apc_status != NT_STATUS_SUCCESS) {
         fputs("FAIL supervised NT special APC delivery\\n", stderr);
         goto cleanup;
     }
@@ -441,6 +473,7 @@ int main(int argc, char **argv)
         fputs("FAIL guest did not resume after asynchronous APC\\n", stderr);
         goto cleanup;
     }
+#endif
     if (nt_supervisor_interrupt_guest(&sup, &scope, 1500, &rejected) ||
         nt_supervisor_detach(&sup)) {
         perror("FAIL PE detach"); goto cleanup;
