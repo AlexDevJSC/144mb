@@ -32,10 +32,10 @@ README de la revisión:
     git checkout <commit-a-auditar>
     bash scripts/fedora-filesystem4-acceptance.sh --physical-confirmed --windows-reference /ruta/fs4-windows-reference.json
 
-La rama integrada suma el modo PE de la PR #153 y la corrección de
-supervisor/FUSE de la PR #150. En esta rama el script ejecuta también
-una sesión PE aislada sobre un perfil C: **descartable**, sin utilizar
-ni sobrescribir los datos personales de C: del usuario.
+La revisión auditada incluye la ruta PE supervisada sobre un perfil C:
+**descartable**; el modo histórico de PE supervisado y el nuevo servicio
+UID no son equivalentes. El script ejecuta ambas comprobaciones por
+separado y no utiliza ni sobrescribe el C: personal del operador.
 
 También se puede ejecutar sin --windows-reference para obtener un
 informe parcial, pero el código de salida 3 indica INCOMPLETE.
@@ -63,9 +63,10 @@ La herramienta:
 3. P3: ejecutar mismo fixture de operaciones en Windows real y en NT144:
    comparar archivos, nombres cortos, atributos, errores, ACL y
    reparse; anotar divergencias sin descartarlas por falta de paridad.
-4. P4: demostrar con un **UID distinto** denegación directa del backing
-   bajo SELinux Enforcing; el prototipo actual **no tiene servicio UID**
-   y esta prueba no puede aprobarse hasta que se implemente.
+4. P4: demostrar con un **segundo UID** que el backing físico no se puede
+   abrir y que la vista FUSE rechaza al cliente no autorizado. Existe un
+   servicio de UID dedicado, pero aún falta verificarlo en Fedora físico y
+   distinguir una denegación DAC de una debida a la política SELinux.
 5. P5: simultaneidad de varios clientes PE/FUSE, caída de FUSE, cierre
    del supervisor, comprobación de limpieza de montajes y descriptores
    heredados; revisar AVC de SELinux y síntomas de corrupción.
