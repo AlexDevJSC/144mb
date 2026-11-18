@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <linux/limits.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -496,6 +497,21 @@ static int serve(struct session *s)
         if (!receive_request(s->socket_fd, &request, payload, &n))
             break;
         const struct fs4_reply reply = dispatch(s, &request, payload, n, output);
+        /* Offline-only SIGKILL injection happens AFTER a successful
+         * physical mutation but BEFORE its IPC reply is observable.
+         * Never available on a production --view worker. */
+        if (s->offline_test && reply.error == NT_ERROR_SUCCESS &&
+            (request.op != FS4_NATIVE_SET || reply.value == NT_STATUS_SUCCESS)) {
+            const char *fault = getenv("NT_FS4_TEST_CRASH");
+            const char *phase = request.op == FS4_OPEN ? "after-open" :
+                request.op == FS4_WRITE ? "after-write" :
+                request.op == FS4_RENAME ? "after-rename" :
+                request.op == FS4_DELETE ? "after-delete" :
+                request.op == FS4_ATTR_SET ? "after-attribute" :
+                request.op == FS4_NATIVE_SET ? "after-native-set" : NULL;
+            if (fault && phase && strcmp(fault, phase) == 0)
+                (void)raise(SIGKILL);
+        }
         if (!send_reply(s, &reply, reply.length ? output : NULL))
             break;
         if (request.nonce != s->nonce || request.magic != FS4_MAGIC)

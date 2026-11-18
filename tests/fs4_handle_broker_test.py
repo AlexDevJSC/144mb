@@ -24,14 +24,19 @@ ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE
 NATIVE_QUERY, NATIVE_SET, NATIVE_FLUSH = 21, 22, 23
 
 class Broker:
-    def __init__(self, root):
+    def __init__(self, root, *, crash=None):
         server, self.client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.client.settimeout(5)
+        env = dict(os.environ)
+        if crash:
+            env["NT_FS4_TEST_CRASH"] = crash
+        else:
+            env.pop("NT_FS4_TEST_CRASH", None)
         self.process = subprocess.Popen([
             BINARY, "--root", str(root), "--fd", str(server.fileno()),
             "--client-uid", str(os.geteuid()), "--test"
         ], pass_fds=(server.fileno(),), stdin=subprocess.DEVNULL,
-           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         server.close()
         hello = self.client.recv(4096)
         if len(hello) != REP.size:
@@ -280,6 +285,79 @@ class FileSystem4Handles(unittest.TestCase):
             finally:
                 first.close()
                 second.close()
+
+    def test_sigkill_during_broker_mutations_and_recovery(self):
+        """Process death after the syscall but before reply must not leak
+        WAL or share leases. This is NOT physical power-loss durability."""
+        for phase in ("after-open", "after-write", "after-rename",
+                      "after-delete", "after-attribute", "after-native-set"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(
+                    prefix="fs4-broker-crash-") as temp:
+                root = Path(temp) / "C"
+                root.mkdir(mode=0o700)
+                if phase in ("after-write", "after-native-set"):
+                    (root / "victim.bin").write_bytes(b"ORIGINAL")
+                elif phase == "after-rename":
+                    (root / "victim.bin").write_bytes(b"RENAMED")
+                elif phase in ("after-delete", "after-attribute"):
+                    (root / "victim.bin").write_bytes(b"KEEP")
+                b = Broker(root, crash=phase)
+                try:
+                    # Send one successful destructive request to the worker.
+                    if phase == "after-open":
+                        req = (OPEN, b"C:/victim.bin", dict(access=0xC0000000,
+                                                          share=7, disposition=1))
+                    elif phase in ("after-write", "after-native-set"):
+                        err, h, _, _ = b.call(OPEN, b"C:/victim.bin",
+                                              access=0xC0000000, share=7,
+                                              disposition=3)
+                        self.assertEqual(err, 0)
+                        req = ((WRITE, b"RESULT", dict(handle=h))
+                               if phase == "after-write" else
+                               (NATIVE_SET, struct.pack("<q", 3),
+                                dict(handle=h, access=20)))
+                    elif phase == "after-rename":
+                        req = (RENAME, b"C:/victim.bin\0C:/renamed.bin", {})
+                    elif phase == "after-delete":
+                        req = (DELETE, b"C:/victim.bin", {})
+                    else:
+                        req = (ATTR_SET, b"C:/victim.bin", dict(flags=1))
+                    with self.assertRaises(AssertionError):
+                        b.call(req[0], req[1], **req[2])
+                    self.assertEqual(b.process.wait(timeout=5),
+                                     -signal.SIGKILL)
+                finally:
+                    b.client.close()
+                # A cold worker re-runs startup recovery under the same root.
+                recovered = Broker(root)
+                try:
+                    if phase == "after-open":
+                        self.assertTrue((root / "victim.bin").exists())
+                    elif phase == "after-write":
+                        self.assertEqual((root / "victim.bin").read_bytes(),
+                                         b"RESULTAL")
+                    elif phase == "after-native-set":
+                        self.assertEqual((root / "victim.bin").read_bytes(), b"ORI")
+                    elif phase == "after-rename":
+                        self.assertFalse((root / "victim.bin").exists())
+                        self.assertEqual((root / "renamed.bin").read_bytes(),
+                                         b"RENAMED")
+                    elif phase == "after-delete":
+                        self.assertFalse((root / "victim.bin").exists())
+                    elif phase == "after-attribute":
+                        err, _, _, attrs = recovered.call(
+                            ATTR_GET, b"C:/victim.bin")
+                        self.assertEqual(err, 0)
+                        self.assertEqual(struct.unpack_from("<I", attrs)[0] & 1, 1)
+                    path = b"C:/renamed.bin" if phase == "after-rename" else b"C:/victim.bin"
+                    if phase != "after-delete":
+                        err, cap, _, _ = recovered.call(
+                            OPEN, path, access=0x80000000, share=7,
+                            disposition=3)
+                        self.assertEqual(err, 0, "orphaned OFD lease")
+                        self.assertEqual(recovered.call(CLOSE, handle=cap)[0], 0)
+                finally:
+                    recovered.close()
 
     def test_wrong_session_nonce_revokes_handles_and_socket(self):
         with tempfile.TemporaryDirectory(prefix="fs4-nonce-") as temp:
