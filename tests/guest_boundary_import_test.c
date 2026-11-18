@@ -249,8 +249,28 @@ int main(void)
         !nt_guest_boundary_finish_guest_hardware_seh(0x400200u) ||
         !nt_guest_boundary_signal_guest_phase() ||
         !nt_guest_boundary_begin_guest_hardware_seh(0x400300u) ||
+        nt_guest_boundary_import_enter(0x100u, 0x400310u) != 0x100u ||
+        !nt_guest_boundary_retire_specific_handler_import() ||
+        nt_guest_boundary_host_nesting() != 0 ||
+        nt_guest_boundary_signal_guest_phase() ||
+        nt_guest_boundary_special_apc_allowed() ||
         !nt_guest_boundary_finish_guest_hardware_seh(0x400400u))
         return 21;
+    /* A nested second host frame can still own a lock/cleanup and
+     * is NEVER discarded as part of the registered resource-free
+     * C-specific handler transition. */
+    if (!nt_guest_boundary_begin_guest_hardware_seh(0x400500u))
+        return 28;
+    (void)nt_guest_boundary_import_enter(0x100u, 0x400510u);
+    (void)nt_guest_boundary_import_enter(0x101u, 0x400520u);
+    if (nt_guest_boundary_retire_specific_handler_import())
+        return 29;
+    (void)nt_guest_boundary_import_leave();
+    (void)nt_guest_boundary_import_leave();
+    if (nt_guest_boundary_signal_guest_phase() ||
+        nt_guest_boundary_special_apc_allowed() ||
+        !nt_guest_boundary_finish_guest_hardware_seh(0x400580u))
+        return 30;
     /* A SINGLE audited naked RaiseException import may abandon its
      * own synthetic return slot; nested/unrelated host frames may not.
      * The PE return RIP was fixed by the immutable loader manifest. */
