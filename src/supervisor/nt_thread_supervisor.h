@@ -73,6 +73,16 @@ int nt_supervisor_invoke_trusted_guest_apc(
     const struct nt_supervisor_guest_scope *scope,
     uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
     const _Atomic uint32_t *guest_completion, unsigned timeout_ms);
+/* Test-only guard for cancellation from an independent supervisor thread
+ * or disconnection of a supervisor-owned SOCK_SEQPACKET peer. These inputs
+ * are never guest PE pointers/FDs. Cancellation before mutation returns
+ * ECANCELED, afterward it quarantines and kills the direct pidfd child. */
+int nt_supervisor_invoke_trusted_guest_apc_guarded(
+    struct nt_thread_supervisor *sup,
+    const struct nt_supervisor_guest_scope *scope,
+    uintptr_t guest_entry, uintptr_t guest_stack_top, uintptr_t guest_argument,
+    const _Atomic uint32_t *guest_completion, unsigned timeout_ms,
+    const _Atomic uint32_t *cancel, int peer_fd);
 /* Cleanup used on error, EOF, stale capability or process teardown. If a
  * tracee cannot safely be detached, SIGKILL is sent ONLY through the
  * pidfd pinned to this exact direct child. Returns 0 on clean detach,
