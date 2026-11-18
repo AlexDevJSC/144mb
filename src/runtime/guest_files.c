@@ -6335,14 +6335,20 @@ static nt_status nt_guest_io(uintptr_t handle, uintptr_t event, void *apc, void 
         return nt_file_complete(io, NT_STATUS_INVALID_PARAMETER, 0);
 
     if (nt_fs4_remote_handle(handle)) {
-        /* Offset-based native I/O must not silently mutate the shared
-         * Win32 file pointer; the v3 protocol supports sequential I/O. */
-        if (offset != NULL)
-            return nt_file_complete(io, NT_STATUS_NOT_SUPPORTED, 0);
+        /* Positional NtReadFile/NtWriteFile use the same broker-owned inode
+         * and OFD lock registry as Win32 OVERLAPPED, without modifying
+         * the shared file pointer of the source HANDLE. */
         uint32_t transferred = 0;
-        if (nt_fs4_remote_io(handle, buffer, length, &transferred,
-                             write_operation))
+        const bool success = offset ?
+            nt_fs4_remote_io_at(handle, buffer, length, &transferred,
+                                 write_operation, (uint64_t)*offset) != 0 :
+            nt_fs4_remote_io(handle, buffer, length, &transferred,
+                             write_operation) != 0;
+        if (success) {
+            if (!write_operation && !transferred && length)
+                return nt_file_complete(io, NT_STATUS_END_OF_FILE, 0);
             return nt_file_complete(io, NT_STATUS_SUCCESS, transferred);
+        }
         return nt_file_complete(io, nt_file_error(nt_GetLastError()), 0);
     }
     const int fd = duplicate_handle(handle, write_operation ? FILE_WRITE : FILE_READ);

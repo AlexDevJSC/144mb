@@ -17,6 +17,7 @@ REQ = struct.Struct("<IHHQqIIIIIIQ")
 REP = struct.Struct("<IHHIIQQ")
 MAGIC, VERSION = 0x34465348, 3
 OPEN, READ, WRITE, CLOSE, DELETE, RENAME, TRUNCATE, LOCK, UNLOCK = range(1, 10)
+SEEK, SIZE = 10, 11
 ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE_AT, HANDLE_INFO = range(12, 21)
 
 class Broker:
@@ -69,9 +70,11 @@ class FileSystem4Handles(unittest.TestCase):
                 self.assertEqual(error, 0)
                 self.assertNotEqual(h, 0)
                 self.assertEqual(b.call(WRITE, b"HELLO", handle=h)[0], 0)
-                self.assertEqual(b.call(READ, handle=h, offset=0, size=5),
+                self.assertEqual(b.call(SEEK, handle=h, offset=0, flags=0)[0], 0)
+                self.assertEqual(b.call(READ, handle=h, size=5),
                                  (0, 0, 5, b"HELLO"))
                 self.assertEqual(b.call(TRUNCATE, handle=h, offset=3)[0], 0)
+                self.assertEqual(b.call(SIZE, handle=h)[2], 3)
                 self.assertEqual(b.call(CLOSE, handle=h)[0], 0)
                 self.assertEqual((root / "file.txt").read_bytes(), b"HEL")
                 self.assertNotEqual(b.call(READ, handle=h, size=1)[0], 0)
