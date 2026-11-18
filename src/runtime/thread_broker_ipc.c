@@ -52,6 +52,17 @@ static bool fd_seqpacket(int fd)
     return fd >= 0 && getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length) == 0 &&
            length == sizeof(type) && type == SOCK_SEQPACKET;
 }
+static bool broker_peer_disconnected(int fd)
+{
+    /* Read-only check, no recv/consume: the parent already authenticated
+     * exactly one request. POLLRDHUP is produced by an explicit
+     * shutdown(SHUT_RDWR), not by a request for more data. */
+    struct pollfd state = {.fd = fd, .events = POLLRDHUP};
+    const int ready = poll(&state, 1, 0);
+    return ready < 0 ? errno != EINTR :
+           ready > 0 && (state.revents &
+                         (POLLRDHUP | POLLHUP | POLLERR | POLLNVAL)) != 0;
+}
 static bool read_ready_for(int fd, short events, int timeout_ms)
 {
     if (timeout_ms < 0)
@@ -624,13 +635,32 @@ void nt_broker_server_loop(int fd,
         default:
             break;
         }
+        /* A SET_CONTEXT that the kernel accepted is not committed to the
+         * caller until its ACK can be delivered. If the caller has left
+         * the authenticated session, never detach with unacknowledged
+         * mutated GPRs. Only this generation-owned pidfd tracee may be
+         * terminated; the server thread owns its ptrace state. */
+        const bool unacked_context =
+            request.operation == NT_BROKER_RPC_SUP_SET_CONTEXT &&
+            response.status == NT_STATUS_SUCCESS &&
+            info.guest_thread_id != 0 && info.generation != 0;
+        if (broker_peer_disconnected(fd)) {
+            if (unacked_context)
+                nt_supervisor_control_server_abort_unacked_context(control, &info);
+            break;
+        }
+        bool reply_sent = false;
         if (request.operation == NT_BROKER_RPC_SUP_GET_CONTEXT) {
             const struct nt_broker_context_reply extended = {
                 .reply = response, .context = context_response
             };
-            if (!send_packet(fd, &extended, sizeof(extended)))
-                break;
-        } else if (!send_packet(fd, &response, sizeof(response))) {
+            reply_sent = send_packet(fd, &extended, sizeof(extended));
+        } else {
+            reply_sent = send_packet(fd, &response, sizeof(response));
+        }
+        if (!reply_sent) {
+            if (unacked_context)
+                nt_supervisor_control_server_abort_unacked_context(control, &info);
             break;
         }
     }
