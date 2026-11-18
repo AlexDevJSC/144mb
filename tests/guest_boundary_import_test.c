@@ -251,6 +251,27 @@ int main(void)
         !nt_guest_boundary_begin_guest_hardware_seh(0x400300u) ||
         !nt_guest_boundary_finish_guest_hardware_seh(0x400400u))
         return 21;
+    /* A SINGLE audited naked RaiseException import may abandon its
+     * own synthetic return slot; nested/unrelated host frames may not.
+     * The PE return RIP was fixed by the immutable loader manifest. */
+    uintptr_t synthetic = 0;
+    void (*entry)(void) = nt_guest_boundary_import_return;
+    memcpy(&synthetic, &entry, sizeof(synthetic));
+    (void)nt_guest_boundary_import_enter(0x100u, 0x400600u);
+    if (nt_guest_boundary_seh_caller_pc(synthetic) != 0x400600u ||
+        !nt_guest_boundary_begin_guest_software_import_seh(0x400600u) ||
+        nt_guest_boundary_host_nesting() != 0 ||
+        nt_guest_boundary_signal_guest_phase() ||
+        !nt_guest_boundary_finish_guest_software_import_seh(0x400700u) ||
+        !nt_guest_boundary_signal_guest_phase())
+        return 23;
+    (void)nt_guest_boundary_import_enter(0x100u, 0x400700u);
+    (void)nt_guest_boundary_import_enter(0x101u, 0x400800u);
+    if (nt_guest_boundary_seh_caller_pc(synthetic) != synthetic ||
+        nt_guest_boundary_begin_guest_software_import_seh(0x400700u))
+        return 24;
+    (void)nt_guest_boundary_import_leave();
+    (void)nt_guest_boundary_import_leave();
     nt_guest_boundary_mark_nonlocal_transfer();
     if (nt_guest_boundary_begin_guest_hardware_seh(0x400500u) ||
         nt_guest_boundary_finish_guest_hardware_seh(0x400500u))
