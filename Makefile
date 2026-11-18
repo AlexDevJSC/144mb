@@ -883,6 +883,14 @@ check-pe-shaders: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/shader-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 30s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/shader-fixture.exe
 else
+$(BUILD_DIR)/graphics-import-names-test: tests/pe/graphics_import_names_test.c src/pe/imports.c src/pe/imports.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/pe $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/pe/graphics_import_names_test.c src/pe/imports.c -o "$@"
+
+.PHONY: check-pe-graphics-import-names
+check-pe-graphics-import-names: $(BUILD_DIR)/graphics-import-names-test $(BUILD_DIR)/graphics-fixture.exe $(BUILD_DIR)/shader-fixture.exe
+	timeout 10s $(BUILD_DIR)/graphics-import-names-test $(BUILD_DIR)/graphics-fixture.exe $(BUILD_DIR)/shader-fixture.exe
+
 check-pe-graphics check-pe-shaders:
 	@echo 'This check requires libvkd3d, libvkd3d-utils and Vulkan development files.' >&2
 	@exit 1
