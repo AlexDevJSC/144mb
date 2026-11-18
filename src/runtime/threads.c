@@ -504,10 +504,17 @@ static nt_status queue_apc_common(uintptr_t handle,
 {
     if ((user == NULL) == (native == NULL))
         return NT_STATUS_INVALID_PARAMETER;
-    if (special &&
-        !trusted_special_apc_entry((uintptr_t)(native ?
-                   (void (*)(void))native : (void (*)(void))user)))
-        return NT_STATUS_NOT_SUPPORTED;
+    if (special) {
+        uintptr_t callback = 0;
+        _Static_assert(sizeof(callback) == sizeof(native) &&
+                       sizeof(callback) == sizeof(user), "PE32+ AMD64 pointers");
+        if (native != NULL)
+            memcpy(&callback, &native, sizeof(callback));
+        else
+            memcpy(&callback, &user, sizeof(callback));
+        if (!trusted_special_apc_entry(callback))
+            return NT_STATUS_NOT_SUPPORTED;
+    }
     pthread_mutex_lock(&wait_lock);
     struct guest_apc_queue *queue = NULL;
     nt_status status = NT_STATUS_SUCCESS;
