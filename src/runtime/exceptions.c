@@ -4,6 +4,7 @@
 #include "winbase.h"
 #include "exception_callbacks.h"
 #include "ntnative/guest_boundary_runtime.h"
+#include "ntnative/runtime.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -621,9 +622,60 @@ static bool software_frame(uint32_t type, struct nt_context64 *next,
            (!dispatch->handler || software_code((uintptr_t)dispatch->handler));
 }
 
-static int32_t invoke_software_handler(struct nt_dispatcher_context *dispatch, struct nt_exception_record *record,
+/* A Windows .pdata UNWIND_INFO can refer to an imported
+ * __C_specific_handler through the PE's own six-byte RIP-relative IAT
+ * jump thunk (FF 25 disp32). Calling it by that PE address from our ELF
+ * exception dispatcher would enter the generic guest import gate, whose
+ * synthetic return belongs to an ELF frame. Transferring to an SEH
+ * target could then strand a host import trampoline on the private
+ * stack. Never relax the import gate to permit that.
+ *
+ * Instead, call the single known, resource-free runtime builtin
+ * directly ONLY if the actual loaded PE thunk and its mapped IAT slot
+ * resolve to the exact native export provided by this runtime.
+ * All other PE handlers retain the normal guest call path, including
+ * their fail-closed rules. This is NOT general PE<->ELF unwinding. */
+static bool verified_c_specific_import_thunk(const void *address)
+{
+    const uintptr_t pc = (uintptr_t)address;
+    if (!software_code(pc) || pc < image.base)
+        return false;
+    const uintptr_t rva = pc - image.base;
+    if (rva > UINT32_MAX)
+        return false;
+    const unsigned char *thunk = image_bytes((uint32_t)rva, 6);
+    if (!thunk || thunk[0] != 0xff || thunk[1] != 0x25)
+        return false;
+    int32_t displacement = 0;
+    memcpy(&displacement, thunk + 2, sizeof(displacement));
+    /* Use checked RVAs, avoiding signed pointer overflow from a forged
+     * displacement or thunk close to the 4-GiB PE image boundary. */
+    const int64_t slot_rva = (int64_t)rva + 6 + displacement;
+    if (slot_rva < 0 || (uint64_t)slot_rva > UINT32_MAX)
+        return false;
+    const unsigned char *slot_bytes = image_bytes((uint32_t)slot_rva,
+                                                 sizeof(uintptr_t));
+    if (!slot_bytes)
+        return false;
+    uintptr_t target = 0, expected = 0;
+    memcpy(&target, slot_bytes, sizeof(target));
+    const nt_guest_proc builtin =
+        nt_runtime_resolve("vcruntime140.dll", "__C_specific_handler");
+    if (!builtin)
+        return false;
+    _Static_assert(sizeof(builtin) == sizeof(expected),
+                   "AMD64 native import entry");
+    memcpy(&expected, &builtin, sizeof(expected));
+    return target == expected;
+}
+
+static int32_t invoke_software_handler(struct nt_dispatcher_context *dispatch,
+                                       struct nt_exception_record *record,
                                        struct nt_context64 *context)
 {
+    if (verified_c_specific_import_thunk(dispatch->handler))
+        return nt_C_specific_handler(record, dispatch->frame, context,
+                                     dispatch);
     software_handler handler;
     memcpy(&handler, &dispatch->handler, sizeof(handler));
     return handler(record, dispatch->frame, context, dispatch);
