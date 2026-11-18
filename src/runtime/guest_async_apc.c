@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "guest_async_apc.h"
+#include "guest_xstate_policy.h"
 #include "compat.h"
 #include "ntnative/guest_boundary_runtime.h"
 
@@ -42,6 +43,7 @@ struct async_apc_slot {
     greg_t gregs[NGREG];
     _Alignas(64) unsigned char xstate[APC_XSAVE_MAX];
     bool has_xstate;
+    size_t xstate_bytes;
 };
 static _Thread_local struct async_apc_slot slot;
 
@@ -79,8 +81,10 @@ static bool capture_signal_context(const ucontext_t *uc)
         const uint64_t allowed =
             UINT64_C(0x3) | (UINT64_C(1) << 2) |
             (UINT64_C(1) << 5) | (UINT64_C(1) << 6) |
-            (UINT64_C(1) << 7);
-        if ((features & ~allowed) != 0 || layout != 0)
+            (UINT64_C(1) << 7) | (UINT64_C(1) << 9);
+        if ((features & ~allowed) != 0 || layout != 0 ||
+            ((features & (UINT64_C(1) << 9)) &&
+             !nt_guest_xstate_pkru_matches(fp, count)))
             return false;
         extended = true;
     }
@@ -89,12 +93,22 @@ static bool capture_signal_context(const ucontext_t *uc)
     for (size_t i = 0; i < NGREG; ++i)
         slot.gregs[i] = uc->uc_mcontext.gregs[i];
     slot.has_xstate = extended;
+    slot.xstate_bytes = count;
     return true;
 }
 
 static _Noreturn void restore_guest_context(const struct nt_context64 *context)
 {
     if (slot.has_xstate) {
+        /* Guest callbacks are not allowed to change PKRU while the
+         * original PE context is suspended on an isolated host stack. */
+        const volatile unsigned char *fp = slot.xstate;
+        uint64_t features = 0;
+        for (unsigned j = 0; j < 8; ++j)
+            features |= (uint64_t)fp[512 + j] << (8 * j);
+        if ((features & (UINT64_C(1) << 9)) &&
+            !nt_guest_xstate_pkru_matches(fp, slot.xstate_bytes))
+            _Exit(174);
         uint32_t low = 0, high = 0;
         __asm__ __volatile__("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
         const uint32_t mask = low &
