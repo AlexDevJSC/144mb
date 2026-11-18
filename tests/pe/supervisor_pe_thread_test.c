@@ -494,7 +494,8 @@ int main(int argc, char **argv)
     atomic_store_explicit(&shared->apc_mode, 2u, memory_order_release);
 #elif defined(NT_SUP_TEST_APC_PRE_CANCEL)
     atomic_store_explicit(&shared->apc_cancel, 1u, memory_order_release);
-#else
+#elif !defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) && \
+      !defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
     const uint64_t guest_before_apc = atomic_load(&shared->guest_ticks);
 #endif
 
