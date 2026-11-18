@@ -157,10 +157,12 @@ static DWORD WINAPI multi_apc_worker(void *argument)
     target->thread_id = GetCurrentThreadId();
     if (!SetEvent(target->ready))
         return 71;
-    if (SleepEx(INFINITE, TRUE) != WAIT_IO_COMPLETION)
-        return 72;
-    if (SleepEx(INFINITE, TRUE) != WAIT_IO_COMPLETION)
-        return 73;
+    /* Windows may dispatch several queued user APCs in one alertable
+     * wait; this runtime currently consumes one callback per wake. Do
+     * not require exactly two wake-ups to prove FIFO and target identity. */
+    for (unsigned wake = 0; wake < 2 && target->calls < 2u; ++wake)
+        if (SleepEx(5000, TRUE) != WAIT_IO_COMPLETION)
+            return 72;
     if (target->calls != 2u || target->ordered != 2u ||
         target->user_seen != target->thread_id ||
         target->native_seen != target->thread_id)
