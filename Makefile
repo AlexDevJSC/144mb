@@ -839,6 +839,16 @@ check-pe-console: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/console-fixture.exe
 # GCC 16 emits an out-of-line memset for aggregate initialization
 # even with -ffreestanding. No Windows CRT may be linked into fixtures.
 # The implementation itself is compiled without loop-to-memset lowering.
+# Exercise the local freestanding symbol on the Linux host as well as
+# linking it into real PE32+ fixtures: redzones and zero-byte behavior.
+$(BUILD_DIR)/fixture-memory-test: tests/fixture_memory_test.c tests/pe/fixture_memory.c | $(BUILD_DIR)
+	$(CC) $(WARN_CFLAGS) $(CFLAGS) -fno-builtin \
+	    -fno-tree-loop-distribute-patterns $^ -o "$@"
+
+.PHONY: check-fixture-memory
+check-fixture-memory: $(BUILD_DIR)/fixture-memory-test
+	timeout 10s $(BUILD_DIR)/fixture-memory-test
+
 $(BUILD_DIR)/fixture-memory.o: tests/pe/fixture_memory.c | $(BUILD_DIR)
 	$(MINGW_CC) -std=c17 -Wall -Wextra -Wpedantic -Werror -O2 \
 	    -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
