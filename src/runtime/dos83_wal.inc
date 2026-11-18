@@ -28,6 +28,29 @@ struct dos83_wal_entry {
 
 static int open_parent(int root, const char *path, char leaf[NAME_MAX + 1]);
 
+/* A failed WAL sync makes both on-disk and page-cache state uncertain.
+ * Never reuse an apparently empty WAL after a failed ftruncate/fsync:
+ * the old record may reappear after power failure and be replayed against
+ * a newer transaction. Recovery must occur in a NEW process, which first
+ * syncs the opened WAL inode before declaring it reusable. */
+static _Atomic bool wal_storage_poisoned;
+
+static bool wal_poison(int cause)
+{
+    atomic_store(&wal_storage_poisoned, true);
+    errno = cause ? cause : EIO;
+    return false;
+}
+
+static bool wal_healthy(void)
+{
+    if (atomic_load(&wal_storage_poisoned)) {
+        errno = EUCLEAN;
+        return false;
+    }
+    return true;
+}
+
 static void wal_put32(unsigned char *p, uint32_t v)
 {
     for (unsigned int i = 0; i < 4; ++i)
@@ -70,12 +93,13 @@ static bool wal_sync_pinned(int path_fd, bool directory)
     if (fd < 0 && !directory)
         fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0)
-        return false;
+        return wal_poison(errno);
     int result = fsync(fd);
     int error = errno;
     close(fd);
-    errno = error;
-    return result == 0;
+    if (result != 0)
+        return wal_poison(error);
+    return true;
 }
 
 static void wal_close(struct dos83_wal *wal)
@@ -90,6 +114,8 @@ static void wal_close(struct dos83_wal *wal)
 static bool wal_open(int root, struct dos83_wal *wal)
 {
     *wal = (struct dos83_wal){.fd = -1, .directory = -1};
+    if (!wal_healthy())
+        return false;
     if (mkdirat(root, ":ntnative-file-leases", 0700) != 0 &&
         errno != EEXIST)
         return false;
@@ -125,9 +151,22 @@ static bool wal_open(int root, struct dos83_wal *wal)
         return false;
     }
     /* Persist the directory entry before a new WAL can authorize changes. */
-    if (fsync(wal->directory) != 0) {
+    if (fsync(wal->directory) != 0 ||
+        !wal_sync_pinned(root, true)) {
+        int error = errno;
         wal_close(wal);
-        return false;
+        return wal_poison(error);
+    }
+    /* The private registry itself may have been created by mkdirat:
+     * parent-root fsync ensures its directory ENTRY is durable, while
+     * fsync(wal->directory) above ensures the WAL filename is durable. */
+    /* Also fsync the WAL inode on EVERY new process/admission, even when
+     * empty: a previous process may have observed a failed clear fsync.
+     * A current page-cache size of zero alone is not durable evidence. */
+    if (dos83_test_io_error("wal-open-fsync") || fsync(wal->fd) != 0) {
+        int error = errno;
+        wal_close(wal);
+        return wal_poison(error);
     }
     return true;
 }
@@ -144,7 +183,11 @@ static bool wal_empty(struct dos83_wal *wal)
 }
 static bool wal_clear(struct dos83_wal *wal)
 {
-    return ftruncate(wal->fd, 0) == 0 && fsync(wal->fd) == 0;
+    if (ftruncate(wal->fd, 0) != 0)
+        return wal_poison(errno);
+    if (dos83_test_io_error("wal-clear-fsync") || fsync(wal->fd) != 0)
+        return wal_poison(errno);
+    return true;
 }
 
 static bool wal_encode(const struct dos83_wal_entry *entry,
@@ -204,12 +247,15 @@ static bool wal_write(struct dos83_wal *wal,
         if (written <= 0) {
             if (written == 0)
                 errno = EIO;
-            return false;
+            return wal_poison(errno);
         }
         done += (size_t)written;
     }
-    return ftruncate(wal->fd, (off_t)size) == 0 &&
-           fsync(wal->fd) == 0;
+    if (ftruncate(wal->fd, (off_t)size) != 0)
+        return wal_poison(errno);
+    if (dos83_test_io_error("wal-write-fsync") || fsync(wal->fd) != 0)
+        return wal_poison(errno);
+    return true;
 }
 
 /* Returns 1 if a verified pending record exists, 0 if empty, -1 on error.
@@ -316,6 +362,54 @@ static bool wal_restore_victim_alias(int victim_fd, const char *key,
         return write_guest_xattr(victim_fd, key, record->victim_old,
                                  record->victim_old_size) == 0;
     return clear_guest_xattr(victim_fd, key) == 0;
+}
+
+/* A different process may hold an unresolved/corrupt WAL on the same
+ * physical grant. Namespace mutations other than MoveFileEx also need to
+ * reject that grant; merely checking our process-local EIO latch is not
+ * enough. This is a non-mutating admission check, never an implicit replay.
+ * Recovery itself runs explicitly at trusted startup. */
+static bool wal_namespace_ready(int root)
+{
+    if (!wal_healthy())
+        return false;
+    int directory = confined_open_raw(root, ":ntnative-file-leases",
+                                      O_RDONLY | O_DIRECTORY, 0);
+    if (directory < 0)
+        return errno == ENOENT;
+    struct stat info;
+    if (fstat(directory, &info) != 0 || !S_ISDIR(info.st_mode) ||
+        info.st_uid != geteuid() || (info.st_mode & 077u) != 0) {
+        const int cause = errno ? errno : EACCES;
+        close(directory);
+        errno = cause;
+        return false;
+    }
+    int fd = confined_open_raw(directory, DOS83_WAL_NAME, O_RDONLY, 0);
+    const int open_error = errno;
+    close(directory);
+    if (fd < 0)
+        return open_error == ENOENT;
+    bool ok = fstat(fd, &info) == 0 &&
+              S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+              info.st_uid == geteuid() && (info.st_mode & 077u) == 0;
+    const int stat_error = errno;
+    if (!ok) {
+        close(fd);
+        errno = stat_error ? stat_error : EUCLEAN;
+        return false;
+    }
+    /* Sync a possibly failed prior clear BEFORE trusting zero length. */
+    if (fsync(fd) != 0) {
+        const int cause = errno;
+        close(fd);
+        return wal_poison(cause);
+    }
+    const bool empty = info.st_size == 0;
+    close(fd);
+    if (!empty)
+        errno = EUCLEAN;
+    return empty && wal_healthy();
 }
 
 /* A crash may happen before *or* after staging. An external writer may
@@ -536,6 +630,13 @@ bool nt_runtime_recover_dos83(void)
     bool ok = wal_recover_root(root);
     int error = errno;
     pthread_mutex_unlock(&dos83_lock);
+    /* A crashed final HANDLE holder may leave a durable delete disposition
+     * but no path through which another opener could find its inode gate.
+     * Reap these records before declaring startup storage clean. */
+    if (ok && !fs4_recover_pending_deletes(root)) {
+        ok = false;
+        error = errno;
+    }
     close(root);
     errno = error;
     return ok;
@@ -574,11 +675,21 @@ static bool wal_recover_if_pending(int root)
                        (info.st_mode & 077u) == 0;
     const off_t pending = valid ? info.st_size : -1;
     const int error = errno;
-    close(wal_file);
     if (!valid) {
+        close(wal_file);
         errno = error ? error : EACCES;
         return false;
     }
+    /* A fresh service/PE process cannot trust st_size==0 alone: the prior
+     * process could have truncated WAL before a failed fsync. Force the
+     * journal inode durable before treating it as empty, even in an
+     * all-grant read-only preflight that does not call wal_open(). */
+    if (fsync(wal_file) != 0) {
+        const int cause = errno;
+        close(wal_file);
+        return wal_poison(cause);
+    }
+    close(wal_file);
     if (pending == 0)
         return true;
     pthread_mutex_lock(&dos83_lock);
@@ -629,6 +740,11 @@ bool nt_runtime_recover_all_dos83_grants(void)
                 break;
             }
         }
+    }
+    if (copied && count > 0 &&
+        !fs4_recover_pending_deletes(grants[0])) {
+        copied = false;
+        error = errno;
     }
     for (size_t i = 0; i < count; ++i)
         close(grants[i]);

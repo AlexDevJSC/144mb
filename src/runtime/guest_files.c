@@ -613,8 +613,23 @@ static void dos83_test_crash(const char *phase)
         _exit(137);
     }
 }
+/* Test-only fsync failure, once per process. Production has NO environment
+ * controlled storage failure path. This specifically exercises the unsafe
+ * truncate-success/fsync-error window on a WAL that appears empty. */
+static bool dos83_test_io_error(const char *phase)
+{
+    static _Atomic bool injected;
+    const char *requested = getenv("NT_DOS83_TEST_IO_ERROR");
+    if (requested && strcmp(requested, phase) == 0 &&
+        !atomic_exchange(&injected, true)) {
+        errno = EIO;
+        return true;
+    }
+    return false;
+}
 #else
 #define dos83_test_crash(phase) ((void)0)
+#define dos83_test_io_error(phase) (false)
 #endif
 
 #include "dos83_alias.inc"
@@ -787,6 +802,12 @@ bool nt_runtime_refresh_dos83_path(const char *input)
     int root = duplicate_root(&relative);
     if (root < 0)
         return false;
+    if (!wal_namespace_ready(root)) {
+        const int cause = errno;
+        close(root);
+        errno = cause;
+        return false;
+    }
     int parent = open_parent(root, relative, leaf);
     const int opened_error = errno;
     close(root);
@@ -1227,13 +1248,15 @@ _Static_assert(sizeof(struct share_lease_record) == 8, "share lease record layou
 static int open_share_registry(const struct stat *info)
 {
     pthread_mutex_lock(&root_lock);
-    const int root = drive_root >= 0 ? fcntl(drive_root, F_DUPFD_CLOEXEC, 3) : -1;
+    const int root = drive_root >= 0 ?
+                     fcntl(drive_root, F_DUPFD_CLOEXEC, 3) : -1;
     pthread_mutex_unlock(&root_lock);
     if (root < 0) {
         errno = EACCES;
         return -1;
     }
-    if (mkdirat(root, ":ntnative-file-leases", 0700) < 0 && errno != EEXIST) {
+    if (mkdirat(root, ":ntnative-file-leases", 0700) < 0 &&
+        errno != EEXIST) {
         const int error = errno;
         close(root);
         errno = error;
@@ -1241,18 +1264,21 @@ static int open_share_registry(const struct stat *info)
     }
     const int directory = confined_open_raw(root, ":ntnative-file-leases",
                                              O_RDONLY | O_DIRECTORY, 0);
-    const int directory_error = errno;
-    close(root);
     if (directory < 0) {
-        errno = directory_error;
+        const int error = errno;
+        close(root);
+        errno = error;
         return -1;
     }
     struct stat dir_stat;
     if (fstat(directory, &dir_stat) != 0 ||
-        dir_stat.st_uid != geteuid() || (dir_stat.st_mode & 077u) != 0) {
-        const int error = errno;
+        !S_ISDIR(dir_stat.st_mode) ||
+        dir_stat.st_uid != geteuid() ||
+        (dir_stat.st_mode & 077u) != 0) {
+        const int error = errno ? errno : EACCES;
         close(directory);
-        errno = error == 0 ? EACCES : error;
+        close(root);
+        errno = error;
         return -1;
     }
     char filename[64];
@@ -1260,24 +1286,43 @@ static int open_share_registry(const struct stat *info)
                            (uintmax_t)info->st_dev, (uintmax_t)info->st_ino);
     if (n < 0 || (size_t)n >= sizeof(filename)) {
         close(directory);
+        close(root);
         errno = ENAMETOOLONG;
         return -1;
     }
-    const int fd = confined_open_raw(directory, filename, O_RDWR | O_CREAT, 0600);
-    const int error = errno;
-    close(directory);
+    int fd = confined_open_raw(directory, filename, O_RDWR | O_CREAT, 0600);
     if (fd < 0) {
+        const int error = errno;
+        close(directory);
+        close(root);
         errno = error;
         return -1;
     }
     struct stat lock_stat;
     if (fstat(fd, &lock_stat) != 0 || !S_ISREG(lock_stat.st_mode) ||
-        lock_stat.st_uid != geteuid() || (lock_stat.st_mode & 077u) != 0) {
-        const int cause = errno;
+        lock_stat.st_nlink != 1 || lock_stat.st_uid != geteuid() ||
+        (lock_stat.st_mode & 077u) != 0) {
+        const int error = errno ? errno : EACCES;
         close(fd);
-        errno = cause == 0 ? EACCES : cause;
+        close(directory);
+        close(root);
+        errno = error;
         return -1;
     }
+    /* The per-inode marker's filename AND the containing registry must
+     * survive power failure before a delete-pending bit can be committed.
+     * fsync(fd) happens when the marker is written; the two directory
+     * barriers here make first-time creation of both names durable. */
+    if (fsync(directory) != 0 || !wal_sync_pinned(root, true)) {
+        const int error = errno;
+        close(fd);
+        close(directory);
+        close(root);
+        (void)wal_poison(error);
+        return -1;
+    }
+    close(directory);
+    close(root);
     return fd;
 }
 
@@ -1327,6 +1372,8 @@ static bool read_share_pending(int gate, struct share_pending_record *record)
 
 static bool set_share_pending(int gate, const struct stat *file, const char *path)
 {
+    if (!wal_healthy())
+        return false;
     struct share_pending_record record;
     if (!read_share_pending(gate, &record))
         return false;
@@ -1373,22 +1420,20 @@ static bool set_share_pending(int gate, const struct stat *file, const char *pat
     do {
         written = pwrite(gate, &staged, sizeof(staged), SHARE_PENDING_OFFSET);
     } while (written < 0 && errno == EINTR);
-    if (written != (ssize_t)sizeof(staged) || fsync(gate) != 0) {
-        if (written >= 0)
-            errno = EIO;
-        return false;
-    }
+    if (written != (ssize_t)sizeof(staged))
+        return wal_poison(written < 0 ? errno : EIO);
+    if (fsync(gate) != 0)
+        return wal_poison(errno);
     const uint32_t pending = 1;
     do {
         written = pwrite(gate, &pending, sizeof(pending),
                          SHARE_PENDING_OFFSET + offsetof(struct share_pending_record, pending));
     } while (written < 0 && errno == EINTR);
-    if (written != (ssize_t)sizeof(pending)) {
-        if (written >= 0)
-            errno = EIO;
-        return false;
-    }
-    return fsync(gate) == 0;
+    if (written != (ssize_t)sizeof(pending))
+        return wal_poison(written < 0 ? errno : EIO);
+    if (fsync(gate) != 0)
+        return wal_poison(errno);
+    return true;
 }
 
 static bool clear_share_pending(int gate)
@@ -1399,12 +1444,11 @@ static bool clear_share_pending(int gate)
         written = pwrite(gate, &zero, sizeof(zero),
                          SHARE_PENDING_OFFSET + offsetof(struct share_pending_record, pending));
     } while (written < 0 && errno == EINTR);
-    if (written != (ssize_t)sizeof(zero)) {
-        if (written >= 0)
-            errno = EIO;
-        return false;
-    }
-    return fsync(gate) == 0;
+    if (written != (ssize_t)sizeof(zero))
+        return wal_poison(written < 0 ? errno : EIO);
+    if (fsync(gate) != 0)
+        return wal_poison(errno);
+    return true;
 }
 
 static bool share_registry_has_leases(int gate, bool *active)
@@ -1430,6 +1474,8 @@ static bool share_registry_has_leases(int gate, bool *active)
 static bool finalize_share_pending_locked(int gate,
                                           const struct share_pending_record *pending)
 {
+    if (!wal_healthy())
+        return false;
     if (!pending->pending)
         return true;
     const char *relative = pending->path;
@@ -1482,9 +1528,10 @@ static bool finalize_share_pending_locked(int gate,
     const int opened_error = errno;
     close(root);
     if (parent < 0) {
-        if (opened_error == ENOENT || opened_error == ENOTDIR)
-            return clear_share_pending(gate);
-        errno = opened_error;
+        /* A vanished parent cannot be fsynced: we cannot prove that its
+         * disappearance will survive a power interruption. Retain the
+         * pending marker rather than silently authorizing a new open. */
+        errno = opened_error ? opened_error : EUCLEAN;
         return false;
     }
     struct stat actual;
@@ -1492,25 +1539,73 @@ static bool finalize_share_pending_locked(int gate,
         if (!S_ISREG(actual.st_mode) ||
             (uint64_t)actual.st_dev != pending->dev ||
             (uint64_t)actual.st_ino != pending->ino) {
-            /* The old path no longer identifies the file: do not
-             * delete a different inode even if the name was reused. */
+            /* Host writer bypassed the cooperative namespace and replaced
+             * this spelling. We MUST NOT delete the replacement inode. The
+             * old pending disposition no longer binds to this path: sync
+             * the observed parent first, then release its obsolete marker.
+             * Existing hardlinks to the old inode remain untouched. */
+            if (!wal_sync_pinned(parent, true)) {
+                const int cause = errno;
+                close(parent);
+                errno = cause;
+                return false;
+            }
             close(parent);
             return clear_share_pending(gate);
         }
-        if (unlinkat(parent, leaf, 0) != 0) {
-            const int error = errno;
+        int pinned = confined_open_raw(parent, leaf, O_PATH | O_NOFOLLOW, 0);
+        struct stat identity;
+        char entry_key[112];
+        if (pinned < 0 || fstat(pinned, &identity) != 0 ||
+            identity.st_dev != actual.st_dev ||
+            identity.st_ino != actual.st_ino ||
+            !dos83_entry_key(parent, leaf, entry_key) ||
+            clear_guest_xattr(pinned, entry_key) != 0 ||
+            !wal_sync_pinned(pinned, false)) {
+            const int failure = errno;
+            if (pinned >= 0)
+                close(pinned);
             close(parent);
-            errno = error;
+            errno = failure ? failure : EUCLEAN;
             return false;
         }
+        close(pinned);
+        dos83_test_crash("after-pending-xattr-cleanup");
+        /* Do not use the untrusted name if it changed while we synced
+         * metadata; the marker is still durable and can be retried. */
+        struct stat verify;
+        if (fstatat(parent, leaf, &verify, AT_SYMLINK_NOFOLLOW) != 0 ||
+            verify.st_dev != actual.st_dev ||
+            verify.st_ino != actual.st_ino ||
+            unlinkat(parent, leaf, 0) != 0) {
+            const int failure = errno;
+            close(parent);
+            errno = failure ? failure : EUCLEAN;
+            return false;
+        }
+        dos83_test_crash("after-pending-unlink");
     } else if (errno != ENOENT) {
         const int error = errno;
         close(parent);
         errno = error;
         return false;
     }
+    /* The pending record MUST remain durable until the physical unlink
+     * and the parent directory entry are synced. A failure here cannot
+     * turn into a successful marker clear or new filename admission. */
+    if (dos83_test_io_error("pending-parent-fsync") ||
+        !wal_sync_pinned(parent, true)) {
+        const int failure = errno;
+        close(parent);
+        (void)wal_poison(failure);
+        return false;
+    }
     close(parent);
-    return clear_share_pending(gate);
+    dos83_test_crash("after-pending-parent-fsync");
+    const bool cleared = clear_share_pending(gate);
+    if (cleared)
+        dos83_test_crash("after-pending-clear");
+    return cleared;
 }
 
 static bool reap_share_pending_locked(int gate)
@@ -1524,6 +1619,98 @@ static bool reap_share_pending_locked(int gate)
     if (!share_registry_has_leases(gate, &active))
         return false;
     return active || finalize_share_pending_locked(gate, &pending);
+}
+
+/* Scan durable C: delete-pending records BEFORE admitting new clients.
+ * After SIGKILL the final owner has no live OFD lease; unlike a normal
+ * open, it cannot discover a deleted inode's registry by pathname.
+ * Therefore startup must iterate the trusted, private per-inode files.
+ * Corruption/foreign identity fails closed and leaves the marker intact. */
+static bool fs4_recover_pending_deletes(int c_root)
+{
+    int registry = confined_open_raw(c_root, ":ntnative-file-leases",
+                                     O_RDONLY | O_DIRECTORY, 0);
+    if (registry < 0)
+        return errno == ENOENT;
+    struct stat registry_info;
+    if (fstat(registry, &registry_info) != 0 ||
+        !S_ISDIR(registry_info.st_mode) ||
+        registry_info.st_uid != geteuid() ||
+        (registry_info.st_mode & 077u) != 0) {
+        const int cause = errno ? errno : EACCES;
+        close(registry);
+        errno = cause;
+        return false;
+    }
+    int iter = fcntl(registry, F_DUPFD_CLOEXEC, 0);
+    DIR *dir = iter < 0 ? NULL : fdopendir(iter);
+    if (!dir) {
+        const int cause = errno;
+        if (iter >= 0)
+            close(iter);
+        close(registry);
+        errno = cause;
+        return false;
+    }
+    bool ok = true;
+    int failure = 0;
+    for (;;) {
+        errno = 0;
+        const struct dirent *ent = readdir(dir);
+        if (!ent) {
+            if (errno) {
+                ok = false;
+                failure = errno;
+            }
+            break;
+        }
+        const char *dash = strchr(ent->d_name, '-');
+        if (!dash || dash == ent->d_name || !dash[1])
+            continue;
+        char *end = NULL;
+        errno = 0;
+        const uintmax_t dev = strtoumax(ent->d_name, &end, 16);
+        if (errno || end != dash)
+            continue;
+        const uintmax_t ino = strtoumax(dash + 1, &end, 16);
+        if (errno || end == dash + 1 || *end)
+            continue; /* Not a per-inode lease record. */
+        int gate = confined_open_raw(registry, ent->d_name, O_RDWR, 0);
+        struct stat gate_stat;
+        if (gate < 0 || fstat(gate, &gate_stat) != 0 ||
+            !S_ISREG(gate_stat.st_mode) || gate_stat.st_nlink != 1 ||
+            gate_stat.st_uid != geteuid() || (gate_stat.st_mode & 077u)) {
+            failure = gate < 0 ? errno : EUCLEAN;
+            if (gate >= 0)
+                close(gate);
+            ok = false;
+            break;
+        }
+        int locked;
+        do {
+            locked = flock(gate, LOCK_EX);
+        } while (locked < 0 && errno == EINTR);
+        struct share_pending_record pending;
+        bool active = false;
+        if (locked != 0 ||
+            !read_share_pending(gate, &pending) ||
+            (pending.pending && ((uintmax_t)pending.dev != dev ||
+                                 (uintmax_t)pending.ino != ino)) ||
+            (pending.pending && !share_registry_has_leases(gate, &active)) ||
+            (pending.pending && !active &&
+             !finalize_share_pending_locked(gate, &pending))) {
+            failure = errno ? errno : EUCLEAN;
+            ok = false;
+        }
+        close(gate);
+        if (!ok)
+            break;
+    }
+    closedir(dir);
+    close(registry);
+    if (!ok)
+        errno = failure ? failure : EUCLEAN;
+    return ok;
 }
 
 /* Obtain a fresh open description of an existing lease registry. dup()
@@ -2219,6 +2406,10 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
 {
     const uint32_t generic_read = UINT32_C(0x80000000), generic_write = UINT32_C(0x40000000);
     const struct security_attributes *attributes = security;
+    if (disposition != OPEN_EXISTING && !wal_healthy()) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return UINTPTR_MAX;
+    }
     const bool read_access = (desired & generic_read) != 0, write_access = (desired & generic_write) != 0;
     if (disposition < CREATE_NEW || disposition > TRUNCATE_EXISTING ||
         (attributes != NULL && attributes->size != sizeof(*attributes))) {
@@ -2258,6 +2449,12 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     const int root = duplicate_root(&resolved);
     if (root < 0) {
         nt_SetLastError(path_error(errno, true));
+        return UINTPTR_MAX;
+    }
+    if (disposition != OPEN_EXISTING && !wal_namespace_ready(root)) {
+        const int cause = errno;
+        close(root);
+        nt_SetLastError(path_error(cause ? cause : EUCLEAN, true));
         return UINTPTR_MAX;
     }
     char leaf[NAME_MAX + 1];
@@ -2394,6 +2591,13 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
                                 (write_access ? FILE_WRITE : 0) |
                                 ((desired & UINT32_C(0x00010000)) ? FILE_DELETE : 0);
     pthread_mutex_lock(&file_lock);
+    if (!wal_healthy() && disposition != OPEN_EXISTING) {
+        pthread_mutex_unlock(&file_lock);
+        close(parent);
+        free(saved_path);
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return UINTPTR_MAX;
+    }
     struct guest_file *slot = new_file();
     bool created = false;
     uintptr_t result = UINTPTR_MAX;
@@ -2402,8 +2606,40 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         const int fd = open_shared(slot, parent, leaf, options, access, share, &created);
         error = errno;
         if (fd >= 0) {
-            if (truncate && !created && ftruncate(fd, 0) != 0) {
-                error = errno;
+            bool committed = true;
+            if (created)
+                dos83_test_crash("after-file-create");
+            if (truncate && !created) {
+                if (ftruncate(fd, 0) != 0)
+                    committed = false;
+                else
+                    dos83_test_crash("after-file-truncate");
+            }
+            int sync_error = committed ? 0 : errno;
+            if (committed && (created || truncate)) {
+                if (!wal_sync_pinned(fd, false)) {
+                    committed = false;
+                    sync_error = errno;
+                } else if (created) {
+                    dos83_test_crash("after-file-create-fsync");
+                } else {
+                    dos83_test_crash("after-file-truncate-fsync");
+                }
+            }
+            if (committed && created) {
+                if (!wal_sync_pinned(parent, true)) {
+                    committed = false;
+                    sync_error = errno;
+                } else {
+                    dos83_test_crash("after-file-parent-fsync");
+                }
+            }
+            if (!committed) {
+                /* Create/truncate may already have physically taken effect
+                 * after a failed fsync. Never return a successful HANDLE,
+                 * and latch storage EIO to forbid additional mutations. */
+                error = sync_error ? sync_error : EIO;
+                (void)wal_poison(error);
                 close(fd);
                 release_share_lease(&slot->share_lease_fd);
             } else {
@@ -3144,11 +3380,18 @@ static int remove_file_or_defer(int parent, const char *leaf, const char *dos_pa
             error = EBUSY;
     }
     if (error == 0) {
-        if (active) {
-            if (!set_share_pending(gate, target, dos_path))
-                error = errno;
-        } else if (unlinkat(parent, leaf, 0) != 0) {
+        /* Even an immediate DeleteFile is a durable disposition. The
+         * pending record is committed BEFORE namespace mutation, so a
+         * SIGKILL between xattr cleanup/unlink/parent fsync is replayable
+         * from the per-inode registry. A surviving hardlink outside the
+         * granted root must not retain the deleted entry's DOS83 alias. */
+        if (!set_share_pending(gate, target, dos_path)) {
             error = errno;
+        } else if (!active) {
+            struct share_pending_record durable;
+            if (!read_share_pending(gate, &durable) ||
+                !finalize_share_pending_locked(gate, &durable))
+                error = errno;
         }
     }
     if (status == 0)
@@ -3170,6 +3413,10 @@ enum path_operation { MAKE_DIRECTORY, REMOVE_FILE, REMOVE_DIRECTORY };
 
 static int32_t change_path(const char *input, enum path_operation operation)
 {
+    if (!wal_healthy()) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
     char path[PATH_MAX];
     if (!guest_path(input, path)) {
         nt_SetLastError(path_error(errno, true));
@@ -3185,6 +3432,12 @@ static int32_t change_path(const char *input, enum path_operation operation)
         nt_SetLastError(path_error(errno, true));
         return 0;
     }
+    if (!wal_namespace_ready(root)) {
+        const int cause = errno;
+        close(root);
+        nt_SetLastError(path_error(cause ? cause : EUCLEAN, true));
+        return 0;
+    }
     char leaf[NAME_MAX + 1];
     const int parent = open_parent(root, resolved, leaf);
     const int parent_error = errno;
@@ -3195,6 +3448,12 @@ static int32_t change_path(const char *input, enum path_operation operation)
     }
 
     pthread_mutex_lock(&file_lock);
+    if (!wal_healthy()) {
+        pthread_mutex_unlock(&file_lock);
+        close(parent);
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
     int status;
     int deletion_guard = -1;
     if (operation == MAKE_DIRECTORY) {
@@ -3217,11 +3476,18 @@ static int32_t change_path(const char *input, enum path_operation operation)
             } else {
                 status = unlinkat(parent, leaf, 0);
                 if (status == 0) {
+                    dos83_test_crash("after-delete-entry");
+                    if (!wal_sync_pinned(parent, true))
+                        status = -1;
+                    else
+                        dos83_test_crash("after-delete-parent-fsync");
                     const int saved_error = errno;
                     pthread_mutex_unlock(&file_lock);
                     close(parent);
                     errno = saved_error;
-                    return 1;
+                    if (status != 0)
+                        nt_SetLastError(path_error(saved_error, false));
+                    return status == 0;
                 }
             }
         } else if (status == 0 && operation == REMOVE_FILE &&
@@ -3243,6 +3509,31 @@ static int32_t change_path(const char *input, enum path_operation operation)
             status = operation == REMOVE_FILE ?
                 remove_file_or_defer(parent, leaf, path, &info) :
                 unlinkat(parent, leaf, AT_REMOVEDIR);
+    }
+    if (status == 0 && operation == MAKE_DIRECTORY) {
+        dos83_test_crash("after-mkdir");
+        int child = confined_open_raw(parent, leaf,
+                                       O_RDONLY | O_DIRECTORY, 0);
+        if (child < 0 || !wal_sync_pinned(child, true))
+            status = -1;
+        if (child >= 0)
+            close(child);
+        if (status == 0)
+            dos83_test_crash("after-mkdir-inode-fsync");
+    }
+    if (status == 0) {
+        if (operation != MAKE_DIRECTORY) {
+            struct stat leftover;
+            if (fstatat(parent, leaf, &leftover, AT_SYMLINK_NOFOLLOW) != 0 &&
+                errno == ENOENT)
+                dos83_test_crash("after-delete-entry");
+        }
+        if (!wal_sync_pinned(parent, true))
+            status = -1;
+        else if (operation == MAKE_DIRECTORY)
+            dos83_test_crash("after-mkdir-parent-fsync");
+        else
+            dos83_test_crash("after-delete-parent-fsync");
     }
     const int error = errno;
     if (deletion_guard >= 0)
@@ -4836,6 +5127,10 @@ int32_t NT_MS_ABI nt_GetFileAttributesExA(const char *path, int32_t level,
  * Linux chmod flags and must never be silently claimed as supported. */
 static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
 {
+    if (!wal_healthy()) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
     if (attributes == 0 || (attributes & ~(WIN_READONLY | WIN_EXTENDED | WIN_NORMAL)) ||
         ((attributes & WIN_NORMAL) && attributes != WIN_NORMAL)) {
         nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
@@ -4850,6 +5145,12 @@ static int32_t set_file_attributes_utf8(const char *input, uint32_t attributes)
     const int root = duplicate_root(&relative);
     if (root < 0) {
         nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    if (!wal_namespace_ready(root)) {
+        const int cause = errno;
+        close(root);
+        nt_SetLastError(path_error(cause ? cause : EUCLEAN, true));
         return 0;
     }
     const int fd = confined_open(root, relative, O_RDONLY, 0);
