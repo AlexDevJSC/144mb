@@ -15,6 +15,8 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <time.h>
+#include <errno.h>
 
 struct endpoint {
     int socket[2], commands[2], replies[2], pidfd;
@@ -166,6 +168,11 @@ int main(void)
         !nt_broker_grant_child_query(asker.pid, target.pid,
                                     NT_BROKER_QUERY_LIMITED_INFORMATION))
         return 2;
+    /* Both authenticated channels must remain open across an idle
+     * interval longer than the old 1s server poll timeout. The first
+     * cross-process QUERY after this delay must still succeed. */
+    struct timespec quiet = {.tv_sec = 1, .tv_nsec = 350000000L};
+    while (nanosleep(&quiet, &quiet) < 0 && errno == EINTR) {}
     uint32_t actual_tid = 0;
     char response = 0;
     if (!read_all(target.replies[0], &actual_tid, sizeof(actual_tid))) {
@@ -211,6 +218,6 @@ int main(void)
     close(target.replies[0]);
     close(asker.commands[1]);
     close(asker.replies[0]);
-    puts("PASS IPC: 2 registered guest processes, authenticated secondary thread, remote query and post-exit revocation");
+    puts("PASS IPC: 2 registered guests, >1.35s idle session, remote query and post-exit revocation");
     return 0;
 }
