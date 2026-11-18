@@ -1152,6 +1152,55 @@ static int backend_selftest(void)
         fprintf(stderr, "FAIL: FUSE WAL test cleanup\\n");
         return 1;
     }
+    /* Dedicated-UID create must acquire an OFD lease BEFORE linkat makes
+     * the name visible, and may never fall back to unsafe O_CREAT. */
+    const char *staged_name = "/FS4StagedLeaseTest.txt";
+    struct fuse_file_info staging = {.flags = O_WRONLY};
+    int stage_guard = guest_mutation_begin(staged_name);
+    if (stage_guard < 0) {
+        fprintf(stderr, "FAIL: staged service WAL admission\n");
+        return 1;
+    }
+    int staged = fs_create_staged_service(staged_name, 0600, &staging);
+    nt_runtime_end_namespace_mutation(stage_guard);
+    if (staged == -EOPNOTSUPP || staged == -ENOTSUP || staged == -EPERM ||
+        staged == -EINVAL) {
+        /* A filesystem may not support unnamed inodes; admission must
+         * refuse instead of publishing without a lease. */
+        int check = lower_open(staged_name, O_RDONLY, 0);
+        if (check >= 0) {
+            close(check);
+            fprintf(stderr, "FAIL: unsupported O_TMPFILE published a name\n");
+            return 1;
+        }
+        printf("SKIP staged service inode test: backing denies O_TMPFILE\n");
+    } else {
+        if (staged || !staging.direct_io || !view_lease_active((int)staging.fh)) {
+            fprintf(stderr, "FAIL: staged service inode was not leased\n");
+            return 1;
+        }
+        uintptr_t opposing = nt_CreateFileW(u"C:\\FS4StagedLeaseTest.txt",
+                                            UINT32_C(0x80000000), 0,
+                                            NULL, 3, 0, 0);
+        if (opposing != UINTPTR_MAX) {
+            (void)nt_CloseHandle(opposing);
+            fprintf(stderr, "FAIL: staged service inode bypassed PE share lease\n");
+            return 1;
+        }
+        if (fs_release(staged_name, &staging) != 0) {
+            fprintf(stderr, "FAIL: staged service lease cleanup\n");
+            return 1;
+        }
+        opposing = nt_CreateFileW(u"C:\\FS4StagedLeaseTest.txt",
+                                  UINT32_C(0x80000000), NT_FS_SHARE_ALL,
+                                  NULL, 3, 0, 0);
+        if (opposing == UINTPTR_MAX || !nt_CloseHandle(opposing) ||
+            fs_unlink(staged_name) != 0) {
+            fprintf(stderr, "FAIL: lease did not release after staged close\n");
+            return 1;
+        }
+        printf("PASS staged FUSE inode is leased before publication\n");
+    }
     printf("PASS FUSE fail-closed pre-mutation WAL admission\\n");
     printf("PASS NT opt-in share leases, pre-truncate denial, range locks, metadata isolation\n");
     printf("PASS FUSE callbacks, broker rename, alias persistence and confinement (mount not tested)\n");
