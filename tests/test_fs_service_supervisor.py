@@ -38,6 +38,21 @@ class ServiceSupervisor(unittest.TestCase):
             self.assertEqual(p.returncode, 3)
             self.assertIn("PE storage IPC backend not implemented", p.stderr)
 
+    def test_experimental_pe_refuses_without_live_v3_worker(self):
+        with tempfile.TemporaryDirectory() as view:
+            p = self.run_cli("--view", view,
+                             "--service-socket", "/run/missing.sock",
+                             "--pe", "--experimental-pe-ipc", "--", "game.exe")
+            self.assertEqual(p.returncode, 3)
+            self.assertIn("REFUSED", p.stderr)
+
+    def test_pe_ipc_never_binds_physical_backing_in_runner(self):
+        code = (ROOT / "src/tools/pe_isolated_run.c").read_text(encoding="utf-8")
+        self.assertIn('ADD("--tmpfs"); ADD("/game");', code)
+        self.assertIn('if (service_pe)', code)
+        self.assertIn('NT_FS4_HANDLE_SOCKET', code)
+        self.assertIn('PE storage IPC forbids direct DOS drive grants', code)
+
     def test_legacy_without_lower_refuses(self):
         with tempfile.TemporaryDirectory() as path:
             p = self.run_cli("--view", path, "--", "/bin/true")

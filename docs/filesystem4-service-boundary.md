@@ -100,3 +100,25 @@ ni el supervisor `--service-socket --pe` ni Bubblewrap levantan un PE usando
 esta vía. Integrar el adaptador PE, ampliar funciones (atributos, directory
 enumeration, reparse y ACL), probar 2/4 procesos y Fedora SELinux Enforcing
 son requisitos previos para habilitar cualquier modo PE generalista.
+
+## Lanzador PE experimental por IPC
+
+`nt-fs-supervisor --view /run/ntnative-storage/view --service-socket
+/run/ntnative-storage/control.sock --pe --experimental-pe-ipc -- game.exe`
+requiere el socket v1 autenticado, el handshake v3 activo con UID de
+servicio verificado mediante SCM_CREDENTIALS, FUSE vivo, Bubblewrap y la
+instalación administrada que permite `NT_STORAGE_EXPERIMENTAL_HANDLES=1`.
+No admite `--lower` ni comparte otros directorios/raíces DOS/UNC.
+
+El launcher crea `/game` con `--tmpfs`, monta sólo el ejecutable PE en
+lectura y un socket del broker en `/run/ntnative-storage/socket`. Ya no
+monta el C: físico en este modo. El runtime redirige CreateFile/ReadFile/
+WriteFile/CloseHandle/DeleteFile/MoveFile/SetEndOfFile/SetFilePointer/LockFile
+al IPC versionado. Algunas operaciones como FindFirstFile, atributos y
+security descriptors aún se rechazan explícitamente: sin ellas un PE real
+puede fallar en vez de fingir compatibilidad. El modo PE general sigue
+desactivado por defecto.
+
+Es imprescindible ejecutar pruebas adversarias en Fedora físico (SELinux
+Enforcing, montajes alternativos, cierres y reconexiones) antes de
+considerarlo seguro para uso de propósito general.
