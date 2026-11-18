@@ -6574,7 +6574,7 @@ static bool truncate_guest_handle(uintptr_t handle, off_t length, bool at_cursor
     else if (!(file->access & FILE_WRITE) || !file->path)
         err=EACCES;
     int guard=-1, fd=-1;
-    if (!err) {
+    if (!err && private_c_path(file->path)) {
         guard=nt_runtime_begin_namespace_mutation(file->path);
         if (guard<0)
             err=errno ? errno : EUCLEAN;
