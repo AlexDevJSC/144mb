@@ -25,6 +25,19 @@ void supervisor_pe_apc_callback(struct nt_supervisor_pe_shared *shared)
         /* Real CPU guest-code exception. Must cause a ptrace SIGILL stop,
          * never be mistaken for APC completion. */
         __asm__ volatile ("ud2" ::: "memory");
+    } else if (mode == 3u) {
+        /* Real AMD64 divide-error #DE, Linux SIGFPE/FPE_INTDIV. */
+        __asm__ volatile ("movl $1, %%eax\n\t"
+                          "xorl %%edx, %%edx\n\t"
+                          "xorl %%ecx, %%ecx\n\t"
+                          "divl %%ecx"
+                          ::: "rax", "rdx", "rcx", "cc", "memory");
+    } else if (mode == 4u) {
+        /* Real page fault #PF on a read from NULL; the test captures
+         * CR2 through PTRACE_GETSIGINFO and x86 ERR from NT_PRSTATUS. */
+        __asm__ volatile ("xorq %%rax, %%rax\n\t"
+                          "movq (%%rax), %%rax"
+                          ::: "rax", "memory");
     }
     atomic_fetch_add_explicit(&shared->apc_delivered, 1u, memory_order_release);
     __asm__ volatile ("int3");

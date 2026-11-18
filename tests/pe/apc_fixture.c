@@ -133,12 +133,14 @@ static DWORD WINAPI worker(void *unused)
 
     /* Guest-only, bounded delivery at the safe return from this NT
      * import, without an alertable wait or hijacking a host mutex. */
-    if (NtQueueApcThreadEx(GetCurrentThread(), (HANDLE)(uintptr_t)1,
+    const LONG special_status =
+        NtQueueApcThreadEx(GetCurrentThread(), (HANDLE)(uintptr_t)1,
                            special_native_apc, (void *)(uintptr_t)0x777u,
                            (void *)(uintptr_t)0x778u,
-                           (void *)(uintptr_t)0x779u) != STATUS_OK ||
-        special_count != 1u || NtTestAlert() != STATUS_OK)
-        return 36;
+                           (void *)(uintptr_t)0x779u);
+    if (special_status != STATUS_OK) return 36;
+    if (special_count != 1u) return 92;
+    if (NtTestAlert() != STATUS_OK) return 93;
 
     typedef DWORD (WINAPI *queue_apc2)(PAPCFUNC, HANDLE, ULONG_PTR, DWORD);
     union { FARPROC address; queue_apc2 call; } resolved = {
@@ -367,10 +369,16 @@ int import_fixture_entry(void)
         ResumeThread(thread) != 1)
         return 15;
     DWORD code = 0;
-    if (WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 ||
-        !GetExitCodeThread(thread, &code) || code != 0x144u ||
-        apc_count != 2 || callback_ok != 2 || callback_thread != tid || worker_id != tid)
+    if (WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0)
         return 16;
+    if (!GetExitCodeThread(thread, &code))
+        return 86;
+    if (code != 0x144u)
+        return code > 0 && code < 86u ? (int)code : 87;
+    if (apc_count != 2) return 88;
+    if (callback_ok != 2) return 89;
+    if (callback_thread != tid) return 90;
+    if (worker_id != tid) return 91;
 
     if (QueueUserAPC(single_apc, thread, 0x143u) != 0 ||
         NtAlertThread(thread) != STATUS_THREAD_IS_TERMINATING)

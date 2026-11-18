@@ -128,7 +128,7 @@ check-pe-thread-supervisor-apc-xstate-failure: $(BUILD_DIR)/supervisor-pe-apc-xs
 # Additional trust-boundary cases: cancellation before/after mutation,
 # a disconnected supervisor-owned socket, asynchronous SIGUSR1 to a guest
 # Linux TID, and a real PE UD2 CPU exception. No public APC hooks.
-APC_GUARD_CASES := cancel disconnect signal exception pre-cancel
+APC_GUARD_CASES := cancel disconnect signal spoof-ill exception exception-fpe exception-segv pre-cancel
 
 define APC_GUARD_FIXTURE
 $(BUILD_DIR)/supervisor-pe-apc-$(1)-test: tests/pe/supervisor_pe_thread_test.c tests/pe/supervisor_pe_shared.h src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/pe/image.c src/runtime/guest_thread.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S | $(BUILD_DIR)
@@ -142,7 +142,10 @@ endef
 $(eval $(call APC_GUARD_FIXTURE,cancel,CANCEL))
 $(eval $(call APC_GUARD_FIXTURE,disconnect,DISCONNECT))
 $(eval $(call APC_GUARD_FIXTURE,signal,SIGNAL))
+$(eval $(call APC_GUARD_FIXTURE,spoof-ill,SPOOF_ILL))
 $(eval $(call APC_GUARD_FIXTURE,exception,EXCEPTION))
+$(eval $(call APC_GUARD_FIXTURE,exception-fpe,EXCEPTION_FPE))
+$(eval $(call APC_GUARD_FIXTURE,exception-segv,EXCEPTION_SEGV))
 $(eval $(call APC_GUARD_FIXTURE,pre-cancel,PRE_CANCEL))
 
 .PHONY: check-pe-thread-supervisor-apc-guards
@@ -150,7 +153,10 @@ check-pe-thread-supervisor-apc-guards: $(addprefix $(BUILD_DIR)/supervisor-pe-ap
 	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-cancel-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-disconnect-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-signal-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-spoof-ill-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-exception-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-exception-fpe-test $(BUILD_DIR)/supervisor-pe-fixture.exe
+	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-exception-segv-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-pre-cancel-test $(BUILD_DIR)/supervisor-pe-fixture.exe
 
 $(BUILD_DIR):

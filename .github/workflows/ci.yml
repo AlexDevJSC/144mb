@@ -32,6 +32,10 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libsdl2-image-dev libcairo2-dev libffi-dev libssl-dev libicu-dev libfuse3-dev fuse3 libfluidsynth3 libvkd3d-dev libvulkan-dev mesa-vulkan-drivers bubblewrap weston fonts-dejavu-core
           x86_64-w64-mingw32-gcc --version
+      # CI should fail at the REAL PE regression instead of compiling
+      # unrelated FUSE/desktop projects for several minutes first.
+      - name: Prove special APC and frame-based VEH/SEH PE before full suite
+        run: make -j2 check-pe-apc check-pe-seh
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 all check check-pe check-pe-import check-pe-image
       - name: Require native FluidSynth library and ABI

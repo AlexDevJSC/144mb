@@ -286,6 +286,94 @@ int nt_supervisor_get_guest_context(struct nt_thread_supervisor *sup,
     return 0;
 }
 
+/* Linux hardware signals become NT exception *records* only after
+ * proving that the kernel stopped a pinned, currently-running PE TID.
+ * The caller may inspect this record but MUST NOT claim that a Windows
+ * VEH/SEH handler has run: doing so requires a separate, authenticated
+ * guest exception trampoline with correct XSTATE and unwind ownership.
+ * All observations are read-only; the failing PE is never CONT/DETACH'd
+ * from an uncertain injected APC context. */
+int nt_supervisor_get_guest_hardware_fault(
+    struct nt_thread_supervisor *sup,
+    const struct nt_supervisor_guest_scope *scope,
+    struct nt_supervisor_guest_fault *out)
+{
+    if (!out || !sup || !sup->seized || !sup->stopped || sup->compromised ||
+        sup->pending_signal == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out = (struct nt_supervisor_guest_fault){0};
+    siginfo_t info = {0};
+    if (ptrace(PTRACE_GETSIGINFO, sup->tid, NULL, &info) == -1)
+        return -1;
+    /* SI_USER, SI_TKILL and pthread-directed signals are NOT CPU faults.
+     * Requiring an actual positive kernel si_code defeats a guest trying
+     * to spoof EXCEPTION_ILLEGAL_INSTRUCTION using kill/tgkill. */
+    if (info.si_code <= 0 || info.si_signo != sup->pending_signal) {
+        errno = EPROTO;
+        return -1;
+    }
+    struct user_regs_struct regs;
+    if (nt_supervisor_get_guest_context(sup, scope, &regs) == -1)
+        return -1;
+
+    struct nt_supervisor_guest_fault fault = {
+        .linux_signal = info.si_signo,
+        .linux_code = info.si_code,
+        .instruction = (uintptr_t)regs.rip,
+        .fault_address = (uintptr_t)info.si_addr
+    };
+    switch (info.si_signo) {
+    case SIGSEGV:
+        if (info.si_code != SEGV_MAPERR && info.si_code != SEGV_ACCERR) {
+            errno = ENOTSUP; return -1;
+        }
+        fault.nt_status = UINT32_C(0xc0000005); /* ACCESS_VIOLATION */
+        /* Linux ptrace NT_PRSTATUS user_regs_struct does NOT expose the
+         * x86 page-fault ERR register. SIGINFO yields CR2/si_addr, but
+         * NOT read/write/execute semantics. Do not manufacture the
+         * Windows ExceptionInformation[0] access kind: 0 parameters
+         * explicitly means an incomplete EXCEPTION_RECORD pending a
+         * guest-context fault handler that can inspect kernel ucontext. */
+        break;
+    case SIGILL:
+        fault.nt_status = info.si_code == ILL_PRVOPC ||
+                          info.si_code == ILL_PRVREG ?
+                          UINT32_C(0xc0000096) : UINT32_C(0xc000001d);
+        break;
+    case SIGFPE:
+        switch (info.si_code) {
+        case FPE_INTDIV: fault.nt_status = UINT32_C(0xc0000094); break;
+        case FPE_INTOVF: fault.nt_status = UINT32_C(0xc0000095); break;
+        case FPE_FLTDIV: fault.nt_status = UINT32_C(0xc000008e); break;
+        case FPE_FLTOVF: fault.nt_status = UINT32_C(0xc0000091); break;
+        case FPE_FLTUND: fault.nt_status = UINT32_C(0xc0000093); break;
+        case FPE_FLTRES: fault.nt_status = UINT32_C(0xc000008f); break;
+        case FPE_FLTINV: fault.nt_status = UINT32_C(0xc0000090); break;
+        case FPE_FLTSUB: fault.nt_status = UINT32_C(0xc000008d); break;
+        default: errno = ENOTSUP; return -1;
+        }
+        break;
+    case SIGBUS:
+        if (info.si_code == BUS_ADRALN) {
+            fault.nt_status = UINT32_C(0x80000002); /* DATATYPE_MISALIGNMENT */
+        } else if (info.si_code == BUS_ADRERR) {
+            fault.nt_status = UINT32_C(0xc0000005);
+            /* PTRACE_GETSIGINFO alone cannot prove read vs write. */
+        } else {
+            errno = ENOTSUP; return -1;
+        }
+        break;
+    default:
+        errno = ENOTSUP;
+        return -1;
+    }
+    fault.valid = true;
+    *out = fault;
+    return 0;
+}
+
 int nt_supervisor_interrupt_guest(struct nt_thread_supervisor *sup,
                                   const struct nt_supervisor_guest_scope *scope,
                                   unsigned timeout_ms, struct user_regs_struct *out)
@@ -498,10 +586,19 @@ int nt_supervisor_invoke_trusted_guest_apc_guarded(
                     return nt_supervisor_apc_fail_closed(sup, errno);
                 return 0;
             }
-            /* Unexpected signal or ptrace event while running injected
-             * code. Never deliver it to an overwritten RIP/RSP. */
-            if (WIFSTOPPED(status))
+            /* A real CPU fault in PE code is useful diagnostic evidence,
+             * NOT permission to resume a hijacked context. Capture the NT
+             * equivalent using kernel SIGINFO + stable RIP/GS/TEB proof,
+             * then kill the pidfd child. User tgkill signals must not
+             * masquerade as CPU-origin exceptions. */
+            if (WIFSTOPPED(status)) {
                 sup->stopped = true;
+                const unsigned event = (unsigned)status >> 16;
+                sup->pending_signal = event == 0 ? WSTOPSIG(status) : 0;
+                struct nt_supervisor_guest_fault fault;
+                if (nt_supervisor_get_guest_hardware_fault(sup, scope, &fault) == 0)
+                    sup->last_guest_fault = fault;
+            }
             return nt_supervisor_apc_fail_closed(sup, EPROTO);
         }
         if (observed < 0) {
