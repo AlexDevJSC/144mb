@@ -51,3 +51,11 @@ para pruebas diferenciales y validación de herencia de HANDLE entre procesos.
 
 No reemplazar una prueba real por green de GitHub Actions. La CI actual
 puede tener fallos ajenos en check-pe-apc; documentar resultado exacto.
+## Orden de locks FUSE multihilo
+
+FUSE create/mkdir/link adquieren ahora namespace_lock **antes** del
+flock físico del WAL, como unlink/rmdir/rename. En el hilo que posee WAL,
+la asignación de alias usa su gate por directorio sin volver a tomar
+dos83_lock, evitando la inversión de locks. `fs_open(O_TRUNC)` y `fs_truncate`
+no esperan namespace_lock mientras retienen WAL. No afirmar ausencia de
+bloqueos mutuos sin estrés en hardware multihilo.

@@ -536,10 +536,15 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
-    int guard = guest_mutation_begin(path);
-    if (guard < 0)
-        return guard;
+    /* Acquire process-local namespace_lock before physical WAL, matching
+     * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
+     * two concurrent FUSE callbacks during namespace mutations. */
     pthread_mutex_lock(&namespace_lock);
+    int guard = guest_mutation_begin(path);
+    if (guard < 0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return guard;
+    }
     if (service_mode) {
         int result = fs_create_staged_service(path, mode, fi);
         pthread_mutex_unlock(&namespace_lock);
@@ -683,10 +688,15 @@ static int fs_mkdir(const char *path, mode_t mode)
 {
     if (!service_authorized())
         return -EACCES;
-    int guard = guest_mutation_begin(path);
-    if (guard < 0)
-        return guard;
+    /* Acquire process-local namespace_lock before physical WAL, matching
+     * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
+     * two concurrent FUSE callbacks during namespace mutations. */
     pthread_mutex_lock(&namespace_lock);
+    int guard = guest_mutation_begin(path);
+    if (guard < 0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return guard;
+    }
     char name[NAME_MAX + 1];
     int parent = lower_parent(path, name);
     int error = parent < 0 ? -errno : 0;
@@ -776,10 +786,15 @@ static int fs_link(const char *from, const char *to)
      * dedicated-UID namespace. Legacy non-service remains unchanged. */
     if (service_mode)
         return -EOPNOTSUPP;
-    int guard = guest_mutation_begin(to);
-    if (guard < 0)
-        return guard;
+    /* Acquire process-local namespace_lock before physical WAL, matching
+     * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
+     * two concurrent FUSE callbacks during namespace mutations. */
     pthread_mutex_lock(&namespace_lock);
+    int guard = guest_mutation_begin(to);
+    if (guard < 0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return guard;
+    }
     char old_name[NAME_MAX + 1], new_name[NAME_MAX + 1];
     int old_parent = lower_parent(from, old_name);
     int new_parent = lower_parent(to, new_name);
