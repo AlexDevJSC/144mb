@@ -498,6 +498,10 @@ struct software_exception {
     bool reconciled_import; /* proven naked RaiseException, no host locks */
 };
 static _Thread_local struct software_exception *active_software;
+/* A naked, reviewed RtlUnwind(Ex) import may escape only its own
+ * resource-free Win64 thunk. Never treat an arbitrary host C frame as
+ * unwindable. Nested unwinds retain the existing fail-closed rules. */
+static _Thread_local bool naked_unwind_import_reconciled;
 
 /* Optional in minimal isolated exception tests; production PE runtime
  * supplies a kernel signal bridge with a dedicated host dispatch stack. */
@@ -707,11 +711,15 @@ static _Noreturn void resume_software(const struct nt_context64 *context, struct
                           (unsigned long long)context->rip);
             software_failure(STATUS_INVALID_TARGET);
         }
-    } else if (active_software != NULL && active_software->reconciled_import) {
-        /* Only the one audited naked RaiseException import was bypassed.
-         * Every other ELF stack frame or callback still fails closed. */
+    } else if ((active_software != NULL && active_software->reconciled_import) ||
+               naked_unwind_import_reconciled) {
+        /* A single verified naked RaiseException or RtlUnwind(Ex)
+         * import owns no ELF locks, and the return PC must still point
+         * into the immutable PE code manifest. Do not lift this rule
+         * to C functions with host-owned stack resources. */
         if (!nt_guest_boundary_finish_guest_software_import_seh(context->rip))
             software_failure(STATUS_INVALID_TARGET);
+        naked_unwind_import_reconciled = false;
     } else {
         nt_guest_boundary_mark_nonlocal_transfer();
     }
@@ -878,8 +886,18 @@ _Noreturn void nt_unwind_software_exception(struct nt_context64 *origin, uint64_
 {
     /* RtlUnwind(Ex) is also a naked imported Win64 entry and may see
      * the same verified synthetic import-return PC as RaiseException. */
-    origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
-    nt_guest_boundary_mark_nonlocal_transfer();
+    const uintptr_t recorded = origin->rip;
+    origin->rip = nt_guest_boundary_seh_caller_pc(recorded);
+    /* The only resumable native import shortcut is a single verified,
+     * resource-free Win64 RtlUnwind(Ex) stub. A nested software SEH or
+     * a host callback must remain poisoned and fail closed. */
+    if (origin->rip != recorded && active_software == NULL &&
+        !naked_unwind_import_reconciled &&
+        nt_guest_boundary_begin_guest_software_import_seh(origin->rip)) {
+        naked_unwind_import_reconciled = true;
+    } else {
+        nt_guest_boundary_mark_nonlocal_transfer();
+    }
     if (!prepare_software_stack())
         software_failure(STATUS_BAD_STACK);
     complete_software_capture(origin);
