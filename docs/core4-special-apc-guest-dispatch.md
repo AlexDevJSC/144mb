@@ -35,8 +35,12 @@ dispatcher `nt_runtime_special_apc_checkpoint`. La asamblea
 XMM0..15 del import que estaba retornando y entrega el valor de retorno
 original después de ejecutar la APC. El dispatcher:
 
-1. Comprueba fase `GUEST`, GS/TEB presente, cero niveles de
-   importación host, ausencia de transferencia no local/SEH envenenada.
+1. Comprueba el contrato **local** de guest-entry activo, TEB
+   presente, cero niveles de importación host, CET sin SHSTK
+   incompatible y ausencia de transferencia no local/SEH envenenada.
+   Cuando existe una sesión de supervisor, exige además fase
+   `GUEST` acreditada; **sin supervisor**, el shared phase es
+   `UNREGISTERED` por diseño y no se finge otra fase para `ptrace`.
 2. Extrae como máximo 8 APC de la cola **del mismo hilo** bajo
    `wait_lock`, y libera siempre el mutex antes de ejecutar la rutina
    Win64 real del PE.
