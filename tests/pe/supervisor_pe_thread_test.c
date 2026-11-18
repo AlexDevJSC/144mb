@@ -429,17 +429,19 @@ int main(int argc, char **argv)
         fputs("FAIL cannot prepare controlled guest APC\\n", stderr);
         goto cleanup;
     }
-#ifndef NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH
+#if !defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) && \
+    !defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
     const uint64_t guest_before_apc = atomic_load(&shared->guest_ticks);
 #endif
     const nt_status apc_status =
         nt_supervisor_nt_queue_trusted_apc(&nt, apc_entry, apc_stack_top,
                                             (uintptr_t)shared,
                                             &shared->apc_delivered);
-#ifdef NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH
-    /* The child executes its real imported-free PE callback and traps with
-     * INT3. A test-only readback mismatch then MUST kill the pidfd-pinned
-     * child instead of ever resuming the injected registers. */
+#if defined(NT_SUP_TEST_APC_FORCE_COMPLETION_MISMATCH) || \
+    defined(NT_SUP_TEST_APC_FORCE_RESTORE_XSTATE_MISMATCH)
+    /* The real PE callback reaches INT3. A test-only completion mismatch
+     * or corrupted XSTATE verification MUST quarantine the tracee;
+     * never resume its potentially mutated registers. */
     errno = 0;
     if (apc_status == NT_STATUS_SUCCESS || !sup.compromised ||
         atomic_load_explicit(&shared->apc_delivered,
