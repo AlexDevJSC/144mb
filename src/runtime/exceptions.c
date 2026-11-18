@@ -575,7 +575,11 @@ static _Noreturn void resume_software(const struct nt_context64 *context, struct
 _Noreturn void nt_dispatch_software_exception(struct nt_context64 *origin, uint32_t code, uint32_t flags,
                                              uint32_t count, const uintptr_t *arguments)
 {
-    /* VEH/SEH handlers may unwind through host import wrappers. */
+    /* The Win64 IAT gate rewrites the immediate return address to a
+     * host trampoline. Recover only the reviewed direct PE import's real
+     * return PC, before poisoning all subsequent async stops. Never
+     * synthesize an ELF unwind for callbacks nested under host locks. */
+    origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
     nt_guest_boundary_mark_nonlocal_transfer();
     complete_software_capture(origin);
     const bool ready = prepare_software_stack();
@@ -668,6 +672,9 @@ _Noreturn void nt_unwind_software_exception(struct nt_context64 *origin, uint64_
                                            struct nt_exception_record *record, uint64_t value,
                                            struct nt_context64 *output)
 {
+    /* RtlUnwind(Ex) is also a naked imported Win64 entry and may see
+     * the same verified synthetic import-return PC as RaiseException. */
+    origin->rip = nt_guest_boundary_seh_caller_pc(origin->rip);
     nt_guest_boundary_mark_nonlocal_transfer();
     if (!prepare_software_stack())
         software_failure(STATUS_BAD_STACK);
