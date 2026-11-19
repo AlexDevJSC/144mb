@@ -69,7 +69,34 @@ def facts(text: str) -> dict[str, str]:
     return result
 
 
-def compare(windows_text: str, linux_text: str) -> dict:
+def native_roundtrip_facts(text: str) -> dict[str, str]:
+    rows: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name in rows:
+            raise ValueError(f"duplicate native Windows scheduler field: {name}")
+        rows[name] = value
+    if rows.get("SCHEMA") != "ntnative.stage4.scheduler.v1" or \
+       rows.get("PLATFORM") != "WINDOWS_NATIVE":
+        raise ValueError("expected genuine native Windows scheduler profile")
+    for field in ("THREAD_PRIORITY_ROUNDTRIP",
+                  "PROCESS_PRIORITY_CLASS_ROUNDTRIP",
+                  "PROCESS_AFFINITY_ROUNDTRIP"):
+        if rows.get(field) not in ("PASS", "FAIL", "SKIP"):
+            raise ValueError(f"missing native Windows roundtrip: {field}")
+    if rows.get("NT_SCHEDULER_POLICY_PARITY") != "UNVERIFIED":
+        raise ValueError("native probe must not claim full NT scheduler parity")
+    return {field: rows[field] for field in (
+        "THREAD_PRIORITY_ROUNDTRIP",
+        "PROCESS_PRIORITY_CLASS_ROUNDTRIP",
+        "PROCESS_AFFINITY_ROUNDTRIP",
+    )}
+
+
+def compare(windows_text: str, linux_text: str,
+            windows_probe_text: str | None = None) -> dict:
     native = facts(windows_text)
     linux = facts(linux_text)
     if native.get("PLATFORM") != "WINDOWS_NATIVE":
@@ -124,6 +151,10 @@ def compare(windows_text: str, linux_text: str) -> dict:
         "physical_fedora_verified": False,
         "windows_physical_hardware_verified": False,
         "tests": checks,
+        "native_windows_reversible_roundtrips": (
+            native_roundtrip_facts(windows_probe_text)
+            if windows_probe_text is not None else {}
+        ),
         "nt_priority_policy_parity_verified": False,
         "nt_dynamic_boost_parity_verified": False,
         "nt_quantum_parity_verified": False,
@@ -143,11 +174,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--windows", type=Path, required=True)
     parser.add_argument("--linux", type=Path, required=True)
+    parser.add_argument("--windows-probe", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     report = compare(
         args.windows.read_text(encoding="utf-8-sig"),
         args.linux.read_text(encoding="utf-8-sig"),
+        args.windows_probe.read_text(encoding="utf-8-sig"),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
