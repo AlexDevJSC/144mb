@@ -87,7 +87,10 @@ el mismo sistema físico de leases OFD, delete-pending y WAL del runtime;
 
 El contrato binario fijo v3 se prueba con sockets Unix de tipo SEQPACKET.
 Cada conexión tiene nonce de sesión, como máximo 32 capacidades de handle
-aleatorias, 256 peticiones, 2048 bytes por E/S y 120 segundos de vida.
+aleatorias, 256 peticiones, 2048 bytes por E/S y 120 segundos de vida
+con reloj monotónico. Una espera `poll` vacía de 2 segundos no revoca
+la sesión ni cuenta como petición: las leases OFD de handles abiertos
+permanecen activas hasta cierre, expiración o revocación.
 Una petición con nonce incorrecto revoca la conexión. Las rutas C:/ se
 validan y el backend mantiene la restricción de raíz por FD del runtime.
 En producción consulta la vista FUSE viva en cada operación y el servicio
