@@ -1,6 +1,14 @@
 # FileSystem4 / FileSystem6 — hardlinks NTFS: contrato bloqueado
 
-**Estado a 19-11-2026:** pendiente de implementación integral y de aceptación.
+> **Nota histórica:** este documento describe el bloqueo constatado por
+> la PR #192. La [PR #204](https://github.com/AlexDevJSC/144mb/pull/204)
+> implementa bajo revisión un subconjunto protegido de
+> `CreateHardLinkW/A` para C: mediante WAL v3 y broker autenticado.
+> Véase [contrato vigente de esa propuesta](filesystem4-hardlink-wal-v3.md).
+> Continúan sin aprobarse FUSE `linkat` libre, otros grants, ACL NTFS
+> avanzadas y compatibilidad NTFS universal.
+
+**Estado a 19-11-2026, antes de la PR #204:** pendiente de implementación integral y de aceptación.
 No interpretar `PASS NT144 live Win32 W-API differential probe (hardlink unimplemented)`
 como paridad NTFS. Esta revisión no activa ni simula hardlinks.
 
