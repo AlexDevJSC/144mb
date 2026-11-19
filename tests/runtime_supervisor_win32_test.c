@@ -202,6 +202,43 @@ static int NT_MS_ABI test_entry(void)
     changed_fp.mxcsr ^= UINT32_C(0x2000); /* image now inconsistent */
     if (nt_NtSetContextThread(thread, &changed_fp) != NT_STATUS_INVALID_PARAMETER)
         return 44;
+    /* Combined INTEGER + legacy FXSAVE transaction: both kernel
+     * regsets must change together and the parent must read both back
+     * before acknowledging success. Restore the original RAX/MXCSR
+     * while the exact guest child remains ptrace-stopped. */
+    _Alignas(16) struct nt_context64 combined = fp;
+    combined.flags = 0x10000au;
+    combined.rax = rax ^ UINT64_C(0x1223344556677889);
+    combined.mxcsr ^= UINT32_C(0x2000);
+    memcpy(combined.floating + 24, &combined.mxcsr, sizeof(combined.mxcsr));
+    if (nt_NtSetContextThread(thread, &combined) != NT_STATUS_SUCCESS)
+        return 51;
+    _Alignas(16) struct nt_context64 observed_combined = {0};
+    observed_combined.flags = 0x10000au;
+    if (nt_NtGetContextThread(thread, &observed_combined) != NT_STATUS_SUCCESS ||
+        observed_combined.rax != combined.rax ||
+        observed_combined.mxcsr != combined.mxcsr ||
+        memcmp(observed_combined.floating, combined.floating, 512) != 0)
+        return 52;
+    combined.rax = rax;
+    combined.mxcsr = fp.mxcsr;
+    memcpy(combined.floating, fp.floating, 512);
+    if (nt_NtSetContextThread(thread, &combined) != NT_STATUS_SUCCESS)
+        return 53;
+    observed_combined.flags = 0x10000au;
+    if (nt_NtGetContextThread(thread, &observed_combined) != NT_STATUS_SUCCESS ||
+        observed_combined.rax != rax ||
+        observed_combined.mxcsr != fp.mxcsr ||
+        memcmp(observed_combined.floating, fp.floating, 512) != 0)
+        return 54;
+    /* Never silently interpret CONTROL, SEGMENTS or DEBUG as a mixed
+     * two-regset transaction. */
+    combined.flags = 0x10000bu; /* CONTROL|INTEGER|FP */
+    if (nt_NtSetContextThread(thread, &combined) != NT_STATUS_NOT_SUPPORTED)
+        return 55;
+    combined.flags = 0x10001au; /* DEBUG|INTEGER|FP */
+    if (nt_NtSetContextThread(thread, &combined) != NT_STATUS_NOT_SUPPORTED)
+        return 56;
     _Alignas(16) struct nt_context64 invalid = {0};
     invalid.flags = 0x100010u; /* debug registers not yet supported */
     if (nt_NtGetContextThread(thread, &invalid) != NT_STATUS_INVALID_PARAMETER)
