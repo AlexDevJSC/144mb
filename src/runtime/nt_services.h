@@ -25,6 +25,7 @@
 #define NT_STATUS_OBJECT_TYPE_MISMATCH ((nt_status)UINT32_C(0xc0000024))
 #define NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED ((nt_status)UINT32_C(0xc0000047))
 #define NT_STATUS_NOT_SUPPORTED ((nt_status)UINT32_C(0xc00000bb))
+#define NT_STATUS_NOT_FOUND ((nt_status)UINT32_C(0xc0000225))
 #define NT_STATUS_END_OF_FILE ((nt_status)UINT32_C(0xc0000011))
 
 struct nt_guest_unicode_string;
@@ -81,6 +82,13 @@ nt_status NT_MS_ABI nt_NtQueueApcThread(uintptr_t thread,
 nt_status NT_MS_ABI nt_NtQueueApcThreadEx(uintptr_t thread, uintptr_t reserve,
     void (NT_MS_ABI *routine)(void *, void *, void *),
     void *context, void *first, void *second);
+/* NTNATIVE project-specific cancellation extension, not a Windows NT API.
+ * Cancels only a queued special APC for a thread HANDLE with SET_CONTEXT.
+ * Does not stop an in-flight or already executed callback. */
+nt_status NT_MS_ABI nt_NtNativeQueueSpecialApc(uintptr_t thread,
+    void (NT_MS_ABI *routine)(void *, void *, void *),
+    void *context, void *first, void *second, uint64_t *ticket);
+nt_status NT_MS_ABI nt_NtNativeCancelSpecialApc(uintptr_t thread, uint64_t ticket);
 nt_status NT_MS_ABI nt_NtAlertThread(uintptr_t thread);
 nt_status NT_MS_ABI nt_NtAlertResumeThread(uintptr_t thread, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtTestAlert(void);
