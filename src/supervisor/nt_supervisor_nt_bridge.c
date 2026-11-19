@@ -132,8 +132,8 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
     if (flags & NT_SUP_CONTEXT_FLOATING_POINT) {
         /* Linux AMD64 NT_PRFPREG is a 512-byte FXSAVE-compatible image
          * (x87 + XMM0..XMM15 + MXCSR). CONTEXT.FltSave has the same
-         * packed 512-byte storage. This is READ ONLY: writes, AVX/YMM
-         * and extended XSTATE are deliberately not claimed. */
+         * packed 512-byte storage. Legacy FP write transactions use
+         * PTRACE_SETREGSET separately; AVX/YMM and XSTATE are not claimed. */
         _Static_assert(sizeof(struct user_fpregs_struct) == 512,
                        "AMD64 NT_PRFPREG FXSAVE layout");
         _Static_assert(sizeof(snapshot.floating) == 512,
