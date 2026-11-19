@@ -22,10 +22,10 @@ MAGIC, VERSION = 0x34465348, 3
 OPEN, READ, WRITE, CLOSE, DELETE, RENAME, TRUNCATE, LOCK, UNLOCK = range(1, 10)
 SEEK, SIZE = 10, 11
 ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE_AT, HANDLE_INFO = range(12, 21)
-NATIVE_QUERY, NATIVE_SET, NATIVE_FLUSH = 21, 22, 23
+NATIVE_QUERY, NATIVE_SET, NATIVE_FLUSH, HARDLINK = 21, 22, 23, 24
 
 class Broker:
-    def __init__(self, root, *, crash=None, binary=None, expire=False):
+    def __init__(self, root, *, crash=None, binary=None, expire=False, wal_crash=None):
         server, self.client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.client.settimeout(5)
         env = dict(os.environ)
@@ -35,8 +35,11 @@ class Broker:
             env.pop("NT_FS4_TEST_CRASH", None)
         # Explicit offline-only injection: never inherited by other tests.
         env.pop("NT_FS4_TEST_EXPIRE_1S", None)
+        env.pop("NT_DOS83_TEST_CRASH", None)
         if expire:
             env["NT_FS4_TEST_EXPIRE_1S"] = "1"
+        if wal_crash:
+            env["NT_DOS83_TEST_CRASH"] = wal_crash
         self.process = None
         try:
             self.process = subprocess.Popen([

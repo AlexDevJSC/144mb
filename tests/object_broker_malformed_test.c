@@ -14,9 +14,10 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
-enum { ROUNDS = 15 };
+enum { ROUNDS = 16 };
 
 static int fd_count(void)
 {
@@ -38,6 +39,12 @@ static int serve_bad_reply(int client, int scenario)
     if (recv(client, &request, sizeof(request), 0) !=
         (ssize_t)sizeof(request))
         return -1;
+    if (scenario == 3) {
+        /* Same UID, valid request, but a peer that never answers. The
+         * client must time out and close its own socket, not hang. */
+        sleep(4);
+        return 0;
+    }
     struct nt_broker_reply reply = {
         .magic = NT_BROKER_MAGIC, .version = NT_BROKER_VERSION,
         .result = NT_BROKER_CREATED,
@@ -85,7 +92,7 @@ static void server(int listener)
         int client = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
         if (client < 0)
             _exit(2);
-        int status = serve_bad_reply(client, i % 3);
+        int status = serve_bad_reply(client, i == ROUNDS - 1 ? 3 : i % 3);
         close(client);
         if (status != 0)
             _exit(3);
@@ -120,6 +127,7 @@ int main(void)
     close(listener);
     if (setenv("NT_NATIVE_BROKER_SOCKET", path, 1) != 0)
         return 2;
+    alarm(12);
     const int before = fd_count();
     int fail = before < 0;
     for (int i = 0; i < ROUNDS && !fail; ++i) {
@@ -130,14 +138,27 @@ int main(void)
         };
         memcpy(req.name, "bad_reply", sizeof("bad_reply"));
         struct nt_broker_resource result = {0};
+        struct timespec start = {0}, end = {0};
+        if (i == ROUNDS - 1 && clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+            fail = 1;
+            break;
+        }
         int status = nt_broker_acquire(&req, &result);
+        if (i == ROUNDS - 1 && clock_gettime(CLOCK_MONOTONIC, &end) != 0) {
+            fail = 1;
+            break;
+        }
         const int after = fd_count();
+        const double elapsed =
+            (double)(end.tv_sec - start.tv_sec) +
+            (double)(end.tv_nsec - start.tv_nsec) / 1000000000.0;
         if (status != NT_BROKER_TRANSPORT_ERROR ||
             result.fd != -1 || result.gate_fd != -1 ||
-            result.lease_fd != -1 || after != before) {
+            result.lease_fd != -1 || after != before ||
+            (i == ROUNDS - 1 && elapsed > 3.5)) {
             fprintf(stderr,
-                    "FAIL broker reply case=%d status=%d fd before=%d after=%d\\n",
-                    i % 3, status, before, after);
+                    "FAIL broker reply case=%d status=%d fd before=%d after=%d time=%.3f\\n",
+                    i == ROUNDS - 1 ? 3 : i % 3, status, before, after, elapsed);
             fail = 1;
         }
     }
@@ -151,7 +172,7 @@ int main(void)
     rmdir(directory);
     if (fail)
         return 1;
-    puts("PASS malformed broker replies (wrong kind, short payload, "
-         "truncated SCM_RIGHTS): no received descriptor leaks");
+    puts("PASS malformed and stalled broker replies (wrong kind, short payload, "
+         "truncated SCM_RIGHTS, bounded receive): no descriptor leaks");
     return 0;
 }

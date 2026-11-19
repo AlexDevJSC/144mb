@@ -36,7 +36,8 @@ enum { FS4_HELLO = 0, FS4_OPEN = 1, FS4_READ = 2, FS4_WRITE = 3,
        FS4_ATTR_SET=13, FS4_FIND_FIRST=14, FS4_FIND_NEXT=15,
        FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
        FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
-       FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23 };
+       FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23,
+       FS4_HARDLINK=24 };
 struct fs4_request {
     uint32_t magic;
     uint16_t version, op;
@@ -420,6 +421,24 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
             !to_wide(sep + 1, n - before - 1, other))
             break;
         result.error = nt_MoveFileExW(path, other, q->flags) ?
+                       NT_ERROR_SUCCESS : nt_GetLastError();
+        break;
+    }
+    case FS4_HARDLINK: {
+        if (n != q->size || n < 9 || q->handle || q->flags ||
+            q->access || q->share || q->disposition || q->offset != -1)
+            break;
+        const unsigned char *sep = memchr(payload, '\0', n);
+        if (!sep)
+            break;
+        const size_t before = (size_t)(sep - payload);
+        if (!to_wide(payload, before, path) ||
+            !to_wide(sep + 1, n - before - 1, other))
+            break;
+        /* Existing/source is first in the wire format. The Win32 W API
+         * accepts (new_name, existing_name). The physical file root and
+         * every WAL/lease operation stay inside this trusted UID worker. */
+        result.error = nt_CreateHardLinkW(other, path, NULL) ?
                        NT_ERROR_SUCCESS : nt_GetLastError();
         break;
     }
