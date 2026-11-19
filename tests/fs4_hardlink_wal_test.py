@@ -140,6 +140,55 @@ class HardlinkWALTest(unittest.TestCase):
                 finally:
                     second.close()
 
+    def test_foreign_inode_at_replay_target_blocks_and_preserves_data(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-link-foreign-") as d:
+            root = new_root(d)
+            crashed = Broker(root, binary=CRASH_BINARY,
+                             wal_crash="hardlink-after-link")
+            try:
+                with self.assertRaises(AssertionError):
+                    crashed.call(HARDLINK, PAYLOAD)
+                self.assertEqual(crashed.process.wait(timeout=5),
+                                 -signal.SIGKILL)
+            finally:
+                crashed.close(expected_returncode=-signal.SIGKILL)
+            destination = root / "secondHardlinkReference.dat"
+            destination.unlink()
+            destination.write_bytes(b"FOREIGN INODE")
+            wal_path = root / ":ntnative-file-leases" / "dos83-rename-v1.wal"
+            pending = wal_path.read_bytes()
+            self.assertTrue(pending.startswith(b"N83LNK03"))
+            with self.assertRaises(AssertionError):
+                Broker(root, binary=NORMAL_BINARY)
+            self.assertEqual(destination.read_bytes(), b"FOREIGN INODE")
+            self.assertEqual(wal_path.read_bytes(), pending,
+                             "ambiguous replay must preserve the WAL")
+            self.assertEqual((root / "originalHardlinkReference.dat").read_bytes(),
+                             b"SHARED-IDENTITY")
+
+    def test_corrupt_hardlink_wal_refuses_without_truncation(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-link-corrupt-") as d:
+            root = new_root(d)
+            crashed = Broker(root, binary=CRASH_BINARY,
+                             wal_crash="hardlink-after-wal")
+            try:
+                with self.assertRaises(AssertionError):
+                    crashed.call(HARDLINK, PAYLOAD)
+                self.assertEqual(crashed.process.wait(timeout=5),
+                                 -signal.SIGKILL)
+            finally:
+                crashed.close(expected_returncode=-signal.SIGKILL)
+            wal_path = root / ":ntnative-file-leases" / "dos83-rename-v1.wal"
+            original = wal_path.read_bytes()
+            self.assertTrue(original.startswith(b"N83LNK03"))
+            poisoned = bytearray(original)
+            poisoned[32] ^= 0x40  # checksum-covered inode identity
+            wal_path.write_bytes(poisoned)
+            with self.assertRaises(AssertionError):
+                Broker(root, binary=NORMAL_BINARY)
+            self.assertEqual(wal_path.read_bytes(), poisoned)
+            self.assertFalse((root / "secondHardlinkReference.dat").exists())
+
     def test_sigkill_at_all_wal_barriers_and_cold_recovery(self):
         phases = (
             "hardlink-after-wal", "hardlink-after-link",
