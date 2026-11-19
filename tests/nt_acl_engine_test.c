@@ -237,7 +237,7 @@ int main(void) {
     assert(output_size==128);
     assert(nt_acl_simple_mode(mode_new,sizeof(mode_new),&mode)==NT_ACL_ALLOWED);
     assert(mode==0640);
-    assert((mode_new[2] & 0x10)!=0); /* DACL_PROTECTED, no host chmod */
+    assert((mode_new[3] & 0x10)!=0); /* DACL_PROTECTED, no host chmod */
     assert(nt_acl_chmod_simple_descriptor(mode_sd,sizeof(mode_sd),01000,
                                           mode_new,sizeof(mode_new),
                                           &output_size)==NT_ACL_INVALID);
@@ -246,7 +246,7 @@ int main(void) {
                                           mode_new,sizeof(mode_new),
                                           &output_size)==NT_ACL_UNSUPPORTED);
     mode_sd[60]=0;
-    mode_sd[92]^=1; /* named foreign SID, not canonical owner */
+    mode_sd[104]^=1; /* named foreign SID, not canonical owner */
     assert(nt_acl_chmod_simple_descriptor(mode_sd,sizeof(mode_sd),0644,
                                           mode_new,sizeof(mode_new),
                                           &output_size)==NT_ACL_UNSUPPORTED);
