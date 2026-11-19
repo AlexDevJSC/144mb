@@ -1544,6 +1544,32 @@ static int service_metadata_selftest(void)
         fprintf(stderr,"FAIL metadata lease not released\n");
         error=1;
     }
+    /* Real on-disk corrupt WAL: all service metadata mutations must
+     * refuse before touching timestamps or arbitrary user xattrs.
+     * This test deliberately destroys only its disposable fixture WAL. */
+    int registry=openat(lower_root,":ntnative-file-leases",
+                        O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    int wal=registry>=0 ? openat(registry,"dos83-rename-v1.wal",
+                                 O_RDWR|O_NOFOLLOW|O_CLOEXEC) : -1;
+    if (registry>=0) close(registry);
+    struct stat journal;
+    if (!error && (wal<0 || fstat(wal,&journal)!=0 ||
+                   journal.st_size!=0 || write(wal,"BADWAL",6)!=6 ||
+                   fsync(wal)!=0)) {
+        fprintf(stderr,"FAIL metadata corrupt-WAL setup\n");
+        error=1;
+    }
+    if (!error && (fs_setxattr(view,attr,"W",1,0)>=0 ||
+                   fs_utimens(view,dates,NULL)>=0 ||
+                   fs_getxattr(view,attr,NULL,0)!=-ENODATA)) {
+        fprintf(stderr,"FAIL metadata mutated through corrupt WAL\n");
+        error=1;
+    }
+    if (wal>=0) {
+        if (ftruncate(wal,0)!=0 || fsync(wal)!=0)
+            error=1;
+        close(wal);
+    }
     if (unlinkat(lower_root,name,0)!=0)
         error=1;
     if (!error)
