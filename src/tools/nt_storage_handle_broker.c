@@ -187,9 +187,18 @@ static uint32_t acl_open_gate(struct session *s,const unsigned char *path,
         return NT_ERROR_SUCCESS;
     }
     if (cause==ENOENT && access==NT_ACL_POLICY_ERROR &&
-        (disposition==1 || disposition==2 ||
-         disposition==4 || disposition==5)) {
-        return acl_path_gate(s,path,length,NT_ACL_DATA_WRITE,true);
+        (disposition==1 || disposition==2 || disposition==4)) {
+        /* CreateFile currently uses O_CREAT, not staged publication.
+         * It must not create a child with NO inherited SD underneath
+         * a managed ACL parent. The FUSE staged-file path is allowed
+         * to inherit before linkat; this PE creation path fails closed. */
+        const int parent=nt_acl_policy_check_path(
+            s->root_fd,name,true,&s->identity,NT_ACL_DATA_WRITE,
+            &nt_acl_directory_generic_mapping);
+        if (parent==NT_ACL_POLICY_ALLOWED)
+            return NT_ERROR_NOT_SUPPORTED;
+        if (parent==NT_ACL_POLICY_ABSENT)
+            return NT_ERROR_SUCCESS;
     }
     return NT_ERROR_ACCESS_DENIED;
 }
