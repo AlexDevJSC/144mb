@@ -158,6 +158,16 @@ int main(void) {
                                      alice,sizeof(alice),
                                      everyone,sizeof(everyone),
                                      sd,sizeof(sd),&output_size)==NT_ACL_INVALID);
+    /* Partial overlap is just as dangerous as identical pointers. It
+     * must leave every original descriptor byte untouched. */
+    uint8_t saved_parent[68];
+    memcpy(saved_parent,sd,sizeof(saved_parent));
+    assert(nt_acl_inherit_descriptor(sd,68,true,
+                                     alice,sizeof(alice),
+                                     everyone,sizeof(everyone),
+                                     sd+4,sizeof(sd)-4,
+                                     &output_size)==NT_ACL_INVALID);
+    assert(memcmp(sd,saved_parent,sizeof(saved_parent))==0);
     /* Foreign / unknown ACEs must fail closed with no child written. */
     sd[28]=9;
     assert(nt_acl_inherit_descriptor(sd,68,false,alice,sizeof(alice),
