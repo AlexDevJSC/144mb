@@ -66,7 +66,7 @@ int import_fixture_entry(void)
             STATUS_OK || revoked == 0)
         return 15;
     if (NtNativeCancelSpecialApc(query, revoked) != STATUS_ACCESS_DENIED ||
-        NtNativeCancelSpecialApc(thread, 0) != STATUS_INVALID_PARAMETER)
+        NtNativeCancelSpecialApc(thread, 0) != (LONG)STATUS_INVALID_PARAMETER)
         return 16;
     if (NtNativeCancelSpecialApc(thread, revoked) != STATUS_OK ||
         NtNativeCancelSpecialApc(thread, revoked) != STATUS_NOT_FOUND)
@@ -80,7 +80,7 @@ int import_fixture_entry(void)
         return 18;
     if (NtNativeCancelSpecialApc(thread, revoked) != STATUS_NOT_FOUND ||
         NtNativeQueueSpecialApc(thread, delivered, NULL, NULL, NULL,
-                                NULL) != STATUS_INVALID_PARAMETER)
+                                NULL) != (LONG)STATUS_INVALID_PARAMETER)
         return 19;
     if (called != 0 || !CloseHandle(query) || !SetEvent(events[1]))
         return 20;
@@ -93,7 +93,7 @@ int import_fixture_entry(void)
     if (!CloseHandle(thread) || !CloseHandle(events[0]) ||
         !CloseHandle(events[1]))
         return 23;
-    if (NtNativeCancelSpecialApc(thread, retained) != STATUS_INVALID_HANDLE)
+    if (NtNativeCancelSpecialApc(thread, retained) != (LONG)STATUS_INVALID_HANDLE)
         return 24;
     return 0;
 }
