@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 BINARY = str(Path(sys.argv[1]).resolve()) if len(sys.argv) > 1 else ""
@@ -95,6 +96,46 @@ class Broker:
             stderr.decode("utf-8", errors="replace"))
 
 class FileSystem4Handles(unittest.TestCase):
+    def test_open_handle_survives_idle_poll_and_preserves_lease(self):
+        # A 2-second poll timeout is NOT the 120-second session expiry.
+        # A second broker must still see the exclusive physical OFD lease
+        # while the first has sent no IPC traffic for more than 2 seconds.
+        with tempfile.TemporaryDirectory(prefix="fs4-broker-idle-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            (root / "idle.dat").write_bytes(b"PERSIST")
+            first = Broker(root)
+            try:
+                second = Broker(root)
+            except BaseException:
+                first.close()
+                raise
+            try:
+                error, handle, _, _ = first.call(
+                    OPEN, b"C:/idle.dat", access=0x80000000,
+                    share=0, disposition=3)
+                self.assertEqual(error, 0)
+                # Deliberately do not ping either worker.
+                time.sleep(2.35)
+                self.assertIsNone(first.process.poll(),
+                                  "idle poll prematurely exited broker worker")
+                self.assertEqual(second.call(
+                    OPEN, b"C:/idle.dat", access=0x80000000,
+                    share=7, disposition=3)[0], 32)
+                self.assertEqual(first.call(READ, handle=handle, size=7),
+                                 (0, 0, 7, b"PERSIST"))
+                self.assertEqual(first.call(CLOSE, handle=handle)[0], 0)
+                error, reopened, _, _ = second.call(
+                    OPEN, b"C:/idle.dat", access=0x80000000,
+                    share=7, disposition=3)
+                self.assertEqual(error, 0)
+                self.assertEqual(second.call(CLOSE, handle=reopened)[0], 0)
+            finally:
+                try:
+                    first.close()
+                finally:
+                    second.close()
+
     def test_broker_clean_shutdown_closes_subprocess_streams(self):
         with tempfile.TemporaryDirectory(prefix="fs4-broker-lifetime-") as temp:
             root = Path(temp) / "C"
