@@ -56,6 +56,8 @@ int main(int argc, char **argv)
         u"C:\\FS4-NTFS-PROBE\\LONGFILESYSTEM4REFERENCEFILENAME.TXT";
     const uint16_t *renamed =
         u"C:\\fs4-ntfs-probe\\renamedFileSystem4Reference.txt";
+    const uint16_t *hardlink =
+        u"C:\\fs4-ntfs-probe\\hardlinkFileSystem4Reference.txt";
     if (!nt_CreateDirectoryW(dir, NULL)) {
         fputs("Probe directory exists or cannot be created; use disposable root\n",
               stderr);
@@ -96,6 +98,31 @@ int main(int argc, char **argv)
     const bool rename_preserves_content = moved &&
         probe_bytes_match(renamed, bytes, sizeof(bytes)-1);
     const uint16_t *existing = moved ? renamed : original;
+    const bool hardlink_created = moved &&
+        nt_CreateHardLinkW(hardlink, renamed, NULL) != 0;
+    bool hardlink_readable = hardlink_created &&
+        probe_bytes_match(hardlink, bytes, sizeof(bytes)-1);
+    if (hardlink_readable) {
+        /* Windows hardlinks are two names for ONE file identity, not a
+         * byte-for-byte copy. The runtime must observe the same inode. */
+        uintptr_t first = nt_CreateFileW(existing, UINT32_C(0x80000000), 7,
+                                          NULL, 3, 0x80, 0);
+        uintptr_t second = nt_CreateFileW(hardlink, UINT32_C(0x80000000), 7,
+                                           NULL, 3, 0x80, 0);
+        struct nt_handle_file_info a = {0}, b = {0};
+        hardlink_readable = first != UINTPTR_MAX &&
+                            second != UINTPTR_MAX &&
+                            nt_GetFileInformationByHandle(first, &a) &&
+                            nt_GetFileInformationByHandle(second, &b) &&
+                            a.volume_serial == b.volume_serial &&
+                            a.index_high == b.index_high &&
+                            a.index_low == b.index_low &&
+                            a.links >= 2 && b.links >= 2;
+        if (first != UINTPTR_MAX)
+            (void)nt_CloseHandle(first);
+        if (second != UINTPTR_MAX)
+            (void)nt_CloseHandle(second);
+    }
     const bool set_readonly = nt_SetFileAttributesW(existing, 1) != 0;
     const uint32_t attributes = nt_GetFileAttributesW(existing);
     const bool readonly = set_readonly &&
@@ -103,15 +130,17 @@ int main(int argc, char **argv)
                           (attributes & 1u) != 0;
     if (set_readonly)
         (void)nt_SetFileAttributesW(existing, 0x80);
-    const bool cleaned = nt_DeleteFileW(existing) &&
+    const bool link_removed = !hardlink_created || nt_DeleteFileW(hardlink);
+    const bool original_removed = nt_DeleteFileW(existing);
+    const bool cleaned = link_removed && original_removed &&
                          nt_RemoveDirectoryW(dir);
     printf("{\"schema\":\"filesystem4-nt144-reference-v1\","
            "\"case_insensitive_exact_name\":%s,"
            "\"rename_preserves_content\":%s,"
            "\"readonly_attribute_visible\":%s,"
            "\"short_path_generated\":%s,"
-           "\"hardlink_created\":null,"
-           "\"hardlink_readable\":null,"
+           "\"hardlink_created\":%s,"
+           "\"hardlink_readable\":%s,"
            "\"acl_descriptor_readable\":%s,"
            "\"acl_explicit_deny_enforced\":null,"
            "\"junction_reparse_visible\":null,"
@@ -122,6 +151,8 @@ int main(int argc, char **argv)
            rename_preserves_content ? "true" : "false",
            readonly ? "true" : "false",
            short_generated ? "true" : "false",
+           hardlink_created ? "true" : "false",
+           hardlink_readable ? "true" : "false",
            acl_descriptor_readable ? "true" : "false",
            cleaned ? "true" : "false");
     return cleaned ? 0 : 3;
