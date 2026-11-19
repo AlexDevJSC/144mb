@@ -144,3 +144,14 @@ La validación humana, segunda identidad UID, reinicio/corte eléctrico en
 volumen descartable y comparación real Windows NTFS siguen pendientes hasta
 disponer de sus registros. No sustituir esta evidencia por la CI de Fedora RPM,
 que corre en contenedor y no certifica SELinux Enforcing físico.
+
+## Preparación de checkpoint verificable entre arranques (19-11-2026)
+
+Se incorpora un protocolo opt-in **sin corte automático de corriente**
+para preparar un archivo descartable vía FUSE y verificar su SHA-256 tras
+cambiar `boot_id`: véase
+[protocolo de checkpoint](filesystem4-postreboot-checkpoint-protocol.md).
+
+El resultado confirma solo persistencia de un fichero sincronizado entre
+arranques. No certifica corte abrupto ni transacciones interrumpidas,
+recuperación completa NTFS, ACL o aislamiento SELinux por sí solo.

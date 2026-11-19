@@ -53,6 +53,33 @@ class AcceptanceGatesTests(unittest.TestCase):
             capture_output=True)
         self.assertEqual(ci.returncode, 3)
 
+    def test_postreboot_checkpoint_requires_real_operator(self):
+        script = ROOT / "scripts" / "fedora-fs4-postreboot-checkpoint.py"
+        syntax = subprocess.run(
+            ["python3", "-c",
+             "import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())",
+             str(script)])
+        self.assertEqual(syntax.returncode, 0)
+        no_consent = subprocess.run(
+            ["python3", str(script), "prepare"], capture_output=True)
+        self.assertEqual(no_consent.returncode, 2)
+        no_disposable = subprocess.run(
+            ["python3", str(script), "prepare", "--physical-confirmed"],
+            capture_output=True)
+        self.assertEqual(no_disposable.returncode, 2)
+        no_manifest = subprocess.run(
+            ["python3", str(script), "verify", "--physical-confirmed"],
+            capture_output=True)
+        self.assertEqual(no_manifest.returncode, 2)
+        in_ci = subprocess.run(
+            ["python3", str(script), "prepare",
+             "--physical-confirmed", "--disposable-confirmed"],
+            env={"PATH": "/usr/bin:/bin", "CI": "true"},
+            capture_output=True)
+        self.assertEqual(in_ci.returncode, 3)
+        self.assertIn(b"INCOMPLETE:", in_ci.stderr)
+        self.assertNotIn(b"PASS", in_ci.stdout)
+
     def test_reference_is_validated_not_assumed(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "reference.json"
