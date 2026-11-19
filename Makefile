@@ -600,6 +600,18 @@ check-fs4-hardlink-wal: $(BUILD_DIR)/nt-storage-handle-broker $(BUILD_DIR)/nt-st
 
 check: check-fs4-hardlink-wal
 
+# Real PE32+ fixture imports kernel32!CreateHardLinkW. This is independent
+# from the native C differential probe and never executes an unknown PE.
+$(BUILD_DIR)/fs4-hardlink-fixture.exe: tests/pe/fs4_hardlink_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -lkernel32
+
+.PHONY: check-pe-fs4-hardlink
+check-pe-fs4-hardlink: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/fs4-hardlink-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/fs4-hardlink-fixture.exe
+
+check: check-pe-fs4-hardlink
+
 .PHONY: check-fs4-service-supervisor
 check-fs4-service-supervisor:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_service_supervisor.py'
