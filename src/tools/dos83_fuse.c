@@ -844,30 +844,169 @@ static int fs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     return result == 0 ? 0 : -error;
 }
 
+/* Convert a POSIX timestamp to the 100-ns Win32 FILETIME epoch.
+ * UTIME_NOW/UTIME_OMIT are handled by the caller; no unchecked signed
+ * multiply or time_t overflow can reach the trusted Win32 backend. */
+static int fs4_timespec_filetime(struct timespec value,
+                                 struct nt_file_time *time)
+{
+    if (value.tv_nsec < 0 || value.tv_nsec >= 1000000000L ||
+        (int64_t)value.tv_sec < -INT64_C(11644473600) ||
+        (int64_t)value.tv_sec > INT64_C(1833029933770))
+        return -EINVAL;
+    const uint64_t shifted=(uint64_t)((int64_t)value.tv_sec+
+                                      INT64_C(11644473600));
+    if (shifted>UINT64_MAX/UINT64_C(10000000))
+        return -ERANGE;
+    const uint64_t ticks=shifted*UINT64_C(10000000)+
+                         (uint64_t)value.tv_nsec/100u;
+    time->low=(uint32_t)ticks;
+    time->high=(uint32_t)(ticks>>32);
+    return 0;
+}
+
 static int fs_utimens(const char *path, const struct timespec times[2],
                       struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
-    /* Until this operation is a broker transaction with WAL, NT ACL and
-     * delete-pending/share validation, no direct service-UID write. */
-    if (service_mode)
-        return -EOPNOTSUPP;
-    int fd = fi ? (int)fi->fh : lower_open(path, O_RDONLY, 0);
-    if (fd < 0)
+    if (!service_mode) {
+        int fd=fi ? (int)fi->fh : lower_open(path,O_RDONLY,0);
+        if (fd<0) return -errno;
+        int result=futimens(fd,times);
+        int error=errno;
+        if (!fi) close(fd);
+        return result==0 ? 0 : -error;
+    }
+    /* A regular file is mutated through the *same* Win32 HANDLE/WAL
+     * path as SetFileTime, never raw futimens with service privileges. */
+    struct timespec resolved[2];
+    struct timespec now={0};
+    if (clock_gettime(CLOCK_REALTIME,&now)!=0)
         return -errno;
-    int result = futimens(fd, times);
-    int error = errno;
-    if (!fi)
-        close(fd);
-    return result == 0 ? 0 : -error;
+    for (int i=0;i<2;i++) {
+        resolved[i]=times ? times[i] :
+                            (struct timespec){.tv_sec=0,.tv_nsec=UTIME_NOW};
+        if (resolved[i].tv_nsec==UTIME_NOW)
+            resolved[i]=now;
+        else if (resolved[i].tv_nsec!=UTIME_OMIT &&
+                 (resolved[i].tv_nsec<0 ||
+                  resolved[i].tv_nsec>=1000000000L))
+            return -EINVAL;
+    }
+    int fd=lower_open(path,O_PATH,0);
+    if (fd<0) return -errno;
+    struct stat pinned;
+    int err=fstat(fd,&pinned)==0 ? 0 : -errno;
+    close(fd);
+    if (err) return err;
+    if (S_ISREG(pinned.st_mode)) {
+        struct nt_file_time access={0},write={0};
+        const struct nt_file_time *a=NULL,*w=NULL;
+        if (resolved[0].tv_nsec!=UTIME_OMIT) {
+            err=fs4_timespec_filetime(resolved[0],&access);
+            if (err) return err;
+            a=&access;
+        }
+        if (resolved[1].tv_nsec!=UTIME_OMIT) {
+            err=fs4_timespec_filetime(resolved[1],&write);
+            if (err) return err;
+            w=&write;
+        }
+        uint16_t dos[PATH_MAX];
+        err=guest_wide(path,dos);
+        if (err) return err;
+        const uintptr_t handle=nt_CreateFileW(
+            dos,UINT32_C(0x40000000),NT_FS_SHARE_ALL,NULL,
+            3,0,0);
+        if (handle==UINTPTR_MAX)
+            return guest_error();
+        const bool ok=nt_SetFileTime(handle,NULL,a,w)!=0;
+        const int result=ok ? 0 : guest_error();
+        (void)nt_CloseHandle(handle);
+        return result;
+    }
+    if (!S_ISDIR(pinned.st_mode))
+        return -EOPNOTSUPP;
+    /* Directories have no FUSE regular-file lease. Serialize with the
+     * namespace WAL and fsync the pinned directory, never chmod backing. */
+    pthread_mutex_lock(&namespace_lock);
+    int guard=guest_mutation_begin(path);
+    if (guard<0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return guard;
+    }
+    fd=lower_open(path,O_RDONLY|O_DIRECTORY,0);
+    err=fd<0 ? -errno : 0;
+    if (!err && futimens(fd,resolved)!=0)
+        err=-errno;
+    if (!err && fsync(fd)!=0)
+        err=-errno;
+    if (fd>=0) close(fd);
+    nt_runtime_end_namespace_mutation(guard);
+    pthread_mutex_unlock(&namespace_lock);
+    return err;
 }
 
-/* Guests cannot alter the runtime's DOS/reparse bookkeeping via arbitrary
- * POSIX setxattr, even if the lower filesystem permits user xattrs. */
+/* Guests cannot alter the runtime's DOS/reparse/security bookkeeping.
+ * Only ordinary user.* xattrs may be modified. The service UID must never
+ * grant itself ambient authority to mutate trusted NT metadata on behalf
+ * of a FUSE caller, even if Linux would permit fsetxattr. */
 static bool reserved_xattr(const char *name)
 {
     return strncmp(name, "user.ntnative.", strlen("user.ntnative.")) == 0;
+}
+
+static bool ordinary_xattr(const char *name)
+{
+    if (!name || strnlen(name,256)>=256)
+        return false;
+    return strncmp(name,"user.",5)==0 && name[5]!=0 &&
+           !reserved_xattr(name);
+}
+
+static int fs4_service_xattr_mutation(const char *path,const char *name,
+                                     const char *value,size_t size,int flags,
+                                     bool remove)
+{
+    if (!ordinary_xattr(name))
+        return -EACCES;
+    if ((!remove && (size>4096 || (size && !value) ||
+                     (flags & ~(XATTR_CREATE|XATTR_REPLACE)) != 0)) ||
+        (remove && (size || flags)))
+        return -EINVAL;
+    pthread_mutex_lock(&namespace_lock);
+    int guard=guest_mutation_begin(path);
+    if (guard<0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return guard;
+    }
+    int fd=lower_open(path,O_RDONLY,0);
+    int error=fd<0 ? -errno : 0;
+    struct stat st;
+    if (!error && fstat(fd,&st)!=0) error=-errno;
+    if (!error && !S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
+        error=-EACCES;
+    int lease=-1;
+    if (!error && S_ISREG(st.st_mode)) {
+        lease=nt_runtime_acquire_linux_nt_lease(fd,NT_FS_WRITE,
+                                                NT_FS_SHARE_ALL);
+        if (lease<0) error=-errno;
+    }
+    if (!error) {
+        int rc=remove ? fremovexattr(fd,name) :
+                        fsetxattr(fd,name,value,size,flags);
+        if (rc!=0)
+            error=-errno;
+        else if (fsync(fd)!=0)
+            error=-errno; /* Data may have changed: do not fake PASS. */
+    }
+    if (lease>=0)
+        nt_runtime_release_linux_nt_lease(&lease);
+    if (fd>=0) close(fd);
+    nt_runtime_end_namespace_mutation(guard);
+    pthread_mutex_unlock(&namespace_lock);
+    return error;
 }
 
 static int fs_getxattr(const char *path, const char *name, char *value,
@@ -892,10 +1031,8 @@ static int fs_setxattr(const char *path, const char *name, const char *value,
 {
     if (!service_authorized())
         return -EACCES;
-    /* POSIX user.* xattrs can alter security-sensitive state without NT
-     * privileges or a durable metadata transaction. Refuse for UID service. */
     if (service_mode)
-        return -EOPNOTSUPP;
+        return fs4_service_xattr_mutation(path,name,value,size,flags,false);
     if (reserved_xattr(name) ||
         (service_mode && strncmp(name, "user.", 5) != 0))
         return -EACCES;
@@ -913,7 +1050,7 @@ static int fs_removexattr(const char *path, const char *name)
     if (!service_authorized())
         return -EACCES;
     if (service_mode)
-        return -EOPNOTSUPP;
+        return fs4_service_xattr_mutation(path,name,NULL,0,0,true);
     if (reserved_xattr(name))
         return -EACCES;
     int fd = lower_open(path, O_RDONLY, 0);
