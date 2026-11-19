@@ -4708,7 +4708,10 @@ static int32_t hardlink_utf8(const char *new_name, const char *existing_name)
     /* file_lock -> physical WAL -> inode delete lock -> registry lock.
      * The order matches cooperating CreateFile/MoveFile/DeleteFile.
      * WAL guards the namespace throughout intent, link, fsync and alias. */
-    mutation_guard = nt_runtime_begin_namespace_mutation(to);
+    /* The mutation entrypoint normalizes its DOS argument itself.
+     * Never normalize an already-normalized C: relative name a second
+     * time: a PE's current directory could otherwise rebase the gate. */
+    mutation_guard = nt_runtime_begin_namespace_mutation(new_name);
     if (mutation_guard < 0) {
         error = errno;
         goto done;
