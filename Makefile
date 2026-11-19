@@ -587,6 +587,13 @@ check-fs4-handle-broker: $(BUILD_DIR)/nt-storage-handle-broker
 
 check: check-fs4-handle-broker
 
+.PHONY: check-fs4-security-metadata
+check-fs4-security-metadata: $(BUILD_DIR)/nt-storage-handle-broker
+	PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -W error::ResourceWarning \
+	    tests/fs4_security_metadata_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
+
+check: check-fs4-security-metadata
+
 .PHONY: check-fs4-service-supervisor
 check-fs4-service-supervisor:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_service_supervisor.py'
