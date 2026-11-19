@@ -90,6 +90,31 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
     return NT_ACL_ALLOWED;
 }
 
+/* A parsed self-relative SD is the minimum condition for persistence.
+ * This does not authenticate its owner or prove an access grant. */
+int nt_acl_validate_descriptor(const uint8_t *sd,size_t bytes) {
+    struct acl acl={0};
+    return sd_acl(sd,bytes,&acl);
+}
+
+static bool map_generic(uint32_t *rights,
+                        const struct nt_acl_generic_mapping *mapping)
+{
+    const uint32_t all_generic=UINT32_C(0xf0000000);
+    if (!(*rights&all_generic))
+        return true;
+    if (!mapping)
+        return false;
+    const uint32_t selected=*rights&all_generic;
+    *rights&=~all_generic;
+    if (selected&UINT32_C(0x80000000)) *rights|=mapping->read;
+    if (selected&UINT32_C(0x40000000)) *rights|=mapping->write;
+    if (selected&UINT32_C(0x20000000)) *rights|=mapping->execute;
+    if (selected&UINT32_C(0x10000000)) *rights|=mapping->all;
+    /* A caller must provide concrete rights, not nested GENERIC bits. */
+    return !(*rights&all_generic);
+}
+
 static bool token_has_sid(const struct nt_acl_token *token,
                           const uint8_t *sid,size_t sid_size,
                           bool for_allow) {
@@ -102,14 +127,16 @@ static bool token_has_sid(const struct nt_acl_token *token,
     return false;
 }
 
-int nt_acl_access_check(const uint8_t *sd,size_t bytes,
-                        const struct nt_acl_token *token,uint32_t requested,
-                        uint32_t *granted) {
+int nt_acl_access_check_mapped(const uint8_t *sd,size_t bytes,
+                               const struct nt_acl_token *token,
+                               uint32_t requested,
+                               const struct nt_acl_generic_mapping *mapping,
+                               uint32_t *granted) {
     if (granted) *granted=0;
     if (!token || token->count>32 || !granted)
         return NT_ACL_INVALID;
-    /* GENERIC_* translation requires object-specific GenericMapping. */
-    if (requested & UINT32_C(0xf0000000))
+    /* Generic mapping is entirely object-specific, never implicit. */
+    if (!map_generic(&requested,mapping))
         return NT_ACL_UNSUPPORTED;
     for (size_t i=0;i<token->count;i++)
         if (!token->sid[i] || !sid_valid(token->sid[i],token->length[i]) ||
@@ -130,7 +157,7 @@ int nt_acl_access_check(const uint8_t *sd,size_t bytes,
         const uint8_t *ace=acl.start+pos;
         size_t length=get16(ace+2);
         uint32_t rights=get32(ace+4);
-        if (rights & UINT32_C(0xf0000000))
+        if (!map_generic(&rights,mapping))
             return NT_ACL_UNSUPPORTED;
         if (!(ace[1]&ACE_INHERIT_ONLY) &&
             token_has_sid(token,ace+ACE_BASE,length-ACE_BASE,
@@ -146,6 +173,12 @@ int nt_acl_access_check(const uint8_t *sd,size_t bytes,
         return NT_ACL_DENIED;
     *granted=requested;
     return NT_ACL_ALLOWED;
+}
+
+int nt_acl_access_check(const uint8_t *sd,size_t bytes,
+                        const struct nt_acl_token *token,uint32_t requested,
+                        uint32_t *granted) {
+    return nt_acl_access_check_mapped(sd,bytes,token,requested,NULL,granted);
 }
 
 /* Copy inheritable access ACEs into an ACL_REVISION-2 buffer. It is NOT a
