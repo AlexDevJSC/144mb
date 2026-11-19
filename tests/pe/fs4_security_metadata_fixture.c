@@ -46,7 +46,8 @@ int import_fixture_entry(void)
     unsigned char security[256] = {0};
     if (!GetFileSecurityW(path,wanted,security,sizeof(security),&needed) ||
         security[0] != SECURITY_DESCRIPTOR_REVISION ||
-        (security[2] & SE_SELF_RELATIVE) == 0)
+        ((((uint16_t)security[2]) | ((uint16_t)security[3] << 8)) &
+         SE_SELF_RELATIVE) == 0)
         return 14;
     if (GetFileSecurityW(path,SACL_SECURITY_INFORMATION,
                          security,sizeof(security),&needed) ||
