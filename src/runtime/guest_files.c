@@ -2822,8 +2822,12 @@ static nt_status duplicate_file_handle(uintptr_t source, uint32_t access,
     nt_status status = NT_STATUS_SUCCESS;
     if (!original) {
         status = NT_STATUS_INVALID_HANDLE;
-    } else if (!(options & 2u)) { /* DUPLICATE_SAME_ACCESS */
-        status = NT_STATUS_NOT_SUPPORTED;
+    } else if (!(options & 2u) &&
+               (access == 0 || (access & ~(FILE_READ | FILE_WRITE | FILE_DELETE)))) {
+        /* Other NT ACCESS_MASK forms need a dedicated generic mapping. */
+        status = NT_STATUS_INVALID_PARAMETER;
+    } else if (!(options & 2u) && (access & ~original->access)) {
+        status = NT_STATUS_ACCESS_DENIED;
     } else {
         struct guest_file *copy = new_file();
         if (!copy || next_handle == UINTPTR_MAX) {
