@@ -155,6 +155,17 @@ con `NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS`; no se activan en el runtime
 distribuido. No se relaja el contrato de señales ajenas a invitado,
 direcciones dinámicas sin registrar ni cambios PKRU.
 
+## Mejora incremental 19-11-2026: señal de reserva ocupada
+
+La selección de señales asíncronas prueba la primera opción libre a partir
+de SIGRTMIN+4. La prueba host reserva antes SIGRTMIN+4 con SIG_IGN,
+comprueba que el runtime no lo reemplaza y que una APC verdadera se
+entrega y restaura el contexto AMD64 por una señal alternativa.
+Conserva fail-closed cuando todo el rango está ocupado; no habilita
+APC arbitrarias ni elimina la limitación de PE autorizados.
+**Componente 4: 96 % → 96 % (+0 puntos)** por robustez de selección,
+sin ampliar el alcance semántico Win32 de la APC.
+
 ## Pendientes obligatorios
 
 - No hay garantía frente a ejecución maliciosa que cambie su
