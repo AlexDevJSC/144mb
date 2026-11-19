@@ -7661,22 +7661,62 @@ int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *cr
 {
     if (!created && !accessed && !written)
         return 1;
-    const int fd = duplicate_handle(handle, FILE_WRITE);
-    if (fd < 0)
-        return file_result(fd, false);
-    bool valid = true;
-    if (created) {
-        const uint64_t value = ticks(*created);
-        valid = write_guest_xattr(fd, WIN_BIRTH_XATTR, &value, sizeof(value)) == 0;
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_set_time(handle,created,accessed,written);
+    /* Metadata changes must not race a cooperating rename/delete on C:.
+     * Match file_lock -> WAL lock ordering of truncate_guest_handle().
+     * A return of success means the pinned inode was actually fsynced. */
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file=find_handle(handle);
+    int error=0, fd=-1, guard=-1;
+    if (!file)
+        error=EBADF;
+    else if (!(file->access & FILE_WRITE))
+        error=EACCES;
+    if (!error && file->path && private_c_path(file->path)) {
+        char absolute[PATH_MAX+3];
+        if (snprintf(absolute,sizeof(absolute),"C:/%s",file->path) >=
+            (int)sizeof(absolute))
+            error=ENAMETOOLONG;
+        else {
+            guard=nt_runtime_begin_namespace_mutation(absolute);
+            if (guard<0)
+                error=errno ? errno : EUCLEAN;
+        }
     }
-    if (valid && (accessed || written)) {
-        const struct timespec dates[2] = {
-            accessed ? to_timespec(ticks(*accessed)) : (struct timespec){0, UTIME_OMIT},
-            written ? to_timespec(ticks(*written)) : (struct timespec){0, UTIME_OMIT}
+    if (!error) {
+        fd=fcntl(file->fd,F_DUPFD_CLOEXEC,3);
+        if (fd<0)
+            error=errno;
+    }
+    /* An all-zero FILETIME is the Windows 'leave unchanged' sentinel. */
+    if (!error && created && ticks(*created)!=0) {
+        const uint64_t value=ticks(*created);
+        if (write_guest_xattr(fd,WIN_BIRTH_XATTR,&value,sizeof(value))!=0)
+            error=errno;
+    }
+    if (!error && (accessed || written)) {
+        const struct timespec dates[2]={
+            accessed ? to_timespec(ticks(*accessed)) :
+                       (struct timespec){0,UTIME_OMIT},
+            written ? to_timespec(ticks(*written)) :
+                      (struct timespec){0,UTIME_OMIT}
         };
-        valid = futimens(fd, dates) == 0;
+        if (futimens(fd,dates)!=0)
+            error=errno;
     }
-    return file_result(fd, valid);
+    if (!error && !wal_sync_pinned(fd,false))
+        error=errno ? errno : EIO;
+    if (fd>=0)
+        close(fd);
+    if (guard>=0)
+        nt_runtime_end_namespace_mutation(guard);
+    pthread_mutex_unlock(&file_lock);
+    if (error) {
+        nt_SetLastError(path_error(error,false));
+        return 0;
+    }
+    return 1;
 }
 
 /* FILE_DISPOSITION_INFO (FileInfoByHandleClass=4) contains a single
@@ -7804,9 +7844,15 @@ int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, 
             nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
             return 0;
         }
-        const struct timespec dates[] = {to_timespec(basic.accessed), to_timespec(basic.written)};
-        const int fd = duplicate_handle(handle, FILE_WRITE);
-        return file_result(fd, fd >= 0 && futimens(fd, dates) == 0);
+        /* Reuse the same WAL/lease/durable metadata path as SetFileTime,
+         * for both local Win32 and an authenticated remote HANDLE. */
+        const struct nt_file_time access_time = {
+            (uint32_t)basic.accessed, (uint32_t)(basic.accessed >> 32)};
+        const struct nt_file_time write_time = {
+            (uint32_t)basic.written, (uint32_t)(basic.written >> 32)};
+        return nt_SetFileTime(handle,
+                              NULL, basic.accessed ? &access_time : NULL,
+                              basic.written ? &write_time : NULL);
     }
     nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
     return 0;
