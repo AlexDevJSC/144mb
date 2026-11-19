@@ -726,6 +726,13 @@ check-fs4-acl-enforcement: $(BUILD_DIR)/nt-storage-handle-broker
 
 check: check-fs4-acl-enforcement
 
+.PHONY: check-fs4-fuse-acl
+check-fs4-fuse-acl: $(BUILD_DIR)/nt-dos83-fuse
+	PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -W error::ResourceWarning \
+	    tests/fs4_fuse_acl_test.py "$(BUILD_DIR)/nt-dos83-fuse"
+
+check: check-fs4-fuse-acl
+
 .PHONY: check-fs4-reparse-wal
 check-fs4-reparse-wal: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_reparse_symlink_wal.py "$(BUILD_DIR)/nt-dos83-mediator"
