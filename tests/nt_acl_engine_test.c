@@ -154,6 +154,21 @@ int main(void) {
     assert(nt_acl_inherit_descriptor(sd,68,false,alice,sizeof(alice),
                                      everyone,sizeof(everyone),child,
                                      sizeof(child),&output_size)==NT_ACL_UNSUPPORTED);
-    puts("PASS self-relative SD, mapped generic ACEs and child creator SID inheritance");
+    /* The verified-host identity adapter never admits guest-declared
+     * domain SIDs or impersonates a different UNIX peer. */
+    struct nt_acl_unix_token host_a={0}, host_b={0};
+    assert(nt_acl_unix_token_init(&host_a,1001,50));
+    assert(nt_acl_unix_token_init(&host_b,1002,50));
+    assert(host_a.token.count==3 && host_a.token.length[0]==16);
+    sd_init(sd,52,1);
+    add_ace(sd+28,0,0,1,host_a.sid_bytes[0],16);
+    assert(nt_acl_access_check(sd,52,&host_a.token,1,&granted)==NT_ACL_ALLOWED);
+    assert(nt_acl_access_check(sd,52,&host_b.token,1,&granted)==NT_ACL_DENIED);
+    sd_init(sd,48,1);
+    add_ace(sd+28,0,0,1,host_a.sid_bytes[2],12);
+    assert(nt_acl_access_check(sd,48,&host_a.token,1,&granted)==NT_ACL_ALLOWED);
+    assert(nt_acl_access_check(sd,48,&host_b.token,1,&granted)==NT_ACL_ALLOWED);
+    assert(!nt_acl_unix_token_init(NULL,1001,50));
+    puts("PASS self-relative SD, mapped rights, inherited owner/group and peer-SID identity");
     return 0;
 }
