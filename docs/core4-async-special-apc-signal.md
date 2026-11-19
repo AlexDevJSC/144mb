@@ -48,8 +48,11 @@ El manejador POSIX:
 El handler puede ignorar la señal si llega en fase HOST: la cola
 permanece pendiente para el antiguo retorno de importación. Los
 callbacks ordinarios permanecen en su cola y NO se ejecutan sin una
-espera alertable. Si el anfitrión ya ha ocupado la señal reservada,
-el runtime no roba ese manejador y conserva el modo cooperativo.
+espera alertable. Si el anfitrión ha ocupado la señal preferida,
+el runtime busca otra libre hasta SIGRTMAX sin sustituir SIG_IGN ni
+manejadores ajenos. Si no queda ninguna, conserva solo el modo cooperativo.
+La selección no es una reserva atómica frente a otro código host que
+registre manejadores simultáneamente y no garantiza señales desbloqueadas.
 
 ## Recuperación limitada de fronteras VEH/SEH
 
