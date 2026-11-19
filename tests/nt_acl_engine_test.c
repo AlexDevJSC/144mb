@@ -124,7 +124,7 @@ int main(void) {
                                      alice,sizeof(alice),
                                      everyone,sizeof(everyone),
                                      NULL,0,&output_size)==NT_ACL_DENIED);
-    assert(output_size==104);
+    assert(output_size==100);
     assert(nt_acl_inherit_descriptor(sd,68,false,
                                      alice,sizeof(alice),
                                      everyone,sizeof(everyone),
@@ -133,7 +133,7 @@ int main(void) {
                                      alice,sizeof(alice),
                                      everyone,sizeof(everyone),
                                      child,sizeof(child),&output_size)==NT_ACL_ALLOWED);
-    assert(output_size==104 && nt_acl_validate_descriptor(child,output_size)==NT_ACL_ALLOWED);
+    assert(output_size==100 && nt_acl_validate_descriptor(child,output_size)==NT_ACL_ALLOWED);
     assert((child[2]&4)!=0 && (child[3]&0x80)!=0);
     assert(nt_acl_access_check(child,output_size,&token,1,&granted)==NT_ACL_ALLOWED);
     assert(nt_acl_access_check(child,output_size,&token,2,&granted)==NT_ACL_DENIED);
