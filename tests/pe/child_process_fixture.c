@@ -285,14 +285,57 @@ int import_fixture_entry(void)
         return 114;
     if (!CloseHandle(shared) || !DeleteFileW(file_path))
         return 115;
+    /* Real Win64 SECURITY_ATTRIBUTES contract: length, NULL descriptor,
+     * per-HANDLE inheritance and event state are independent. */
+    SECURITY_ATTRIBUTES bad_event_attributes = security;
+    bad_event_attributes.nLength = sizeof(security) - 1;
+    SetLastError(0);
+    if (CreateEventW(&bad_event_attributes, TRUE, FALSE, NULL) != NULL ||
+        GetLastError() != ERROR_INVALID_PARAMETER)
+        return 139;
+    bad_event_attributes = security;
+    bad_event_attributes.lpSecurityDescriptor = (void *)(uintptr_t)1;
+    SetLastError(0);
+    if (CreateEventW(&bad_event_attributes, TRUE, FALSE, NULL) != NULL ||
+        GetLastError() != ERROR_NOT_SUPPORTED)
+        return 140;
     HANDLE unshareable = CreateEventW(&security, TRUE, FALSE, NULL);
     if (unshareable == NULL)
         return 116;
+    DWORD event_flags = ~0u;
+    if (!GetHandleInformation(unshareable, &event_flags) ||
+        event_flags != HANDLE_FLAG_INHERIT ||
+        WaitForSingleObject(unshareable, 0) != WAIT_TIMEOUT ||
+        !SetEvent(unshareable) ||
+        WaitForSingleObject(unshareable, 0) != WAIT_OBJECT_0 ||
+        !ResetEvent(unshareable))
+        return 141;
+    /* bInheritHandles=FALSE must not leak the object even when the
+     * original local HANDLE remains marked inheritable. */
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL,
+                        directory, &startup, &process) ||
+        WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess))
+        return 142;
+    /* This runtime cannot transfer event HANDLE identity/state through
+     * exec. Explicitly deny the attempted inheritance, not a fake spawn. */
     SetLastError(0);
     if (CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL,
                        directory, &startup, &process) ||
-        GetLastError() != ERROR_NOT_SUPPORTED || !CloseHandle(unshareable))
+        GetLastError() != ERROR_NOT_SUPPORTED)
         return 117;
+    /* Clearing inheritance on this single HANDLE permits a real
+     * child again; the underlying event and its state remain intact. */
+    if (!SetHandleInformation(unshareable, HANDLE_FLAG_INHERIT, 0) ||
+        !GetHandleInformation(unshareable, &event_flags) || event_flags != 0 ||
+        !CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL,
+                        directory, &startup, &process) ||
+        WaitForSingleObject(process.hProcess, 10000) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &code) || code != 0x12345678u ||
+        !CloseHandle(process.hThread) || !CloseHandle(process.hProcess) ||
+        !CloseHandle(unshareable))
+        return 143;
     /* STARTF_USESTDHANDLES must point to truly inherited Win32 pipe
      * handles, not to invented Linux stdout/stderr pseudo values. */
     HANDLE read_pipe = NULL, write_pipe = NULL;

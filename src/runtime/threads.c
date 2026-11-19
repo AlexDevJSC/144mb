@@ -1449,23 +1449,50 @@ int32_t NT_MS_ABI nt_ReleaseSemaphore(uintptr_t handle, int32_t count, int32_t *
     return status == NT_STATUS_SUCCESS;
 }
 
+/* SECURITY_ATTRIBUTES is a Win64 ABI structure, not OBJECT_ATTRIBUTES.
+ * The only supported security profile is a NULL descriptor; inheritance is
+ * a property of this HANDLE entry, not the shared event's signaled state.
+ * Actual serialization of an event into a child process is unsupported and
+ * CreateProcessW must reject it before posix_spawn. */
+struct nt_event_security_attributes {
+    uint32_t length;
+    const void *descriptor;
+    int32_t inherit;
+};
+_Static_assert(sizeof(struct nt_event_security_attributes) == 24 &&
+               offsetof(struct nt_event_security_attributes, descriptor) == 8 &&
+               offsetof(struct nt_event_security_attributes, inherit) == 16,
+               "Win64 SECURITY_ATTRIBUTES ABI");
+
 uintptr_t NT_MS_ABI nt_CreateEventW(const void *security, int32_t manual, int32_t initial,
                                     const uint16_t *name)
 {
+    bool inherit = false;
     if (security != NULL) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
+        const struct nt_event_security_attributes *attributes = security;
+        if (attributes->length != sizeof(*attributes)) {
+            nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        if (attributes->descriptor != NULL) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        inherit = attributes->inherit != 0;
     }
     struct nt_guest_unicode_string unicode = win_event_string(name);
     if (name != NULL && name[0] != 0 && unicode.length >= 127 * sizeof(uint16_t)) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    struct nt_object_attributes attrs = win_event_attributes(&unicode, false);
+    /* Unnamed events MUST still forward OBJECT_ATTRIBUTES: the inherited
+     * HANDLE flag is independent from whether an object has a name.
+     * Supplying NULL to NtCreateEvent silently dropped bInheritHandle. */
+    struct nt_object_attributes attrs =
+        win_event_attributes(name && *name ? &unicode : NULL, inherit);
     uintptr_t handle = 0;
     const nt_status status = nt_NtCreateEvent(&handle, EVENT_ALL_ACCESS,
-                                               name && *name ? &attrs : NULL,
-                                               manual ? 0 : 1, initial != 0);
+                                               &attrs, manual ? 0 : 1, initial != 0);
     nt_SetLastError(nt_runtime_nt_error(status));
     return handle;
 }

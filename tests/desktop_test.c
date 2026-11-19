@@ -194,6 +194,38 @@ static uintptr_t check_menu_navigation(uintptr_t window, uint32_t native_id, uin
     CHECK(SDL_PushEvent(&wheel) == 1);
     CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
     CHECK(!nt_GetMenuItemRect(window, popup, 0, &bounds));
+
+    /* A registered raw mouse with RIDEV_NOLEGACY must still navigate
+     * USER32's own popup; only legacy *application* mouse messages are
+     * suppressed. Check both directions and the independent WM_INPUT
+     * payload without changing the existing nested-menu assertions. */
+    const struct nt_raw_input_device raw_wheel = {1, 2, 0x30, window};
+    const struct nt_raw_input_device raw_remove = {1, 2, 1, 0};
+    CHECK(nt_RegisterRawInputDevices(&raw_wheel, 1, sizeof(raw_wheel)));
+    wheel.wheel.y = 1000;
+    CHECK(SDL_PushEvent(&wheel) == 1);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND,
+                                         NT_WM_COMMAND) == 0);
+    CHECK(nt_GetMenuItemRect(window, popup, 0, &bounds));
+    struct nt_message raw_message;
+    CHECK(nt_PeekMessageW(&raw_message, window, 0xff, 0xff, 1));
+    uint32_t raw_size = 0;
+    CHECK(nt_GetRawInputData((uintptr_t)raw_message.lparam, 0x10000003,
+                             NULL, &raw_size, 24) == 0 && raw_size == 48);
+    unsigned char raw_packet[48];
+    CHECK(nt_GetRawInputData((uintptr_t)raw_message.lparam, 0x10000003,
+                             raw_packet, &raw_size, 24) == 48);
+    uint16_t raw_buttons;
+    memcpy(&raw_buttons, raw_packet + 24 + 4, sizeof(raw_buttons));
+    CHECK(raw_buttons == 0x400);
+    wheel.wheel.y = -1000;
+    CHECK(SDL_PushEvent(&wheel) == 1);
+    CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND,
+                                         NT_WM_COMMAND) == 0);
+    CHECK(!nt_GetMenuItemRect(window, popup, 0, &bounds));
+    CHECK(nt_PeekMessageW(&raw_message, window, 0xff, 0xff, 1));
+    CHECK(nt_RegisterRawInputDevices(&raw_remove, 1, sizeof(raw_remove)));
+
     click_menu_item(window, native_id, popup, 12);
     CHECK(nt_runtime_take_window_message(&message, window, NT_WM_COMMAND, NT_WM_COMMAND) == 0);
     click_menu_item(window, native_id, child, 0);

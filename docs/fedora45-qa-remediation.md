@@ -81,3 +81,78 @@ no reescribe los resultados, solo muestra por qué están pendientes.
 
 No se han modificado tests para aceptar respuestas falsas, ocultar skips
 ni elevar privilegios de programas Windows desconocidos.
+
+
+## NT144 QA — segunda ejecución, commit 96199dd5 (Fedora 45)
+
+**Registro aportado por QA:** Fedora 45 x86-64, kernel
+`7.3.3-300.fc45.x86_64`, SELinux `Enforcing`, cpuset permitido
+`[0,1,2,3]`; 83 comprobaciones: 76 PASS, 6 FALLO y 1 INCOMPLETO.
+El commit de origen es
+`96199dd54f07140cd64ef27ba35d6c8ef001d0f4`.
+Este resultado **no debe sobrescribirse** con la salida de una CI
+posterior. El árbol `main` en el inicio de esta reparación coincidía
+exactamente con ese SHA.
+
+La PR de reparación NT144 QA aplica contratos distintos y los valida
+independientemente, manteniendo SELinux, Bubblewrap y la separación
+de derechos:
+
+- `CreateEventW`: valida `SECURITY_ATTRIBUTES` x64 (24 bytes),
+  `lpSecurityDescriptor == NULL`, y propaga `bInheritHandle` como
+  atributo **por HANDLE** a la creación NT. La semántica y el estado
+  del objeto no dependen de este bit. Con `bInheritHandles=TRUE`,
+  `CreateProcessW` sigue rechazando eventos NT heredables que no
+  pueden serializarse en el manifest de descriptores del hijo: no
+  se transmite silenciosamente un HANDLE que el hijo no poseerá.
+- `check-pe-preflight`: captura el código shell real con `$$?` y
+  `$$status` en la receta GNU Make y exige el resultado negativo
+  específico del auditor, tanto en código de salida como en nombre
+  `KERNEL32.dll!MissingNtNativeApi`.
+- MinGW GCC 16: los dos fixtures afectados se enlazan con un helper
+  `memset` **limitado a tests PE freestanding**, sin CRT importada
+  ni símbolos Win32 ficticios. Existe prueba de los bytes escritos
+  y de los márgenes no modificados.
+- DXGI/shaders: el texto del error del host añade un `0` espurio
+  incluso a importaciones **nominales**; el formato por nombre se
+  separa del formato ordinal. Un test inspecciona las cadenas reales
+  `IMAGE_IMPORT_BY_NAME`, y las comprobaciones funcionales de los
+  backends siguen siendo obligatorias.
+- Menús y Raw Input: las pruebas SDL offscreen deben conservar
+  el scroll de popups, el rechazo de ítems ya fuera del viewport
+  y el suministro de `WM_INPUT` de acuerdo con `RIDEV_NOLEGACY`.
+
+### Puertas P2 no completables con este cpuset
+
+**Boost positivo de prioridad.** La subida reversible del `nice`
+Linux requiere un `RLIMIT_NICE` y privilegios de recursos
+autorizados para el proceso de prueba. La prueba ordinaria sin
+esa concesión puede indicar `SKIP`; `--with-priority` usa una
+delegación temporal con `prlimit` y `setpriv`, descarta UID/GID
+privilegiados antes de ejecutar el test y no eleva el runtime ni
+el PE general. Una transición de política Windows no probada
+no se convierte en PASS por permitir un `nice` Linux.
+
+**Prioridad multihilo positiva.** Hay que admitir efectivamente
+las transiciones sobre todos los hilos gestionados, sin
+`EPERM`, y demostrar rollback de cada TID y la prioridad
+base tras errores. Un grupo de CPU pequeño no elimina la
+necesidad de esa delegación reversible de recursos.
+
+**Afinidad y processor groups físicos adicionales.** Un
+cpuset con CPUs `[0,1,2,3]` cubre solo el grupo Windows 0.
+El test sintético de 80 CPUs valida cálculos/índices, pero
+**no** demuestra la transición efectiva entre al menos dos
+grupos ni la programación física de CPU `>=64`. Debe
+ejecutarse `--require-multigroup` sobre un anfitrión
+con CPUs permitidas en ambos grupos, sin inventar topología
+ni modificar las restricciones del usuario. Resultado en la
+máquina actual: `INCOMPLETO / HOST_LIMITED`, no PASS.
+
+Para la aceptación definitiva, ejecutar los objetivos de QA
+en Fedora 45 físico con `SELinux=Enforcing`, guardar
+logs completos y exigir explícitamente el mensaje
+`PASS PE child launched inside the same Linux sandbox and returned its full exit code`.
+Un `SKIP` por imposibilidad de crear namespaces en CI permanece
+`INCOMPLETO`; no se desactiva Bubblewrap ni se altera el backend
+FileSystem4. La fase 4 permanece abierta.

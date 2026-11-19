@@ -32,6 +32,25 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libsdl2-image-dev libcairo2-dev libffi-dev libssl-dev libicu-dev libfuse3-dev fuse3 libfluidsynth3 libvkd3d-dev libvulkan-dev mesa-vulkan-drivers bubblewrap weston fonts-dejavu-core
           x86_64-w64-mingw32-gcc --version
+      - name: NT144 QA P0 direct import audit and free-standing fixture support
+        run: make -j2 check-pe-preflight check-pe-lstrcmp check-fixture-memory
+      - name: NT144 QA MinGW16 link, exact graphics import names and execution
+        run: |
+          make -j2 check-pe-displayconfig check-pe-native check-pe-graphics-import-names
+      - name: NT144 QA scroll/menu and Raw Input regression offscreen
+        run: SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-desktop
+      # Bubblewrap might be forbidden on hosted Ubuntu. Run the full
+      # fixture; explicitly flag namespace skips, never call them PASS.
+      - name: NT144 QA child PE inside Bubblewrap if namespaces are permitted
+        run: |
+          set -o pipefail
+          SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 make -j2 check-pe-isolated 2>&1 | tee nt144-isolated.log
+          if grep -q '^SKIP external-PE sandbox test:' nt144-isolated.log; then
+            echo '::notice::INCOMPLETE: GitHub runner cannot execute nested PE under Bubblewrap; Fedora physical gate still required'
+          else
+            grep -F 'PASS PE child launched inside the same Linux sandbox and returned its full exit code' nt144-isolated.log
+            grep -F 'PASS PE launcher preserves Windows arguments, escaping and Unicode' nt144-isolated.log
+          fi
       # Check our real kernel-signal-to-PE SEH contract independently of
       # preexisting APC/VEH regressions, so a failing legacy test cannot
       # hide its actual result.

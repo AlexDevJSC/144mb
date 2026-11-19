@@ -1576,7 +1576,15 @@ static void translate_event(const SDL_Event *event)
                 delta = delta == INT_MIN ? INT_MAX : -delta;
             const int64_t step = (int64_t)delta * 120;
             const int16_t wheel = step < INT16_MIN ? INT16_MIN : step > INT16_MAX ? INT16_MAX : (int16_t)step;
-            if (!nt_runtime_raw_mouse(window->handle, 0, 0, 0x400, (uint16_t)wheel))
+            /* Raw Input with RIDEV_NOLEGACY suppresses legacy WM_MOUSEWHEEL
+             * delivery to the application, not the internal navigation of
+             * a menu already opened by USER32. Always emit the registered
+             * WM_INPUT packet; scroll the active popup independently so
+             * its viewport and GetMenuItemRect agree. No popup means no
+             * menu action, regardless of raw registration. */
+            (void)nt_runtime_raw_mouse(window->handle, 0, 0, 0x400,
+                                       (uint16_t)wheel);
+            if (window->popup_count != 0)
                 scroll_popup(window, delta);
         }
         break;

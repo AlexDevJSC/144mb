@@ -836,9 +836,27 @@ check-pe-console: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/console-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/console-fixture.exe
 
-$(BUILD_DIR)/displayconfig-fixture.exe: tests/pe/displayconfig_fixture.c | $(BUILD_DIR)
+# GCC 16 emits an out-of-line memset for aggregate initialization
+# even with -ffreestanding. No Windows CRT may be linked into fixtures.
+# The implementation itself is compiled without loop-to-memset lowering.
+# Exercise the local freestanding symbol on the Linux host as well as
+# linking it into real PE32+ fixtures: redzones and zero-byte behavior.
+$(BUILD_DIR)/fixture-memory-test: tests/fixture_memory_test.c tests/pe/fixture_memory.c | $(BUILD_DIR)
+	$(CC) $(WARN_CFLAGS) $(CFLAGS) -fno-builtin \
+	    -fno-tree-loop-distribute-patterns $^ -o "$@"
+
+.PHONY: check-fixture-memory
+check-fixture-memory: $(BUILD_DIR)/fixture-memory-test
+	timeout 10s $(BUILD_DIR)/fixture-memory-test
+
+$(BUILD_DIR)/fixture-memory.o: tests/pe/fixture_memory.c | $(BUILD_DIR)
+	$(MINGW_CC) -std=c17 -Wall -Wextra -Wpedantic -Werror -O2 \
+	    -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns \
+	    -fno-stack-protector -c "$<" -o "$@"
+
+$(BUILD_DIR)/displayconfig-fixture.exe: tests/pe/displayconfig_fixture.c $(BUILD_DIR)/fixture-memory.o | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
-	    $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -luser32
+	    $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -luser32
 
 check-pe-displayconfig: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/displayconfig-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 25s \
@@ -864,8 +882,16 @@ $(BUILD_DIR)/shader-fixture.exe: tests/pe/shader_fixture.c $(BUILD_DIR)/fixture-
 check-pe-shaders: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/shader-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 30s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/shader-fixture.exe
+$(BUILD_DIR)/graphics-import-names-test: tests/pe/graphics_import_names_test.c src/pe/imports.c src/pe/imports.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/pe $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/pe/graphics_import_names_test.c src/pe/imports.c -o "$@"
+
+.PHONY: check-pe-graphics-import-names
+check-pe-graphics-import-names: $(BUILD_DIR)/graphics-import-names-test $(BUILD_DIR)/graphics-fixture.exe $(BUILD_DIR)/shader-fixture.exe
+	timeout 10s $(BUILD_DIR)/graphics-import-names-test $(BUILD_DIR)/graphics-fixture.exe $(BUILD_DIR)/shader-fixture.exe
+
 else
-check-pe-graphics check-pe-shaders:
+check-pe-graphics check-pe-shaders check-pe-graphics-import-names:
 	@echo 'This check requires libvkd3d, libvkd3d-utils and Vulkan development files.' >&2
 	@exit 1
 endif
@@ -1064,7 +1090,7 @@ check-pe-memory: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/virtual-memory-fixtu
 $(BUILD_DIR)/fixture-ws2_32.a: tests/pe/ws2_32.def | $(BUILD_DIR)
 	$(MINGW_DLLTOOL) -d "$<" -l "$@"
 
-$(BUILD_DIR)/native-services.exe: tests/pe/native_services_fixture.c $(BUILD_DIR)/fixture-ws2_32.a $(BUILD_DIR)/fixture-comctl32.a | $(BUILD_DIR)
+$(BUILD_DIR)/native-services.exe: tests/pe/native_services_fixture.c $(BUILD_DIR)/fixture-ws2_32.a $(BUILD_DIR)/fixture-comctl32.a $(BUILD_DIR)/fixture-memory.o | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) \
 	    $(PE_FIXTURE_LDFLAGS) -o "$@" $^ -lbcrypt -lshell32 -lole32 -luser32 -lgdi32 -lmsimg32 -ladvapi32 -limm32 -lkernel32
 
@@ -1131,10 +1157,12 @@ $(BUILD_DIR)/missing-import-fixture.exe: tests/pe/missing_import_fixture.c $(BUI
 check-pe-preflight: $(BUILD_DIR)/pe-import-audit $(PE_ISOLATED_FIXTURES) $(BUILD_DIR)/lstrcmp-fixture.exe $(BUILD_DIR)/missing-import-fixture.exe
 	$(BUILD_DIR)/pe-import-audit --verify $(PE_ISOLATED_FIXTURES) $(BUILD_DIR)/lstrcmp-fixture.exe
 	@status=0; $(BUILD_DIR)/pe-import-audit --verify $(BUILD_DIR)/missing-import-fixture.exe \
-	    > $(BUILD_DIR)/missing-import-audit.log 2>&1 || status=$?; \
-	    if [ "$status" -ne 1 ] || ! grep -q 'MissingNtNativeApi' $(BUILD_DIR)/missing-import-audit.log; then \
+	    > $(BUILD_DIR)/missing-import-audit.log 2>&1 || status=$$?; \
+	    if [ "$$status" -ne 1 ] || \
+	       ! grep -Eq 'unresolved[[:space:]]+KERNEL32[.]dll[[:space:]]+MissingNtNativeApi$$' $(BUILD_DIR)/missing-import-audit.log || \
+	       ! grep -Eq '^1 direct imports, 0 with native equivalents, 1 unresolved' $(BUILD_DIR)/missing-import-audit.log; then \
 	        cat $(BUILD_DIR)/missing-import-audit.log; \
-	        echo "FAIL: auditor did not reject unsupported KERNEL32 import" >&2; exit 1; \
+	        echo "FAIL: auditor must return exactly 1 for the missing KERNEL32.dll!MissingNtNativeApi (not PE parse exit 2)" >&2; exit 1; \
 	    fi; \
 	    echo "PASS PE import preflight rejects a genuinely missing runtime API"
 
