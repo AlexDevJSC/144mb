@@ -548,7 +548,6 @@ nt_status nt_runtime_section_duplicate(uintptr_t source, uint32_t access,
     }
     *target = copy->number;
     pthread_mutex_unlock(&section_lock);
-    (void)access;
     return NT_STATUS_SUCCESS;
 }
 bool nt_runtime_section_query(const void *address,
