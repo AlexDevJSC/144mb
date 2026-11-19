@@ -119,6 +119,8 @@ jobs:
         run: make -j2 check-supervisor-context-rollback
       - name: Verify direct RAX readback, rollback and pidfd-only fatal recovery
         run: make -j2 check-supervisor-rax-rollback
+      - name: Verify two-group AMD64 INTEGER and FP rollback or pinned-child quarantine
+        run: make -j2 check-supervisor-mixed-rollback
       - name: Repeat supervisor control lifecycle with UBSan
         run: |
           make -j2 BUILD_DIR=build-supervisor-control-ubsan \

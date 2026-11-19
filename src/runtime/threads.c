@@ -49,6 +49,8 @@ struct guest_apc {
     guest_user_apc user;
     guest_native_apc native;
     uintptr_t first, second, third;
+    /* Nonzero only for explicitly cancellable NTNative special APCs. */
+    uint64_t cancellation_ticket;
 };
 struct guest_apc_queue {
     struct guest_apc *head, *tail;
@@ -124,6 +126,10 @@ static struct waitable waitables[WAITABLE_COUNT];
 static uintptr_t next_handle = 0x76000004;
 static struct waitable *current_process_state;
 static pthread_mutex_t wait_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Scoped process-local sequence: a ticket is an identifier, NEVER
+ * authority. Cancellation must still pass THREAD_SET_CONTEXT through
+ * the canonical HANDLE table. All reads and increments take wait_lock. */
+static uint64_t next_special_apc_ticket = 1;
 /* Serialize all asynchronous parent RPCs affecting the same NT object
  * without blocking unrelated guest waitables on wait_lock. */
 static pthread_mutex_t supervisor_gate_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -555,9 +561,9 @@ static void clear_apcs_locked(struct guest_apc_queue *queue)
 static nt_status queue_apc_common(uintptr_t handle,
                                 guest_user_apc user, guest_native_apc native,
                                 uintptr_t first, uintptr_t second, uintptr_t third,
-                                bool special)
+                                bool special, uint64_t *ticket_out)
 {
-    if ((user == NULL) == (native == NULL))
+    if ((user == NULL) == (native == NULL) || (ticket_out && !special))
         return NT_STATUS_INVALID_PARAMETER;
     pthread_mutex_lock(&wait_lock);
     struct guest_apc_queue *queue = NULL;
@@ -602,11 +608,20 @@ static nt_status queue_apc_common(uintptr_t handle,
             struct guest_apc *apc = calloc(1, sizeof(*apc));
             if (apc == NULL) {
                 status = NT_STATUS_NO_MEMORY;
+            } else if (ticket_out && next_special_apc_ticket == 0) {
+                /* The ticket sequence must never wrap and alias a past
+                 * cancel target even if an old HANDLE was recycled. */
+                free(apc);
+                status = NT_STATUS_NO_MEMORY;
             } else {
                 *apc = (struct guest_apc){
                     .user = user, .native = native,
                     .first = first, .second = second, .third = third
                 };
+                if (ticket_out) {
+                    apc->cancellation_ticket = next_special_apc_ticket++;
+                    *ticket_out = apc->cancellation_ticket;
+                }
                 if (queue->tail != NULL)
                     queue->tail->next = apc;
                 else
@@ -650,7 +665,7 @@ nt_status nt_runtime_queue_apc(uintptr_t handle, guest_user_apc user,
                                 guest_native_apc native,
                                 uintptr_t first, uintptr_t second, uintptr_t third)
 {
-    return queue_apc_common(handle, user, native, first, second, third, false);
+    return queue_apc_common(handle, user, native, first, second, third, false, NULL);
 }
 
 uint32_t NT_MS_ABI nt_QueueUserAPC(guest_user_apc callback, uintptr_t handle, uintptr_t data)
@@ -679,7 +694,7 @@ nt_status NT_MS_ABI nt_NtQueueApcThreadEx(uintptr_t thread, uintptr_t reserve,
 {
     if (reserve == 1)
         return queue_apc_common(thread, NULL, routine, (uintptr_t)context,
-                                (uintptr_t)first, (uintptr_t)second, true);
+                                (uintptr_t)first, (uintptr_t)second, true, NULL);
     if (reserve != 0)
         return NT_STATUS_NOT_SUPPORTED;
     return nt_NtQueueApcThread(thread, routine, context, first, second);
@@ -690,7 +705,7 @@ uint32_t NT_MS_ABI nt_QueueUserAPC2(guest_user_apc callback, uintptr_t handle,
 {
     if (flags == 1) {
         const nt_status status =
-            queue_apc_common(handle, callback, NULL, data, 0, 0, true);
+            queue_apc_common(handle, callback, NULL, data, 0, 0, true, NULL);
         if (status != NT_STATUS_SUCCESS)
             nt_SetLastError(nt_runtime_nt_error(status));
         return status == NT_STATUS_SUCCESS;
@@ -700,6 +715,82 @@ uint32_t NT_MS_ABI nt_QueueUserAPC2(guest_user_apc callback, uintptr_t handle,
         return 0;
     }
     return nt_QueueUserAPC(callback, handle, data);
+}
+
+/* Non-Windows NTNATIVE extension. Unlike Windows QueueUserAPC2, this
+ * scoped API returns an opaque per-process ticket for an APC still in
+ * the special queue. It does NOT offer cancellation of a callback that
+ * has been dequeued or is currently executing on the guest stack. The
+ * ticket is not a Linux TID, callback pointer, ptrace capability or
+ * substitute for THREAD_SET_CONTEXT rights. */
+nt_status NT_MS_ABI nt_NtNativeQueueSpecialApc(
+    uintptr_t thread, guest_native_apc callback, void *context,
+    void *first, void *second, uint64_t *ticket)
+{
+    if (ticket == NULL)
+        return NT_STATUS_INVALID_PARAMETER;
+    return queue_apc_common(thread, NULL, callback, (uintptr_t)context,
+                            (uintptr_t)first, (uintptr_t)second, true, ticket);
+}
+
+nt_status NT_MS_ABI nt_NtNativeCancelSpecialApc(uintptr_t thread,
+                                                uint64_t ticket)
+{
+    if (ticket == 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct guest_apc_queue *queue = NULL;
+    nt_status status = NT_STATUS_SUCCESS;
+    if (thread == UINTPTR_MAX - 1) {
+        if (nt_guest_thread_teb() == NULL)
+            status = NT_STATUS_NOT_SUPPORTED;
+        else
+            queue = current_special_apcs();
+    } else {
+        struct waitable *object = find_waitable(thread);
+        if (object == NULL)
+            status = NT_STATUS_INVALID_HANDLE;
+        else if (object->kind != THREAD)
+            status = NT_STATUS_OBJECT_TYPE_MISMATCH;
+        else if (wait_state(object)->owner_pid != (uint32_t)getpid())
+            status = NT_STATUS_NOT_SUPPORTED;
+        else if (!(object->access & THREAD_SET_CONTEXT))
+            status = NT_STATUS_ACCESS_DENIED;
+        else if (wait_state(object)->signaled || wait_state(object)->terminate_at_start)
+            status = NT_STATUS_THREAD_IS_TERMINATING;
+        else
+            queue = &wait_state(object)->special_apcs;
+    }
+    if (queue != NULL) {
+        struct guest_apc *previous = NULL;
+        struct guest_apc *current = queue->head;
+        while (current && current->cancellation_ticket != ticket) {
+            previous = current;
+            current = current->next;
+        }
+        if (current == NULL)
+            status = NT_STATUS_NOT_FOUND;
+        else {
+            if (previous)
+                previous->next = current->next;
+            else
+                queue->head = current->next;
+            if (queue->tail == current)
+                queue->tail = previous;
+            --queue->count;
+            if (queue->count == 0)
+                atomic_store_explicit(&queue->available, false,
+                                      memory_order_release);
+            free(current);
+            /* The signal dispatcher may have already captured a guest
+             * context. It must check the queue again under wait_lock,
+             * and will restore the snapshot without calling a canceled
+             * callback. A matching dequeued callback is NOT cancelable. */
+            pthread_cond_broadcast(&wait_changed);
+        }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return status;
 }
 
 nt_status NT_MS_ABI nt_NtAlertThread(uintptr_t handle)

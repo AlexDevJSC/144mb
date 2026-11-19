@@ -227,6 +227,119 @@ static nt_status set_legacy_fp_context(struct nt_supervisor_nt_thread *state,
     return NT_STATUS_NOT_SUPPORTED;
 }
 
+/* Atomic-to-the-guest transaction for TWO reviewed NT CONTEXT groups.
+ * The Linux kernel has no atomic multi-regset ptrace operation; keep the
+ * guest stopped, verify both reads and compensate both writes on error.
+ * A failed compensation quarantines the exact pidfd-pinned child.
+ * Never extend this path to RIP/RSP/segments/debug or variable XSTATE
+ * without a separate proof of stack, privilege and regset ownership. */
+static nt_status set_integer_fp_context(struct nt_supervisor_nt_thread *state,
+                                        const struct nt_context64 *context)
+{
+    uint32_t image_mxcsr = 0;
+    memcpy(&image_mxcsr, context->floating + 24, sizeof(image_mxcsr));
+    if (image_mxcsr != context->mxcsr ||
+        (image_mxcsr & ~UINT32_C(0x0000ffbf)) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    struct user_regs_struct original_regs = {0};
+    if (nt_supervisor_get_guest_context(state->tracer, &state->scope,
+                                        &original_regs))
+        return translate_ptrace_error(errno);
+    _Static_assert(sizeof(struct user_fpregs_struct) == 512,
+                   "AMD64 FXSAVE must be exactly 512 bytes");
+    _Alignas(16) struct user_fpregs_struct original_fp = {0};
+    struct iovec io = {.iov_base = &original_fp,
+                       .iov_len = sizeof(original_fp)};
+    if (ptrace(PTRACE_GETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRFPREG, &io) == -1)
+        return translate_ptrace_error(errno);
+    if (io.iov_len != sizeof(original_fp))
+        return NT_STATUS_NOT_SUPPORTED;
+
+    struct user_regs_struct updated_regs = original_regs;
+    updated_regs.rax = context->rax;
+    updated_regs.rbx = context->rbx;
+    updated_regs.rcx = context->rcx;
+    updated_regs.rdx = context->rdx;
+    updated_regs.rsi = context->rsi;
+    updated_regs.rdi = context->rdi;
+    updated_regs.r8 = context->r8;
+    updated_regs.r9 = context->r9;
+    updated_regs.r10 = context->r10;
+    updated_regs.r11 = context->r11;
+    updated_regs.r12 = context->r12;
+    updated_regs.r13 = context->r13;
+    updated_regs.r14 = context->r14;
+    updated_regs.r15 = context->r15;
+    _Alignas(16) struct user_fpregs_struct updated_fp = {0};
+    memcpy(&updated_fp, context->floating, sizeof(updated_fp));
+
+    struct user_regs_struct read_regs = {0};
+    _Alignas(16) struct user_fpregs_struct read_fp = {0};
+    state->unsafe_register_state = true;
+    io = (struct iovec){.iov_base = &updated_fp, .iov_len = sizeof(updated_fp)};
+    const bool wrote_fp =
+        ptrace(PTRACE_SETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRFPREG, &io) == 0 &&
+        io.iov_len == sizeof(updated_fp);
+    io = (struct iovec){.iov_base = &updated_regs,
+                        .iov_len = sizeof(updated_regs)};
+    const bool wrote_regs = wrote_fp &&
+        ptrace(PTRACE_SETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
+        io.iov_len == sizeof(updated_regs);
+    io = (struct iovec){.iov_base = &read_fp, .iov_len = sizeof(read_fp)};
+    const bool checked = wrote_regs &&
+        nt_supervisor_get_registers(state->tracer, &read_regs) == 0 &&
+        ptrace(PTRACE_GETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRFPREG, &io) == 0 &&
+        io.iov_len == sizeof(read_fp);
+#ifdef NT_SUP_TEST_FORCE_MIXED_VERIFY_MISMATCH
+    if (checked)
+        read_fp.mxcsr ^= UINT32_C(0x2000);
+#endif
+    if (checked &&
+        memcmp(&updated_regs, &read_regs, sizeof(read_regs)) == 0 &&
+        memcmp(&updated_fp, &read_fp, sizeof(read_fp)) == 0) {
+        state->unsafe_register_state = false;
+        return NT_STATUS_SUCCESS;
+    }
+
+    /* The first kernel write might have taken effect even if the next
+     * operation failed. Restore BOTH groups and verify the kernel owns
+     * the exact original image before any future resume/detach. */
+    io = (struct iovec){.iov_base = &original_fp,
+                        .iov_len = sizeof(original_fp)};
+    const bool restored_fp =
+        ptrace(PTRACE_SETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRFPREG, &io) == 0 &&
+        io.iov_len == sizeof(original_fp);
+    io = (struct iovec){.iov_base = &original_regs,
+                        .iov_len = sizeof(original_regs)};
+    const bool restored_regs =
+        ptrace(PTRACE_SETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
+        io.iov_len == sizeof(original_regs);
+    io = (struct iovec){.iov_base = &read_fp, .iov_len = sizeof(read_fp)};
+    const bool restoration_verified = restored_fp && restored_regs &&
+        nt_supervisor_get_registers(state->tracer, &read_regs) == 0 &&
+        ptrace(PTRACE_GETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRFPREG, &io) == 0 &&
+        io.iov_len == sizeof(read_fp) &&
+        memcmp(&original_regs, &read_regs, sizeof(read_regs)) == 0 &&
+        memcmp(&original_fp, &read_fp, sizeof(read_fp)) == 0;
+#ifdef NT_SUP_TEST_FORCE_MIXED_ROLLBACK_FAILURE
+    (void)restoration_verified;
+    state->tracer->compromised = true;
+#else
+    if (restoration_verified)
+        state->unsafe_register_state = false;
+    else
+        state->tracer->compromised = true;
+#endif
+    return NT_STATUS_NOT_SUPPORTED;
+}
+
 nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
                                        const struct nt_context64 *context)
 {
@@ -235,15 +348,16 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
         return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
-    /* No general CONTEXT_CONTROL/SEGMENTS rewrite: do not allow guest
-     * modifications to RIP/RSP/GS or the host unwind chain. Integer and
-     * legacy FPU are separate atomic transactions, with no mixed group
-     * writes until rollback of both groups can be proven. */
-    if (!valid_context(context, NT_SUP_CONTEXT_INTEGER) &&
-        !valid_context(context, NT_SUP_CONTEXT_FLOATING_POINT))
+    /* CONTROL / SEGMENTS / DEBUG / variable XSTATE remain unsupported.
+     * Allow exactly INTEGER, legacy FXSAVE, or their verified combination. */
+    if (!valid_context(context, NT_SUP_CONTEXT_INTEGER |
+                                NT_SUP_CONTEXT_FLOATING_POINT))
         return NT_STATUS_NOT_SUPPORTED;
     if (state->suspend_count == 0) return NT_STATUS_NOT_SUPPORTED;
-    if ((context->flags & NT_SUP_CONTEXT_FLOATING_POINT) != 0)
+    const uint32_t groups = context->flags & ~NT_SUP_CONTEXT_AMD64;
+    if (groups == (NT_SUP_CONTEXT_INTEGER | NT_SUP_CONTEXT_FLOATING_POINT))
+        return set_integer_fp_context(state, context);
+    if (groups == NT_SUP_CONTEXT_FLOATING_POINT)
         return set_legacy_fp_context(state, context);
     struct user_regs_struct original;
     if (nt_supervisor_get_guest_context(state->tracer, &state->scope, &original))

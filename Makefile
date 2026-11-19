@@ -474,6 +474,27 @@ check-supervisor-fp-rollback: $(BUILD_DIR)/supervisor-fp-rollback-ok-test $(BUIL
 	timeout 20s $(BUILD_DIR)/supervisor-fp-rollback-ok-test
 	timeout 20s $(BUILD_DIR)/supervisor-fp-rollback-fatal-test
 
+# Mixed INTEGER + legacy FXSAVE dual-regset transaction. The
+# verification mismatch is injected only in the supervisor test build:
+# successful compensation must restore BOTH original kernel regsets;
+# a forced rollback failure must quarantine and kill only the pidfd
+# anchored child, never PTRACE_CONT or DETACH an unknown guest.
+$(BUILD_DIR)/supervisor-mixed-rollback-ok-test: tests/supervisor_context_rollback_fault_test.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/supervisor/nt_supervisor_nt_bridge.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) \
+	    -DNT_SUP_TEST_FORCE_MIXED_VERIFY_MISMATCH=1 $(LDFLAGS) \
+	    $(filter %.c %.S,$^) -pthread -o "$@"
+
+$(BUILD_DIR)/supervisor-mixed-rollback-fatal-test: tests/supervisor_context_rollback_fault_test.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/supervisor/nt_supervisor_nt_bridge.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) \
+	    -DNT_SUP_TEST_FORCE_MIXED_VERIFY_MISMATCH=1 \
+	    -DNT_SUP_TEST_FORCE_MIXED_ROLLBACK_FAILURE=1 $(LDFLAGS) \
+	    $(filter %.c %.S,$^) -pthread -o "$@"
+
+.PHONY: check-supervisor-mixed-rollback
+check-supervisor-mixed-rollback: $(BUILD_DIR)/supervisor-mixed-rollback-ok-test $(BUILD_DIR)/supervisor-mixed-rollback-fatal-test
+	timeout 20s $(BUILD_DIR)/supervisor-mixed-rollback-ok-test
+	timeout 20s $(BUILD_DIR)/supervisor-mixed-rollback-fatal-test
+
 $(BUILD_DIR)/supervisor-control-ipc-test: tests/supervisor_control_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_supervisor_control_server.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
@@ -830,7 +851,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
-check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/broker-transport-failure-test $(BUILD_DIR)/supervisor-control-ipc-test $(BUILD_DIR)/supervisor-context-rollback-ok-test $(BUILD_DIR)/supervisor-context-rollback-fatal-test $(BUILD_DIR)/supervisor-fp-rollback-ok-test $(BUILD_DIR)/supervisor-fp-rollback-fatal-test $(BUILD_DIR)/supervisor-rax-rollback-ok-test $(BUILD_DIR)/supervisor-rax-rollback-fatal-test $(BUILD_DIR)/runtime-supervisor-win32-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/guest-boundary-import-test $(BUILD_DIR)/guest-boundary-cet-test $(BUILD_DIR)/inherited-file-test \
+check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/broker-transport-failure-test $(BUILD_DIR)/supervisor-control-ipc-test $(BUILD_DIR)/supervisor-context-rollback-ok-test $(BUILD_DIR)/supervisor-context-rollback-fatal-test $(BUILD_DIR)/supervisor-fp-rollback-ok-test $(BUILD_DIR)/supervisor-fp-rollback-fatal-test $(BUILD_DIR)/supervisor-mixed-rollback-ok-test $(BUILD_DIR)/supervisor-mixed-rollback-fatal-test $(BUILD_DIR)/supervisor-rax-rollback-ok-test $(BUILD_DIR)/supervisor-rax-rollback-fatal-test $(BUILD_DIR)/runtime-supervisor-win32-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/guest-boundary-import-test $(BUILD_DIR)/guest-boundary-cet-test $(BUILD_DIR)/inherited-file-test \
        $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/section-memory-test $(BUILD_DIR)/nt-object-broker $(BUILD_DIR)/object-broker-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator
@@ -858,6 +879,8 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-fatal-test
 	timeout 20s $(BUILD_DIR)/supervisor-fp-rollback-ok-test
 	timeout 20s $(BUILD_DIR)/supervisor-fp-rollback-fatal-test
+	timeout 20s $(BUILD_DIR)/supervisor-mixed-rollback-ok-test
+	timeout 20s $(BUILD_DIR)/supervisor-mixed-rollback-fatal-test
 	timeout 20s $(BUILD_DIR)/supervisor-rax-rollback-ok-test
 	timeout 20s $(BUILD_DIR)/supervisor-rax-rollback-fatal-test
 	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
@@ -1074,6 +1097,18 @@ $(BUILD_DIR)/fixture-nt_apc.a: tests/pe/nt_apc.def | $(BUILD_DIR)
 $(BUILD_DIR)/apc-fixture.exe: tests/pe/apc_fixture.c $(BUILD_DIR)/fixture-nt_apc.a | $(BUILD_DIR)
 	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-nt_apc.a -lkernel32
 
+# NTNATIVE project-specific cancellation extension: unlike Win32 APC
+# queueing, it returns a ticket that can revoke only a not-yet-dequeued
+# special APC. The test uses a real blocked PE worker and a read-only
+# THREAD HANDLE, not a synthetic queue or host pointer.
+$(BUILD_DIR)/cancel-special-apc-fixture.exe: tests/pe/cancel_special_apc_fixture.c $(BUILD_DIR)/fixture-nt_apc.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-nt_apc.a -lkernel32
+
+.PHONY: check-pe-cancel-special-apc
+check-pe-cancel-special-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/cancel-special-apc-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/cancel-special-apc-fixture.exe
+
 # A genuine PE busy loop contains no import, wait or yield in the
 # interval between entering the loop and handling a remote special APC.
 # Its kernel signal path is independent of the import-return checkpoint.
@@ -1095,7 +1130,7 @@ check-pe-async-special-apc-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-seh-fixture.exe
 
-check-pe-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe $(BUILD_DIR)/special-apc-seh-fixture.exe
+check-pe-apc: check-pe-cancel-special-apc $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe $(BUILD_DIR)/special-apc-seh-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
