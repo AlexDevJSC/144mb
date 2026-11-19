@@ -24,8 +24,9 @@ def main():
         assert rows["rename_preserves_content"] is True
         assert rows["readonly_attribute_visible"] is True
         assert type(rows["short_path_generated"]) is bool
-        assert rows["hardlink_created"] is None
-        print("PASS NT144 live Win32 W-API differential probe (hardlink unimplemented)")
+        assert rows["hardlink_created"] is True, rows
+        assert rows["hardlink_readable"] is True, rows
+        print("PASS NT144 live Win32 W-API differential probe (hardlink shared inode)")
 
 
 if __name__ == "__main__":

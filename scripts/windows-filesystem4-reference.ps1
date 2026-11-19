@@ -61,8 +61,11 @@ try {
                              [Convert]::ToBase64String($content))
     $link = Join-Path $folder 'hardlinkFileSystem4Reference.txt'
     $hardlinkCreated = [FS4Native]::CreateHardLinkW($link, $target, [IntPtr]::Zero)
+    # A matching length is not evidence of matching contents. Compare
+    # every byte in the reference, not only the output file's size.
     $hardlinkContentsSame = $hardlinkCreated -and
-        ([IO.File]::ReadAllBytes($link).Length -eq $content.Length)
+        ([Convert]::ToBase64String([IO.File]::ReadAllBytes($link)) -eq
+         [Convert]::ToBase64String($content))
     [IO.File]::SetAttributes($target, [IO.FileAttributes]::ReadOnly)
     $readOnlyReported = (([IO.File]::GetAttributes($target) -band
                           [IO.FileAttributes]::ReadOnly) -ne 0)

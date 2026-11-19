@@ -178,9 +178,30 @@ static int NT_MS_ABI test_entry(void)
     memcpy(&saved_mxcsr, fp.floating + 24, sizeof(saved_mxcsr));
     if (saved_mxcsr != fp.mxcsr)
         return 33;
+    /* The guest is ptrace-stopped with a parent-approved grant. Modify
+     * ONLY the MXCSR rounding-mode bits in the kernel FP regset, read
+     * them back from the same TID, then restore before resuming. */
+    _Alignas(16) struct nt_context64 changed_fp = fp;
+    changed_fp.flags = 0x100008u;
+    changed_fp.mxcsr ^= UINT32_C(0x2000);
+    memcpy(changed_fp.floating + 24, &changed_fp.mxcsr, sizeof(changed_fp.mxcsr));
+    if (nt_NtSetContextThread(thread, &changed_fp) != NT_STATUS_SUCCESS)
+        return 34;
+    _Alignas(16) struct nt_context64 verified_fp = {0};
+    verified_fp.flags = 0x100008u;
+    if (nt_NtGetContextThread(thread, &verified_fp) != NT_STATUS_SUCCESS ||
+        verified_fp.mxcsr != changed_fp.mxcsr)
+        return 41;
     fp.flags = 0x100008u;
-    if (nt_NtSetContextThread(thread, &fp) != NT_STATUS_NOT_SUPPORTED)
-        return 34; /* read-only x87/XMM; no fabricated Set success */
+    if (nt_NtSetContextThread(thread, &fp) != NT_STATUS_SUCCESS)
+        return 42;
+    verified_fp.flags = 0x100008u;
+    if (nt_NtGetContextThread(thread, &verified_fp) != NT_STATUS_SUCCESS ||
+        verified_fp.mxcsr != fp.mxcsr)
+        return 43;
+    changed_fp.mxcsr ^= UINT32_C(0x2000); /* image now inconsistent */
+    if (nt_NtSetContextThread(thread, &changed_fp) != NT_STATUS_INVALID_PARAMETER)
+        return 44;
     _Alignas(16) struct nt_context64 invalid = {0};
     invalid.flags = 0x100010u; /* debug registers not yet supported */
     if (nt_NtGetContextThread(thread, &invalid) != NT_STATUS_INVALID_PARAMETER)
@@ -223,8 +244,8 @@ int main(void)
         }
     }
     puts("PASS real runtime Win32 entrypoints: SuspendThread nested counts, "
-         "Get/SetThreadContext AMD64 integer readback, ResumeThread, "
-         "HANDLE rights, NTSTATUS API parity, HOST fail-close, "
+         "Get/SetThreadContext AMD64 integer and legacy FP kernel readback, "
+         "ResumeThread, HANDLE rights, NTSTATUS API parity, HOST fail-close, "
          "authenticated direct-parent IPC, two sessions");
     return 0;
 }
