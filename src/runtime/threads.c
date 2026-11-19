@@ -565,7 +565,6 @@ static nt_status queue_apc_common(uintptr_t handle,
 {
     if ((user == NULL) == (native == NULL) || (ticket_out && !special))
         return NT_STATUS_INVALID_PARAMETER;
-        return NT_STATUS_INVALID_PARAMETER;
     pthread_mutex_lock(&wait_lock);
     struct guest_apc_queue *queue = NULL;
     nt_status status = NT_STATUS_SUCCESS;
