@@ -57,14 +57,14 @@ class FunctionalSchedulerTests(unittest.TestCase):
                          "NOT_DEMONSTRATED")
 
     def test_native_reversible_priority_and_affinity_observations(self):
-        native = (
-            "SCHEMA=ntnative.stage4.scheduler.v1\\n"
-            "PLATFORM=WINDOWS_NATIVE\\n"
-            "THREAD_PRIORITY_ROUNDTRIP=PASS\\n"
-            "PROCESS_PRIORITY_CLASS_ROUNDTRIP=PASS\\n"
-            "PROCESS_AFFINITY_ROUNDTRIP=SKIP\\n"
-            "NT_SCHEDULER_POLICY_PARITY=UNVERIFIED\\n"
-        ).replace("\\\\n", "\\n")
+        native = "\n".join([
+            "SCHEMA=ntnative.stage4.scheduler.v1",
+            "PLATFORM=WINDOWS_NATIVE",
+            "THREAD_PRIORITY_ROUNDTRIP=PASS",
+            "PROCESS_PRIORITY_CLASS_ROUNDTRIP=PASS",
+            "PROCESS_AFFINITY_ROUNDTRIP=SKIP",
+            "NT_SCHEDULER_POLICY_PARITY=UNVERIFIED",
+        ]) + "\n"
         result = module.compare(
             report("WINDOWS_NATIVE"), report("LINUX_GUEST_PE"), native
         )
