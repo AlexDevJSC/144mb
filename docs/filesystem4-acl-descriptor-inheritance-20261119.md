@@ -30,6 +30,38 @@ tener una identidad NT confiable y una política que cubra PE y FUSE.
   Las nuevas APIs no admiten un SID declarado por el PE como identidad
   autenticada.
 
+## Persistencia interna de descriptores (sin exposición a invitados)
+
+Se añade `src/runtime/nt_acl_storage.c/.h` como mecanismo **interno**
+de guardado por inode fijado, todavía no conectado a `SetFileSecurityW`.
+
+- Formato único `user.ntnative.security.sd`: cabecera `NTSD0001`,
+  longitud y versión, identidad `(st_dev,st_ino)`, hash FNV-1a para
+  detectar corrupción accidental y descriptor de hasta 32768 bytes.
+  Nunca interpretar ese hash como firma o autorización criptográfica.
+- Lectura fail-closed: verifica nombre del atributo, tamaño, dev/ino,
+  checksum, SID/ACL y categorías ACE admitidas. Distingue ausencia,
+  presencia, corrupción y buffer insuficiente. Un registro corrupto
+  no puede sobreescribirse con este helper sin una operación de
+  recuperación administrada por separado.
+- Escritura *trusted only*: una operación `fsetxattr` de valor completo
+  sobre FD regular/directorio, seguida por `fsync` y verificación de
+  lectura. **El llamador deberá adquirir y retener WAL/lease, autenticar
+  token y verificar WRITE_DAC antes de llamar; este helper no realiza
+  esos pasos ni se exporta al PE.** Una pérdida eléctrica o un error
+  `fsync` puede dejar un valor observable; no hay rollback general.
+- El atributo pertenece al namespace `user.ntnative.*`, que la
+  vista FUSE en modo servicio ya oculta y deniega modificar. El
+  backing físico permanece UID separado con DAC 0700. Esto no
+  constituye autorización de lectura/escritura según DACL.
+- `tests/nt_acl_storage_test.c` comprueba xattr real, fsync/reopen,
+  rechazo de inode sustituido, checksum alterado, ACE no admitida y
+  negativa de reparación silenciosa.
+
+```sh
+make -j2 check-nt-acl-storage
+```
+
 ## Bloqueos para implementar SetFileSecurity/DACL completo
 
 El contrato existente de FileSystem4 ya tiene operaciones FUSE ordinarias
