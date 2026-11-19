@@ -29,7 +29,10 @@ enum { FS4_MAGIC=0x34465348u, FS4_VERSION=3, FS4_MAX=2048,
        FS4_ATTR_GET=12, FS4_ATTR_SET=13, FS4_FIND_FIRST=14,
        FS4_FIND_NEXT=15, FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
        FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
-       FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23 };
+       FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23,
+       /* Opcode 24 belongs to the independent hardlink change. */
+       FS4_SECURITY_PATH=25, FS4_NATIVE_SECURITY=26, FS4_TIME_SET=27,
+       FS4_INFO_GET=28, FS4_INFO_SET=29 };
 struct request {
     uint32_t magic;
     uint16_t version, op;
@@ -437,6 +440,164 @@ int32_t nt_fs4_remote_io(uintptr_t handle,void *data,uint32_t length,
             break;
     }
     *done=total;
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+/* No guest-owned pointers enter the wire protocol; all data is copied
+ * to/from bounded local arrays after authentication and length checks. */
+int32_t nt_fs4_remote_get_security(const char *path,uint32_t information,
+                                   void *descriptor,uint32_t length,
+                                   uint32_t *needed)
+{
+    if(!needed) {nt_SetLastError(NT_ERROR_INVALID_PARAMETER);return 0;}
+    size_t n=0;
+    if(!checked_path(path,&n)) return 0;
+    struct reply reply={0};
+    unsigned char local[128]={0};
+    const uint32_t limit=descriptor ?
+        (length<sizeof(local) ? length : (uint32_t)sizeof(local)) : 0u;
+    pthread_mutex_lock(&guard);
+    bool ok=request(FS4_SECURITY_PATH,0,-1,information,0,limit,0,
+                    path,(uint32_t)n,(uint32_t)n,&reply,local,sizeof(local));
+    if(reply.magic==FS4_MAGIC && reply.version==FS4_VERSION &&
+       reply.op==FS4_SECURITY_PATH && reply.value<=UINT32_MAX)
+        *needed=(uint32_t)reply.value;
+    if(ok) {
+        if(!descriptor || reply.length==0 || reply.length>length ||
+           reply.length!=reply.value) {
+            poisoned=true;
+            nt_SetLastError(NT_ERROR_BROKEN_PIPE);
+            ok=false;
+        } else
+            memcpy(descriptor,local,reply.length);
+    }
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+nt_status nt_fs4_remote_native_security(uintptr_t handle,uint32_t information,
+                                        void *descriptor,uint32_t length,
+                                        uint32_t *needed)
+{
+    if(!needed || !descriptor) return NT_STATUS_INVALID_PARAMETER;
+    const uint32_t bound=length>128 ? 128 : length;
+    unsigned char local[128]={0};
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    if(!entry || entry->search) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        pthread_mutex_unlock(&guard);
+        return NT_STATUS_INVALID_HANDLE;
+    }
+    struct reply reply={0};
+    const bool ok=request(FS4_NATIVE_SECURITY,entry->cap,-1,information,
+                          0,0,0,NULL,0,bound,&reply,local,sizeof(local));
+    nt_status status=NT_STATUS_UNSUCCESSFUL;
+    if(ok) {
+        status=(nt_status)(uint32_t)reply.value;
+        if(reply.handle>UINT32_MAX ||
+           (status==NT_STATUS_SUCCESS &&
+            (reply.length!=reply.handle || reply.length>length))) {
+            poisoned=true;
+            nt_SetLastError(NT_ERROR_BROKEN_PIPE);
+            status=NT_STATUS_UNSUCCESSFUL;
+        } else {
+            *needed=(uint32_t)reply.handle;
+            if(status==NT_STATUS_SUCCESS)
+                memcpy(descriptor,local,reply.length);
+        }
+    }
+    pthread_mutex_unlock(&guard);
+    return status;
+}
+
+int32_t nt_fs4_remote_get_time(uintptr_t handle,
+                               struct nt_file_time *created,
+                               struct nt_file_time *accessed,
+                               struct nt_file_time *written)
+{
+    struct nt_handle_file_info info={0};
+    if(!nt_fs4_remote_handle_info(handle,&info))
+        return 0;
+    if(created) *created=info.created;
+    if(accessed) *accessed=info.accessed;
+    if(written) *written=info.written;
+    return 1;
+}
+
+int32_t nt_fs4_remote_set_time(uintptr_t handle,
+                               const struct nt_file_time *created,
+                               const struct nt_file_time *accessed,
+                               const struct nt_file_time *written)
+{
+    if(!created && !accessed && !written)
+        return 1;
+    _Static_assert(sizeof(struct nt_file_time)==8,"FS4 FILETIME ABI");
+    struct nt_file_time fields[3]={{0},{0},{0}};
+    uint32_t mask=0;
+    if(created) {fields[0]=*created;mask|=1u;}
+    if(accessed) {fields[1]=*accessed;mask|=2u;}
+    if(written) {fields[2]=*written;mask|=4u;}
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    struct reply reply={0};
+    bool ok=entry && !entry->search &&
+        request(FS4_TIME_SET,entry->cap,-1,0,0,0,mask,
+                fields,sizeof(fields),sizeof(fields),&reply,NULL,0);
+    if(!entry || entry->search)
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+int32_t nt_fs4_remote_info_get(uintptr_t handle,int32_t kind,
+                               void *data,uint32_t size)
+{
+    const uint32_t required=kind==0 ? 40u : kind==1 ? 24u :
+                            kind==9 ? 8u : 0u;
+    if(!required) {nt_SetLastError(NT_ERROR_NOT_SUPPORTED);return 0;}
+    if(!data || size<required) {
+        nt_SetLastError(data ? NT_ERROR_INSUFFICIENT_BUFFER :
+                                NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    unsigned char local[40]={0};
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    struct reply reply={0};
+    bool ok=entry && !entry->search &&
+        request(FS4_INFO_GET,entry->cap,-1,(uint32_t)kind,0,0,0,
+                NULL,0,required,&reply,local,sizeof(local));
+    if(!entry || entry->search)
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+    if(ok && reply.length!=required) {
+        poisoned=true;
+        nt_SetLastError(NT_ERROR_BROKEN_PIPE);
+        ok=false;
+    }
+    if(ok) memcpy(data,local,required);
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+int32_t nt_fs4_remote_info_set(uintptr_t handle,int32_t kind,
+                               const void *data,uint32_t size)
+{
+    if(kind!=0) {nt_SetLastError(NT_ERROR_NOT_SUPPORTED);return 0;}
+    if(!data || size<40) {
+        nt_SetLastError(data ? NT_ERROR_INSUFFICIENT_BUFFER :
+                                NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    struct reply reply={0};
+    bool ok=entry && !entry->search &&
+        request(FS4_INFO_SET,entry->cap,-1,0,0,0,0,
+                data,40,40,&reply,NULL,0);
+    if(!entry || entry->search)
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
     pthread_mutex_unlock(&guard);
     return ok;
 }
