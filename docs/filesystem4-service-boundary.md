@@ -98,11 +98,12 @@ mata trabajadores al detenerse. Los binarios confiables exigen propiedad
 root y no ser escribibles por clientes.
 
 **Desactivado por defecto:** requiere la opción explícita de administrador
-`NT_STORAGE_EXPERIMENTAL_HANDLES=1`. El PE aún **no utiliza** ese protocolo:
-ni el supervisor `--service-socket --pe` ni Bubblewrap levantan un PE usando
-esta vía. Integrar el adaptador PE, ampliar funciones (atributos, directory
-enumeration, reparse y ACL), probar 2/4 procesos y Fedora SELinux Enforcing
-son requisitos previos para habilitar cualquier modo PE generalista.
+`NT_STORAGE_EXPERIMENTAL_HANDLES=1`. Existe un **adaptador PE experimental**
+mediante `nt-fs-supervisor --service-socket ... --pe --experimental-pe-ipc`
+y `src/runtime/fs4_remote.c` para un subconjunto de llamadas; no equivale
+a habilitar ejecución PE generalista. Faltan cobertura de atributos,
+reparse y ACL, semánticas de hardlink, pruebas de 2/4 procesos y aceptación
+física Fedora con SELinux Enforcing antes de generalizar el modo.
 
 ## Lanzador PE experimental por IPC
 
