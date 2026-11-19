@@ -18,6 +18,11 @@ class ManagedFUSEACL(unittest.TestCase):
         if os.geteuid() == 0:
             self.skipTest("the trusted service ACL fixture refuses root")
         with tempfile.TemporaryDirectory(prefix="fs4-managed-fuse-acl-") as root:
+            # Simulate SIGKILL after mkdir(stage) but before its publication.
+            # Only an EMPTY stage with the reserved prefix may be recovered.
+            stage = Path(root) / ":ntnative-acl-stage"
+            stage.mkdir(mode=0o700)
+            (stage / "dir-deadbeef").mkdir(mode=0o700)
             result = subprocess.run(
                 [BINARY, "--selftest-acl", root],
                 capture_output=True, text=True, timeout=30, check=False)
@@ -25,7 +30,8 @@ class ManagedFUSEACL(unittest.TestCase):
                              f"stdout={result.stdout}\nstderr={result.stderr}")
             if "SKIP offline managed FUSE ACL" in result.stdout:
                 self.skipTest(result.stdout.strip())
-            self.assertIn("PASS offline FUSE managed DACL inherited", result.stdout)
+            self.assertIn("PASS offline FUSE managed file+directory DACL inherited", result.stdout)
+            self.assertEqual(list(stage.iterdir()), [], "orphaned private stage not recovered")
             self.assertIn("(mount not tested)", result.stdout)
 
 
