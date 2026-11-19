@@ -2847,6 +2847,8 @@ static nt_status duplicate_file_handle(uintptr_t source, uint32_t access,
             } else {
                 *copy = *original;
                 copy->fd = fd;
+                if (!(options & 2u))
+                    copy->access = access;
                 copy->share_lease_fd = lease;
                 copy->path = path;
                 copy->handle = next_handle++;
