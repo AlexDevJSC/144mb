@@ -108,8 +108,8 @@ class FileSystem4Handles(unittest.TestCase):
 
     def test_failed_handshake_does_not_leak_parent_fds(self):
         # A deterministic negative handshake: /usr/bin/false exits without
-        # HELLO. An absent backing root is NOT a reliable startup failure,
-        # because the runtime may wait for recovery instead.
+        # HELLO. Closing the parent's server endpoint must expose EOF, rather
+        # than hanging until the socket timeout.
         if not Path("/proc/self/fd").is_dir():
             self.skipTest("Linux /proc/self/fd required for FD accounting")
         with tempfile.TemporaryDirectory(prefix="fs4-broker-badhello-") as temp:
