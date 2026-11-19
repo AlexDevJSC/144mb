@@ -10,6 +10,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <signal.h>
 #include <unistd.h>
 
 static _Thread_local bool inside_guest;
