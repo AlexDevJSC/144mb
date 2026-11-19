@@ -70,6 +70,6 @@ if ! grep -q 'PASS PE child launched inside the same Linux sandbox' "$log"; then
     exit 3
 fi
 
-echo "PASS: all currently implemented stage-4 acceptance suites ran on this Fedora host."
-echo "LIMITATION: passing this suite does NOT establish 100% Windows NT process/thread compatibility."
+echo "PASS: implemented stage-4 runtime/PE/UBSan and isolated child tests ran with SELinux Enforcing on this nonvirtualized Fedora host."
+echo "LIMITATION: this does NOT establish 100% Windows NT process/thread compatibility, privileged priority transitions or real multicpu-group scheduling."
 echo "Remaining contracts are listed in docs/nt-stage4-process-threads.md."
