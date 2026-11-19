@@ -5219,8 +5219,10 @@ int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information
                                       void *descriptor, uint32_t size, uint32_t *needed)
 {
     if (nt_fs4_remote_mode()) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
+        char remote[PATH_MAX];
+        return wide_path(name,remote) &&
+               nt_fs4_remote_get_security(remote,information,
+                                          descriptor,size,needed);
     }
     char narrow[PATH_MAX], path[PATH_MAX];
     if (!wide_path(name, narrow))
@@ -5254,6 +5256,15 @@ nt_status NT_MS_ABI nt_NtQuerySecurityObject(uintptr_t handle, uint32_t informat
 {
     if (!needed)
         return NT_STATUS_ACCESS_VIOLATION;
+    if (nt_fs4_remote_handle(handle)) {
+        if (!descriptor)
+            return NT_STATUS_ACCESS_VIOLATION;
+        const uint32_t saved=nt_GetLastError();
+        const nt_status status=nt_fs4_remote_native_security(
+            handle,information,descriptor,length,needed);
+        nt_SetLastError(saved); /* Native queries do not set LastError. */
+        return status;
+    }
     const int fd = duplicate_handle(handle, FILE_READ);
     if (fd < 0)
         return nt_file_error(path_error(errno, false));
@@ -7514,10 +7525,8 @@ _Static_assert(sizeof(struct standard_file_info) == 24, "FILE_STANDARD_INFO layo
 
 int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind, void *info, uint32_t size)
 {
-    if (nt_fs4_remote_handle(handle)) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
-    }
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_info_get(handle,kind,info,size);
     if (info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -7620,6 +7629,8 @@ int32_t NT_MS_ABI nt_GetFileInformationByHandle(uintptr_t handle,
 int32_t NT_MS_ABI nt_GetFileTime(uintptr_t handle, struct nt_file_time *created,
                                 struct nt_file_time *accessed, struct nt_file_time *written)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_get_time(handle,created,accessed,written);
     const int fd = duplicate_handle(handle, 0);
     if (fd < 0)
         return file_result(fd, false);
@@ -7756,6 +7767,8 @@ int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, 
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
+    if (kind == 0 && nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_info_set(handle,kind,info,size);
     if (kind == 4) {
         if (size < 1) {
             nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
