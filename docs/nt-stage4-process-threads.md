@@ -3,6 +3,38 @@
 Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-order.md):
 **4 → 1 → 5 → 2 → 3 → 6 → 7** (nueva instrucción expresa del 14-11-2026; el orden original era 4 → 5 → 2 → 3 → 1 → 6 → 7). **Esta fase permanece activa** y el cargador PE/DLL no empieza hasta que se satisfagan los criterios de salida.
 
+## Avance de contextos AMD64: FXSAVE legado verificable (19-11-2026)
+
+La ruta real de `GetThreadContext` bajo el supervisor ya leía
+`NT_PRFPREG` de un hilo PE detenido, con imagen FXSAVE de 512 bytes.
+Esta entrega habilita una **transacción acotada** para
+`SetThreadContext`/`NtSetContextThread` con
+`CONTEXT_AMD64 | CONTEXT_FLOATING_POINT` **únicamente** en un hilo
+propio autenticado y detenido por el supervisor:
+
+- El `mxcsr` explícito debe coincidir exactamente con los cuatro bytes
+  de `FltSave` en offset 24; bits reservados se rechazan sin mutación.
+- `PTRACE_GETREGSET(NT_PRFPREG)` guarda una copia kernel original; el
+  `SETREGSET` real se verifica con un segundo `GETREGSET` completo.
+- Ante escritura incierta, el supervisor restaura la copia original y
+  exige nuevo readback completo. Si no es demostrable, **prohíbe
+  reanudación y detach**, marcando el hijo como comprometido para
+  terminación por `pidfd`. No se finge una escritura completada.
+- Tests: `runtime-supervisor-win32-test` cambia el modo de redondeo
+  MXCSR de un hilo realmente detenido, lo lee y restaura antes de
+  reanudarlo; `supervisor-fp-rollback-ok/fatal-test` inyectan fallos
+  únicamente en el binario de prueba, para acreditar rollback y
+  cuarentena de la sesión.
+
+Este avance **NO** añade CONTEXT_CONTROL/SEGMENTS escribibles, cambio
+de RIP/RSP/GS, registros DEBUG, AVX/YMM extendido, XSAVE completo,
+cambios de grupos combinados en una sola transacción, ni toma de
+contexto de pthread ajenos o de host import activo. El host conserva
+los límites de aislamiento existentes; no implica una interfaz NT
+universal ni validación física de Fedora. **Madurez componente 4:
+96 % → 96 % (+0 puntos)** hasta pruebas positivas y revisión de CI;
+si las pruebas pasan será una ampliación acotada, sin cerrar fase 4.
+
 ## Continuación 18-11-2026: revocación durante RPC del broker (#178)
 
 La entrega posterior a la [PR #177](https://github.com/AlexDevJSC/144mb/pull/177)

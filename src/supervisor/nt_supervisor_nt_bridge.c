@@ -97,7 +97,8 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
     _Alignas(16) struct nt_context64 snapshot = {0};
     snapshot.flags = flags;
     /* Windows CONTEXT x64 ABI fields, populated only for requested groups.
-     * Neither debug registers nor FP/XSTATE are promised here. */
+     * DEBUG and extended XSTATE are not promised; the 512-byte legacy FP
+     * group has its own separately verified STOPPED-only write path. */
     if (flags & NT_SUP_CONTEXT_CONTROL) {
         snapshot.rip = regs.rip;
         snapshot.rsp = regs.rsp;
@@ -131,8 +132,8 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
     if (flags & NT_SUP_CONTEXT_FLOATING_POINT) {
         /* Linux AMD64 NT_PRFPREG is a 512-byte FXSAVE-compatible image
          * (x87 + XMM0..XMM15 + MXCSR). CONTEXT.FltSave has the same
-         * packed 512-byte storage. This is READ ONLY: writes, AVX/YMM
-         * and extended XSTATE are deliberately not claimed. */
+         * packed 512-byte storage. Legacy FP write transactions use
+         * PTRACE_SETREGSET separately; AVX/YMM and XSTATE are not claimed. */
         _Static_assert(sizeof(struct user_fpregs_struct) == 512,
                        "AMD64 NT_PRFPREG FXSAVE layout");
         _Static_assert(sizeof(snapshot.floating) == 512,
@@ -151,6 +152,81 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
     return NT_STATUS_SUCCESS;
 }
 
+/* The legacy Windows CONTEXT_FLOATING_POINT group (x87/XMM0..15)
+ * corresponds to Linux NT_PRFPREG, not to AVX/XSAVE or a guest FPU
+ * context owned by the host. Permit writes ONLY on an authenticated,
+ * kernel-stopped PE thread, with an exact readback/rollback transaction.
+ * Never update control registers, RIP/RSP/GS or extended XSTATE here. */
+static nt_status set_legacy_fp_context(struct nt_supervisor_nt_thread *state,
+                                      const struct nt_context64 *context)
+{
+    _Static_assert(sizeof(struct user_fpregs_struct) == 512,
+                   "Linux AMD64 NT_PRFPREG layout");
+    _Static_assert(sizeof(context->floating) == 512,
+                   "Windows AMD64 FltSave layout");
+    uint32_t fp_mxcsr = 0;
+    memcpy(&fp_mxcsr, context->floating + 24, sizeof(fp_mxcsr));
+    if (fp_mxcsr != context->mxcsr ||
+        (fp_mxcsr & ~UINT32_C(0x0000ffbf)) != 0)
+        return NT_STATUS_INVALID_PARAMETER;
+
+    _Alignas(16) struct user_fpregs_struct original = {0};
+    struct iovec io = {.iov_base = &original, .iov_len = sizeof(original)};
+    if (ptrace(PTRACE_GETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRFPREG, &io) == -1)
+        return translate_ptrace_error(errno);
+    if (io.iov_len != sizeof(original))
+        return NT_STATUS_NOT_SUPPORTED;
+
+    _Alignas(16) struct user_fpregs_struct changed = {0};
+    memcpy(&changed, context->floating, sizeof(changed));
+    _Alignas(16) struct user_fpregs_struct verified = {0};
+
+    /* From this point a partial kernel write is possible. Keep the
+     * tracee stopped and quarantined until an exact state is observed. */
+    state->unsafe_register_state = true;
+    io = (struct iovec){.iov_base = &changed, .iov_len = sizeof(changed)};
+    const bool wrote = ptrace(PTRACE_SETREGSET, state->tracer->tid,
+                             (void *)(uintptr_t)NT_PRFPREG, &io) == 0 &&
+                       io.iov_len == sizeof(changed);
+    io = (struct iovec){.iov_base = &verified, .iov_len = sizeof(verified)};
+    const bool readback = wrote &&
+        ptrace(PTRACE_GETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRFPREG, &io) == 0 &&
+        io.iov_len == sizeof(verified);
+#ifdef NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH
+    extern _Atomic uint32_t nt_sup_test_fp_verify_corrupted;
+    if (readback) {
+        verified.mxcsr ^= UINT32_C(0x2000);
+        atomic_fetch_add_explicit(&nt_sup_test_fp_verify_corrupted, 1,
+                                  memory_order_relaxed);
+    }
+#endif
+    if (readback && memcmp(&verified, &changed, sizeof(changed)) == 0) {
+        state->unsafe_register_state = false;
+        return NT_STATUS_SUCCESS;
+    }
+
+    /* An unverified write is not a Windows success. Even rollback must
+     * be verified against the original whole 512-byte kernel image. */
+#ifndef NT_SUP_TEST_FORCE_FP_ROLLBACK_FAILURE
+    io = (struct iovec){.iov_base = &original, .iov_len = sizeof(original)};
+    if (ptrace(PTRACE_SETREGSET, state->tracer->tid,
+               (void *)(uintptr_t)NT_PRFPREG, &io) == 0 &&
+        io.iov_len == sizeof(original)) {
+        io = (struct iovec){.iov_base = &verified, .iov_len = sizeof(verified)};
+        if (ptrace(PTRACE_GETREGSET, state->tracer->tid,
+                   (void *)(uintptr_t)NT_PRFPREG, &io) == 0 &&
+            io.iov_len == sizeof(verified) &&
+            memcmp(&verified, &original, sizeof(original)) == 0)
+            state->unsafe_register_state = false;
+    }
+#endif
+    if (state->unsafe_register_state)
+        state->tracer->compromised = true;
+    return NT_STATUS_NOT_SUPPORTED;
+}
+
 nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
                                        const struct nt_context64 *context)
 {
@@ -159,13 +235,16 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
         return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
-    /* A general CONTEXT_CONTROL/SEGMENTS/FP rewrite is not safe yet:
-     * never allow the guest to change RIP/RSP/GS or the host unwind chain.
-     * This first contract supports only the integer group, excluding
-     * RBP/RSP which must remain unchanged by design. */
-    if (!valid_context(context, NT_SUP_CONTEXT_INTEGER))
+    /* No general CONTEXT_CONTROL/SEGMENTS rewrite: do not allow guest
+     * modifications to RIP/RSP/GS or the host unwind chain. Integer and
+     * legacy FPU are separate atomic transactions, with no mixed group
+     * writes until rollback of both groups can be proven. */
+    if (!valid_context(context, NT_SUP_CONTEXT_INTEGER) &&
+        !valid_context(context, NT_SUP_CONTEXT_FLOATING_POINT))
         return NT_STATUS_NOT_SUPPORTED;
     if (state->suspend_count == 0) return NT_STATUS_NOT_SUPPORTED;
+    if ((context->flags & NT_SUP_CONTEXT_FLOATING_POINT) != 0)
+        return set_legacy_fp_context(state, context);
     struct user_regs_struct original;
     if (nt_supervisor_get_guest_context(state->tracer, &state->scope, &original))
         return translate_ptrace_error(errno);

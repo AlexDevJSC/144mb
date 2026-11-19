@@ -72,16 +72,29 @@ int import_fixture_entry(void)
         ctx.Rip == 0 || ctx.Rsp == 0 ||
         ctx.ContextFlags != (CONTEXT_CONTROL | CONTEXT_INTEGER))
         return 14;
-    /* The real Windows PE32+ import reads the Linux NT_PRFPREG/FltSave
-     * state. Its matching write path is intentionally not authorised. */
+    /* The real PE import now exercises the separately authorised legacy
+     * FXSAVE write, kernel readback and restoration on a STOPPED worker.
+     * It cannot write RIP/RSP/GS or any extended XSTATE group. */
     CONTEXT floating = {0};
     floating.ContextFlags = CONTEXT_FLOATING_POINT;
     if (NtGetContextThread(thread, &floating) != 0 ||
         floating.MxCsr == 0 ||
         floating.ContextFlags != CONTEXT_FLOATING_POINT)
         return 28;
-    if (NtSetContextThread(thread, &floating) != (LONG)0xc00000bbu)
+    const DWORD old_mxcsr = floating.MxCsr;
+    floating.MxCsr ^= 0x2000u;
+    floating.FltSave.MxCsr = floating.MxCsr;
+    if (NtSetContextThread(thread, &floating) != 0)
         return 29;
+    CONTEXT actual_fp = {0};
+    actual_fp.ContextFlags = CONTEXT_FLOATING_POINT;
+    if (NtGetContextThread(thread, &actual_fp) != 0 ||
+        actual_fp.MxCsr != floating.MxCsr)
+        return 35;
+    floating.MxCsr = old_mxcsr;
+    floating.FltSave.MxCsr = old_mxcsr;
+    if (NtSetContextThread(thread, &floating) != 0)
+        return 36;
     /* Verified integer update; original value restored while still
      * suspended, so the guest continues with original observable state. */
     CONTEXT integer = ctx;

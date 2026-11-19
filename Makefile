@@ -444,6 +444,24 @@ check-supervisor-context-rollback: $(BUILD_DIR)/supervisor-context-rollback-ok-t
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-ok-test
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-fatal-test
 
+# FP register writes are checked against a real kernel-regset readback;
+# failures must either restore the original state or kill the pinned guest.
+$(BUILD_DIR)/supervisor-fp-rollback-ok-test: tests/supervisor_context_rollback_fault_test.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/supervisor/nt_supervisor_nt_bridge.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) \
+	    -DNT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH=1 $(LDFLAGS) \
+	    $(filter %.c %.S,$^) -pthread -o "$@"
+
+$(BUILD_DIR)/supervisor-fp-rollback-fatal-test: tests/supervisor_context_rollback_fault_test.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/supervisor/nt_supervisor_nt_bridge.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) \
+	    -DNT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH=1 \
+	    -DNT_SUP_TEST_FORCE_FP_ROLLBACK_FAILURE=1 $(LDFLAGS) \
+	    $(filter %.c %.S,$^) -pthread -o "$@"
+
+.PHONY: check-supervisor-fp-rollback
+check-supervisor-fp-rollback: $(BUILD_DIR)/supervisor-fp-rollback-ok-test $(BUILD_DIR)/supervisor-fp-rollback-fatal-test
+	timeout 20s $(BUILD_DIR)/supervisor-fp-rollback-ok-test
+	timeout 20s $(BUILD_DIR)/supervisor-fp-rollback-fatal-test
+
 $(BUILD_DIR)/supervisor-control-ipc-test: tests/supervisor_control_ipc_test.c src/runtime/thread_broker_ipc.c src/runtime/thread_broker_registry.c src/runtime/thread_broker_auth.c src/supervisor/nt_thread_supervisor.c src/supervisor/nt_supervisor_nt_bridge.c src/runtime/thread_supervisor_control_server.c src/runtime/guest_boundary.c src/runtime/guest_boundary_import.S src/runtime/thread_broker_ipc.h src/runtime/thread_supervisor_control_server.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime -Isrc/supervisor $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.S,$^) -pthread -o "$@"
@@ -748,7 +766,7 @@ $(BUILD_DIR)/import-scan-test: tests/pe/import_scan_test.c src/pe/imports.c \
 	$(CC) $(CPPFLAGS) $(PE_INCLUDES) $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c,$^) $(LDLIBS) -o "$@"
 
-check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/broker-transport-failure-test $(BUILD_DIR)/supervisor-control-ipc-test $(BUILD_DIR)/supervisor-context-rollback-ok-test $(BUILD_DIR)/supervisor-context-rollback-fatal-test $(BUILD_DIR)/supervisor-rax-rollback-ok-test $(BUILD_DIR)/supervisor-rax-rollback-fatal-test $(BUILD_DIR)/runtime-supervisor-win32-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/guest-boundary-import-test $(BUILD_DIR)/guest-boundary-cet-test $(BUILD_DIR)/inherited-file-test \
+check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runtime-test $(BUILD_DIR)/process-thread-test $(BUILD_DIR)/thread-affinity-test $(BUILD_DIR)/thread-group-affinity-test $(BUILD_DIR)/process-priority-class-test $(BUILD_DIR)/dynamic-priority-boost-test $(BUILD_DIR)/process-priority-multithread-test $(BUILD_DIR)/priority-boost-boundary-test $(BUILD_DIR)/process-affinity-mask-test $(BUILD_DIR)/process-group-inheritance-test $(BUILD_DIR)/process-group-synthetic-80cpu-test $(BUILD_DIR)/external-thread-boundary-test $(BUILD_DIR)/thread-broker-auth-test $(BUILD_DIR)/thread-broker-registry-test $(BUILD_DIR)/thread-broker-ipc-test $(BUILD_DIR)/supervisor-authenticated-ipc-test $(BUILD_DIR)/broker-transport-failure-test $(BUILD_DIR)/supervisor-control-ipc-test $(BUILD_DIR)/supervisor-context-rollback-ok-test $(BUILD_DIR)/supervisor-context-rollback-fatal-test $(BUILD_DIR)/supervisor-fp-rollback-ok-test $(BUILD_DIR)/supervisor-fp-rollback-fatal-test $(BUILD_DIR)/supervisor-rax-rollback-ok-test $(BUILD_DIR)/supervisor-rax-rollback-fatal-test $(BUILD_DIR)/runtime-supervisor-win32-test $(BUILD_DIR)/runtime-supervisor-launch-test $(BUILD_DIR)/guest-boundary-import-test $(BUILD_DIR)/guest-boundary-cet-test $(BUILD_DIR)/inherited-file-test \
        $(BUILD_DIR)/compat-batch-test $(BUILD_DIR)/section-memory-test $(BUILD_DIR)/nt-object-broker $(BUILD_DIR)/object-broker-test $(BUILD_DIR)/mines-services-test $(BUILD_DIR)/import-scan-test \
        $(BUILD_DIR)/guest-thread-test $(BUILD_DIR)/guest-profile-test $(BUILD_DIR)/native-audio-test \
        $(BUILD_DIR)/console-test $(BUILD_DIR)/vulkan-probe-test $(BUILD_DIR)/vk-mock/libvulkan.so.1 $(BUILD_DIR)/nt-dos83-mediator
@@ -774,6 +792,8 @@ check: $(BUILD_DIR)/counter-test $(BUILD_DIR)/nt-native-probe $(BUILD_DIR)/runti
 	timeout 35s $(BUILD_DIR)/supervisor-control-ipc-test
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-ok-test
 	timeout 20s $(BUILD_DIR)/supervisor-context-rollback-fatal-test
+	timeout 20s $(BUILD_DIR)/supervisor-fp-rollback-ok-test
+	timeout 20s $(BUILD_DIR)/supervisor-fp-rollback-fatal-test
 	timeout 20s $(BUILD_DIR)/supervisor-rax-rollback-ok-test
 	timeout 20s $(BUILD_DIR)/supervisor-rax-rollback-fatal-test
 	timeout 25s $(BUILD_DIR)/runtime-supervisor-launch-test
