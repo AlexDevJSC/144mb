@@ -133,7 +133,8 @@ int nt_acl_access_check(const uint8_t *sd,size_t bytes,
         if (rights & UINT32_C(0xf0000000))
             return NT_ACL_UNSUPPORTED;
         if (!(ace[1]&ACE_INHERIT_ONLY) &&
-            token_has_sid(token,ace+ACE_BASE,length-ACE_BASE)) {
+            token_has_sid(token,ace+ACE_BASE,length-ACE_BASE,
+                          ace[0]==ACE_ALLOW)) {
             if (ace[0]==ACE_DENY && (remaining & rights))
                 return NT_ACL_DENIED;
             if (ace[0]==ACE_ALLOW)
