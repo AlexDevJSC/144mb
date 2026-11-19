@@ -594,6 +594,18 @@ check-fs4-security-metadata: $(BUILD_DIR)/nt-storage-handle-broker
 
 check: check-fs4-security-metadata
 
+# Win64 PE fixture imports kernel32 and advapi32; it runs through our
+# normal PE loader, not Wine and not a native POSIX emulation shortcut.
+$(BUILD_DIR)/fs4-security-metadata-fixture.exe: tests/pe/fs4_security_metadata_fixture.c | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" -ladvapi32 -lkernel32
+
+.PHONY: check-pe-fs4-security-metadata
+check-pe-fs4-security-metadata: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/fs4-security-metadata-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/fs4-security-metadata-fixture.exe
+
+check: check-pe-fs4-security-metadata
+
 .PHONY: check-fs4-service-supervisor
 check-fs4-service-supervisor:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_service_supervisor.py'
