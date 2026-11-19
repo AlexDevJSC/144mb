@@ -54,4 +54,16 @@ int nt_acl_inherit_descriptor(const uint8_t *parent_sd, size_t bytes,
                               const uint8_t *owner, size_t owner_bytes,
                               const uint8_t *group, size_t group_bytes,
                               uint8_t *out, size_t capacity, size_t *needed);
+
+/* Narrow, explicit UNIX-backed SID identity. The caller is responsible for
+ * sourcing uid/gid from SO_PEERCRED or fuse_get_context, never guest IPC.
+ * Does NOT simulate domain SIDs, supplementary groups or impersonation.
+ * Its self-owned bytes make SID pointers valid until the struct is moved. */
+struct nt_acl_unix_token {
+    struct nt_acl_token token;
+    uint8_t sid_bytes[3][16];
+};
+bool nt_acl_unix_token_init(struct nt_acl_unix_token *out,
+                            uint32_t authenticated_uid,
+                            uint32_t authenticated_gid);
 #endif
