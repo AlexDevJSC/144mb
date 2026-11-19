@@ -188,6 +188,33 @@ int main(void) {
     assert(nt_acl_access_check(sd,48,&host_a.token,1,&granted)==NT_ACL_ALLOWED);
     assert(nt_acl_access_check(sd,48,&host_b.token,1,&granted)==NT_ACL_ALLOWED);
     assert(!nt_acl_unix_token_init(NULL,1001,50));
-    puts("PASS self-relative SD, mapped rights, inherited owner/group and peer-SID identity");
+    /* Arbitrary binary SIDs can carry the maximum 15 sub-authorities:
+     * neither child inheritance nor AccessCheck may silently truncate
+     * or substitute an unrecognized domain principal. */
+    uint8_t foreign_sid[68]={1,15};
+    foreign_sid[7]=5;
+    for(unsigned i=0;i<15;i++) put32(foreign_sid+8+i*4,i+10);
+    struct nt_acl_token foreign_token={
+        .sid={foreign_sid},.length={sizeof(foreign_sid)},.count=1
+    };
+    sd_init(sd,104,1);
+    add_ace(sd+28,0,3,1,foreign_sid,sizeof(foreign_sid));
+    assert(nt_acl_validate_descriptor(sd,104)==NT_ACL_ALLOWED);
+    assert(nt_acl_access_check(sd,104,&foreign_token,1,&granted)==NT_ACL_ALLOWED);
+    assert(nt_acl_access_check(sd,104,&host_a.token,1,&granted)==NT_ACL_DENIED);
+    uint8_t extended_child[160]={0};
+    assert(nt_acl_inherit_descriptor(sd,104,false,
+                                     alice,sizeof(alice),
+                                     everyone,sizeof(everyone),
+                                     extended_child,sizeof(extended_child),
+                                     &output_size)==NT_ACL_ALLOWED);
+    assert(output_size==132);
+    assert(nt_acl_validate_descriptor(extended_child,output_size)==NT_ACL_ALLOWED);
+    assert(nt_acl_access_check(extended_child,output_size,
+                               &foreign_token,1,&granted)==NT_ACL_ALLOWED);
+    foreign_sid[1]=16;
+    assert(nt_acl_access_check(sd,104,&foreign_token,1,
+                               &granted)==NT_ACL_INVALID);
+    puts("PASS self-relative SD, 15-subauthority SID, mapped rights, inheritance and peer identity");
     return 0;
 }
