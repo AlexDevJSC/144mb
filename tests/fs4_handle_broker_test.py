@@ -25,7 +25,7 @@ ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE
 NATIVE_QUERY, NATIVE_SET, NATIVE_FLUSH = 21, 22, 23
 
 class Broker:
-    def __init__(self, root, *, crash=None, binary=None):
+    def __init__(self, root, *, crash=None, binary=None, expire=False):
         server, self.client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.client.settimeout(5)
         env = dict(os.environ)
@@ -33,6 +33,10 @@ class Broker:
             env["NT_FS4_TEST_CRASH"] = crash
         else:
             env.pop("NT_FS4_TEST_CRASH", None)
+        # Explicit offline-only injection: never inherited by other tests.
+        env.pop("NT_FS4_TEST_EXPIRE_1S", None)
+        if expire:
+            env["NT_FS4_TEST_EXPIRE_1S"] = "1"
         self.process = None
         try:
             self.process = subprocess.Popen([
@@ -96,6 +100,72 @@ class Broker:
             stderr.decode("utf-8", errors="replace"))
 
 class FileSystem4Handles(unittest.TestCase):
+    def test_absolute_session_expiry_releases_open_lease(self):
+        # A test-only 1s absolute deadline confirms that expiration actually
+        # revokes all physical leases, even when no CLOSE request is sent.
+        with tempfile.TemporaryDirectory(prefix="fs4-broker-expiry-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            (root / "expiry.dat").write_bytes(b"EXPIRING")
+            first = Broker(root, expire=True)
+            try:
+                second = Broker(root)
+            except BaseException:
+                first.close()
+                raise
+            try:
+                err, h, _, _ = first.call(
+                    OPEN, b"C:/expiry.dat", access=0x80000000,
+                    share=0, disposition=3)
+                self.assertEqual(err, 0)
+                self.assertNotEqual(h, 0)
+                self.assertEqual(second.call(
+                    OPEN, b"C:/expiry.dat", access=0x80000000,
+                    share=7, disposition=3)[0], 32)
+                self.assertEqual(first.process.wait(timeout=4), 0)
+                self.assertEqual(first.client.recv(4096), b"")
+                err, h2, _, _ = second.call(
+                    OPEN, b"C:/expiry.dat", access=0x80000000,
+                    share=7, disposition=3)
+                self.assertEqual(err, 0, "expired worker kept OFD lease")
+                self.assertEqual(second.call(CLOSE, handle=h2)[0], 0)
+            finally:
+                try:
+                    first.close()
+                finally:
+                    second.close()
+
+    def test_request_quota_counts_packets_not_idle_wakeups(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-broker-quota-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            (root / "quota.dat").write_bytes(b"Q")
+            first = Broker(root)
+            try:
+                second = Broker(root)
+            except BaseException:
+                first.close()
+                raise
+            try:
+                err, h, _, _ = first.call(
+                    OPEN, b"C:/quota.dat", access=0x80000000,
+                    share=0, disposition=3)
+                self.assertEqual(err, 0)
+                for _ in range(255):
+                    self.assertEqual(first.call(SIZE, handle=h)[0], 0)
+                self.assertEqual(first.client.recv(4096), b"")
+                self.assertEqual(first.process.wait(timeout=4), 0)
+                err, h2, _, _ = second.call(
+                    OPEN, b"C:/quota.dat", access=0x80000000,
+                    share=7, disposition=3)
+                self.assertEqual(err, 0, "quota worker kept OFD lease")
+                self.assertEqual(second.call(CLOSE, handle=h2)[0], 0)
+            finally:
+                try:
+                    first.close()
+                finally:
+                    second.close()
+
     def test_open_handle_survives_idle_poll_and_preserves_lease(self):
         # A 2-second poll timeout is NOT the 120-second session expiry.
         # A second broker must still see the exclusive physical OFD lease
