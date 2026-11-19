@@ -786,12 +786,32 @@ int main(int argc, char **argv)
     if (lstat(argv[2], &root) != 0 || !S_ISDIR(root.st_mode) ||
         root.st_uid != geteuid() || (root.st_mode & 077u))
         return 3;
+    /* SO_PEERGROUPS is a kernel snapshot of the connecting process'
+     * supplementary groups. Failing to obtain ALL groups must fail
+     * closed: truncation could omit a deny-only or DENY ACE principal.
+     * The request payload cannot specify or add any SID or group. */
+    gid_t supplementary[29]={0};
+    socklen_t groups_bytes=sizeof(supplementary);
+    if (getsockopt(sock,SOL_SOCKET,SO_PEERGROUPS,supplementary,
+                   &groups_bytes)!=0 ||
+        (groups_bytes%sizeof(gid_t))!=0 ||
+        groups_bytes>sizeof(supplementary))
+        return 3;
     if (!nt_runtime_set_file_root(argv[2]) ||
         !nt_runtime_recover_dos83())
         return 3;
+    const int pinned_root=open(argv[2],O_PATH|O_DIRECTORY|O_CLOEXEC);
+    if (pinned_root<0)
+        return 3;
     struct session state = {.socket_fd = sock, .view = test ? NULL : argv[8],
-                            .offline_test = test};
+                            .offline_test = test, .root_fd=pinned_root};
+    if (nt_acl_peer_token_init(&state.identity,peer.uid,peer.gid,
+                supplementary,groups_bytes/sizeof(gid_t),NULL)!=0) {
+        close(pinned_root);
+        return 3;
+    }
     int result = serve(&state);
+    close(pinned_root);
     close(sock);
     return result;
 }
