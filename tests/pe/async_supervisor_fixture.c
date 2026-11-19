@@ -54,6 +54,7 @@ static DWORD WINAPI safe_import_worker(void *arg)
         __atomic_add_fetch(&safe_import_ticks, 1, __ATOMIC_RELAXED);
         Sleep(0); /* trusted Win32 import-return checkpoint */
     }
+    return 0; /* required by the DWORD WINAPI signature; never reached */
 }
 static DWORD WINAPI worker(void *arg)
 {
