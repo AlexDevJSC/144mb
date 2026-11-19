@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <stddef.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -88,6 +91,48 @@ static void join(pid_t pid)
           WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
+/* SO_PEERCRED at accept is insufficient: an established socket can be
+ * transferred across fork. Its next sender must NOT inherit the parent's
+ * broker identity just because it inherited the descriptor. */
+static void check_forwarded_connection_rejected(void)
+{
+    const char *path = getenv("NT_NATIVE_BROKER_SOCKET");
+    CHECK(path && strlen(path) < sizeof(((struct sockaddr_un *)0)->sun_path));
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    CHECK(fd >= 0);
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    strcpy(addr.sun_path, path);
+    const socklen_t length =
+        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(path) + 1);
+    CHECK(connect(fd, (struct sockaddr *)&addr, length) == 0);
+    const struct timeval deadline = {.tv_sec = 2, .tv_usec = 0};
+    CHECK(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                     &deadline, sizeof(deadline)) == 0);
+    const pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        struct nt_broker_request request = {
+            .magic = NT_BROKER_MAGIC, .version = NT_BROKER_VERSION,
+            .action = NT_BROKER_CREATE, .kind = NT_BROKER_EVENT,
+            .rights = 1, .maximum = 1
+        };
+        memcpy(request.name, "forged_lease_sender",
+               sizeof("forged_lease_sender"));
+        if (send(fd, &request, sizeof(request), MSG_NOSIGNAL) !=
+            (ssize_t)sizeof(request))
+            _exit(2);
+        struct nt_broker_reply reply = {0};
+        const ssize_t result = recv(fd, &reply, sizeof(reply), 0);
+        /* In the old UID-only broker, this returns CREATED. The patched
+         * server must close the channel without a successful response. */
+        _exit(result == (ssize_t)sizeof(reply) &&
+              reply.magic == NT_BROKER_MAGIC &&
+              reply.result == NT_BROKER_CREATED ? 3 : 0);
+    }
+    close(fd);
+    join(child);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1) {
@@ -118,6 +163,19 @@ int main(int argc, char **argv)
     uintptr_t event = nt_CreateEventW(NULL, 0, 0, event_name);
     uintptr_t sem = nt_CreateSemaphoreW(NULL, 0, 3, semaphore_name);
     CHECK(event && sem);
+    /* An OPEN request for a reduced granted mask must never return the
+     * creator's maximum rights, even though both clients use the same UID. */
+    struct nt_broker_request read_request = {
+        .magic = NT_BROKER_MAGIC, .version = NT_BROKER_VERSION,
+        .action = NT_BROKER_OPEN, .kind = NT_BROKER_EVENT, .rights = 1
+    };
+    memcpy(read_request.name, "broker_event", sizeof("broker_event"));
+    struct nt_broker_resource reduced = {0};
+    CHECK(nt_broker_acquire(&read_request, &reduced) == NT_BROKER_EXISTS &&
+          reduced.rights == 1 &&
+          reduced.fd >= 0 && reduced.lease_fd >= 0);
+    nt_broker_release(&reduced);
+    check_forwarded_connection_rejected();
     CHECK(!nt_CreateSemaphoreW(NULL, 0, 1, event_name));
     CHECK(!nt_CreateFileMappingW(UINTPTR_MAX, NULL, 4, 0, 4096, event_name));
     CHECK(nt_GetProcessHandleCount(nt_GetCurrentProcess(), &after) &&
