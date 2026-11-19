@@ -12,6 +12,7 @@ enum {
 #define DOS83_WAL_NAME "dos83-rename-v1.wal"
 #define DOS83_WAL_MAGIC_V1 "N83WAL01"
 #define DOS83_WAL_MAGIC "N83WAL02"
+#define DOS83_WAL_MAGIC_LINK "N83LNK03" /* independently recoverable hardlink */
 
 struct dos83_wal {
     int fd, directory;
@@ -20,7 +21,7 @@ struct dos83_wal_entry {
     uint64_t root_dev, root_ino, file_dev, file_ino;
     uint64_t from_dir_dev, from_dir_ino, to_dir_dev, to_dir_ino;
     uint64_t victim_dev, victim_ino;
-    bool staged, victim, victim_preclean;
+    bool staged, victim, victim_preclean, hardlink;
     size_t old_size, victim_old_size;
     char old_dest[14], alias[14], victim_old[14];
     char from[PATH_MAX], to[PATH_MAX];
@@ -200,12 +201,17 @@ static bool wal_encode(const struct dos83_wal_entry *entry,
         entry->old_size > sizeof(entry->old_dest) ||
         entry->victim_old_size > sizeof(entry->victim_old) ||
         (entry->victim_preclean && !entry->victim) ||
-        (!entry->victim_preclean && entry->victim_old_size)) {
+        (!entry->victim_preclean && entry->victim_old_size) ||
+        (entry->hardlink &&
+         (entry->staged || entry->victim || entry->victim_preclean ||
+          entry->old_size || entry->victim_old_size || entry->alias[0] ||
+          entry->old_dest[0] || entry->victim_old[0]))) {
         errno = EINVAL;
         return false;
     }
     memset(bytes, 0, DOS83_WAL_HEADER);
-    memcpy(bytes, DOS83_WAL_MAGIC, 8);
+    memcpy(bytes, entry->hardlink ? DOS83_WAL_MAGIC_LINK :
+                  DOS83_WAL_MAGIC, 8);
     const uint64_t ids[] = {
         entry->root_dev, entry->root_ino, entry->file_dev, entry->file_ino,
         entry->from_dir_dev, entry->from_dir_ino,
@@ -216,7 +222,8 @@ static bool wal_encode(const struct dos83_wal_entry *entry,
         wal_put64(bytes + 16 + 8 * i, ids[i]);
     wal_put32(bytes + 96, (entry->staged ? 1u : 0u) |
                              (entry->victim ? 2u : 0u) |
-                             (entry->victim_preclean ? 4u : 0u));
+                             (entry->victim_preclean ? 4u : 0u) |
+                             (entry->hardlink ? 8u : 0u));
     wal_put32(bytes + 100, (uint32_t)entry->old_size);
     wal_put32(bytes + 104, (uint32_t)from_size);
     wal_put32(bytes + 108, (uint32_t)to_size);
@@ -286,19 +293,25 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
     }
     const bool version2 = memcmp(bytes, DOS83_WAL_MAGIC, 8) == 0;
     const bool version1 = memcmp(bytes, DOS83_WAL_MAGIC_V1, 8) == 0;
-    const size_t header = version2 ? DOS83_WAL_HEADER : DOS83_WAL_V1_HEADER;
+    const bool link_record = memcmp(bytes, DOS83_WAL_MAGIC_LINK, 8) == 0;
+    const size_t header = version2 || link_record ?
+                          DOS83_WAL_HEADER : DOS83_WAL_V1_HEADER;
     const uint32_t flags = wal_get32(bytes + 96);
     const uint32_t old_size = wal_get32(bytes + 100);
-    const uint32_t victim_old_size = version2 ? wal_get32(bytes + 154) : 0;
+    const uint32_t victim_old_size =
+        version2 || link_record ? wal_get32(bytes + 154) : 0;
     const uint32_t from_size = wal_get32(bytes + 104);
     const uint32_t to_size = wal_get32(bytes + 108);
-    if ((!version1 && !version2) || size < header + 4 ||
+    if ((!version1 && !version2 && !link_record) || size < header + 4 ||
         wal_get64(bytes + 8) != wal_hash(bytes + 16, size - 16) ||
-        (flags & (version2 ? ~7u : ~3u)) != 0 ||
+        (flags & (link_record ? ~8u : version2 ? ~7u : ~3u)) != 0 ||
+        (link_record && (flags != 8u || old_size || victim_old_size ||
+                         memcmp(bytes + 112, (unsigned char[42]){0}, 42) != 0)) ||
         old_size > 14 || victim_old_size > 14 ||
         ((flags & 4u) && !(flags & 2u)) ||
         (!(flags & 4u) && victim_old_size) ||
-        (version2 && (bytes[158] != 0 || bytes[159] != 0)) ||
+        ((version2 || link_record) &&
+         (bytes[158] != 0 || bytes[159] != 0)) ||
         from_size < 2 || to_size < 2 ||
         from_size > PATH_MAX || to_size > PATH_MAX ||
         (size_t)from_size + (size_t)to_size != size - header ||
@@ -323,6 +336,7 @@ static int wal_read(struct dos83_wal *wal, struct dos83_wal_entry *entry)
     entry->victim = (flags & 2u) != 0;
     entry->victim_preclean = (flags & 4u) != 0;
     entry->victim_old_size = victim_old_size;
+    entry->hardlink = link_record;
     if (version2)
         memcpy(entry->victim_old, bytes + 140, sizeof(entry->victim_old));
     entry->old_size = old_size;
@@ -499,6 +513,53 @@ static bool wal_recover_root(int root)
                                record.to_dir_ino))) {
         errno = EUCLEAN;
         ok = false;
+    }
+    /* Hardlink intent has an idempotent two-state recovery:
+     * no target entry = link did not survive; exact pinned inode = finish
+     * alias/metadata barriers. Anything else is an unknown host mutation
+     * and MUST retain WAL for manual intervention. No rollback guesses. */
+    if (ok && record.hardlink) {
+        struct stat target, source;
+        bool exists = false;
+        if (!wal_missing_or_identity(to, to_exact, &target, &exists))
+            ok = false;
+        else if (exists &&
+                 (!S_ISREG(target.st_mode) ||
+                  !wal_same_inode(&target, record.file_dev,
+                                  record.file_ino))) {
+            errno = EUCLEAN;
+            ok = false;
+        } else if (exists &&
+                   (fstatat(from, from_exact, &source,
+                            AT_SYMLINK_NOFOLLOW) != 0 ||
+                    !S_ISREG(source.st_mode) ||
+                    !wal_same_inode(&source, record.file_dev,
+                                    record.file_ino))) {
+            errno = EUCLEAN;
+            ok = false;
+        } else if (exists) {
+            char alias[14] = {0};
+            /* wal_recover_root already holds dos83_lock and the physical
+             * WAL flock. Avoid re-taking the local mutex during alias
+             * assignment while preserving directory registry locking. */
+            ++fs4_wal_guard_depth;
+            ok = dos83_assign_at(to, to_exact, alias);
+            --fs4_wal_guard_depth;
+            if (ok)
+                dos83_test_crash("hardlink-replay-after-alias");
+            if (ok)
+                ok = wal_sync_pinned(to, true) && wal_clear(&wal);
+        } else {
+            /* The intent reached fsync, but no link survived; clearing
+             * requires its own fsync and does not mutate the namespace. */
+            ok = wal_clear(&wal);
+        }
+        const int error = ok ? 0 : (errno ? errno : EUCLEAN);
+        if (to >= 0) close(to);
+        if (from >= 0) close(from);
+        wal_close(&wal);
+        errno = error;
+        return ok;
     }
     int gate_a = -1, gate_b = -1;
     bool same = false;

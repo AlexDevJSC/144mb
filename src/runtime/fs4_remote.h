@@ -68,6 +68,7 @@ int32_t nt_fs4_remote_info_set(uintptr_t handle, int32_t kind,
 int32_t nt_fs4_remote_delete(const char *path);
 int32_t nt_fs4_remote_rename(const char *old_name, const char *new_name,
                              uint32_t flags);
+int32_t nt_fs4_remote_hardlink(const char *old_name, const char *new_name);
 int32_t nt_fs4_remote_seek(uintptr_t handle, int64_t offset, uint32_t method,
                            int64_t *position);
 int32_t nt_fs4_remote_size(uintptr_t handle, int64_t *length);

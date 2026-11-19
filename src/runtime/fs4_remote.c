@@ -30,9 +30,7 @@ enum { FS4_MAGIC=0x34465348u, FS4_VERSION=3, FS4_MAX=2048,
        FS4_FIND_NEXT=15, FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
        FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
        FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23,
-       /* Opcode 24 belongs to the independent hardlink change. */
-       FS4_SECURITY_PATH=25, FS4_NATIVE_SECURITY=26, FS4_TIME_SET=27,
-       FS4_INFO_GET=28, FS4_INFO_SET=29 };
+       FS4_HARDLINK=24, FS4_SECURITY_PATH=25, FS4_NATIVE_SECURITY=26, FS4_TIME_SET=27, FS4_INFO_GET=28, FS4_INFO_SET=29 };
 struct request {
     uint32_t magic;
     uint16_t version, op;
@@ -632,6 +630,33 @@ int32_t nt_fs4_remote_rename(const char *source,const char *dest,uint32_t flags)
     struct reply response;
     bool ok=request(FS4_RENAME,0,-1,0,0,0,flags,data,(uint32_t)(a+b+1),
                     (uint32_t)(a+b+1),&response,NULL,0);
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+int32_t nt_fs4_remote_hardlink(const char *source, const char *dest)
+{
+    size_t a=0,b=0;
+    if (!checked_path(source,&a) || !checked_path(dest,&b))
+        return 0;
+    /* guest_path() strips the C: prefix for its private grant; the broker
+     * intentionally requires explicit C:/ names and rejects bare paths.
+     * Reintroduce ONLY this proven private-root prefix on the wire. */
+    if (a+3>1024 || b+3>1024 || a+b+7>FS4_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_NAME);
+        return 0;
+    }
+    unsigned char data[FS4_MAX];
+    memcpy(data,"C:/",3);
+    memcpy(data+3,source,a);
+    data[a+3]=0;
+    memcpy(data+a+4,"C:/",3);
+    memcpy(data+a+7,dest,b);
+    const uint32_t length=(uint32_t)(a+b+7);
+    pthread_mutex_lock(&guard);
+    struct reply response;
+    const bool ok=request(FS4_HARDLINK,0,-1,0,0,0,0,
+                          data,length,length,&response,NULL,0);
     pthread_mutex_unlock(&guard);
     return ok;
 }

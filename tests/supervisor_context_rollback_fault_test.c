@@ -21,10 +21,16 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifndef NT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH
+#if !defined(NT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH) && \
+    !defined(NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH)
 #error "This test is only for forced verification failure"
 #endif
+#ifdef NT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH
 _Atomic uint32_t nt_sup_test_verify_corrupted;
+#endif
+#ifdef NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH
+_Atomic uint32_t nt_sup_test_fp_verify_corrupted;
+#endif
 
 struct fixture_shared {
     struct nt_guest_boundary_session boundary;
@@ -123,10 +129,24 @@ int main(void)
         goto cleanup;
 
     _Alignas(16) struct nt_context64 original = {0};
+#ifdef NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH
+    original.flags = 0x100008u;
+#else
     original.flags = 0x100003u;
+#endif
     if (nt_supervisor_nt_get_context(&thread, &original) != NT_STATUS_SUCCESS)
         goto cleanup;
     _Alignas(16) struct nt_context64 edited = original;
+#ifdef NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH
+    edited.flags = 0x100008u;
+    edited.mxcsr ^= UINT32_C(0x2000);
+    memcpy(edited.floating + 24, &edited.mxcsr, sizeof(edited.mxcsr));
+    if (nt_supervisor_nt_set_context(&thread, &edited) !=
+            NT_STATUS_NOT_SUPPORTED ||
+        atomic_load_explicit(&nt_sup_test_fp_verify_corrupted,
+                              memory_order_relaxed) != 1u)
+        goto cleanup;
+#else
     edited.flags = 0x100002u;
     edited.rax ^= UINT64_C(0x5555666677778888);
     if (nt_supervisor_nt_set_context(&thread, &edited) !=
@@ -134,7 +154,9 @@ int main(void)
         atomic_load_explicit(&nt_sup_test_verify_corrupted,
                               memory_order_relaxed) != 1u)
         goto cleanup;
-#ifdef NT_SUP_TEST_FORCE_GPR_ROLLBACK_FAILURE
+#endif
+#if defined(NT_SUP_TEST_FORCE_GPR_ROLLBACK_FAILURE) || \
+    defined(NT_SUP_TEST_FORCE_FP_ROLLBACK_FAILURE)
     /* The requested mutation reached the kernel, but readback failed
      * and rollback was forced to fail. No DETACH of these regs is legal.
      * Only the pidfd-pinned child can be terminated. */
@@ -163,11 +185,19 @@ int main(void)
     if (thread.unsafe_register_state)
         goto cleanup;
     _Alignas(16) struct nt_context64 restored = {0};
-    restored.flags = 0x100003u;
-    if (nt_supervisor_nt_get_context(&thread, &restored) != NT_STATUS_SUCCESS ||
-        restored.rax != original.rax || restored.rip != original.rip ||
-        restored.rsp != original.rsp ||
-        nt_supervisor_detach(&supervisor) != 0)
+    restored.flags = original.flags;
+    if (nt_supervisor_nt_get_context(&thread, &restored) != NT_STATUS_SUCCESS)
+        goto cleanup;
+#ifdef NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH
+    if (restored.mxcsr != original.mxcsr ||
+        memcmp(restored.floating, original.floating, 512) != 0)
+        goto cleanup;
+#else
+    if (restored.rax != original.rax || restored.rip != original.rip ||
+        restored.rsp != original.rsp)
+        goto cleanup;
+#endif
+    if (nt_supervisor_detach(&supervisor) != 0)
         goto cleanup;
     nt_supervisor_release(&supervisor);
     atomic_store_explicit(&data->stop, 1u, memory_order_release);
