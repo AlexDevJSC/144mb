@@ -4,6 +4,58 @@
 hardware físico y paridad de planificación **NO verificados** en esta entrega.
 Esta comprobación no habilita la transición al problema 5 (APC avanzadas).
 
+## Contraste funcional de prioridades y afinidades con Windows nativo (19-11-2026)
+
+Este contrato añade un diferencial **mismo código fuente Win32** para
+cuatro suites PE existentes, sin sustituir sus expectativas ni
+reescribirlas para favorecer a Windows o Linux:
+
+| Fixture PE | Contrato observable y frontera |
+| --- | --- |
+| `thread_group_affinity_fixture.c` | `Get/SetThreadGroupAffinity`, CPU realmente ejecutado, máscaras relativas a grupo, derechos de HANDLE y parámetros inválidos |
+| `process_affinity_mask_fixture.c` | `Get/SetProcessAffinityMask`, permisos reducidos, máscaras, propagación a worker y restauración |
+| `priority_class_fixture.c` | `Get/SetPriorityClass`, prioridades relativas de `Get/SetThreadPriority`, `NtQueryInformationProcess` y denegación sobre handles limitados |
+| `priority_boost_boundary_fixture.c` | Presencia y respuesta de `Get/SetThreadPriorityBoost` y `Get/SetProcessPriorityBoost` |
+
+En CI, `scripts/windows-run-stage4-scheduler.ps1` compila **las cuatro
+fuentes exactas** con MSVC como EXE nativos (el mismo fixture de
+grupos ya existía; se añaden tres). Ejecuta únicamente procesos de
+prueba Windows y **guarda cada código de salida, incluido el distinto
+de cero**. Algunos fixtures expresan restricciones específicas del
+runtime Linux (por ejemplo `ERROR_NOT_SUPPORTED` para *priority
+boost* si la extensión no está habilitada); un Windows auténtico puede
+satisfacer la API y fallar legítimamente esas expectativas: ese es
+precisamente un dato diferencial, no una avería que se deba ocultar.
+
+`scripts/linux-run-stage4-scheduler-functional.sh` ejecuta los
+cuatro objetivos `make check-pe-thread-groups`,
+`check-pe-process-affinity`, `check-pe-priority-class` y
+`check-pe-priority-boost` sobre el runtime Linux real y archiva
+resultados y logs independientes. Este perfil utiliza Linux de CI
+hosted, **no Fedora físico**. Cada fixture altera solamente el proceso
+de laboratorio que crea; no cambia prioridad, cpuset ni derechos del
+anfitrión fuera de él.
+
+`scripts/compare-stage4-priority-affinity.py` exige que las pruebas
+Windows y Linux provengan del mismo commit SHA, rechaza resultados
+omitidos y deja tres categorías: `SAME_SOURCE_CONTRACT_CONSISTENT`,
+`OBSERVED_DIFFERENCE_CHECK_FIXTURE_ASSUMPTIONS` o
+`NOT_DEMONSTRATED`. No atribuye una discrepancia a un defecto Linux
+sin revisar el código de salida exacto. El informe está disponible como
+`build/stage4-priority-affinity-differential.json` junto con
+`stage4-windows-priority-affinity.txt`,
+`stage4-linux-priority-affinity.txt` y logs originales.
+El resultado máximo es *observación funcional limitada*,
+**no paridad de planificador NT**.
+
+La política dinámica escalonada de prioridades, *boost/decay* exacto,
+quantum NT, selección por topología Windows real, CPU Sets, prioridades
+efectivas y equidad entre cargas continúan **no demostrados**. La CI de
+Windows utiliza un kernel auténtico en VM; ni eso ni Fedora RPM en
+contenedor prueban rendimiento o aislamiento en dos máquinas físicas
+homologables. No se altera el 96 % documental del componente 4 hasta
+la revisión de los resultados y criterios de aceptación física.
+
 ## Comparación explícita de CONTEXT_FLOATING_POINT (19-11-2026)
 
 La CI ejecuta una nueva fuente **nativa Windows compilada con MSVC**:
