@@ -506,6 +506,72 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
+/* If a parent has a managed DACL, the new regular inode must receive
+ * an inherited SD while still unnamed. FUSE may not publish a file with
+ * only the parent's admission check and a missing child ACL. */
+static int fs4_inherit_unpublished_inode(int parent,int child,
+                                         uint32_t requested)
+{
+    if (!service_mode || metadata_selftest)
+        return 0;
+    uint8_t *source=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!source)
+        return -ENOMEM;
+    size_t size=0;
+    int result=nt_acl_storage_read_fd(parent,source,NT_ACL_SD_MAX_BYTES,&size);
+    if (result==NT_ACL_STORAGE_ABSENT) {
+        free(source);
+        return 0;
+    }
+    if (result!=NT_ACL_STORAGE_PRESENT) {
+        int error=errno ? errno : EUCLEAN;
+        free(source);
+        return -error;
+    }
+    struct nt_acl_peer_token token={0};
+    int authorized=view_acl_token(&token);
+    if (authorized) {
+        free(source);
+        return authorized;
+    }
+    size_t needed=0;
+    const uint8_t *owner=token.token.sid[0];
+    const uint8_t *group=token.token.sid[1];
+    int state=nt_acl_inherit_descriptor(source,size,false,
+                                owner,token.token.length[0],
+                                group,token.token.length[1],
+                                NULL,0,&needed);
+    if (state!=NT_ACL_DENIED || !needed ||
+        needed>NT_ACL_SD_MAX_BYTES) {
+        free(source);
+        return -ENOTSUP;
+    }
+    uint8_t *child_sd=malloc(needed);
+    if (!child_sd) {free(source);return -ENOMEM;}
+    state=nt_acl_inherit_descriptor(source,size,false,
+                                owner,token.token.length[0],
+                                group,token.token.length[1],
+                                child_sd,needed,&needed);
+    free(source);
+    if (state!=NT_ACL_ALLOWED) {
+        free(child_sd);
+        return -ENOTSUP;
+    }
+    /* The child is not yet visible. If the inherited DACL does not grant
+     * the requested initial open rights, do not publish the inode. */
+    uint32_t granted=0;
+    state=nt_acl_access_check_mapped(child_sd,needed,&token.token,requested,
+                                     &nt_acl_file_generic_mapping,&granted);
+    if (state!=NT_ACL_ALLOWED || (granted&requested)!=requested) {
+        free(child_sd);
+        return -EACCES;
+    }
+    const bool stored=nt_acl_storage_write_trusted_fd(child,child_sd,needed);
+    const int error=errno;
+    free(child_sd);
+    return stored ? 0 : -(error ? error : EIO);
+}
+
 /* Dedicated storage UID uses staged inode publication. */
 /* Publish the inode only AFTER it holds a compatible OFD FILE_SHARE
  * lease. A normal O_CREAT makes the inode visible before share admission:
@@ -540,6 +606,10 @@ static int fs_create_staged_service(const char *path, mode_t mode,
         if (!error)
             lease = -1; /* lifecycle transferred to FUSE view registry */
     }
+    if (!error)
+        error=fs4_inherit_unpublished_inode(parent,fd,
+                        access_mode==O_RDWR ? NT_ACL_DATA_READ|NT_ACL_DATA_WRITE :
+                                             NT_ACL_DATA_WRITE);
     if (!error)
         fs4_stage_test_crash("post-lease");
     bool published = false;
@@ -775,6 +845,18 @@ static int fs_mkdir(const char *path, mode_t mode)
     char name[NAME_MAX + 1];
     int parent = lower_parent(path, name);
     int error = parent < 0 ? -errno : 0;
+    if (!error && service_mode && !metadata_selftest) {
+        /* mkdirat would expose a directory BEFORE attaching inherited
+         * ACLs. Until staged-directory rename/recovery is implemented,
+         * reject managed-parent mkdir rather than create an ACL bypass. */
+        size_t needed=0;
+        const int state=nt_acl_storage_read_fd(parent,NULL,0,&needed);
+        if (state==NT_ACL_STORAGE_SHORT_BUFFER ||
+            state==NT_ACL_STORAGE_PRESENT)
+            error=-ENOTSUP;
+        else if (state==NT_ACL_STORAGE_ERROR)
+            error=-(errno ? errno : EUCLEAN);
+    }
     if (!error && mkdirat(parent, name, mode) != 0)
         error = -errno;
     if (!error) {
