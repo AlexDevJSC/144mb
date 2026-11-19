@@ -149,13 +149,47 @@ int main(int argc, char **argv)
           "reject non-sealed or forged handle manifests");
     close(pipe_fds[0]);
     close(pipe_fds[1]);
-    /* An event/sem HANDLE is NOT a Linux fd. Process creation must reject
-     * it rather than silently pretending it was inherited. */
-    uintptr_t event = nt_CreateEventW(NULL, 1, 0, NULL);
-    check(event != 0 && nt_runtime_set_waitable_flags(event, 1u, 1u),
-          "mark event inheritable");
+    /* CreateEventW inherits the Win64 SECURITY_ATTRIBUTES handle flag,
+     * not a host FD, rights or the shared object's signaled state. */
+    security.size = 23;
+    nt_SetLastError(0);
+    check(nt_CreateEventW(&security, 1, 0, NULL) == 0 &&
+          nt_GetLastError() == NT_ERROR_INVALID_PARAMETER,
+          "reject invalid SECURITY_ATTRIBUTES length");
+    security.size = 24;
+    security.descriptor = (void *)(uintptr_t)1;
+    nt_SetLastError(0);
+    check(nt_CreateEventW(&security, 1, 0, NULL) == 0 &&
+          nt_GetLastError() == NT_ERROR_NOT_SUPPORTED,
+          "reject unsupported event security descriptor");
+    security.descriptor = NULL;
+    security.inherit = 0;
+    uintptr_t private_event = nt_CreateEventW(&security, 1, 0, NULL);
+    uint32_t event_flags = 99;
+    check(private_event != 0 &&
+          nt_runtime_get_waitable_flags(private_event, &event_flags) &&
+          event_flags == 0 &&
+          nt_runtime_snapshot_inherited_files(true, &files, NULL) ==
+            NT_ERROR_SUCCESS && files.count == 1,
+          "non-inheritable event leaves real inherited file alone");
+    nt_runtime_release_inherited_files(&files);
+    check(nt_runtime_close_waitable(private_event), "close non-inheritable event");
+    security.inherit = 1;
+    uintptr_t event = nt_CreateEventW(&security, 1, 0, NULL);
+    check(event != 0 && nt_runtime_get_waitable_flags(event, &event_flags) &&
+          event_flags == 1u, "SECURITY_ATTRIBUTES creates inheritable event HANDLE");
+    check(nt_runtime_snapshot_inherited_files(false, &files, NULL) ==
+          NT_ERROR_SUCCESS && files.count == 0,
+          "bInheritHandles=FALSE excludes unsupported inheritable event");
+    nt_runtime_release_inherited_files(&files);
     check(nt_runtime_snapshot_inherited_files(true, &files, NULL) ==
-          NT_ERROR_NOT_SUPPORTED, "reject unsupported cross-process event inheritance");
+          NT_ERROR_NOT_SUPPORTED,
+          "reject unsupported cross-process event inheritance before exec");
+    check(nt_runtime_set_waitable_flags(event, 1u, 0u) &&
+          nt_runtime_snapshot_inherited_files(true, &files, NULL) ==
+          NT_ERROR_SUCCESS && files.count == 1,
+          "clearing one event HANDLE inheritance allows real file transfers");
+    nt_runtime_release_inherited_files(&files);
     check(nt_runtime_close_waitable(event), "close event");
     /* Anonymous pipes use real kernel pipes and the same inherited file
      * protocol. The child's WriteFile reaches the parent's ReadFile. */
