@@ -24,7 +24,7 @@ ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE
 NATIVE_QUERY, NATIVE_SET, NATIVE_FLUSH = 21, 22, 23
 
 class Broker:
-    def __init__(self, root, *, crash=None):
+    def __init__(self, root, *, crash=None, binary=None):
         server, self.client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.client.settimeout(5)
         env = dict(os.environ)
@@ -32,19 +32,34 @@ class Broker:
             env["NT_FS4_TEST_CRASH"] = crash
         else:
             env.pop("NT_FS4_TEST_CRASH", None)
-        self.process = subprocess.Popen([
-            BINARY, "--root", str(root), "--fd", str(server.fileno()),
-            "--client-uid", str(os.geteuid()), "--test"
-        ], pass_fds=(server.fileno(),), stdin=subprocess.DEVNULL,
-           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-        server.close()
-        hello = self.client.recv(4096)
-        if len(hello) != REP.size:
-            raise AssertionError(("bad hello", hello, self.process.poll(),
-                                 self.process.stderr.read().decode()))
-        mag, ver, op, status, n, cap, value = REP.unpack(hello)
-        assert (mag, ver, op, status, n, cap) == (MAGIC, VERSION, 0, 0, 0, 0)
-        self.nonce = value
+        self.process = None
+        try:
+            self.process = subprocess.Popen([
+                BINARY if binary is None else binary,
+                "--root", str(root), "--fd", str(server.fileno()),
+                "--client-uid", str(os.geteuid()), "--test"
+            ], pass_fds=(server.fileno(),), stdin=subprocess.DEVNULL,
+               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            # Parent must drop its copy before waiting for HELLO: otherwise
+            # a worker that exits early cannot produce EOF on the client.
+            server.close()
+            hello = self.client.recv(4096)
+            if len(hello) != REP.size:
+                raise AssertionError(("bad hello", hello, self.process.poll()))
+            mag, ver, op, status, n, cap, value = REP.unpack(hello)
+            assert (mag, ver, op, status, n, cap) == (MAGIC, VERSION, 0, 0, 0, 0)
+            self.nonce = value
+        except BaseException:
+            # Startup failure must not retain the inherited IPC endpoint or
+            # parent-side pipes. Never block on stderr.read() from a live worker.
+            self.client.close()
+            if self.process is not None:
+                if self.process.poll() is None:
+                    self.process.kill()
+                self.process.communicate(timeout=5)
+            raise
+        finally:
+            server.close()
 
     def call(self, op, data=b"", handle=0, offset=-1, access=0, share=0,
              disposition=0, flags=0, size=None, nonce=None):
@@ -61,12 +76,68 @@ class Broker:
         assert len(frame) == REP.size + length, (frame, length)
         return err, cap, value, frame[REP.size:]
 
-    def close(self):
+    def close(self, expected_returncode=0, *, timeout=5):
+        # Closing the connection makes the worker release all session handles.
+        # communicate() drains BOTH pipes and closes their BufferedReaders.
+        # wait() alone leaves them open and triggers ResourceWarning on GC.
         self.client.close()
-        self.process.wait(timeout=5)
-        assert self.process.returncode == 0, self.process.stderr.read().decode()
+        try:
+            _, stderr = self.process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            # An unresponsive test worker cannot survive teardown or retain
+            # physical leases. Still report failure, not a successful test.
+            self.process.kill()
+            self.process.communicate()
+            raise AssertionError("FS4 broker did not exit after IPC close") from error
+        assert self.process.stdout.closed and self.process.stderr.closed
+        assert self.process.returncode == expected_returncode, (
+            self.process.returncode, expected_returncode,
+            stderr.decode("utf-8", errors="replace"))
 
 class FileSystem4Handles(unittest.TestCase):
+    def test_broker_clean_shutdown_closes_subprocess_streams(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-broker-lifetime-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            broker = Broker(root)
+            process = broker.process
+            broker.close()
+            self.assertEqual(process.returncode, 0)
+            self.assertTrue(process.stdout.closed)
+            self.assertTrue(process.stderr.closed)
+
+    def test_failed_handshake_does_not_leak_parent_fds(self):
+        # A deterministic negative handshake: /usr/bin/false exits without
+        # HELLO. Closing the parent's server endpoint must expose EOF, rather
+        # than hanging until the socket timeout.
+        self.assertTrue(Path("/proc/self/fd").is_dir(),
+                        "Linux /proc/self/fd required for FD accounting; no SKIP")
+        with tempfile.TemporaryDirectory(prefix="fs4-broker-badhello-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            before = len(os.listdir("/proc/self/fd"))
+            with self.assertRaises(AssertionError):
+                Broker(root, binary="/usr/bin/false")
+            self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    def test_broker_timeout_kills_worker_and_closes_pipes(self):
+        with tempfile.TemporaryDirectory(prefix="fs4-broker-timeout-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            broker = Broker(root)
+            process = broker.process
+            try:
+                os.kill(process.pid, signal.SIGSTOP)
+                with self.assertRaisesRegex(AssertionError, "did not exit"):
+                    broker.close(timeout=0.2)
+                self.assertEqual(process.returncode, -signal.SIGKILL)
+                self.assertTrue(process.stdout.closed)
+                self.assertTrue(process.stderr.closed)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
     def test_create_write_read_truncate_delete_and_capabilities(self):
         with tempfile.TemporaryDirectory(prefix="fs4-broker-") as temp:
             root = Path(temp) / "C"
@@ -176,7 +247,12 @@ class FileSystem4Handles(unittest.TestCase):
             root = Path(temp) / "C"
             root.mkdir(mode=0o700)
             (root / "file.txt").write_bytes(b"LOCKED")
-            a, b = Broker(root), Broker(root)
+            a = Broker(root)
+            try:
+                b = Broker(root)
+            except BaseException:
+                a.close()
+                raise
             try:
                 err, handle, _, _ = a.call(OPEN, b"C:/file.txt", access=0x80000000,
                                             share=0, disposition=3)
@@ -192,8 +268,10 @@ class FileSystem4Handles(unittest.TestCase):
                 self.assertEqual(err, 0)
                 self.assertEqual(b.call(CLOSE, handle=next_handle)[0], 0)
             finally:
-                a.close()
-                b.close()
+                try:
+                    a.close()
+                finally:
+                    b.close()
 
     def test_native_query_set_and_flush_through_service(self):
         with tempfile.TemporaryDirectory(prefix="fs4-native-") as temp:
@@ -231,7 +309,12 @@ class FileSystem4Handles(unittest.TestCase):
             root = Path(temp) / "C"
             root.mkdir(mode=0o700)
             (root / "lease.dat").write_bytes(b"SAFE")
-            first, second = Broker(root), Broker(root)
+            first = Broker(root)
+            try:
+                second = Broker(root)
+            except BaseException:
+                first.close()
+                raise
             killed = False
             try:
                 err, handle, _, _ = first.call(OPEN, b"C:/lease.dat",
@@ -241,9 +324,9 @@ class FileSystem4Handles(unittest.TestCase):
                 self.assertEqual(second.call(OPEN, b"C:/lease.dat",
                     access=0x80000000, share=7, disposition=3)[0], 32)
                 os.kill(first.process.pid, signal.SIGKILL)
-                first.process.wait(timeout=5)
-                first.client.close()
                 killed = True
+                self.assertEqual(first.process.wait(timeout=5),
+                                 -signal.SIGKILL)
                 self.assertNotEqual(first.process.returncode, 0)
                 err, available, _, _ = second.call(
                     OPEN, b"C:/lease.dat", access=0x80000000,
@@ -252,15 +335,21 @@ class FileSystem4Handles(unittest.TestCase):
                 self.assertEqual(second.call(CLOSE, handle=available)[0], 0)
                 self.assertEqual((root / "lease.dat").read_bytes(), b"SAFE")
             finally:
-                if not killed:
-                    first.close()
-                second.close()
+                try:
+                    first.close(expected_returncode=-signal.SIGKILL if killed else 0)
+                finally:
+                    second.close()
 
     def test_concurrent_create_new_is_single_winner(self):
         with tempfile.TemporaryDirectory(prefix="fs4-create-race-") as temp:
             root = Path(temp) / "C"
             root.mkdir(mode=0o700)
-            first, second = Broker(root), Broker(root)
+            first = Broker(root)
+            try:
+                second = Broker(root)
+            except BaseException:
+                first.close()
+                raise
             start = threading.Barrier(3)
             results = []
             def create(client):
@@ -283,8 +372,10 @@ class FileSystem4Handles(unittest.TestCase):
                                                      handle=reply[1])[0], 0)
                 self.assertTrue((root / "contended.bin").is_file())
             finally:
-                first.close()
-                second.close()
+                try:
+                    first.close()
+                finally:
+                    second.close()
 
     def test_sigkill_during_broker_mutations_and_recovery(self):
         """Process death after the syscall but before reply must not leak
@@ -327,7 +418,9 @@ class FileSystem4Handles(unittest.TestCase):
                     self.assertEqual(b.process.wait(timeout=5),
                                      -signal.SIGKILL)
                 finally:
-                    b.client.close()
+                    # The death is intentional; reap and close parent pipes
+                    # without ever weakening the cold-restart WAL test.
+                    b.close(expected_returncode=-signal.SIGKILL)
                 # A cold worker re-runs startup recovery under the same root.
                 recovered = Broker(root)
                 try:

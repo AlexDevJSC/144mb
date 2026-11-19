@@ -573,7 +573,7 @@ check: check-fs4-fuse-staging-sigkill
 
 .PHONY: check-fs4-handle-broker
 check-fs4-handle-broker: $(BUILD_DIR)/nt-storage-handle-broker
-	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_handle_broker_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
+	PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -W error::ResourceWarning tests/fs4_handle_broker_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
 
 check: check-fs4-handle-broker
 
