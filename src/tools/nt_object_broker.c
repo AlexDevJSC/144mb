@@ -400,8 +400,14 @@ int main(int argc, char **argv)
     }
     umask(077);
     int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    const int passcred = 1;
     socklen_t length = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1);
-    if (listener < 0 || bind(listener, (struct sockaddr *)&addr, length) != 0 ||
+    /* Enable credential capture before binding/listening so even packets
+     * queued immediately after connect carry kernel sender identity. */
+    if (listener < 0 ||
+        setsockopt(listener, SOL_SOCKET, SO_PASSCRED,
+                   &passcred, sizeof(passcred)) != 0 ||
+        bind(listener, (struct sockaddr *)&addr, length) != 0 ||
         chmod(path, 0600) != 0 || listen(listener, 32) != 0) {
         perror("Cannot bind broker socket (will not replace an existing entry)");
         if (listener >= 0)
