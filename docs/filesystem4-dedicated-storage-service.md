@@ -61,6 +61,16 @@ SELinux revisado, y los binarios del proyecto compilados.
 6. Ejecutar en un Fedora físico:
        python3 scripts/fedora-fs4-service-acceptance.py
 
+## Metadatos FUSE de usuario (propuesta de 19-11-2026)
+
+La PR de metadatos del servicio UID habilita `utimens` mediado con
+`SetFileTime`/WAL en archivos regulares y escrituras/borrados de xattrs
+ordinarios `user.*` protegidos por WAL/OFD + fsync. La vista mantiene
+`chmod` físico denegado y no concede acceso a `user.ntnative.*` ni
+xattrs privilegiados. Véase
+[contrato FUSE metadata](filesystem4-fuse-metadata-20261119.md) para
+límites de atomicidad y la distinción entre pruebas offline/montadas.
+
 ## Límites y puertas pendientes
 
 - El adaptador PE por IPC v3 existe **solo en modo experimental opt-in**:

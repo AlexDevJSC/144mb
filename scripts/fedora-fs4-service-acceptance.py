@@ -132,12 +132,33 @@ def main():
         required((dest.stat().st_dev, dest.stat().st_ino) == identity and
                  dest.read_bytes() == sample, "inode and data identity preserved")
         # Negative tests run on the mounted FUSE inode, not an offline mock.
-        denied(lambda: os.chmod(dest, 0o777), "FUSE chmod")
-        denied(lambda: os.utime(dest, None), "FUSE utimens")
-        denied(lambda: os.setxattr(dest, "user.fs4_service_probe", b"X"),
-               "FUSE arbitrary setxattr")
-        denied(lambda: os.removexattr(dest, "user.fs4_service_probe"),
-               "FUSE arbitrary removexattr")
+        denied(lambda: os.chmod(dest, 0o777),
+               "FUSE physical chmod (still requires virtual ACL model)")
+        # These POSIX metadata operations are now mediated, not raw
+        # writes with ambient storage UID; verify the file's bytes,
+        # timestamp and private xattr namespace remain intact.
+        reference_ns = 1609459200123456700
+        os.utime(dest, ns=(reference_ns, reference_ns))
+        required(dest.stat().st_mtime_ns == reference_ns,
+                 "FUSE utimens persisted via Win32 FILETIME/WAL")
+        ordinary = "user.fs4_service_probe"
+        os.setxattr(dest, ordinary, b"X")
+        required(os.getxattr(dest, ordinary) == b"X",
+                 "FUSE ordinary user.* xattr written via WAL/OFD")
+        os.removexattr(dest, ordinary)
+        try:
+            os.getxattr(dest, ordinary)
+        except OSError as error:
+            required(error.errno == errno.ENODATA,
+                     "FUSE ordinary user.* xattr safely removed")
+        else:
+            raise RuntimeError("FAIL xattr remained after removal")
+        denied(lambda: os.setxattr(dest, "user.ntnative.forbidden", b"X"),
+               "FUSE reserved metadata write")
+        denied(lambda: os.setxattr(dest, "security.selinux", b"X"),
+               "FUSE security namespace write")
+        denied(lambda: os.removexattr(dest, "user.ntnative.forbidden"),
+               "FUSE reserved metadata removal")
         hardlink = base / "blockedHardlink"
         denied(lambda: os.link(dest, hardlink), "FUSE raw hardlink")
         required(not hardlink.exists(), "denied hardlink not published")

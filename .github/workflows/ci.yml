@@ -33,7 +33,7 @@ jobs:
             check-fs4-handle-broker check-fs4-security-metadata check-pe-fs4-security-metadata check-fs4-hardlink-wal check-pe-fs4-hardlink check-fs4-ntfs-diff \
             check-fs4-reparse-wal check-fs4-storage-service \
             check-fs4-readonly-session check-fs4-service-supervisor \
-            check-fs4-acceptance-gates check-fs4-fuse-staging-sigkill \
+            check-fs4-acceptance-gates check-fs4-fuse-staging-sigkill check-fs4-fuse-metadata \
             check-fs-backing-audit check-fs-supervisor \
             check-dos83-mediator check-dos83-fuse check-dos83-wal \
             check-dos83-sigkill check-dos83-alias-durability \

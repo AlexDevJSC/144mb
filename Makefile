@@ -609,6 +609,14 @@ check-fs4-fuse-staging-sigkill: $(BUILD_DIR)/nt-dos83-fuse $(BUILD_DIR)/nt-dos83
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_fuse_stage_sigkill.py \
 	    "$(BUILD_DIR)/nt-dos83-fuse" "$(BUILD_DIR)/nt-dos83-mediator"
 
+# Offline service-UID metadata callbacks: real WAL and OFD share leases,
+# no fake FUSE mount in a runner without /dev/fuse.
+.PHONY: check-fs4-fuse-metadata
+check-fs4-fuse-metadata: $(BUILD_DIR)/nt-dos83-fuse
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_fuse_metadata_test.py "$(BUILD_DIR)/nt-dos83-fuse"
+
+check: check-fs4-fuse-metadata
+
 check: check-fs4-fuse-staging-sigkill
 
 .PHONY: check-fs4-handle-broker
