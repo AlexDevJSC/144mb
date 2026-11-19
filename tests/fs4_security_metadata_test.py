@@ -5,6 +5,7 @@
 All mutations use a disposable private test C: backing. Physical Fedora
 and NTFS ACL inheritance are deliberately outside this regression.
 """
+import errno
 import os
 from pathlib import Path
 import struct
@@ -80,6 +81,27 @@ class SecurityMetadataIPC(unittest.TestCase):
         self.assertEqual(self.worker.call(
             SECURITY_PATH, PATH, access=7, disposition=2049)[0],
             INVALID_PARAMETER)
+        self.assertEqual(self.target.read_bytes(), b"TRUSTED")
+
+    def test_extended_posix_acl_cannot_be_misrepresented_as_ntfs_dacl(self):
+        # Linux POSIX ACL xattr v2: owner, named user, group, mask, other.
+        # The runtime's three-mode-bit ACE projection must explicitly
+        # refuse this richer ACL, rather than claim full NT ACL parity.
+        tags = ((1, 6, 0xFFFFFFFF), (2, 4, 65534),
+                (4, 4, 0xFFFFFFFF), (16, 4, 0xFFFFFFFF),
+                (32, 0, 0xFFFFFFFF))
+        encoded = struct.pack("<I", 2) + b"".join(
+            struct.pack("<HHI", tag, perm, ident)
+            for tag, perm, ident in tags)
+        try:
+            os.setxattr(self.target, "system.posix_acl_access", encoded)
+        except OSError as exc:
+            if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM):
+                self.skipTest("backing filesystem disallows POSIX ACL xattrs")
+            raise
+        self.assertEqual(self.worker.call(
+            SECURITY_PATH, PATH, access=7, disposition=128)[0],
+            NOT_SUPPORTED)
         self.assertEqual(self.target.read_bytes(), b"TRUSTED")
 
     def test_native_security_reports_required_size_and_status(self):
