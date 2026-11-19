@@ -2810,10 +2810,12 @@ static int close_file(struct guest_file *file)
 
 /* Duplicated descriptors share a Linux open-file description (and therefore
  * the seek offset), as a duplicated Windows file HANDLE does. They remain
- * independent entries in the guest handle table. Rights-preserving copies
- * are supported; reducing access rights needs a separate access-mask model. */
-static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
-                                       uint32_t options, uintptr_t *target)
+ * independent entries in the guest handle table. Restrict explicit rights
+ * to the already-normalized FILE_READ/WRITE/DELETE model: a guest must not
+ * turn a read-only source into a writable duplicate. */
+static nt_status duplicate_file_handle(uintptr_t source, uint32_t access,
+                                       uint32_t attributes, uint32_t options,
+                                       uintptr_t *target)
 {
     pthread_mutex_lock(&file_lock);
     const struct guest_file *original = find_handle(source);
