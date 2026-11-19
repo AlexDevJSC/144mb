@@ -3406,7 +3406,7 @@ nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t sou
     if (status == NT_STATUS_INVALID_HANDLE)
         status = nt_runtime_section_duplicate(source, access, attributes, options, target);
     if (status == NT_STATUS_INVALID_HANDLE)
-        status = duplicate_file_handle(source, attributes, options, target);
+        status = duplicate_file_handle(source, access, attributes, options, target);
     if (status == NT_STATUS_SUCCESS && (options & 1u)) {
         /* After successful duplication each handle has an independent life. */
         const nt_status closed = nt_NtClose(source);
