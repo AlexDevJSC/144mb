@@ -481,19 +481,24 @@ int32_t nt_fs4_remote_hardlink(const char *source, const char *dest)
     size_t a=0,b=0;
     if (!checked_path(source,&a) || !checked_path(dest,&b))
         return 0;
-    if (a+b+1>FS4_MAX) {
+    /* guest_path() strips the C: prefix for its private grant; the broker
+     * intentionally requires explicit C:/ names and rejects bare paths.
+     * Reintroduce ONLY this proven private-root prefix on the wire. */
+    if (a+3>1024 || b+3>1024 || a+b+7>FS4_MAX) {
         nt_SetLastError(NT_ERROR_INVALID_NAME);
         return 0;
     }
     unsigned char data[FS4_MAX];
-    memcpy(data,source,a);
-    data[a]=0;
-    memcpy(data+a+1,dest,b);
+    memcpy(data,"C:/",3);
+    memcpy(data+3,source,a);
+    data[a+3]=0;
+    memcpy(data+a+4,"C:/",3);
+    memcpy(data+a+7,dest,b);
+    const uint32_t length=(uint32_t)(a+b+7);
     pthread_mutex_lock(&guard);
     struct reply response;
     const bool ok=request(FS4_HARDLINK,0,-1,0,0,0,0,
-                          data,(uint32_t)(a+b+1),
-                          (uint32_t)(a+b+1),&response,NULL,0);
+                          data,length,length,&response,NULL,0);
     pthread_mutex_unlock(&guard);
     return ok;
 }
