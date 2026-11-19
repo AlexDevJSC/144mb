@@ -14,6 +14,8 @@
 #define FUSE_USE_VERSION 35
 #include "compat.h"
 #include "winfile.h"
+#include "nt_acl_policy.h"
+#include "nt_acl_storage.h"
 
 #include <fuse3/fuse.h>
 #include <dirent.h>
@@ -68,6 +70,56 @@ static bool service_authorized(void)
     return ctx && (ctx->uid == service_client_uid || ctx->uid == geteuid());
 }
 
+
+/* FUSE uid/gid/pid come from the kernel request context; getgroups()
+ * is resolved by libfuse for that request. Never derive groups from an
+ * application-controlled xattr, memory block or filename. */
+static int view_acl_token(struct nt_acl_peer_token *token)
+{
+    const struct fuse_context *ctx=fuse_get_context();
+    if (!ctx) return -EACCES;
+    const int count=fuse_getgroups(0,NULL);
+    if (count<0 || count>29) return -EACCES;
+    gid_t groups[29]={0};
+    if (count>0 && fuse_getgroups(count,groups)!=count)
+        return -EACCES;
+    return nt_acl_peer_token_init(token,ctx->uid,ctx->gid,
+                                  groups,(size_t)count,NULL)==0 ? 0 : -EACCES;
+}
+static int view_acl_check(const char *path,uint32_t rights,bool parent)
+{
+    /* Never authorize a process through a fake FUSE context during the
+     * no-mount selftests. Production service mode is the only gate. */
+    if (!service_mode || metadata_selftest)
+        return 0;
+    struct nt_acl_peer_token token={0};
+    const int peer=view_acl_token(&token);
+    if (peer) return peer;
+    int status=nt_acl_policy_check_path(lower_root,path,parent,&token,
+                       rights,parent ? &nt_acl_directory_generic_mapping :
+                                       &nt_acl_file_generic_mapping);
+    if (status==NT_ACL_POLICY_ALLOWED || status==NT_ACL_POLICY_ABSENT)
+        return 0;
+    return status==NT_ACL_POLICY_DENIED ? -EACCES :
+            -(errno ? errno : EACCES);
+}
+/* When replacing a destination, ENOENT means there is no existing inode
+ * whose DACL can be bypassed; every other read error is fail-closed. */
+static int view_acl_replace_target(const char *path)
+{
+    if (!service_mode || metadata_selftest)
+        return 0;
+    struct nt_acl_peer_token token={0};
+    const int peer=view_acl_token(&token);
+    if (peer) return peer;
+    int state=nt_acl_policy_check_path(lower_root,path,false,&token,
+                         NT_ACL_DELETE,&nt_acl_file_generic_mapping);
+    if (state==NT_ACL_POLICY_ALLOWED || state==NT_ACL_POLICY_ABSENT)
+        return 0;
+    if (state==NT_ACL_POLICY_ERROR && errno==ENOENT)
+        return 0;
+    return -EACCES;
+}
 
 /* NT-compatible files opt into the existing CreateFile OFD lease registry.
  * A separate live lease for each FUSE FD preserves independent lifetimes. */
@@ -292,6 +344,8 @@ static int fs_getattr(const char *path, struct stat *st,
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_READ_ATTR,false);
+    if (acl) return acl;
     int fd = fi && fi->fh ? (int)fi->fh : lower_open(path, O_PATH, 0);
     if (fd < 0)
         return -errno;
@@ -310,6 +364,8 @@ static int fs_opendir(const char *path, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DATA_READ,false);
+    if (acl) return acl;
     int fd = lower_open(path, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0)
         return -errno;
@@ -375,6 +431,13 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    const int mode=fi->flags&O_ACCMODE;
+    uint32_t rights=mode==O_RDONLY ? NT_ACL_DATA_READ :
+                    mode==O_WRONLY ? NT_ACL_DATA_WRITE :
+                    NT_ACL_DATA_READ|NT_ACL_DATA_WRITE;
+    if (fi->flags&O_TRUNC) rights|=NT_ACL_DATA_WRITE;
+    int acl=view_acl_check(path,rights,false);
+    if (acl) return acl;
     /* Never truncate before share admission: a Windows handle can reject
      * this write, and a rejected FUSE open must not mutate the file. */
     const bool truncate = (fi->flags & O_TRUNC) != 0;
@@ -538,6 +601,8 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DATA_WRITE,true);
+    if (acl) return acl;
     /* Acquire process-local namespace_lock before physical WAL, matching
      * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
      * two concurrent FUSE callbacks during namespace mutations. */
@@ -651,6 +716,12 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    /* FUSE fi is an already-authorized open capability; a path-only
+     * truncate must obtain WRITE_DATA permission before any effect. */
+    if (!fi) {
+        int acl=view_acl_check(path,NT_ACL_DATA_WRITE,false);
+        if (acl) return acl;
+    }
     if (size < 0)
         return -EINVAL;
     int guard = guest_mutation_begin(path);
@@ -690,6 +761,8 @@ static int fs_mkdir(const char *path, mode_t mode)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DIR_ADD_SUBDIR,true);
+    if (acl) return acl;
     /* Acquire process-local namespace_lock before physical WAL, matching
      * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
      * two concurrent FUSE callbacks during namespace mutations. */
@@ -734,6 +807,10 @@ static int fs_unlink(const char *path)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DELETE,false);
+    if (acl) return acl;
+    acl=view_acl_check(path,NT_ACL_DIR_DELETE_CHILD,true);
+    if (acl) return acl;
     uint16_t wide[PATH_MAX];
     int error = guest_wide(path, wide);
     if (error)
@@ -748,6 +825,10 @@ static int fs_rmdir(const char *path)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DELETE,false);
+    if (acl) return acl;
+    acl=view_acl_check(path,NT_ACL_DIR_DELETE_CHILD,true);
+    if (acl) return acl;
     uint16_t wide[PATH_MAX];
     int error = guest_wide(path, wide);
     if (error)
@@ -762,6 +843,16 @@ static int fs_rename(const char *from, const char *to, unsigned int flags)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(from,NT_ACL_DELETE,false);
+    if (acl) return acl;
+    acl=view_acl_check(from,NT_ACL_DIR_DELETE_CHILD,true);
+    if (acl) return acl;
+    acl=view_acl_check(to,NT_ACL_DATA_WRITE,true);
+    if (acl) return acl;
+    if (!(flags&RENAME_NOREPLACE)) {
+        acl=view_acl_replace_target(to);
+        if (acl) return acl;
+    }
     if (flags & ~(unsigned int)RENAME_NOREPLACE)
         return -ENOTSUP;
     uint16_t old[PATH_MAX], replacement[PATH_MAX];
@@ -871,6 +962,8 @@ static int fs_utimens(const char *path, const struct timespec times[2],
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_WRITE_ATTR,false);
+    if (acl) return acl;
     if (!service_mode) {
         int fd=fi ? (int)fi->fh : lower_open(path,O_RDONLY,0);
         if (fd<0) return -errno;
@@ -970,6 +1063,8 @@ static int fs4_service_xattr_mutation(const char *path,const char *name,
                                      const char *value,size_t size,int flags,
                                      bool remove)
 {
+    int acl=view_acl_check(path,NT_ACL_WRITE_EA,false);
+    if (acl) return acl;
     if (!ordinary_xattr(name))
         return -EACCES;
     if ((!remove && (size>4096 || (size && !value) ||
@@ -1015,6 +1110,8 @@ static int fs_getxattr(const char *path, const char *name, char *value,
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_READ_EA,false);
+    if (acl) return acl;
     if (reserved_xattr(name) ||
         (service_mode && strncmp(name, "user.", 5) != 0))
         return -ENODATA;
@@ -1067,6 +1164,8 @@ static int fs_listxattr(const char *path, char *buffer, size_t capacity)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_READ_EA,false);
+    if (acl) return acl;
     int fd = lower_open(path, O_RDONLY, 0);
     if (fd < 0)
         return -errno;
