@@ -26,4 +26,32 @@ int nt_acl_access_check(const uint8_t *sd, size_t bytes,
 int nt_acl_inherit_dacl(const uint8_t *parent_sd, size_t bytes,
                         bool child_directory, uint8_t *out,
                         size_t capacity, size_t *needed);
+
+/* Object-specific, explicitly authenticated GENERIC_* translation.
+ * A null mapping does NOT give generic rights: the old entrypoint keeps
+ * rejecting masks it cannot interpret. The mapped output contains only
+ * concrete access bits, so the caller can compare it to its NT grants. */
+struct nt_acl_generic_mapping {
+    uint32_t read, write, execute, all;
+};
+int nt_acl_access_check_mapped(const uint8_t *sd, size_t bytes,
+                               const struct nt_acl_token *token,
+                               uint32_t requested,
+                               const struct nt_acl_generic_mapping *mapping,
+                               uint32_t *granted);
+
+/* Validate a complete self-relative descriptor (not merely parse an ACL
+ * header). No writes to filesystem; never accept a malformed SD to xattr. */
+int nt_acl_validate_descriptor(const uint8_t *sd, size_t bytes);
+
+/* Materialize a CHILD self-relative descriptor with authenticated owner
+ * and group SIDs, carrying forward inherited ACEs (including arbitrary
+ * binary SID values). CREATOR_OWNER/GROUP SIDs are substituted using the
+ * supplied identities. Only ACL revision 2 allow/deny ACEs are supported.
+ * Result 0 means insufficient capacity, with *needed set, no output. */
+int nt_acl_inherit_descriptor(const uint8_t *parent_sd, size_t bytes,
+                              bool child_directory,
+                              const uint8_t *owner, size_t owner_bytes,
+                              const uint8_t *group, size_t group_bytes,
+                              uint8_t *out, size_t capacity, size_t *needed);
 #endif
