@@ -46,7 +46,7 @@ class SecurityMetadataIPC(unittest.TestCase):
         self.target = self.root / "secure-dates.txt"
         self.target.write_bytes(b"TRUSTED")
         self.worker = Broker(self.root)
-        self.addCleanup(self.worker.close)
+        self.addCleanup(lambda: self.worker.close())
 
     def opening(self, access=0x80000000):
         err, handle, _, _ = self.worker.call(
@@ -154,7 +154,9 @@ class SecurityMetadataIPC(unittest.TestCase):
 
     def test_reopen_sees_committed_metadata_and_no_wal_leak(self):
         old = ticks(1483228800)
-        write_handle = self.opening(0xC0000000)
+        err, write_handle, _, _ = self.worker.call(
+            OPEN, PATH, access=0xC0000000, share=7, disposition=3)
+        self.assertEqual(err, 0)
         fields = filetime(0) + filetime(0) + filetime(old)
         self.assertEqual(self.worker.call(
             TIME_SET, fields, handle=write_handle, flags=4)[0], 0)
