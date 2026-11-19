@@ -29,7 +29,7 @@ DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
 else
 DOS83_FUSE_TARGET =
 endif
-RUNTIME_PARTS = guest_boundary guest_hardware_fault guest_async_apc exports system global_memory unicode crt crt_stdio guest_files fs4_remote user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
+RUNTIME_PARTS = fs4_acl guest_boundary guest_hardware_fault guest_async_apc exports system global_memory unicode crt crt_stdio guest_files fs4_remote user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry thread_broker_ipc thread_supervisor_control_server shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o $(BUILD_DIR)/runtime-thread-supervisor-core.o $(BUILD_DIR)/runtime-guest_boundary_import.o $(BUILD_DIR)/runtime-thread-supervisor-nt-bridge.o
@@ -628,6 +628,31 @@ check: check-fs4-handle-broker
 check-fs4-security-metadata: $(BUILD_DIR)/nt-storage-handle-broker
 	PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -W error::ResourceWarning \
 	    tests/fs4_security_metadata_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
+
+# Pure bounded NT security descriptor and ordered DACL evaluator.
+# No production ACL write path is claimed until every file operation
+# passes an authenticated per-process token to this policy engine.
+$(BUILD_DIR)/fs4-acl-policy-test: tests/fs4_acl_policy_test.c src/runtime/fs4_acl.c src/runtime/fs4_acl.h | $(BUILD_DIR)
+	$(CC) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/fs4_acl_policy_test.c src/runtime/fs4_acl.c -o "$@"
+
+.PHONY: check-fs4-acl-policy
+check-fs4-acl-policy: $(BUILD_DIR)/fs4-acl-policy-test
+	$(BUILD_DIR)/fs4-acl-policy-test
+
+check: check-fs4-acl-policy
+
+# Protected internal DACL xattr read/write/fsync and inheritance on
+# unpublished O_TMPFILE. NOT exposed as Win32 SetFileSecurityW yet.
+$(BUILD_DIR)/fs4-acl-storage-test: tests/fs4_acl_storage_test.c src/runtime/fs4_acl.c src/runtime/fs4_acl_storage.c src/runtime/fs4_acl.h src/runtime/fs4_acl_storage.h | $(BUILD_DIR)
+	$(CC) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/fs4_acl_storage_test.c src/runtime/fs4_acl.c src/runtime/fs4_acl_storage.c -o "$@"
+
+.PHONY: check-fs4-acl-storage
+check-fs4-acl-storage: $(BUILD_DIR)/fs4-acl-storage-test
+	$(BUILD_DIR)/fs4-acl-storage-test
+
+check: check-fs4-acl-storage
 
 check: check-fs4-security-metadata
 
