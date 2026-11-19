@@ -66,6 +66,24 @@ int main(void) {
     sd[28+8+1]=1;
     put16(sd+28+2,5000); /* malicious ACE size */
     assert(nt_acl_access_check(sd,48,&token,1,&granted)==NT_ACL_INVALID);
-    puts("PASS self-relative SD, SID, ordered ACE and bounded DACL inheritance");
+    /* A deny-only group is eligible for DENY, never for ALLOW. Even
+     * a matching SID does not promote it to an enabled grant group. */
+    sd_init(sd,48,1);
+    add_ace(sd+28,0,0,1,everyone,sizeof(everyone));
+    token.sid_flags[1]=NT_ACL_SID_DENY_ONLY;
+    granted=99;
+    assert(nt_acl_access_check(sd,48,&token,1,&granted)==NT_ACL_DENIED);
+    assert(granted==0);
+    token.sid_flags[1]=0;
+    assert(nt_acl_access_check(sd,48,&token,1,&granted)==NT_ACL_ALLOWED);
+    assert(granted==1);
+    token.sid_flags[1]=NT_ACL_SID_DENY_ONLY;
+    sd[28]=1; /* DENY ACE still matches deny-only SID */
+    assert(nt_acl_access_check(sd,48,&token,1,&granted)==NT_ACL_DENIED);
+    assert(granted==0);
+    token.sid_flags[1]=2; /* future/unknown attributes must fail closed */
+    assert(nt_acl_access_check(sd,48,&token,1,&granted)==NT_ACL_INVALID);
+    assert(granted==0);
+    puts("PASS self-relative SD, ordered ACE, deny-only SID and DACL inheritance");
     return 0;
 }

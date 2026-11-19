@@ -91,9 +91,12 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
 }
 
 static bool token_has_sid(const struct nt_acl_token *token,
-                          const uint8_t *sid,size_t sid_size) {
+                          const uint8_t *sid,size_t sid_size,
+                          bool for_allow) {
     for (size_t i=0;i<token->count;i++)
-        if (token->sid[i] && token->length[i]==sid_size &&
+        if ((!for_allow ||
+             !(token->sid_flags[i] & NT_ACL_SID_DENY_ONLY)) &&
+            token->sid[i] && token->length[i]==sid_size &&
             memcmp(token->sid[i],sid,sid_size)==0)
             return true;
     return false;
@@ -110,7 +113,8 @@ int nt_acl_access_check(const uint8_t *sd,size_t bytes,
         return NT_ACL_UNSUPPORTED;
     for (size_t i=0;i<token->count;i++)
         if (!token->sid[i] || !sid_valid(token->sid[i],token->length[i]) ||
-            token->length[i]!=8u+(size_t)token->sid[i][1]*4u)
+            token->length[i]!=8u+(size_t)token->sid[i][1]*4u ||
+            (token->sid_flags[i] & (uint8_t)~NT_ACL_SID_DENY_ONLY))
             return NT_ACL_INVALID;
     struct acl acl={0};
     int valid=sd_acl(sd,bytes,&acl);
@@ -129,7 +133,8 @@ int nt_acl_access_check(const uint8_t *sd,size_t bytes,
         if (rights & UINT32_C(0xf0000000))
             return NT_ACL_UNSUPPORTED;
         if (!(ace[1]&ACE_INHERIT_ONLY) &&
-            token_has_sid(token,ace+ACE_BASE,length-ACE_BASE)) {
+            token_has_sid(token,ace+ACE_BASE,length-ACE_BASE,
+                          ace[0]==ACE_ALLOW)) {
             if (ace[0]==ACE_DENY && (remaining & rights))
                 return NT_ACL_DENIED;
             if (ace[0]==ACE_ALLOW)
