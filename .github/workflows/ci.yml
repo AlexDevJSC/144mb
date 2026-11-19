@@ -13,6 +13,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  filesystem4-linux:
+    # Independent FS4 regression gate: unrelated PE/APC/graphics failures must
+    # not hide this subsystem's evidence. No physical FUSE/SELinux claim.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install FileSystem4 build and test dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 --no-install-recommends install -y gcc-mingw-w64-x86-64-posix libsdl2-dev libsdl2-image-dev libcairo2-dev libffi-dev libssl-dev libicu-dev libfuse3-dev fuse3 libfluidsynth3 libvkd3d-dev libvulkan-dev mesa-vulkan-drivers bubblewrap fonts-dejavu-core
+      - name: Verify FileSystem4 targets without changing host security
+        run: |
+          set -o pipefail
+          make -j2 \
+            check-fs4-handle-broker check-fs4-ntfs-diff \
+            check-fs4-reparse-wal check-fs4-storage-service \
+            check-fs4-readonly-session check-fs4-service-supervisor \
+            check-fs4-acceptance-gates check-fs4-fuse-staging-sigkill \
+            check-fs-backing-audit check-fs-supervisor \
+            check-dos83-mediator check-dos83-fuse check-dos83-wal \
+            check-dos83-sigkill check-dos83-alias-durability \
+            check-dos83-wal-io-failure check-dos83-pending-delete-durability \
+            check-dos83-namespace-durability check-dos83-pending-wal-admission \
+            check-dos83-all-grants check-dos83-bad-source check-nt-acl-engine \
+            2>&1 | tee fs4-linux-regression.log
+          if grep -Eiq 'SKIP.*(mounted.FUSE|FUSE|Landlock|Bubblewrap|sandbox|large junction)' fs4-linux-regression.log; then
+            echo '::warning::INCOMPLETE: FS4 physical isolation/mounted FUSE checks skipped on this CI runner; Fedora acceptance remains pending'
+          fi
+      - name: Preserve FileSystem4 evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: filesystem4-regressions-${{ github.sha }}
+          path: fs4-linux-regression.log
+          if-no-files-found: warn
+          retention-days: 14
+
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
