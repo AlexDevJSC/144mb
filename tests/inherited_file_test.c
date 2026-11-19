@@ -128,6 +128,35 @@ int main(int argc, char **argv)
     check(nt_WriteFile(file, "HELLO", 5, &done, NULL) && done == 5,
           "write baseline in parent");
     check(nt_SetFilePointerEx(file, 0, NULL, 0), "reset shared offset");
+    /* Section and file HANDLE duplicates now support attenuated rights
+     * on the same process; FD inheritance or NT cross-PID authority is
+     * not implied by a successful local duplicate. */
+    uintptr_t reader = 0;
+    check(nt_DuplicateHandle(nt_GetCurrentProcess(), file,
+          nt_GetCurrentProcess(), &reader, 1, 0, 0) && reader != 0,
+          "duplicate existing file with only read permission");
+    done = UINT32_MAX;
+    check(!nt_WriteFile(reader, "X", 1, &done, NULL) &&
+          nt_GetLastError() == NT_ERROR_ACCESS_DENIED,
+          "read-only alias cannot write through shared Linux FD");
+    uintptr_t illegal = UINTPTR_MAX;
+    check(nt_NtDuplicateObject(nt_GetCurrentProcess(), reader,
+          nt_GetCurrentProcess(), &illegal, 2, 0, 0) ==
+          NT_STATUS_ACCESS_DENIED && illegal == 0,
+          "read-only file HANDLE cannot be promoted to write");
+    illegal = UINTPTR_MAX;
+    check(nt_NtDuplicateObject(nt_GetCurrentProcess(), reader,
+          nt_GetCurrentProcess(), &illegal, 8, 0, 0) ==
+          NT_STATUS_INVALID_PARAMETER && illegal == 0,
+          "unknown access bits never grant host FD authority");
+    char observed[6] = {0};
+    done = 0;
+    check(nt_ReadFile(reader, observed, 5, &done, NULL) &&
+          done == 5 && strcmp(observed, "HELLO") == 0,
+          "attenuated file duplicate still shares the original OFD");
+    check(nt_CloseHandle(reader) &&
+          nt_SetFilePointerEx(file, 0, NULL, 0),
+          "closing reduced alias leaves full-access parent handle alive");
     struct nt_child_file_transfer files;
     check(nt_runtime_snapshot_inherited_files(true, &files, NULL) == NT_ERROR_SUCCESS &&
           files.count == 1 && files.source_fds[0] >= 128,
