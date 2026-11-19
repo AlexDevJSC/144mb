@@ -60,11 +60,12 @@ static void fs4_stage_test_crash(const char *phase)
  * or caller-provided metadata) are checked at every entry point. */
 static bool service_mode;
 static bool metadata_selftest; /* only --selftest-metadata, NEVER production */
+static bool managed_acl_selftest; /* only --selftest-acl, NEVER production */
 static uid_t service_client_uid;
 static gid_t service_client_gid;
 static bool service_authorized(void)
 {
-    if (!service_mode || metadata_selftest)
+    if (!service_mode || metadata_selftest || managed_acl_selftest)
         return true;
     const struct fuse_context *ctx = fuse_get_context();
     return ctx && (ctx->uid == service_client_uid || ctx->uid == geteuid());
@@ -76,6 +77,14 @@ static bool service_authorized(void)
  * application-controlled xattr, memory block or filename. */
 static int view_acl_token(struct nt_acl_peer_token *token)
 {
+    if (managed_acl_selftest) {
+        const int count=getgroups(0,NULL);
+        if (count<0 || count>29) return -EACCES;
+        gid_t groups[29]={0};
+        if (count && getgroups(count,groups)!=count) return -EACCES;
+        return nt_acl_peer_token_init(token,geteuid(),getegid(),
+                           groups,(size_t)count,NULL)==0 ? 0 : -EACCES;
+    }
     const struct fuse_context *ctx=fuse_get_context();
     if (!ctx) return -EACCES;
     const int count=fuse_getgroups(0,NULL);
@@ -1763,7 +1772,16 @@ int main(int argc, char **argv)
 {
     /* Service client identity is explicit; a test invocation cannot
      * accidentally enable allow_other or weaken backing permissions. */
-    if (argc == 3 && !strcmp(argv[1], "--selftest-metadata")) {
+    if (argc == 3 && !strcmp(argv[1], "--selftest-acl")) {
+        if (geteuid()==0) {
+            fputs("ACL selftest must be non-root\n",stderr);
+            return 2;
+        }
+        managed_acl_selftest=true;
+        service_mode=true;
+        service_client_uid=geteuid();
+        service_client_gid=getegid();
+    } else if (argc == 3 && !strcmp(argv[1], "--selftest-metadata")) {
         /* No mount, no credentials bypass in production. The test binary
          * demands an owner-only disposable backing and current UID. */
         if (geteuid()==0) {
@@ -1791,17 +1809,17 @@ int main(int argc, char **argv)
         service_mode = true;
         service_client_uid = (uid_t)uid;
         service_client_gid = (gid_t)gid;
-    } else if (!metadata_selftest &&
+    } else if (!metadata_selftest && !managed_acl_selftest &&
                !((argc == 3 && !strcmp(argv[1], "--selftest")) ||
                  (argc >= 3 && argc <= 4 && strcmp(argv[1], "--selftest")))) {
         fprintf(stderr,
-                "Usage: %s --selftest BACKING | --selftest-metadata BACKING | BACKING MOUNT [-f] | "
+                "Usage: %s --selftest BACKING | --selftest-metadata BACKING | --selftest-acl BACKING | BACKING MOUNT [-f] | "
                 "BACKING MOUNT -f --service-client-uid UID --service-client-gid GID\n",
                 argv[0]);
         return 2;
     }
-    const char *backing = !strcmp(argv[1], "--selftest") || metadata_selftest ?
-                          argv[2] : argv[1];
+    const char *backing = !strcmp(argv[1], "--selftest") || metadata_selftest ||
+                          managed_acl_selftest ? argv[2] : argv[1];
     lower_root = open(backing, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (lower_root < 0 || !nt_runtime_set_file_root(backing)) {
         perror("nt-dos83-fuse: backing");
@@ -1817,6 +1835,8 @@ int main(int argc, char **argv)
     }
     if (metadata_selftest)
         return service_metadata_selftest();
+    if (managed_acl_selftest)
+        return service_acl_selftest();
     if (!strcmp(argv[1], "--selftest"))
         return backend_selftest();
     if (argc < 3 || argc > 4) {
