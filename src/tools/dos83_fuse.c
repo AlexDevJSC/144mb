@@ -2079,6 +2079,11 @@ int main(int argc, char **argv)
             fputs("Service backing must be private and owner-only\n", stderr);
             return 2;
         }
+        const int staged=acl_stage_prepare();
+        if (staged) {
+            fprintf(stderr,"Cannot recover private ACL staging: %d\n",staged);
+            return 2;
+        }
     }
     if (metadata_selftest)
         return service_metadata_selftest();
