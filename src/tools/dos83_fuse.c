@@ -33,6 +33,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/random.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -42,6 +43,8 @@
 /* All FUSE callbacks operate in the backing namespace, NOT through VIEW.
  * Otherwise a FUSE request would recurse into itself and deadlock. */
 static int lower_root = -1;
+/* Private service-only source directory for atomic ACL-protected mkdir. */
+static int acl_staging_root = -1;
 static pthread_mutex_t namespace_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Enable fault injection exclusively for --selftest. Production service
  * mounting never arms these SIGKILL hooks, regardless of environment. */
@@ -224,8 +227,11 @@ static const char *relpath(const char *path)
     }
     /* Clients must not see or alter the authoritative share-lease files. */
     static const char hidden[] = "/:ntnative-file-leases";
+    static const char acl_hidden[] = "/:ntnative-acl-stage";
     const size_t n = sizeof(hidden) - 1;
-    if (!strncmp(path, hidden, n) && (path[n] == '/' || path[n] == '\0')) {
+    const size_t a = sizeof(acl_hidden) - 1;
+    if ((!strncmp(path, hidden, n) && (path[n] == '/' || path[n] == '\0')) ||
+        (!strncmp(path,acl_hidden,a) && (path[a]=='/' || path[a]=='\0'))) {
         errno = EACCES;
         return NULL;
     }
@@ -413,7 +419,8 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
             break;
         }
         if (!strcmp(path, "/") &&
-            !strcmp(entry->d_name, ":ntnative-file-leases"))
+            (!strcmp(entry->d_name, ":ntnative-file-leases") ||
+             !strcmp(entry->d_name, ":ntnative-acl-stage")))
             continue;
         const long cookie = telldir(dir);
         if (cookie < 0) {
@@ -519,6 +526,7 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
  * an inherited SD while still unnamed. FUSE may not publish a file with
  * only the parent's admission check and a missing child ACL. */
 static int fs4_inherit_unpublished_inode(int parent,int child,
+                                         bool child_directory,
                                          uint32_t requested)
 {
     if (!service_mode || metadata_selftest)
@@ -546,7 +554,7 @@ static int fs4_inherit_unpublished_inode(int parent,int child,
     size_t needed=0;
     const uint8_t *owner=token.token.sid[0];
     const uint8_t *group=token.token.sid[1];
-    int state=nt_acl_inherit_descriptor(source,size,false,
+    int state=nt_acl_inherit_descriptor(source,size,child_directory,
                                 owner,token.token.length[0],
                                 group,token.token.length[1],
                                 NULL,0,&needed);
@@ -557,7 +565,7 @@ static int fs4_inherit_unpublished_inode(int parent,int child,
     }
     uint8_t *child_sd=malloc(needed);
     if (!child_sd) {free(source);return -ENOMEM;}
-    state=nt_acl_inherit_descriptor(source,size,false,
+    state=nt_acl_inherit_descriptor(source,size,child_directory,
                                 owner,token.token.length[0],
                                 group,token.token.length[1],
                                 child_sd,needed,&needed);
@@ -616,7 +624,7 @@ static int fs_create_staged_service(const char *path, mode_t mode,
             lease = -1; /* lifecycle transferred to FUSE view registry */
     }
     if (!error)
-        error=fs4_inherit_unpublished_inode(parent,fd,
+        error=fs4_inherit_unpublished_inode(parent,fd,false,
                         access_mode==O_RDWR ? NT_ACL_DATA_READ|NT_ACL_DATA_WRITE :
                                              NT_ACL_DATA_WRITE);
     if (!error)
