@@ -108,6 +108,10 @@ jobs:
         run: make -j2 check-pe-apc check-pe-seh
       - name: Build, test Linux and execute the PE fixture
         run: make -j2 all check check-pe check-pe-import check-pe-image
+      # Public APCs and the experimental pidfd-pinned supervisor remain
+      # separate trust domains, but both must meet the acceptance gate.
+      - name: Accept bounded special APC PE context and fail-closed supervisor cancellation
+        run: make -j2 check-core4-public-special-apc-contract
       - name: Measure same-source PE priorities and affinities on hosted Linux
         run: bash scripts/linux-run-stage4-scheduler-functional.sh
       - name: Record Linux-hosted NT/Win32 context observation
