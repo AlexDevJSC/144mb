@@ -156,3 +156,22 @@ logs completos y exigir explícitamente el mensaje
 Un `SKIP` por imposibilidad de crear namespaces en CI permanece
 `INCOMPLETO`; no se desactiva Bubblewrap ni se altera el backend
 FileSystem4. La fase 4 permanece abierta.
+
+### Puerta ampliada de fase 4 — 19-11-2026
+
+`bash scripts/fedora-check-stage4.sh` exige ahora `getenforce=Enforcing`
+y ausencia de virtualización detectada, imprime SHA/kernel/SELinux y
+ejecuta explícitamente los PE de APC asíncrona en bucle sin importaciones,
+APC con SEH y fallos hardware SEH, también bajo la variante UBSan.
+Si falta cualquier requisito de anfitrión, devuelve 3 (`INCOMPLETO`).
+No instala paquetes, no modifica SELinux, no concede permisos y no
+desactiva Bubblewrap. La detección automática de entorno físico es un
+preflight y requiere igualmente revisión del operador.
+
+Esta puerta no cubre los contratos NT que aún faltan, ni prueba por sí
+sola prioridad positiva recuperable o multigrupo real; para lo segundo
+se mantiene la puerta separada `fedora-stage4-multigroup-acceptance.sh`.
+`nt144-qa` continúa siendo una herramienta externa cuyo informe
+completo debe repetirse y archivarse sin convertir SKIP en éxito.
+**Componente 4: 96 % → 96 % (+0 puntos)**; el cambio endurece la
+aceptación, no amplía semántica Windows.
