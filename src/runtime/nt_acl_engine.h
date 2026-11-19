@@ -52,6 +52,16 @@ int nt_acl_project_descriptor(const uint8_t *sd,size_t bytes,
                               uint32_t information,uint8_t *out,
                               size_t capacity,size_t *needed);
 
+/* Strictly virtual POSIX mode bridge for a canonical 3-ACE
+ * owner/group/Everyone ALLOW DACL. A complex or named-SID DACL MUST
+ * return UNSUPPORTED rather than deleting a principal or a DENY ACE.
+ * The output is the same-sized SD with updated ACE masks, never chmod
+ * on the physical backing. Mode bits other than 0777 are invalid. */
+int nt_acl_simple_mode(const uint8_t *sd,size_t bytes,uint32_t *mode);
+int nt_acl_chmod_simple_descriptor(const uint8_t *sd,size_t bytes,
+                                   uint32_t mode,uint8_t *out,
+                                   size_t capacity,size_t *needed);
+
 /* Materialize a CHILD self-relative descriptor with authenticated owner
  * and group SIDs, carrying forward inherited ACEs (including arbitrary
  * binary SID values). CREATOR_OWNER/GROUP SIDs are substituted using the
