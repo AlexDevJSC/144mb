@@ -45,10 +45,13 @@ int import_fixture_entry(void)
     events[1] = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!events[0] || !events[1]) return 10;
     DWORD tid = 0, exit_code = 0;
-    HANDLE thread = CreateThread(NULL, 0, controlled_worker, events, 0, &tid);
+    /* CREATE_SUSPENDED is a deterministic pending-queue barrier:
+     * CreateThread has already attached the guest TEB but the worker
+     * has not executed a single PE instruction. The cancel result
+     * cannot race a callback which starts during SetEvent's return. */
+    HANDLE thread = CreateThread(NULL, 0, controlled_worker, events,
+                                 CREATE_SUSPENDED, &tid);
     if (!thread || !tid) return 11;
-    if (WaitForSingleObject(events[0], 5000) != WAIT_OBJECT_0)
-        return 12;
     HANDLE query = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
     if (!query) return 13;
     uint64_t ticket = UINT64_C(0x1122334455667788);
@@ -82,8 +85,12 @@ int import_fixture_entry(void)
         NtNativeQueueSpecialApc(thread, delivered, NULL, NULL, NULL,
                                 NULL) != (LONG)STATUS_INVALID_PARAMETER)
         return 19;
-    if (called != 0 || !CloseHandle(query) || !SetEvent(events[1]))
+    if (called != 0 || !CloseHandle(query) ||
+        ResumeThread(thread) != 1u)
         return 20;
+    if (WaitForSingleObject(events[0], 5000) != WAIT_OBJECT_0 ||
+        !SetEvent(events[1]))
+        return 12;
     if (WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 ||
         !GetExitCodeThread(thread, &exit_code) || exit_code != 0x144u ||
         called != 1 || observed_thread != tid)
