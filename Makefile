@@ -697,6 +697,17 @@ check-nt-acl-engine: $(BUILD_DIR)/nt-acl-engine-test
 
 check: check-nt-acl-engine
 
+# Trusted-only SD persistence using a pinned inode, not an ACL setter for PE.
+$(BUILD_DIR)/nt-acl-storage-test: tests/nt_acl_storage_test.c src/runtime/nt_acl_storage.c src/runtime/nt_acl_engine.c src/runtime/nt_acl_storage.h src/runtime/nt_acl_engine.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) \
+	    tests/nt_acl_storage_test.c src/runtime/nt_acl_storage.c src/runtime/nt_acl_engine.c -o "$@"
+
+.PHONY: check-nt-acl-storage
+check-nt-acl-storage: $(BUILD_DIR)/nt-acl-storage-test
+	"$(BUILD_DIR)/nt-acl-storage-test"
+
+check: check-nt-acl-storage
+
 .PHONY: check-fs4-reparse-wal
 check-fs4-reparse-wal: $(BUILD_DIR)/nt-dos83-mediator
 	PYTHONDONTWRITEBYTECODE=1 python3 tests/fs4_reparse_symlink_wal.py "$(BUILD_DIR)/nt-dos83-mediator"
