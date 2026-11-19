@@ -24,6 +24,29 @@ DETAILS = {
     "PRIORITY_CLASS": "process class, relative thread priority, NT base and denial semantics",
     "PRIORITY_BOOST_BOUNDARY": "availability and denial of process/thread boost controls",
 }
+# These identifiers come from numbered 'return' statements in the exact
+# source fixtures. A Windows fixture's nonzero result can mean that the
+# test assumes an NT144 restriction, or that the hosted runner starts with
+# a different default class; it is NOT automatically a runtime defect.
+KNOWN_NATIVE_EXITS = {
+    "THREAD_GROUP": {
+        10: "The native Windows CreateThread(CREATE_SUSPENDED) call failed",
+    },
+    "PROCESS_AFFINITY": {
+        10: "GetProcessAffinityMask failed with an error not expected by the fixture",
+    },
+    "PRIORITY_CLASS": {
+        10: "Initial Windows process priority class was not NORMAL_PRIORITY_CLASS",
+        14: "Windows did not return the fixture's expected REALTIME/NOT_SUPPORTED result",
+        20: "Windows did not return NT144's expected multi-thread priority transition denial",
+    },
+    "PRIORITY_BOOST_BOUNDARY": {
+        10: "GetProcessPriorityBoost did not return NT144's unsupported-path contract",
+        11: "SetProcessPriorityBoost did not return NT144's unsupported-path contract",
+        13: "GetThreadPriorityBoost did not return NT144's unsupported-path contract",
+        14: "SetThreadPriorityBoost did not return NT144's unsupported-path contract",
+    },
+}
 
 
 def facts(text: str) -> dict[str, str]:
@@ -76,6 +99,13 @@ def compare(windows_text: str, linux_text: str) -> dict:
         checks[fixture.lower()] = {
             "scope": DETAILS[fixture],
             "native_windows_exit": exit_code,
+            "native_exit_interpretation": (
+                "All tested fixture assertions passed"
+                if exit_code == 0 else
+                KNOWN_NATIVE_EXITS.get(fixture, {}).get(
+                    exit_code, "Consult numbered returns in this fixture source"
+                )
+            ),
             "linux_guest_pe": status,
             "assessment": assessment,
             "same_fixture": True,
