@@ -8,6 +8,7 @@
 struct nt_find_data_w;
 struct nt_file_attribute_data;
 struct nt_handle_file_info;
+struct nt_file_time;
 
 /* Win32 runtime-side, opt-in client of the dedicated-UID HANDLE broker.
  * No Linux backing FDs or paths are ever transferred to guest code. */
@@ -44,6 +45,26 @@ uintptr_t nt_fs4_remote_find_first(const char *path, int32_t level,
 int32_t nt_fs4_remote_find_next(uintptr_t handle, struct nt_find_data_w *info);
 int32_t nt_fs4_remote_find_close(uintptr_t handle);
 int32_t nt_fs4_remote_handle_info(uintptr_t handle, struct nt_handle_file_info *info);
+/* Read-only SECURITY_DESCRIPTOR_RELATIVE owner/group/DACL projection.
+ * No arbitrary NT ACL writes, raw backing FDs or guest pointers in IPC. */
+int32_t nt_fs4_remote_get_security(const char *path, uint32_t information,
+                                   void *descriptor, uint32_t length,
+                                   uint32_t *needed);
+nt_status nt_fs4_remote_native_security(uintptr_t handle, uint32_t information,
+                                        void *descriptor, uint32_t length,
+                                        uint32_t *needed);
+int32_t nt_fs4_remote_get_time(uintptr_t handle,
+                               struct nt_file_time *created,
+                               struct nt_file_time *accessed,
+                               struct nt_file_time *written);
+int32_t nt_fs4_remote_set_time(uintptr_t handle,
+                               const struct nt_file_time *created,
+                               const struct nt_file_time *accessed,
+                               const struct nt_file_time *written);
+int32_t nt_fs4_remote_info_get(uintptr_t handle, int32_t kind,
+                               void *data, uint32_t size);
+int32_t nt_fs4_remote_info_set(uintptr_t handle, int32_t kind,
+                               const void *data, uint32_t size);
 int32_t nt_fs4_remote_delete(const char *path);
 int32_t nt_fs4_remote_rename(const char *old_name, const char *new_name,
                              uint32_t flags);
