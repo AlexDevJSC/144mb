@@ -113,7 +113,8 @@ int nt_acl_access_check(const uint8_t *sd,size_t bytes,
         return NT_ACL_UNSUPPORTED;
     for (size_t i=0;i<token->count;i++)
         if (!token->sid[i] || !sid_valid(token->sid[i],token->length[i]) ||
-            token->length[i]!=8u+(size_t)token->sid[i][1]*4u)
+            token->length[i]!=8u+(size_t)token->sid[i][1]*4u ||
+            (token->sid_flags[i] & (uint8_t)~NT_ACL_SID_DENY_ONLY))
             return NT_ACL_INVALID;
     struct acl acl={0};
     int valid=sd_acl(sd,bytes,&acl);
