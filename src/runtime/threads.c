@@ -1485,11 +1485,14 @@ uintptr_t NT_MS_ABI nt_CreateEventW(const void *security, int32_t manual, int32_
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
-    struct nt_object_attributes attrs = win_event_attributes(&unicode, inherit);
+    /* Unnamed events MUST still forward OBJECT_ATTRIBUTES: the inherited
+     * HANDLE flag is independent from whether an object has a name.
+     * Supplying NULL to NtCreateEvent silently dropped bInheritHandle. */
+    struct nt_object_attributes attrs =
+        win_event_attributes(name && *name ? &unicode : NULL, inherit);
     uintptr_t handle = 0;
     const nt_status status = nt_NtCreateEvent(&handle, EVENT_ALL_ACCESS,
-                                               name && *name ? &attrs : NULL,
-                                               manual ? 0 : 1, initial != 0);
+                                               &attrs, manual ? 0 : 1, initial != 0);
     nt_SetLastError(nt_runtime_nt_error(status));
     return handle;
 }
