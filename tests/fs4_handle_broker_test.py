@@ -24,7 +24,7 @@ ATTR_GET, ATTR_SET, FIND_FIRST, FIND_NEXT, FIND_CLOSE, DUPLICATE, READ_AT, WRITE
 NATIVE_QUERY, NATIVE_SET, NATIVE_FLUSH = 21, 22, 23
 
 class Broker:
-    def __init__(self, root, *, crash=None):
+    def __init__(self, root, *, crash=None, binary=None):
         server, self.client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.client.settimeout(5)
         env = dict(os.environ)
@@ -35,7 +35,8 @@ class Broker:
         self.process = None
         try:
             self.process = subprocess.Popen([
-                BINARY, "--root", str(root), "--fd", str(server.fileno()),
+                BINARY if binary is None else binary,
+                "--root", str(root), "--fd", str(server.fileno()),
                 "--client-uid", str(os.geteuid()), "--test"
             ], pass_fds=(server.fileno(),), stdin=subprocess.DEVNULL,
                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
@@ -103,15 +104,17 @@ class FileSystem4Handles(unittest.TestCase):
             self.assertTrue(process.stderr.closed)
 
     def test_failed_handshake_does_not_leak_parent_fds(self):
-        # The worker must exit before HELLO on an absent root; this also
-        # exercises the constructor's error/timeout cleanup path.
+        # A deterministic negative handshake: /usr/bin/false exits without
+        # HELLO. An absent backing root is NOT a reliable startup failure,
+        # because the runtime may wait for recovery instead.
         if not Path("/proc/self/fd").is_dir():
             self.skipTest("Linux /proc/self/fd required for FD accounting")
-        with tempfile.TemporaryDirectory(prefix="fs4-broker-badroot-") as temp:
-            absent = Path(temp) / "does-not-exist"
+        with tempfile.TemporaryDirectory(prefix="fs4-broker-badhello-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
             before = len(os.listdir("/proc/self/fd"))
             with self.assertRaises(AssertionError):
-                Broker(absent)
+                Broker(root, binary="/usr/bin/false")
             self.assertEqual(len(os.listdir("/proc/self/fd")), before)
 
     def test_broker_timeout_kills_worker_and_closes_pipes(self):
