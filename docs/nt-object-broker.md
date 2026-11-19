@@ -71,6 +71,35 @@ de sesión. Ningún cambio concede permisos a un PE ni toca SELinux.
 **Madurez del componente 4: 96 % → 96 % (+0 pp)**. Se fortalece
 la liveness del broker actual, no la herencia general de HANDLE.
 
+## Contrato autenticado por mensaje y derechos exactos — 19-11-2026
+
+El broker de objetos NT **ya no acepta cualquier mensaje recibido a
+través de un socket que alguna vez se abrió bajo el mismo UID**. El
+servidor habilita `SO_PASSCRED` en el listener y en cada conexión
+aceptada, y exige un único `SCM_CREDENTIALS` auténtico en cada
+`SOCK_SEQPACKET`. PID, UID y GID efectivos del emisor deben coincidir
+con `SO_PEERCRED` de la conexión original. Paquetes truncados, mensajes
+auxiliares desconocidos y transferencias `SCM_RIGHTS` en peticiones se
+rechazan, cerrando cualquier FD recibido. Esto impide que un proceso
+hijo que recibió por `fork` un socket del padre herede su autoridad
+para crear/abrir objetos NT sin nueva autenticación.
+
+El broker también devuelve exactamente `req.rights`, no el máximo
+`obj.rights` del creador, cuando la comprobación ya permitió la
+apertura. El cliente rechaza una respuesta que añada derechos. La
+prueba de integración del broker comprueba explícitamente una apertura
+reducida a derechos 1 y un socket conectado por el padre cuyo único
+paquete se envía desde un hijo distinto.
+
+**Esto NO crea todavía tokens NT autenticados ni una DACL NT aplicada
+a objetos**: autentica identidad Linux por sesión y por mensaje, y
+aplica exclusivamente la máscara de acceso existente; varios programas
+PE legítimos del mismo UID comparten un ámbito de confianza. No
+aceptar descriptores de seguridad suministrados por el invitado como
+autoridad sin un emisor confiable y un contrato NT completo. Tampoco
+habilita duplicación entre PID ni acceso a recursos de otros UID.
+Madurez componente 4: **96 % → 96 % (+0 puntos)** sin aceptación.
+
 ## Alcance y límites
 
 Esta es la base operativa del **broker por usuario**, no un Object Manager Windows completo:

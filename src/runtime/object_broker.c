@@ -165,7 +165,9 @@ int nt_broker_acquire(const struct nt_broker_request *request,
     uint64_t expected_size = request->kind == NT_BROKER_SECTION ? reply.size : 4096;
     if (count != expected_count || !verify_memfd(rights[0], expected_size) ||
         (count == 2 && !verify_memfd(rights[1], 4096)) ||
-        (reply.rights & request->rights) != request->rights)
+        /* Reject over-granted rights as well as insufficient grants.
+         * A same-UID peer must not silently widen the opened HANDLE. */
+        reply.rights != request->rights)
         goto received_error;
     resource->fd = rights[0];
     resource->gate_fd = count == 2 ? rights[1] : -1;
