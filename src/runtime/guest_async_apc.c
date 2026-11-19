@@ -193,25 +193,32 @@ static void async_apc_signal_handler(int sig, siginfo_t *info, void *frame)
 
 static void install_once_fn(void)
 {
-    const int target = SIGRTMIN + 4;
-    if (target > SIGRTMAX)
-        return;
-    long page = sysconf(_SC_PAGESIZE);
+    const long page = sysconf(_SC_PAGESIZE);
     if (page <= 0 || page > 65536)
         return;
-    struct sigaction old = {0};
-    if (sigaction(target, NULL, &old) != 0 ||
-        old.sa_handler != SIG_DFL)
-        return; /* never steal a signal already owned by another host */
-    struct sigaction act = {0};
-    act.sa_sigaction = async_apc_signal_handler;
-    act.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigemptyset(&act.sa_mask);
-    if (sigaction(target, &act, NULL) != 0)
+
+    /* The host may have reserved our preferred signal already. Never
+     * replace its handler (including SIG_IGN): try another realtime
+     * signal before falling back to cooperative import-return delivery.
+     * This is process-local; it is not a signal-ownership sandbox. */
+    const int first = SIGRTMIN + 4;
+    const int last = SIGRTMAX;
+    for (int candidate = first; candidate <= last; ++candidate) {
+        struct sigaction old = {0};
+        if (sigaction(candidate, NULL, &old) != 0 ||
+            old.sa_handler != SIG_DFL)
+            continue;
+        struct sigaction act = {0};
+        act.sa_sigaction = async_apc_signal_handler;
+        act.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&act.sa_mask);
+        if (sigaction(candidate, &act, NULL) != 0)
+            continue;
+        page_size = (size_t)page;
+        apc_signal_number = candidate;
+        installed = true;
         return;
-    page_size = (size_t)page;
-    apc_signal_number = target;
-    installed = true;
+    }
 }
 
 bool nt_runtime_guest_async_apc_install(void)
