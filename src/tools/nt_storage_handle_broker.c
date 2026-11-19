@@ -483,19 +483,49 @@ static int serve(struct session *s)
                                     .op = FS4_HELLO, .value = s->nonce};
     if (!send_reply(s, &hello, NULL))
         return 3;
-    const time_t deadline = time(NULL) + 120;
+    /* The 120-second limit is a SESSION lifetime, not a two-second
+     * idle timeout. Use a monotonic deadline: poll(2000) returning zero
+     * must not release live handles or consume the request quota. */
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+        return 3;
+    /* Only the offline --test worker may shorten its lifetime for a real
+     * expiration/lease-recovery regression; production stays at 120 s. */
+    const char *fast_expire = s->offline_test ?
+        getenv("NT_FS4_TEST_EXPIRE_1S") : NULL;
+    deadline.tv_sec += fast_expire && strcmp(fast_expire, "1") == 0 ?
+                       1 : 120;
     unsigned char payload[FS4_DATA_MAX], output[FS4_DATA_MAX];
-    for (int count = 0; count < FS4_REQUEST_MAX && time(NULL) < deadline; ++count) {
+    for (int count = 0; count < FS4_REQUEST_MAX; ) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            break;
+        const int64_t remaining_ns =
+            ((int64_t)deadline.tv_sec - (int64_t)now.tv_sec) *
+                INT64_C(1000000000) +
+            ((int64_t)deadline.tv_nsec - (int64_t)now.tv_nsec);
+        if (remaining_ns <= 0)
+            break;
+        const int timeout_ms = remaining_ns >= INT64_C(2000000000) ?
+            2000 : (int)((remaining_ns + 999999) / 1000000);
         struct pollfd fd = {.fd = s->socket_fd, .events = POLLIN};
-        const int ready = poll(&fd, 1, 2000);
+        const int ready = poll(&fd, 1, timeout_ms);
         if (ready < 0 && errno == EINTR)
             continue;
-        if (ready <= 0 || !(fd.revents & POLLIN))
+        if (ready == 0)
+            continue; /* Idle is not disconnect; keep OFD leases alive. */
+        if (ready < 0 || !(fd.revents & POLLIN))
+            break;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
+            now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec &&
+             now.tv_nsec >= deadline.tv_nsec))
             break;
         struct fs4_request request;
         size_t n = 0;
         if (!receive_request(s->socket_fd, &request, payload, &n))
             break;
+        ++count; /* A real IPC request, not poll timeout or EINTR. */
         const struct fs4_reply reply = dispatch(s, &request, payload, n, output);
         /* Offline-only SIGKILL injection happens AFTER a successful
          * physical mutation but BEFORE its IPC reply is observable.
