@@ -2810,18 +2810,24 @@ static int close_file(struct guest_file *file)
 
 /* Duplicated descriptors share a Linux open-file description (and therefore
  * the seek offset), as a duplicated Windows file HANDLE does. They remain
- * independent entries in the guest handle table. Rights-preserving copies
- * are supported; reducing access rights needs a separate access-mask model. */
-static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
-                                       uint32_t options, uintptr_t *target)
+ * independent entries in the guest handle table. Restrict explicit rights
+ * to the already-normalized FILE_READ/WRITE/DELETE model: a guest must not
+ * turn a read-only source into a writable duplicate. */
+static nt_status duplicate_file_handle(uintptr_t source, uint32_t access,
+                                       uint32_t attributes, uint32_t options,
+                                       uintptr_t *target)
 {
     pthread_mutex_lock(&file_lock);
     const struct guest_file *original = find_handle(source);
     nt_status status = NT_STATUS_SUCCESS;
     if (!original) {
         status = NT_STATUS_INVALID_HANDLE;
-    } else if (!(options & 2u)) { /* DUPLICATE_SAME_ACCESS */
-        status = NT_STATUS_NOT_SUPPORTED;
+    } else if (!(options & 2u) &&
+               (access == 0 || (access & ~(FILE_READ | FILE_WRITE | FILE_DELETE)))) {
+        /* Other NT ACCESS_MASK forms need a dedicated generic mapping. */
+        status = NT_STATUS_INVALID_PARAMETER;
+    } else if (!(options & 2u) && (access & ~original->access)) {
+        status = NT_STATUS_ACCESS_DENIED;
     } else {
         struct guest_file *copy = new_file();
         if (!copy || next_handle == UINTPTR_MAX) {
@@ -2841,6 +2847,8 @@ static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
             } else {
                 *copy = *original;
                 copy->fd = fd;
+                if (!(options & 2u))
+                    copy->access = access;
                 copy->share_lease_fd = lease;
                 copy->path = path;
                 copy->handle = next_handle++;
@@ -3398,7 +3406,7 @@ nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t sou
     if (status == NT_STATUS_INVALID_HANDLE)
         status = nt_runtime_section_duplicate(source, access, attributes, options, target);
     if (status == NT_STATUS_INVALID_HANDLE)
-        status = duplicate_file_handle(source, attributes, options, target);
+        status = duplicate_file_handle(source, access, attributes, options, target);
     if (status == NT_STATUS_SUCCESS && (options & 1u)) {
         /* After successful duplication each handle has an independent life. */
         const nt_status closed = nt_NtClose(source);

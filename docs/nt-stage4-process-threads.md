@@ -3,6 +3,39 @@
 Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-order.md):
 **4 → 1 → 5 → 2 → 3 → 6 → 7** (nueva instrucción expresa del 14-11-2026; el orden original era 4 → 5 → 2 → 3 → 1 → 6 → 7). **Esta fase permanece activa** y el cargador PE/DLL no empieza hasta que se satisfagan los criterios de salida.
 
+## Subcontrato de handles: atenuación local de derechos (19-11-2026)
+
+`NtDuplicateObject`/`DuplicateHandle` permiten ahora copiar handles de
+**archivos normales** y **secciones de memoria** del mismo proceso con un
+subconjunto explícito de derechos, en vez de admitir solamente
+`DUPLICATE_SAME_ACCESS`. La copia se almacena como un handle nuevo
+e independiente en la tabla Win32; el descriptor de archivo conserva
+su open-file description y offset compartido, pero su máscara NT
+es reducida antes de atender nuevas operaciones. Una petición que eleva
+derechos devuelve `STATUS_ACCESS_DENIED` sin crear el alias.
+
+- Los archivos admiten como contrato reducido únicamente
+  `FILE_READ | FILE_WRITE | FILE_DELETE`, las máscaras internas
+  realmente interpretadas por el runtime; una máscara NT genérica no
+  traducida se rechaza, sin equivalencias inventadas.
+- Las secciones admiten solamente las máscaras de
+  `OpenFileMappingW` ya soportadas (`FILE_MAP_READ`,
+  `FILE_MAP_WRITE`, `FILE_MAP_COPY` y combinaciones válidas).
+- `DUPLICATE_SAME_ACCESS` sigue conservando el contrato anterior.
+  Se preservan el control independiente de cierre protegido y la
+  política de herencia por HANDLE existente.
+- Las regresiones `section-memory-test` e
+  `inherited-file-test` comprueban copia solo lectura, intento de
+  escritura denegado, prohibición de elevación y bits desconocidos,
+  conservación del recurso y cierre de cada alias.
+
+**Limitación:** estos cambios no implementan duplicación entre PID
+independientes, ni un token NT autenticado, ni herencia de eventos,
+hilos o secciones entre procesos. Continúan los límites del broker
+y el rechazo de herencia no soportada durante `CreateProcess`.
+No se incrementa la estimación de madurez del componente 4
+(**96 % → 96 %, +0 puntos**) sin la suite completa y el diferencial.
+
 ## Avance de contextos AMD64: FXSAVE legado verificable (19-11-2026)
 
 La ruta real de `GetThreadContext` bajo el supervisor ya leía
