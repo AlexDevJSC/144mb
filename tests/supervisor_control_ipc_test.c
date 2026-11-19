@@ -261,8 +261,24 @@ static _Noreturn void child_client(int fd, unsigned mode)
                sizeof(backing_mxcsr));
         if (backing_mxcsr != float_context.mxcsr ||
             nt_broker_client_supervisor_set_context(capability, &float_context) !=
-                NT_STATUS_NOT_SUPPORTED)
+                NT_STATUS_SUCCESS)
             _exit(58);
+        _Alignas(16) struct nt_context64 altered_float = float_context;
+        altered_float.mxcsr ^= UINT32_C(0x2000);
+        memcpy(altered_float.floating + 24, &altered_float.mxcsr,
+               sizeof(altered_float.mxcsr));
+        if (nt_broker_client_supervisor_set_context(capability, &altered_float) !=
+                NT_STATUS_SUCCESS)
+            _exit(59);
+        _Alignas(16) struct nt_context64 readback_float = {0};
+        readback_float.flags = 0x100008u;
+        if (nt_broker_client_supervisor_get_context(capability, &readback_float) !=
+                NT_STATUS_SUCCESS ||
+            readback_float.mxcsr != altered_float.mxcsr)
+            _exit(60);
+        if (nt_broker_client_supervisor_set_context(capability, &float_context) !=
+                NT_STATUS_SUCCESS)
+            _exit(61);
         _Alignas(16) struct nt_context64 integer = before;
         integer.flags = 0x100002u;
         const uint64_t original_rax = integer.rax;
