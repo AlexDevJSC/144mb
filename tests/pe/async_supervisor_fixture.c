@@ -46,6 +46,15 @@ static DWORD WINAPI dll_worker(void *unused)
 
 static volatile LONG ticks;
 static volatile LONG go;
+static volatile LONG safe_import_ticks;
+static DWORD WINAPI safe_import_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        __atomic_add_fetch(&safe_import_ticks, 1, __ATOMIC_RELAXED);
+        Sleep(0); /* trusted Win32 import-return checkpoint */
+    }
+}
 static DWORD WINAPI worker(void *arg)
 {
     (void)arg;
@@ -125,6 +134,11 @@ int import_fixture_entry(void)
         return 21;
     Sleep(30);
     if (ticks <= before) return 22;
+    /* No import boundary in the target PE busy loop. TerminateThread
+     * must time out WITHOUT cancelling its Linux pthread or leaving a
+     * delayed kill request that would run at a later unrelated import. */
+    if (TerminateThread(thread, 0xdead)) return 46;
+    if (ticks <= before) return 47;
     go = 1;
     if (WaitForSingleObject(thread, 4000) != WAIT_OBJECT_0 ||
         !GetExitCodeThread(thread, &exit_code) || exit_code != 0x144 ||
@@ -160,5 +174,20 @@ int import_fixture_entry(void)
         !GetExitCodeThread(dll_thread, &exit_code) || exit_code != 0x177 ||
         !CloseHandle(dll_thread))
         return 45;
+    /* Positive: a local PE worker repeatedly crosses an import-return
+     * boundary with all host mutexes already released. Only the worker
+     * itself may ACK and ExitThread. */
+    safe_import_ticks = 0;
+    HANDLE safe_thread = CreateThread(NULL, 0, safe_import_worker,
+                                      NULL, 0, &id);
+    if (!safe_thread || !id) return 48;
+    for (unsigned spin = 0; !safe_import_ticks && spin < 1000000; ++spin)
+        Sleep(0);
+    if (!safe_import_ticks) return 49;
+    if (!TerminateThread(safe_thread, 0x178)) return 50;
+    if (WaitForSingleObject(safe_thread, 4000) != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(safe_thread, &exit_code) ||
+        exit_code != 0x178 || !CloseHandle(safe_thread))
+        return 51;
     return 0;
 }
