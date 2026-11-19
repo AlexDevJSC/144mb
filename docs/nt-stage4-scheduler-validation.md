@@ -36,6 +36,22 @@ hosted, **no Fedora físico**. Cada fixture altera solamente el proceso
 de laboratorio que crea; no cambia prioridad, cpuset ni derechos del
 anfitrión fuera de él.
 
+Además, la sonda nativa independiente
+`tests/windows/stage4_scheduler_probe.c` comprueba **mutaciones
+reversibles del propio proceso/hilo** sin suponer la clase de
+prioridad inicial del runner. Para `PROCESS_PRIORITY_CLASS_ROUNDTRIP`
+alterna entre NORMAL y BELOW_NORMAL, verifica la lectura y restaura
+la clase original. Para `THREAD_PRIORITY_ROUNDTRIP` modifica la
+prioridad de un worker `CREATE_SUSPENDED`, comprueba la lectura y
+restaura el valor original antes de `ResumeThread`.
+`PROCESS_AFFINITY_ROUNDTRIP` reduce la máscara del propio proceso
+a uno de sus CPU permitidos, verifica y restaura; registra `SKIP`
+cuando la API legacy no es representable en topología multigrupo.
+Los resultados de ese binario se archivan en
+`stage4-windows-native.txt` y no convierten un fixture antiguo
+que sale en 10 en una falsa coincidencia. El comparador exige estos
+tres hechos nativos y `NT_SCHEDULER_POLICY_PARITY=UNVERIFIED`.
+
 `scripts/compare-stage4-priority-affinity.py` exige que las pruebas
 Windows y Linux provengan del mismo commit SHA, rechaza resultados
 omitidos y deja tres categorías: `SAME_SOURCE_CONTRACT_CONSISTENT`,
