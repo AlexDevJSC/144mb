@@ -121,7 +121,7 @@ int main(void)
                 atomic_load(&failure), atomic_load(&calls));
         return 6;
     }
-    puts("PASS kernel-directed APC during import-free busy loop; "
-         "dedicated stack and original AMD64 context restored");
+    puts("PASS host-owned preferred signal preserved; asynchronous APC "
+         "used another realtime signal, private stack and AMD64 restore");
     return 0;
 }
