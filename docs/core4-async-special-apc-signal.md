@@ -13,8 +13,9 @@ un **RIP PE en ejecución continua sin importaciones ni esperas**.
 
 El cargador confiable fija los intervalos `.text` del PE y DLL de inicio
 antes de ejecutar código invitado. El runtime reserva un número de
-señal POSIX de tiempo real (SIGRTMIN+4) **solo si ningún componente host
-lo había registrado**, y asigna a cada hilo invitado su propia pila de
+señal POSIX de tiempo real (prefiere SIGRTMIN+4 y busca otro número
+disponible si ya está ocupado) **solo si ningún componente host lo había
+registrado**, y asigna a cada hilo invitado su propia pila de
 despacho con página guardia; mantiene independiente la pila que usan
 las señales de fallo de CPU de #186. No se expone a Win32 ninguna API
 de señales, dirección `pthread_t`, número de TID Linux o puntero de
