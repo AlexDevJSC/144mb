@@ -54,8 +54,13 @@ static uint64_t record_hash(const uint8_t *p,size_t length) {
     return hash_bytes(hash,p+HEADER_BYTES,length-HEADER_BYTES);
 }
 static bool valid_inode(int fd,struct stat *st) {
-    return fstat(fd,st)==0 &&
-           (S_ISREG(st->st_mode) || S_ISDIR(st->st_mode));
+    if (fstat(fd,st)!=0)
+        return false;
+    if (!S_ISREG(st->st_mode) && !S_ISDIR(st->st_mode)) {
+        errno=EINVAL;
+        return false;
+    }
+    return true;
 }
 int nt_acl_storage_read_fd(int fd,uint8_t *out,size_t capacity,
                            size_t *needed)
