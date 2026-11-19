@@ -13,8 +13,9 @@ un **RIP PE en ejecución continua sin importaciones ni esperas**.
 
 El cargador confiable fija los intervalos `.text` del PE y DLL de inicio
 antes de ejecutar código invitado. El runtime reserva un número de
-señal POSIX de tiempo real (SIGRTMIN+4) **solo si ningún componente host
-lo había registrado**, y asigna a cada hilo invitado su propia pila de
+señal POSIX de tiempo real (prefiere SIGRTMIN+4 y busca otro número
+disponible si ya está ocupado) **solo si ningún componente host lo había
+registrado**, y asigna a cada hilo invitado su propia pila de
 despacho con página guardia; mantiene independiente la pila que usan
 las señales de fallo de CPU de #186. No se expone a Win32 ninguna API
 de señales, dirección `pthread_t`, número de TID Linux o puntero de
@@ -47,8 +48,11 @@ El manejador POSIX:
 El handler puede ignorar la señal si llega en fase HOST: la cola
 permanece pendiente para el antiguo retorno de importación. Los
 callbacks ordinarios permanecen en su cola y NO se ejecutan sin una
-espera alertable. Si el anfitrión ya ha ocupado la señal reservada,
-el runtime no roba ese manejador y conserva el modo cooperativo.
+espera alertable. Si el anfitrión ha ocupado la señal preferida,
+el runtime busca otra libre hasta SIGRTMAX sin sustituir SIG_IGN ni
+manejadores ajenos. Si no queda ninguna, conserva solo el modo cooperativo.
+La selección no es una reserva atómica frente a otro código host que
+registre manejadores simultáneamente y no garantiza señales desbloqueadas.
 
 ## Recuperación limitada de fronteras VEH/SEH
 
@@ -150,6 +154,17 @@ Las trazas instrumentadas de la regresión de hardware se compilan solo
 con `NT_HARDWARE_SIGNAL_TEST_DIAGNOSTICS`; no se activan en el runtime
 distribuido. No se relaja el contrato de señales ajenas a invitado,
 direcciones dinámicas sin registrar ni cambios PKRU.
+
+## Mejora incremental 19-11-2026: señal de reserva ocupada
+
+La selección de señales asíncronas prueba la primera opción libre a partir
+de SIGRTMIN+4. La prueba host reserva antes SIGRTMIN+4 con SIG_IGN,
+comprueba que el runtime no lo reemplaza y que una APC verdadera se
+entrega y restaura el contexto AMD64 por una señal alternativa.
+Conserva fail-closed cuando todo el rango está ocupado; no habilita
+APC arbitrarias ni elimina la limitación de PE autorizados.
+**Componente 4: 96 % → 96 % (+0 puntos)** por robustez de selección,
+sin ampliar el alcance semántico Win32 de la APC.
 
 ## Pendientes obligatorios
 
