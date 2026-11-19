@@ -144,6 +144,12 @@ class SecurityMetadataIPC(unittest.TestCase):
             NOT_SUPPORTED)
         self.assertEqual(self.worker.call(
             INFO_SET, basic, handle=readonly, access=0)[0], ACCESS_DENIED)
+        # A zero-timestamp no-op must not bypass write permissions.
+        noop = BASIC.pack(0, 0, 0, 0, 0)
+        self.assertEqual(self.worker.call(
+            INFO_SET, noop, handle=readonly, access=0)[0], ACCESS_DENIED)
+        self.assertEqual(self.worker.call(
+            INFO_SET, noop, handle=write_handle, access=0)[0], SUCCESS)
         err, _, _, info = self.worker.call(HANDLE_INFO, handle=write_handle)
         self.assertEqual((err, len(info)), (SUCCESS, 52))
         # FILETIME fields in BY_HANDLE_FILE_INFORMATION follow attrs.
