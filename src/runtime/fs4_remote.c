@@ -29,7 +29,8 @@ enum { FS4_MAGIC=0x34465348u, FS4_VERSION=3, FS4_MAX=2048,
        FS4_ATTR_GET=12, FS4_ATTR_SET=13, FS4_FIND_FIRST=14,
        FS4_FIND_NEXT=15, FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
        FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
-       FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23 };
+       FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23,
+       FS4_HARDLINK=24 };
 struct request {
     uint32_t magic;
     uint16_t version, op;
@@ -471,6 +472,28 @@ int32_t nt_fs4_remote_rename(const char *source,const char *dest,uint32_t flags)
     struct reply response;
     bool ok=request(FS4_RENAME,0,-1,0,0,0,flags,data,(uint32_t)(a+b+1),
                     (uint32_t)(a+b+1),&response,NULL,0);
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+int32_t nt_fs4_remote_hardlink(const char *source, const char *dest)
+{
+    size_t a=0,b=0;
+    if (!checked_path(source,&a) || !checked_path(dest,&b))
+        return 0;
+    if (a+b+1>FS4_MAX) {
+        nt_SetLastError(NT_ERROR_INVALID_NAME);
+        return 0;
+    }
+    unsigned char data[FS4_MAX];
+    memcpy(data,source,a);
+    data[a]=0;
+    memcpy(data+a+1,dest,b);
+    pthread_mutex_lock(&guard);
+    struct reply response;
+    const bool ok=request(FS4_HARDLINK,0,-1,0,0,0,0,
+                          data,(uint32_t)(a+b+1),
+                          (uint32_t)(a+b+1),&response,NULL,0);
     pthread_mutex_unlock(&guard);
     return ok;
 }
