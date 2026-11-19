@@ -457,7 +457,7 @@ int main(void)
          "suspension, real AMD64 CONTEXT GET/SET/restore, unsupported groups, "
          "queued Linux SIGUSR1 preserved, HOST-phase denial, no stale leases, "
          "EOF cleanup, idle >1.3s with ptrace stop, 32 attach cycles, pinned startup DLL allow, "
-         "dynamic DLL and real RW→RX JIT denial, FXSAVE read-only");
+         "dynamic DLL and real RW→RX JIT denial, FXSAVE verified SET/GET with rollback");
     return 0;
 #endif
 }
