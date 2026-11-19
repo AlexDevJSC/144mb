@@ -16,12 +16,23 @@ if ! grep -Eq '^ID=fedora$|^ID="fedora"$' /etc/os-release; then
     exit 2
 fi
 
-for tool in make cc x86_64-w64-mingw32-gcc timeout bwrap; do
+for tool in make cc git getenforce systemd-detect-virt x86_64-w64-mingw32-gcc timeout bwrap; do
     if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "FAIL: missing required build/runtime tool: $tool" >&2
-        exit 2
+        echo "INCOMPLETE: missing required physical-QA tool: $tool" >&2
+        exit 3
     fi
 done
+if [[ $(getenforce) != Enforcing ]]; then
+    echo "INCOMPLETE: Fedora physical acceptance requires SELinux Enforcing." >&2
+    exit 3
+fi
+if systemd-detect-virt --quiet; then
+    echo "INCOMPLETE: virtualization/container detected; physical acceptance not demonstrated." >&2
+    exit 3
+fi
+printf 'STAGE4 SHA=%s KERNEL=%s SELINUX=%s\n' \
+  "$(git rev-parse HEAD)" "$(uname -r)" "$(getenforce)"
+printf 'NOTE: physical-host detection is a preflight, not proof of Windows parity.\n'
 
 log=$(mktemp)
 cleanup() { rm -f -- "$log"; }
