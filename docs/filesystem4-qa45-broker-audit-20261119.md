@@ -58,7 +58,8 @@ servicio**: no se cambia este código.
   el nuevo worker conserva las comprobaciones de datos y OFD lease.
 - Se cierra el primer worker si falla crear el segundo en las tres
   pruebas de concurrencia.
-- Nuevo test de cierre normal, test de HELLO fallido con contabilidad
+- Nuevo test de cierre normal, test de HELLO fallido con un ejecutable
+  determinista de prueba (`/usr/bin/false`) y contabilidad de
   `/proc/self/fd`, y test de timeout bajo `SIGSTOP` con comprobación
   de reap y cierre de pipes.
 - `check-fs4-handle-broker` ejecuta Python con
