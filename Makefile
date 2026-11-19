@@ -148,6 +148,18 @@ $(eval $(call APC_GUARD_FIXTURE,exception-fpe,EXCEPTION_FPE))
 $(eval $(call APC_GUARD_FIXTURE,exception-segv,EXCEPTION_SEGV))
 $(eval $(call APC_GUARD_FIXTURE,pre-cancel,PRE_CANCEL))
 
+# One reproducible acceptance target for the already public, bounded
+# special-APC contract. The two backends remain DISTINCT:
+# (a) real public QueueUserAPC2/NtQueueApcThreadEx over a trusted PE thread,
+# (b) the experimental pidfd-pinned supervisor's failure/cancel quarantine.
+# Passing the union does NOT establish NT-wide APC parity or prove the
+# public queue is authorized to call the ptrace supervisor.
+.PHONY: check-core4-public-special-apc-contract
+check-core4-public-special-apc-contract: check-pe-async-special-apc check-pe-async-special-apc-seh \
+    check-pe-thread-supervisor-apc-failure \
+    check-pe-thread-supervisor-apc-xstate-failure \
+    check-pe-thread-supervisor-apc-guards
+
 .PHONY: check-pe-thread-supervisor-apc-guards
 check-pe-thread-supervisor-apc-guards: $(addprefix $(BUILD_DIR)/supervisor-pe-apc-,$(addsuffix -test,$(APC_GUARD_CASES))) $(BUILD_DIR)/supervisor-pe-fixture.exe
 	timeout 20s $(BUILD_DIR)/supervisor-pe-apc-cancel-test $(BUILD_DIR)/supervisor-pe-fixture.exe
