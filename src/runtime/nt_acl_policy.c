@@ -99,6 +99,39 @@ int nt_acl_peer_token_init(struct nt_acl_peer_token *out,
     return 0;
 }
 
+static uint32_t little32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1]<<8) |
+           ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+}
+/* FILE object GenericMapping is selected by the trusted caller.  The
+ * authenticated owner retains the implicit NT READ_CONTROL/WRITE_DAC
+ * rights even if the DACL does not explicitly grant them. */
+static int requested_concrete(uint32_t *mask,
+                              const struct nt_acl_generic_mapping *mapping)
+{
+    const uint32_t generic=*mask&UINT32_C(0xf0000000);
+    *mask&=~UINT32_C(0xf0000000);
+    if (generic&UINT32_C(0x80000000)) *mask|=mapping->read;
+    if (generic&UINT32_C(0x40000000)) *mask|=mapping->write;
+    if (generic&UINT32_C(0x20000000)) *mask|=mapping->execute;
+    if (generic&UINT32_C(0x10000000)) *mask|=mapping->all;
+    return (*mask&UINT32_C(0xf0000000)) ? -1 : 0;
+}
+static bool is_authenticated_owner(const uint8_t *sd,size_t length,
+                                   const struct nt_acl_peer_token *peer)
+{
+    if (length<20 || !peer->token.count || !peer->token.sid[0])
+        return false;
+    const size_t offset=little32(sd+4);
+    if (!offset || offset>=length)
+        return false;
+    const size_t bytes=8u+(size_t)sd[offset+1]*4u;
+    return bytes==peer->token.length[0] &&
+           bytes<=length-offset &&
+           memcmp(sd+offset,peer->token.sid[0],bytes)==0;
+}
+
 int nt_acl_policy_check_fd(int fd,const struct nt_acl_peer_token *peer,
                            uint32_t requested,
                            const struct nt_acl_generic_mapping *mapping)
@@ -120,11 +153,24 @@ int nt_acl_policy_check_fd(int fd,const struct nt_acl_peer_token *peer,
         errno=saved;
         return NT_ACL_POLICY_ERROR;
     }
+    uint32_t concrete=requested;
+    if (requested_concrete(&concrete,mapping)!=0) {
+        free(descriptor);
+        errno=ENOTSUP;
+        return NT_ACL_POLICY_ERROR;
+    }
+    const uint32_t implicit=is_authenticated_owner(
+        descriptor,needed,peer) ?
+        NT_ACL_READ_CONTROL|NT_ACL_WRITE_DAC : 0u;
+    const uint32_t remaining=concrete & ~implicit;
     uint32_t granted=0;
-    const int result=nt_acl_access_check_mapped(
-        descriptor,needed,&peer->token,requested,mapping,&granted);
+    const int result=remaining ?
+        nt_acl_access_check_mapped(descriptor,needed,&peer->token,
+                                    remaining,mapping,&granted) :
+        NT_ACL_ALLOWED;
     free(descriptor);
-    if (result==NT_ACL_ALLOWED && granted) return NT_ACL_POLICY_ALLOWED;
+    if (result==NT_ACL_ALLOWED && (!remaining || granted==remaining))
+        return NT_ACL_POLICY_ALLOWED;
     if (result==NT_ACL_DENIED) {errno=EACCES;return NT_ACL_POLICY_DENIED;}
     errno=result==NT_ACL_UNSUPPORTED ? ENOTSUP : EUCLEAN;
     return NT_ACL_POLICY_ERROR;
