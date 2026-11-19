@@ -78,7 +78,28 @@ __attribute__((noinline)) static void *pure_guest_loop(void *ignored)
 }
 int main(void)
 {
+    /* Reserve the preferred signal for a simulated pre-existing host
+     * component. The runtime must neither steal SIG_IGN nor give up
+     * asynchronous PE dispatch when a later realtime signal is free. */
+    const int preferred = SIGRTMIN + 4;
+    if (preferred > SIGRTMAX)
+        return 2;
+    struct sigaction previous = {0};
+    if (sigaction(preferred, NULL, &previous) != 0)
+        return 2;
+    const bool test_reserved = previous.sa_handler == SIG_DFL;
+    if (test_reserved) {
+        struct sigaction occupied = {0};
+        occupied.sa_handler = SIG_IGN;
+        sigemptyset(&occupied.sa_mask);
+        if (sigaction(preferred, &occupied, NULL) != 0)
+            return 2;
+    }
     if (!nt_runtime_guest_async_apc_install())
+        return 2;
+    struct sigaction after = {0};
+    if (sigaction(preferred, NULL, &after) != 0 ||
+        (test_reserved && after.sa_handler != SIG_IGN))
         return 2;
     /* The synthetic immutable code grant is under TEST ownership only.
      * Production gets its range exclusively from validated PE loader. */
