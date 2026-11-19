@@ -49,6 +49,33 @@ esté aplicando al abrir, escribir, renombrar o borrar archivos.**
   acceso por defecto. No se inventa una DACL de concesión total.
 - La función no realiza mutación en disco ni cambia la DACL parental.
 
+## Persistencia interna de DACL (todavía no expuesta al invitado)
+
+La segunda pieza interna `fs4_acl_storage.c` puede almacenar un
+`SECURITY_DESCRIPTOR_RELATIVE` **ya validado** como
+`user.ntnative.ntacl-v1` sobre un inode fijado. Su escritura comprueba
+tipo regular/directorio y confirma `fsync` antes de éxito; su lectura
+rechaza metadatos corruptos o mayores de 2048 bytes con `EUCLEAN`,
+en vez de caer silenciosamente al descriptor POSIX básico.
+
+`fs4_acl_storage_inherit_trusted` toma la DACL del directorio padre,
+construye la del hijo con los SID `S-1-22-1/2` del propietario/grupo
+autenticado y escribe el xattr **en un inode O_TMPFILE no publicado**.
+La nueva prueba crea y publica después ese inode, reabre el nuevo nombre,
+verifica permisos y rechaza un parent xattr corrompido.
+
+**Advertencia de seguridad:** este helper no autentica el llamante,
+no implementa `WRITE_DAC` ni hace cumplir la DACL en `CreateFileW`,
+FUSE, rename, delete o accesos existentes. Es código interno de
+persistencia y **no se ha expuesto en el broker ni a aplicaciones PE**.
+El integrador final debe retener el WAL de namespace y evaluar los
+derechos antes de invocarlo. `fsync` no constituye por sí solo
+atomicidad multioperación ni recuperación ante corte eléctrico.
+
+La prueba `make check-fs4-acl-storage` requiere xattrs y
+`O_TMPFILE` del backing; si la plataforma no ofrece staging,
+imprime **SKIP** y no simula éxito de herencia antes de publicación.
+
 ## Trabajo que sigue bloqueado
 
 El servicio IPC v3 aún necesita:
