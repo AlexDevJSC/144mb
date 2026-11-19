@@ -231,20 +231,6 @@ bool fs4_acl_inherit(const void *parent,size_t parent_length,
             (flags & (FS4_ACE_OBJECT_INHERIT | FS4_ACE_CONTAINER_INHERIT)) != 0 :
             (flags & FS4_ACE_OBJECT_INHERIT) != 0;
         if (propagate) {
-            uint32_t new_type=0;
-            const bool creator=creator_rewrite(source + cursor + ACE_HEADER,
-                                               span - ACE_HEADER,&new_type);
-            const size_t new_span=span + (creator ? 4u : 0u);
-            if (!region(pos,new_span,FS4_SD_LIMIT) ||
-                new_span > UINT16_MAX) {
-                errno=ENOSPC;
-                return false;
-            }
-            memcpy(scratch + pos,source + cursor,span);
-            put16(scratch + pos + 2,(uint16_t)new_span);
-            if (creator)
-                fs4_acl_unix_sid(scratch + pos + ACE_HEADER,new_type,
-                                 new_type==1u ? owner_uid : group_gid);
             uint8_t new_flags=flags | FS4_ACE_INHERITED;
             if (!child_dir) {
                 new_flags &= (uint8_t)~(FS4_ACE_OBJECT_INHERIT |
@@ -261,6 +247,25 @@ bool fs4_acl_inherit(const void *parent,size_t parent_length,
                 else
                     new_flags &= (uint8_t)~FS4_ACE_INHERIT_ONLY;
             }
+            uint32_t new_type=0;
+            /* An OI-only ACE on an intermediate directory is
+             * INHERIT_ONLY. Keep CREATOR_OWNER/GROUP as a placeholder
+             * there: it must bind to the final file's actual owner,
+             * not the intermediate directory's owner. */
+            const bool creator=!(new_flags & FS4_ACE_INHERIT_ONLY) &&
+                creator_rewrite(source + cursor + ACE_HEADER,
+                                span - ACE_HEADER,&new_type);
+            const size_t new_span=span + (creator ? 4u : 0u);
+            if (!region(pos,new_span,FS4_SD_LIMIT) ||
+                new_span > UINT16_MAX) {
+                errno=ENOSPC;
+                return false;
+            }
+            memcpy(scratch + pos,source + cursor,span);
+            put16(scratch + pos + 2,(uint16_t)new_span);
+            if (creator)
+                fs4_acl_unix_sid(scratch + pos + ACE_HEADER,new_type,
+                                 new_type==1u ? owner_uid : group_gid);
             scratch[pos + 1]=new_flags;
             pos+=new_span;
             ++count;
