@@ -56,6 +56,36 @@ class FunctionalSchedulerTests(unittest.TestCase):
         self.assertEqual(result["tests"]["thread_group"]["assessment"],
                          "NOT_DEMONSTRATED")
 
+    def test_native_reversible_priority_and_affinity_observations(self):
+        native = (
+            "SCHEMA=ntnative.stage4.scheduler.v1\\n"
+            "PLATFORM=WINDOWS_NATIVE\\n"
+            "THREAD_PRIORITY_ROUNDTRIP=PASS\\n"
+            "PROCESS_PRIORITY_CLASS_ROUNDTRIP=PASS\\n"
+            "PROCESS_AFFINITY_ROUNDTRIP=SKIP\\n"
+            "NT_SCHEDULER_POLICY_PARITY=UNVERIFIED\\n"
+        ).replace("\\\\n", "\\n")
+        result = module.compare(
+            report("WINDOWS_NATIVE"), report("LINUX_GUEST_PE"), native
+        )
+        self.assertEqual(
+            result["native_windows_reversible_roundtrips"]["THREAD_PRIORITY_ROUNDTRIP"],
+            "PASS",
+        )
+        self.assertEqual(
+            result["native_windows_reversible_roundtrips"]["PROCESS_AFFINITY_ROUNDTRIP"],
+            "SKIP",
+        )
+        self.assertFalse(result["nt_priority_policy_parity_verified"])
+        with self.assertRaises(ValueError):
+            module.compare(report("WINDOWS_NATIVE"), report("LINUX_GUEST_PE"),
+                           native.replace("NT_SCHEDULER_POLICY_PARITY=UNVERIFIED",
+                                          "NT_SCHEDULER_POLICY_PARITY=PROVEN"))
+        with self.assertRaises(ValueError):
+            module.compare(report("WINDOWS_NATIVE"), report("LINUX_GUEST_PE"),
+                           native.replace("THREAD_PRIORITY_ROUNDTRIP=PASS",
+                                          "THREAD_PRIORITY_ROUNDTRIP=UNKNOWN"))
+
     def test_commit_mismatch_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "different source commits"):
             module.compare(
