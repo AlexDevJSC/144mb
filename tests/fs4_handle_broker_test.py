@@ -110,8 +110,8 @@ class FileSystem4Handles(unittest.TestCase):
         # A deterministic negative handshake: /usr/bin/false exits without
         # HELLO. Closing the parent's server endpoint must expose EOF, rather
         # than hanging until the socket timeout.
-        if not Path("/proc/self/fd").is_dir():
-            self.skipTest("Linux /proc/self/fd required for FD accounting")
+        self.assertTrue(Path("/proc/self/fd").is_dir(),
+                        "Linux /proc/self/fd required for FD accounting; no SKIP")
         with tempfile.TemporaryDirectory(prefix="fs4-broker-badhello-") as temp:
             root = Path(temp) / "C"
             root.mkdir(mode=0o700)
@@ -268,8 +268,10 @@ class FileSystem4Handles(unittest.TestCase):
                 self.assertEqual(err, 0)
                 self.assertEqual(b.call(CLOSE, handle=next_handle)[0], 0)
             finally:
-                a.close()
-                b.close()
+                try:
+                    a.close()
+                finally:
+                    b.close()
 
     def test_native_query_set_and_flush_through_service(self):
         with tempfile.TemporaryDirectory(prefix="fs4-native-") as temp:
@@ -333,8 +335,10 @@ class FileSystem4Handles(unittest.TestCase):
                 self.assertEqual(second.call(CLOSE, handle=available)[0], 0)
                 self.assertEqual((root / "lease.dat").read_bytes(), b"SAFE")
             finally:
-                first.close(expected_returncode=-signal.SIGKILL if killed else 0)
-                second.close()
+                try:
+                    first.close(expected_returncode=-signal.SIGKILL if killed else 0)
+                finally:
+                    second.close()
 
     def test_concurrent_create_new_is_single_winner(self):
         with tempfile.TemporaryDirectory(prefix="fs4-create-race-") as temp:
@@ -368,8 +372,10 @@ class FileSystem4Handles(unittest.TestCase):
                                                      handle=reply[1])[0], 0)
                 self.assertTrue((root / "contended.bin").is_file())
             finally:
-                first.close()
-                second.close()
+                try:
+                    first.close()
+                finally:
+                    second.close()
 
     def test_sigkill_during_broker_mutations_and_recovery(self):
         """Process death after the syscall but before reply must not leak
