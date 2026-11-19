@@ -215,6 +215,41 @@ int main(void) {
     foreign_sid[1]=16;
     assert(nt_acl_access_check(sd,104,&foreign_token,1,
                                &granted)==NT_ACL_INVALID);
-    puts("PASS self-relative SD, 15-subauthority SID, mapped rights, inheritance and peer identity");
+    /* Virtual chmod is allowed only on an EXACT canonical three-ACE
+     * owner/group/Everyone allow DACL, never on arbitrary named or DENY
+     * ACEs which would be silently removed by mode conversion. */
+    uint8_t mode_sd[128]={0},mode_new[128]={0};
+    static const uint8_t gsid[16]={1,2,0,0,0,0,0,22,2,0,0,0,25,0,0,0};
+    mode_sd[0]=1;put16(mode_sd+2,0x8004);
+    put32(mode_sd+4,20);put32(mode_sd+8,36);put32(mode_sd+16,52);
+    memcpy(mode_sd+20,alice,16);memcpy(mode_sd+36,gsid,16);
+    mode_sd[52]=2;put16(mode_sd+54,76);put16(mode_sd+56,3);
+    add_ace(mode_sd+60,0,0,0x81,alice,16);
+    add_ace(mode_sd+84,0,0,0x81,gsid,16);
+    add_ace(mode_sd+108,0,0,0,everyone,12);
+    uint32_t mode=0;
+    assert(nt_acl_validate_descriptor(mode_sd,sizeof(mode_sd))==NT_ACL_ALLOWED);
+    assert(nt_acl_simple_mode(mode_sd,sizeof(mode_sd),&mode)==NT_ACL_ALLOWED);
+    assert(mode==0440);
+    assert(nt_acl_chmod_simple_descriptor(mode_sd,sizeof(mode_sd),0640,
+                                          mode_new,sizeof(mode_new),
+                                          &output_size)==NT_ACL_ALLOWED);
+    assert(output_size==128);
+    assert(nt_acl_simple_mode(mode_new,sizeof(mode_new),&mode)==NT_ACL_ALLOWED);
+    assert(mode==0640);
+    assert((mode_new[3] & 0x10)!=0); /* DACL_PROTECTED, no host chmod */
+    assert(nt_acl_chmod_simple_descriptor(mode_sd,sizeof(mode_sd),01000,
+                                          mode_new,sizeof(mode_new),
+                                          &output_size)==NT_ACL_INVALID);
+    mode_sd[60]=1; /* explicit DENY must not be erased */
+    assert(nt_acl_chmod_simple_descriptor(mode_sd,sizeof(mode_sd),0777,
+                                          mode_new,sizeof(mode_new),
+                                          &output_size)==NT_ACL_UNSUPPORTED);
+    mode_sd[60]=0;
+    mode_sd[104]^=1; /* named foreign SID, not canonical owner */
+    assert(nt_acl_chmod_simple_descriptor(mode_sd,sizeof(mode_sd),0644,
+                                          mode_new,sizeof(mode_new),
+                                          &output_size)==NT_ACL_UNSUPPORTED);
+    puts("PASS self-relative SD, long SID, DACL inheritance, mapped rights and fail-closed virtual chmod");
     return 0;
 }

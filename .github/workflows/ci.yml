@@ -30,16 +30,16 @@ jobs:
         run: |
           set -o pipefail
           make -j2 \
-            check-fs4-handle-broker check-fs4-security-metadata check-pe-fs4-security-metadata check-fs4-hardlink-wal check-pe-fs4-hardlink check-fs4-ntfs-diff \
+            check-fs4-handle-broker check-fs4-acl-enforcement check-fs4-security-metadata check-pe-fs4-security-metadata check-fs4-hardlink-wal check-pe-fs4-hardlink check-fs4-ntfs-diff \
             check-fs4-reparse-wal check-fs4-storage-service \
             check-fs4-readonly-session check-fs4-service-supervisor \
-            check-fs4-acceptance-gates check-fs4-fuse-staging-sigkill check-fs4-fuse-metadata \
+            check-fs4-acceptance-gates check-fs4-fuse-staging-sigkill check-fs4-fuse-metadata check-fs4-fuse-acl \
             check-fs-backing-audit check-fs-supervisor \
             check-dos83-mediator check-dos83-fuse check-dos83-wal \
             check-dos83-sigkill check-dos83-alias-durability \
             check-dos83-wal-io-failure check-dos83-pending-delete-durability \
             check-dos83-namespace-durability check-dos83-pending-wal-admission \
-            check-dos83-all-grants check-dos83-bad-source check-nt-acl-engine check-nt-acl-storage \
+            check-dos83-all-grants check-dos83-bad-source check-nt-acl-engine check-nt-acl-storage check-nt-acl-policy \
             2>&1 | tee fs4-linux-regression.log
           if grep -Eiq 'SKIP.*(mounted.FUSE|FUSE|Landlock|Bubblewrap|sandbox|large junction)' fs4-linux-regression.log; then
             echo '::warning::INCOMPLETE: FS4 physical isolation/mounted FUSE checks skipped on this CI runner; Fedora acceptance remains pending'

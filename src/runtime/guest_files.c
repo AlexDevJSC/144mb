@@ -5,6 +5,8 @@
 #include "winbase.h"
 #include "winfile.h"
 #include "fs4_remote.h"
+#include "nt_acl_engine.h"
+#include "nt_acl_storage.h"
 #include "section_memory.h"
 #include "sync.h"
 #include "user_folders.h"
@@ -5398,6 +5400,41 @@ static int32_t security_descriptor_from_fd(int fd, uint32_t information,
          * user-space adapter cannot currently claim to implement. */
         nt_SetLastError((information & 8u) ? NT_ERROR_ACCESS_DENIED :
                         NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+
+    /* Prefer a managed NT SD on this pinned inode. Its owner/group/DACL
+     * are never silently overwritten by a POSIX mode projection. An
+     * invalid or corrupted record fails closed, including on hardlink
+     * aliases of the same physical inode. */
+    uint8_t *persisted=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!persisted) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    size_t actual=0;
+    const int stored=nt_acl_storage_read_fd(
+        fd,persisted,NT_ACL_SD_MAX_BYTES,&actual);
+    if (stored==NT_ACL_STORAGE_PRESENT) {
+        size_t projected=0;
+        const int state=nt_acl_project_descriptor(persisted,actual,
+                        information,descriptor,size,&projected);
+        free(persisted);
+        if (projected>UINT32_MAX) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        *needed=(uint32_t)projected;
+        if (state==NT_ACL_ALLOWED)
+            return 1;
+        nt_SetLastError(state==NT_ACL_DENIED ?
+                        NT_ERROR_INSUFFICIENT_BUFFER :
+                        NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    free(persisted);
+    if (stored!=NT_ACL_STORAGE_ABSENT) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
         return 0;
     }
 
