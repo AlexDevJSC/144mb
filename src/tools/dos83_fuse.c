@@ -844,6 +844,129 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
     return error;
 }
 
+/* A hidden, service-owned staging directory makes a new directory's
+ * inherited SD durable BEFORE its final name is visible. Recovery removes
+ * only empty orphaned stages, never follows symlinks or trusts a guest
+ * staging path. No public fallback to mkdirat under a managed DACL. */
+static int acl_stage_prepare(void)
+{
+    if (!service_mode)
+        return 0;
+    if (mkdirat(lower_root,":ntnative-acl-stage",0700)!=0 &&
+        errno!=EEXIST)
+        return -errno;
+    acl_staging_root=openat(lower_root,":ntnative-acl-stage",
+                     O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if (acl_staging_root<0)
+        return -errno;
+    struct stat st;
+    if (fstat(acl_staging_root,&st)!=0 ||
+        !S_ISDIR(st.st_mode) || st.st_uid!=geteuid() ||
+        (st.st_mode&077u)!=0)
+        return -EACCES;
+    DIR *dir=fdopendir(dup(acl_staging_root));
+    if (!dir)
+        return -errno;
+    int err=0;
+    for (;;) {
+        errno=0;
+        const struct dirent *entry=readdir(dir);
+        if (!entry) {
+            if (errno) err=-errno;
+            break;
+        }
+        if (!strcmp(entry->d_name,".") || !strcmp(entry->d_name,".."))
+            continue;
+        if (strncmp(entry->d_name,"dir-",4)!=0) {
+            err=-EUCLEAN;
+            break;
+        }
+        struct stat item;
+        if (fstatat(acl_staging_root,entry->d_name,
+                    &item,AT_SYMLINK_NOFOLLOW)!=0 ||
+            !S_ISDIR(item.st_mode) || item.st_uid!=geteuid() ||
+            (item.st_mode&077u)!=0 ||
+            unlinkat(acl_staging_root,entry->d_name,
+                     AT_REMOVEDIR)!=0) {
+            err=-EUCLEAN; /* Never remove nonempty or foreign entries. */
+            break;
+        }
+    }
+    closedir(dir);
+    if (!err && fsync(acl_staging_root)!=0)
+        err=-errno;
+    return err;
+}
+
+static int acl_mkdir_staged(const char *path,int parent,const char *name)
+{
+    if (acl_staging_root<0)
+        return -EACCES;
+    uint64_t nonce=0;
+    char stage_name[32];
+    bool stage_created=false;
+    for (int i=0;i<8;i++) {
+        if (getrandom(&nonce,sizeof(nonce),0)!=(ssize_t)sizeof(nonce))
+            return -EIO;
+        const int n=snprintf(stage_name,sizeof(stage_name),
+                              "dir-%016" PRIx64,nonce);
+        if (n<0 || (size_t)n>=sizeof(stage_name))
+            return -EINVAL;
+        if (mkdirat(acl_staging_root,stage_name,0700)==0) {
+            stage_created=true;
+            break;
+        }
+        if (errno!=EEXIST)
+            return -errno;
+    }
+    if (!stage_created)
+        return -EEXIST;
+    int fd=openat(acl_staging_root,stage_name,
+                  O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    int err=fd<0 ? -errno : 0;
+    if (!err)
+        err=fs4_inherit_unpublished_inode(parent,fd,true,
+                         NT_ACL_READ_ATTR|NT_ACL_DATA_READ);
+    struct stat original={0};
+    if (!err && fstat(fd,&original)!=0)
+        err=-errno;
+    bool visible=false;
+    if (!err) {
+        if (renameat2(acl_staging_root,stage_name,parent,name,
+                      RENAME_NOREPLACE)!=0)
+            err=-errno;
+        else
+            visible=true;
+    }
+    if (!err) {
+        int destination=openat(parent,".",
+               O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+        if (destination<0)
+            err=-errno;
+        else {
+            if (fsync(destination)!=0)
+                err=-errno;
+            close(destination);
+        }
+    }
+    if (!err && fsync(acl_staging_root)!=0)
+        err=-errno;
+    if (!err)
+        err=guest_refresh(path);
+    if (err && visible) {
+        struct stat current;
+        if (fstatat(parent,name,&current,AT_SYMLINK_NOFOLLOW)==0 &&
+            current.st_dev==original.st_dev &&
+            current.st_ino==original.st_ino)
+            (void)unlinkat(parent,name,AT_REMOVEDIR);
+    }
+    if (!visible)
+        (void)unlinkat(acl_staging_root,stage_name,AT_REMOVEDIR);
+    if (fd>=0)
+        close(fd);
+    return err;
+}
+
 static int fs_mkdir(const char *path, mode_t mode)
 {
     if (!service_authorized())
