@@ -387,3 +387,37 @@ int nt_acl_inherit_descriptor(const uint8_t *parent_sd,size_t bytes,
     return nt_acl_validate_descriptor(out,total)==NT_ACL_ALLOWED ?
            NT_ACL_ALLOWED : NT_ACL_INVALID;
 }
+
+/* The only SIDs in this synthetic token are those derivable from a
+ * verified Linux identity: current UNIX user, primary UNIX group and
+ * Everyone. A domain SID or guest-supplied group is never added. */
+bool nt_acl_unix_token_init(struct nt_acl_unix_token *out,
+                            uint32_t authenticated_uid,
+                            uint32_t authenticated_gid)
+{
+    if (!out)
+        return false;
+    memset(out,0,sizeof(*out));
+    /* S-1-22-1-uid and S-1-22-2-gid. */
+    for (unsigned i=0;i<2;i++) {
+        uint8_t *sid=out->sid_bytes[i];
+        sid[0]=1;sid[1]=2;sid[7]=22;
+        uint32_t kind=i==0 ? 1u : 2u;
+        uint32_t id=i==0 ? authenticated_uid : authenticated_gid;
+        for (unsigned k=0;k<4;k++) {
+            sid[8+k]=(uint8_t)(kind>>(k*8));
+            sid[12+k]=(uint8_t)(id>>(k*8));
+        }
+        out->token.sid[i]=sid;
+        out->token.length[i]=16;
+    }
+    /* S-1-1-0 (Everyone), not an unvalidated wildcard SID. */
+    uint8_t *everyone=out->sid_bytes[2];
+    everyone[0]=1;
+    everyone[1]=1;
+    everyone[7]=1;
+    out->token.sid[2]=everyone;
+    out->token.length[2]=12;
+    out->token.count=3;
+    return true;
+}
