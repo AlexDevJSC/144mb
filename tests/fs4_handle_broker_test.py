@@ -40,6 +40,9 @@ class Broker:
                 "--client-uid", str(os.geteuid()), "--test"
             ], pass_fds=(server.fileno(),), stdin=subprocess.DEVNULL,
                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            # Parent must drop its copy before waiting for HELLO: otherwise
+            # a worker that exits early cannot produce EOF on the client.
+            server.close()
             hello = self.client.recv(4096)
             if len(hello) != REP.size:
                 raise AssertionError(("bad hello", hello, self.process.poll()))
