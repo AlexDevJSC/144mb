@@ -107,6 +107,15 @@ int main(void) {
                                      &bad_mapping,&granted)==NT_ACL_UNSUPPORTED);
     assert(granted==0);
 
+    /* A valid SID-shaped blob embedded in the DACL must never be
+     * accepted as the descriptor owner, even though its SID header parses. */
+    sd_init(sd,48,1);
+    add_ace(sd+28,0,0,1,everyone,sizeof(everyone));
+    put32(sd+4,36); /* owner aliasing the ACE's Everyone SID */
+    assert(nt_acl_validate_descriptor(sd,48)==NT_ACL_INVALID);
+    put32(sd+4,0);
+    assert(nt_acl_validate_descriptor(sd,48)==NT_ACL_ALLOWED);
+
     /* A complete child SD carries real authenticated owner+group SIDs
      * and translates CREATOR_OWNER inside inherited ACEs. Its SID can
      * be longer than the placeholder, so ACE+ACL sizes must be rebuilt. */
