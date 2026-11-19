@@ -48,7 +48,7 @@ class HardlinkWALTest(unittest.TestCase):
                 self.assertEqual((a.stat().st_dev, a.stat().st_ino),
                                  (b.stat().st_dev, b.stat().st_ino))
                 self.assertEqual(a.stat().st_nlink, 2)
-                self.assertEqual(first.call(HARDLINK, PAYLOAD)[0], 80)
+                self.assertEqual(first.call(HARDLINK, PAYLOAD)[0], 183)
                 err, held, _, _ = first.call(OPEN, SRC,
                     access=0x80000000, share=0, disposition=3)
                 self.assertEqual(err, 0)
@@ -132,7 +132,7 @@ class HardlinkWALTest(unittest.TestCase):
                                  "concurrent hardlink WAL deadlock")
                 self.assertEqual(len(results), 2)
                 self.assertEqual(results.count(0), 1)
-                self.assertEqual(results.count(80), 1)
+                self.assertEqual(results.count(183), 1)
                 self.assertEqual((root / "secondHardlinkReference.dat").stat().st_nlink, 2)
             finally:
                 try:
