@@ -489,7 +489,12 @@ static int serve(struct session *s)
     struct timespec deadline;
     if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
         return 3;
-    deadline.tv_sec += 120;
+    /* Only the offline --test worker may shorten its lifetime for a real
+     * expiration/lease-recovery regression; production stays at 120 s. */
+    const char *fast_expire = s->offline_test ?
+        getenv("NT_FS4_TEST_EXPIRE_1S") : NULL;
+    deadline.tv_sec += fast_expire && strcmp(fast_expire, "1") == 0 ?
+                       1 : 120;
     unsigned char payload[FS4_DATA_MAX], output[FS4_DATA_MAX];
     for (int count = 0; count < FS4_REQUEST_MAX; ) {
         struct timespec now;
