@@ -114,6 +114,70 @@ int nt_acl_validate_descriptor(const uint8_t *sd,size_t bytes) {
     return sd_acl(sd,bytes,&acl);
 }
 
+/* Filter a persisted self-relative descriptor using the same strict
+ * parser as DACL access checks. Return selected information only: a
+ * DACL-only read must not leak owner/group SID bytes. */
+int nt_acl_project_descriptor(const uint8_t *sd,size_t bytes,
+                              uint32_t information,uint8_t *out,
+                              size_t capacity,size_t *needed)
+{
+    if (!needed || !sd || information==0 || (information&~7u))
+        return NT_ACL_UNSUPPORTED;
+    *needed=0;
+    const int parsed=nt_acl_validate_descriptor(sd,bytes);
+    if (parsed!=NT_ACL_ALLOWED)
+        return parsed;
+    size_t part[3]={0},length[3]={0};
+    for (int i=0;i<2;i++) {
+        if (!(information&(1u<<i)))
+            continue;
+        const uint32_t offset=get32(sd+4+(unsigned)i*4u);
+        if (!offset)
+            continue;
+        part[i]=offset;
+        length[i]=8u+(size_t)sd[offset+1]*4u;
+    }
+    const uint16_t oldcontrol=get16(sd+2);
+    if ((information&4u) && (oldcontrol&SD_DACL_PRESENT)) {
+        part[2]=get32(sd+16);
+        if (part[2]) length[2]=get16(sd+part[2]+2);
+    }
+    size_t total=SD_HEADER;
+    for (int i=0;i<3;i++) {
+        if (length[i]>SIZE_MAX-total)
+            return NT_ACL_INVALID;
+        total+=length[i];
+    }
+    *needed=total;
+    if (!out || capacity<total)
+        return NT_ACL_DENIED;
+    const uintptr_t a=(uintptr_t)out,b=(uintptr_t)sd;
+    if ((a<=b && b-a<total) || (a>b && a-b<bytes))
+        return NT_ACL_INVALID;
+    memset(out,0,total);
+    out[0]=1;
+    uint16_t flags=SD_SELF_RELATIVE;
+    if (information&4u) {
+        /* Preserve protected / inherited DACL state without importing
+         * unrelated SECURITY_DESCRIPTOR_CONTROL privilege flags. */
+        flags|=oldcontrol&UINT16_C(0x1404);
+    }
+    put16(out+2,flags);
+    size_t next=SD_HEADER;
+    for (int i=0;i<3;i++) {
+        if (!length[i])
+            continue;
+        const size_t offset_field=i==2 ? 16u : 4u+(size_t)i*4u;
+        const uint32_t offset=(uint32_t)next;
+        for (unsigned byte=0;byte<4;byte++)
+            out[offset_field+byte]=(uint8_t)(offset>>(8u*byte));
+        memcpy(out+next,sd+part[i],length[i]);
+        next+=length[i];
+    }
+    return nt_acl_validate_descriptor(out,total)==NT_ACL_ALLOWED ?
+           NT_ACL_ALLOWED : NT_ACL_INVALID;
+}
+
 static bool map_generic(uint32_t *rights,
                         const struct nt_acl_generic_mapping *mapping)
 {
