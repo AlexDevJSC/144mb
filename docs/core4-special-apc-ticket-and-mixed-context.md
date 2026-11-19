@@ -87,11 +87,15 @@ cuarentena del hilo y confirmación de la muerte del hijo mediante
 `pidfd`. La CI experimental ejecuta ambos casos; no hay macros de
 inyección habilitables por el PE invitado.
 
-La prueba de cancelación es un PE32+ freestanding que inicia un hilo
-y lo mantiene en una espera host no alertable. Encola un callback
-cancellable, comprueba el rechazo de un HANDLE solo-consulta, retira
-el ticket y verifica que un ticket diferente sí se entrega en el
-hilo correcto una vez finalizada la espera. Incluye token caducado,
+La prueba de cancelación es un PE32+ freestanding que crea un hilo
+con `CREATE_SUSPENDED` y TEB ya registrado: constituye una barrera
+determinista antes de cualquier instrucción invitada, evitando la carrera
+entre `SetEvent` y el encolado. Encola un callback cancellable,
+comprueba el rechazo de un HANDLE solo-consulta, retira el ticket y
+verifica que uno distinto se entrega en el hilo correcto al reanudar
+y atravesar el siguiente retorno de importación Win32. El trabajador
+también utiliza una espera host no alertable; nunca se atribuye una
+entrega a una espera APC alertable. Incluye token caducado,
 HANDLE cerrado, doble cancelación e invalidación de parámetros.
 
 **No confundir este resultado con una conexión pública completa
