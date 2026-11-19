@@ -75,7 +75,11 @@ struct waitable {
     uint32_t handle_flags;
     enum waitable_kind kind;
     bool manual, signaled, started, alerted;
-    bool termination_requested, child_guest, remote_guest, terminate_at_start, self_process;
+    /* Published by the HANDLE owner; only consumed by its own PE thread
+     * at a host-import-return checkpoint with no host mutex held. */
+    _Atomic bool termination_requested;
+    bool termination_acknowledged;
+    bool child_guest, remote_guest, terminate_at_start, self_process;
     uint64_t remote_broker_capability, remote_broker_generation;
     int32_t semaphore_count, semaphore_maximum;
     bool brokered;
@@ -482,6 +486,33 @@ void nt_runtime_special_apc_checkpoint(void)
 {
     if (special_apc_dispatching)
         return;
+    /* A checked TerminateThread request can commit only when the target
+     * is itself returning from a Windows import, after all host locks
+     * have been released by that call. No signal, pthread_cancel or raw
+     * guest-supplied TID may kill an active Linux host stack. */
+    if (running_thread != NULL &&
+        atomic_load_explicit(&running_thread->termination_requested,
+                             memory_order_acquire) &&
+        nt_guest_boundary_special_apc_allowed() &&
+        nt_guest_thread_teb() != NULL) {
+        bool exiting = false;
+        uint32_t code = 0;
+        pthread_mutex_lock(&wait_lock);
+        if (running_thread->termination_requested &&
+            !running_thread->signaled &&
+            !running_thread->supervisor_async_suspended &&
+            running_thread->suspend_count == 0) {
+            code = running_thread->requested_exit_code;
+            running_thread->termination_acknowledged = true;
+            atomic_store_explicit(&running_thread->termination_requested,
+                                  false, memory_order_release);
+            pthread_cond_broadcast(&wait_changed);
+            exiting = true;
+        }
+        pthread_mutex_unlock(&wait_lock);
+        if (exiting)
+            nt_ExitThread(code); /* only this thread's existing jump gate */
+    }
     /* Most imported Win32 calls have no pending APC. Avoid taking
      * wait_lock (and a second CET probe) on every PE import. */
     if (!atomic_load_explicit(&current_special_apcs()->available,
@@ -2734,9 +2765,53 @@ static nt_status terminate_suspended_thread(uintptr_t handle, uint32_t exit_code
              * Clearing the local counter here previously lost the only
              * tracked ResumeThread route and stranded a kernel tracee. */
             status = NT_STATUS_NOT_SUPPORTED;
-        else if (state->suspend_count == 0 || state->cooperative_pause_requested)
+        else if (state->cooperative_pause_requested ||
+                 state->termination_requested ||
+                 state->termination_acknowledged)
             status = NT_STATUS_NOT_SUPPORTED;
-        else {
+        else if (state->suspend_count == 0) {
+            /* Only a local, owned and TEB-attached PE worker has a
+             * reviewed import-return gate. Wait for that worker's ACK;
+             * a busy PE loop or blocked host import returns NOT_SUPPORTED
+             * without leaving a latent delayed termination request. */
+            if (state->remote_guest || state->child_guest || !state->started ||
+                state->teb_base == 0 || pthread_equal(state->host, pthread_self()) ||
+                !nt_guest_boundary_import_gate_enabled()) {
+                status = NT_STATUS_NOT_SUPPORTED;
+            } else {
+                struct timespec limit;
+                if (clock_gettime(CLOCK_MONOTONIC, &limit) != 0) {
+                    status = NT_STATUS_UNSUCCESSFUL;
+                } else {
+                    limit.tv_nsec += 500000000L;
+                    if (limit.tv_nsec >= 1000000000L) {
+                        ++limit.tv_sec;
+                        limit.tv_nsec -= 1000000000L;
+                    }
+                    /* Pin the canonical object while cond_wait releases
+                     * the lock: another guest may close its last HANDLE. */
+                    ++state->refs;
+                    state->requested_exit_code = exit_code;
+                    state->termination_acknowledged = false;
+                    atomic_store_explicit(&state->termination_requested,
+                                          true, memory_order_release);
+                    int error = 0;
+                    while (!state->termination_acknowledged &&
+                           !state->signaled && error == 0)
+                        error = pthread_cond_clockwait(&wait_changed, &wait_lock,
+                                                       CLOCK_MONOTONIC, &limit);
+                    if (!state->termination_acknowledged) {
+                        atomic_store_explicit(&state->termination_requested,
+                                              false, memory_order_release);
+                        status = state->signaled ?
+                            NT_STATUS_THREAD_IS_TERMINATING :
+                            NT_STATUS_NOT_SUPPORTED;
+                    }
+                    release_waitable(state);
+                }
+            }
+        } else {
+            /* This is CREATE_SUSPENDED, never a ptrace stop. */
             state->terminate_at_start = true;
             state->requested_exit_code = exit_code;
             state->suspend_count = 0;
@@ -2763,8 +2838,8 @@ nt_status NT_MS_ABI nt_NtTerminateThread(uintptr_t thread, nt_status exit_code)
         nt_ExitThread((uint32_t)exit_code);
         return NT_STATUS_SUCCESS; /* not reached */
     }
-    /* Remote running pthreads cannot be cancelled without violating
-     * their lock ownership. The startup gate is the only safe target. */
+    /* Remote Linux pthreads remain untouchable. A local PE worker may
+     * instead ACK termination at its own safe import-return boundary. */
     return terminate_suspended_thread(thread, (uint32_t)exit_code);
 }
 
