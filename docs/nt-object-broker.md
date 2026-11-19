@@ -55,6 +55,22 @@ duplicación remota, ACL Windows ni aislamiento entre procesos maliciosos
 del mismo UID. **Componente 4: 96 % → 96 % (+0 puntos)**; corrige
 un recurso de IPC sin ampliar los contratos Win32 soportados.
 
+## Acotación del intercambio IPC — 19-11-2026
+
+El cliente aplica límites de 2 s a `send` y `recvmsg` sobre el socket
+`SOCK_SEQPACKET` del broker. Una respuesta que no llega devuelve
+`NT_BROKER_TRANSPORT_ERROR` y revoca el socket local sin promover
+la operación a un objeto NT simulado. El test
+`object-broker-malformed-test` incluye ahora un servidor de mismo UID
+que acepta una petición válida y retiene su respuesta durante cuatro
+segundos; la comprobación exige un fallo acotado, sin fuga de FDs.
+Esto **no** acota todavía todas las rutas de `connect()` bajo congestión
+del backlog Unix, ni suministra recuperación automática o servicio
+de sesión. Ningún cambio concede permisos a un PE ni toca SELinux.
+
+**Madurez del componente 4: 96 % → 96 % (+0 pp)**. Se fortalece
+la liveness del broker actual, no la herencia general de HANDLE.
+
 ## Contrato autenticado por mensaje y derechos exactos — 19-11-2026
 
 El broker de objetos NT **ya no acepta cualquier mensaje recibido a

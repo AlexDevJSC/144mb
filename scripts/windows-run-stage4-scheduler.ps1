@@ -22,9 +22,11 @@ if (-not (Test-Path $vcvars)) { throw "Missing vcvars64.bat" }
 $source = Join-Path $root "tests/windows/stage4_scheduler_probe.c"
 $fixture = Join-Path $root "tests/pe/thread_group_affinity_fixture.c"
 $quantumSource = Join-Path $root "tests/bench/scheduler_quantum_observation.c"
+$fpSource = Join-Path $root "tests/windows/stage4_fp_context_probe.c"
 $exe = Join-Path $build "stage4-scheduler-native.exe"
 $fixtureExe = Join-Path $build "stage4-group-fixture-native.exe"
 $quantumExe = Join-Path $build "stage4-quantum-native.exe"
+$fpExe = Join-Path $build "stage4-fp-context-native.exe"
 $compileCmd = Join-Path $build "compile-stage4-windows.cmd"
 @"
 @echo off
@@ -36,6 +38,8 @@ rem compiled and run natively. A behavior divergence is preserved, never hidden.
 cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Dimport_fixture_entry=main /Fe:"$fixtureExe" "$fixture" /link kernel32.lib
 if errorlevel 1 exit /b 1
 cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Fe:"$quantumExe" "$quantumSource" /link kernel32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Fe:"$fpExe" "$fpSource" /link kernel32.lib
 exit /b %errorlevel%
 "@ | Set-Content -Encoding ASCII $compileCmd
 & cmd.exe /d /c "`"$compileCmd`""
@@ -74,6 +78,16 @@ if ($quantumExit -ne 0 -or
     -not (Select-String -Path $quantumReport -Pattern '^RESULT=PASS$' -Quiet) -or
     -not (Select-String -Path $quantumReport -Pattern '^NT_QUANTUM_VERIFIED=NO$' -Quiet)) {
     throw "Native Windows pinned CPU scheduler benchmark failed. See $quantumReport."
+}
+# Windows VM: genuine NT kernel reference, not physical certification.
+$fpReport = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-fp-context.txt"
+& $fpExe | Set-Content -Encoding ASCII $fpReport
+$fpExit = $LASTEXITCODE
+Get-Content $fpReport
+if ($fpExit -ne 0 -or
+    -not (Select-String -Path $fpReport -Pattern '^SCHEMA=ntnative.stage4.fp-context.v1$' -Quiet) -or
+    -not (Select-String -Path $fpReport -Pattern '^PLATFORM=WINDOWS_NATIVE$' -Quiet)) {
+    throw "Invalid native Windows FXSAVE reference: $fpReport"
 }
 $entries = @{}
 foreach ($line in (Get-Content $OutputPath)) {

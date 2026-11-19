@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -106,6 +107,15 @@ int nt_broker_acquire(const struct nt_broker_request *request,
     int sock = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     if (sock < 0)
         return NT_BROKER_TRANSPORT_ERROR;
+    /* A configured broker with matching SO_PEERCRED can still stall after
+     * accepting a request. Never let a PE's open/create wait indefinitely
+     * for that peer: this controls send/recv, not total connect time. */
+    const struct timeval deadline = {.tv_sec = 2, .tv_usec = 0};
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                   &deadline, sizeof(deadline)) != 0 ||
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+                   &deadline, sizeof(deadline)) != 0)
+        goto error;
     socklen_t size = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + length + 1);
     if (connect(sock, (const struct sockaddr *)&addr, size) != 0)
         goto error;

@@ -147,11 +147,17 @@ static bool owned_guest_scope(
 static bool supported_flags(uint32_t flags, bool writing)
 {
     const uint32_t base = NT_SUP_CONTEXT_AMD64;
-    const uint32_t groups = writing ? NT_SUP_CONTEXT_INTEGER :
-        (NT_SUP_CONTEXT_INTEGER | NT_SUP_CONTEXT_CONTROL |
-         NT_SUP_CONTEXT_SEGMENTS | NT_SUP_CONTEXT_FLOATING_POINT);
-    return (flags & base) == base && (flags & groups) != 0 &&
-           (flags & ~(base | groups)) == 0;
+    const uint32_t readers = NT_SUP_CONTEXT_INTEGER |
+        NT_SUP_CONTEXT_CONTROL | NT_SUP_CONTEXT_SEGMENTS |
+        NT_SUP_CONTEXT_FLOATING_POINT;
+    /* Writing a legacy FXSAVE image is a separate, verified kernel
+     * transaction. Never permit mixed INTEGER|FP writes or control,
+     * segment and extended XSTATE groups via this RPC gate. */
+    if (writing)
+        return flags == (base | NT_SUP_CONTEXT_INTEGER) ||
+               flags == (base | NT_SUP_CONTEXT_FLOATING_POINT);
+    return (flags & base) == base && (flags & readers) != 0 &&
+           (flags & ~(base | readers)) == 0;
 }
 
 nt_status nt_supervisor_control_server_call(
