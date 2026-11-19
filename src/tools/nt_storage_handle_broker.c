@@ -8,8 +8,10 @@
 #include "compat.h"
 #include "winfile.h"
 #include "nt_services.h"
+#include "nt_acl_policy.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <linux/limits.h>
@@ -57,6 +59,7 @@ _Static_assert(sizeof(struct fs4_reply) == 32, "FS4 reply ABI");
 
 struct session_handle { uint64_t capability; uintptr_t native; bool search; };
 struct session { int socket_fd; const char *view; bool offline_test;
+                 int root_fd; struct nt_acl_peer_token identity;
                  uint64_t nonce; struct session_handle entries[FS4_HANDLE_MAX]; };
 
 static bool entropy(uint64_t *number)
@@ -142,6 +145,55 @@ static struct session_handle *lookup(struct session *s, uint64_t cap)
     return NULL;
 }
 
+/* Use only a token created from kernel peer credentials, never from
+ * q->access, a PE-supplied SID or a path alias. A record missing on disk
+ * retains the legacy service/DAC rules; a bad record never does. */
+static uint32_t acl_path_gate(struct session *s,const unsigned char *path,
+                              size_t length,uint32_t requested,bool parent)
+{
+    if (!valid_path(path,length) || length>FS4_PATH_MAX)
+        return NT_ERROR_INVALID_PARAMETER;
+    char name[FS4_PATH_MAX+1];
+    memcpy(name,path,length);
+    name[length]=0;
+    int state=nt_acl_policy_check_path(
+        s->root_fd,name,parent,&s->identity,requested,
+        parent ? &nt_acl_directory_generic_mapping :
+                 &nt_acl_file_generic_mapping);
+    if (state==NT_ACL_POLICY_ALLOWED || state==NT_ACL_POLICY_ABSENT)
+        return NT_ERROR_SUCCESS;
+    return NT_ERROR_ACCESS_DENIED;
+}
+
+static uint32_t acl_open_gate(struct session *s,const unsigned char *path,
+                              size_t length,uint32_t desired,
+                              uint32_t disposition)
+{
+    uint32_t required=desired&(UINT32_C(0xf0000000)|UINT32_C(0x000f0000));
+    if (!required)
+        required=NT_ACL_READ_ATTR;
+    if (!valid_path(path,length))
+        return NT_ERROR_INVALID_PARAMETER;
+    char name[FS4_PATH_MAX+1];
+    memcpy(name,path,length);
+    name[length]=0;
+    const int access=nt_acl_policy_check_path(
+        s->root_fd,name,false,&s->identity,required,
+        &nt_acl_file_generic_mapping);
+    const int cause=errno;
+    if (access==NT_ACL_POLICY_ALLOWED || access==NT_ACL_POLICY_ABSENT) {
+        /* Opening a pre-existing file requires the target's DACL, while
+         * creation of a new name additionally needs ADD_FILE on parent. */
+        return NT_ERROR_SUCCESS;
+    }
+    if (cause==ENOENT && access==NT_ACL_POLICY_ERROR &&
+        (disposition==1 || disposition==2 ||
+         disposition==4 || disposition==5)) {
+        return acl_path_gate(s,path,length,NT_ACL_DATA_WRITE,true);
+    }
+    return NT_ERROR_ACCESS_DENIED;
+}
+
 static bool view_alive(const char *view)
 {
     if (view == NULL || view[0] != '/')
@@ -202,6 +254,9 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
             result.error = NT_ERROR_NOT_ENOUGH_MEMORY;
             break;
         }
+        result.error=acl_open_gate(s,payload,n,q->access,q->disposition);
+        if (result.error!=NT_ERROR_SUCCESS)
+            break;
         const uintptr_t native = nt_CreateFileW(path, q->access, q->share, NULL,
                                                  q->disposition, q->flags, 0);
         if (native == UINTPTR_MAX) {
@@ -270,6 +325,9 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
     case FS4_ATTR_GET: {
         if (n!=q->size || !to_wide(payload,n,path) || q->handle)
             break;
+        result.error=acl_path_gate(s,payload,n,NT_ACL_READ_ATTR,false);
+        if (result.error!=NT_ERROR_SUCCESS)
+            break;
         struct nt_file_attribute_data info={0};
         if (!nt_GetFileAttributesExW(path,0,&info))
             result.error=nt_GetLastError();
@@ -283,6 +341,9 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
     case FS4_ATTR_SET:
         if (n!=q->size || !to_wide(payload,n,path) || q->handle)
             break;
+        result.error=acl_path_gate(s,payload,n,NT_ACL_WRITE_ATTR,false);
+        if (result.error!=NT_ERROR_SUCCESS)
+            break;
         result.error=nt_SetFileAttributesW(path,q->flags) ?
                      NT_ERROR_SUCCESS : nt_GetLastError();
         break;
@@ -294,6 +355,9 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
             if (!s->entries[i].capability && !free_slot)
                 free_slot=&s->entries[i];
         if (!free_slot) { result.error=NT_ERROR_NOT_ENOUGH_MEMORY; break; }
+        result.error=acl_path_gate(s,payload,n,NT_ACL_DATA_READ,true);
+        if (result.error!=NT_ERROR_SUCCESS)
+            break;
         struct nt_find_data_w item={0};
         uintptr_t native=nt_FindFirstFileExW(path,(int32_t)q->access,&item,
                                               (int32_t)q->share,NULL,q->flags);
@@ -376,6 +440,9 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         if (q->handle || n != q->size || q->size > FS4_PATH_MAX ||
             q->share || q->flags || q->offset != -1 ||
             q->disposition > FS4_DATA_MAX || !to_wide(payload, n, path))
+            break;
+        result.error=acl_path_gate(s,payload,n,NT_ACL_READ_CONTROL,false);
+        if (result.error!=NT_ERROR_SUCCESS)
             break;
         uint32_t needed=0;
         const bool ok=nt_GetFileSecurityW(path,q->access,output,
@@ -487,6 +554,10 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
     case FS4_DELETE:
         if (n != q->size || !to_wide(payload, n, path))
             break;
+        result.error=acl_path_gate(s,payload,n,NT_ACL_DELETE,false);
+        if (result.error!=NT_ERROR_SUCCESS) break;
+        result.error=acl_path_gate(s,payload,n,NT_ACL_DIR_DELETE_CHILD,true);
+        if (result.error!=NT_ERROR_SUCCESS) break;
         result.error = nt_DeleteFileW(path) ? NT_ERROR_SUCCESS : nt_GetLastError();
         break;
     case FS4_RENAME: {
@@ -499,6 +570,26 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         if (!to_wide(payload, before, path) ||
             !to_wide(sep + 1, n - before - 1, other))
             break;
+        result.error=acl_path_gate(s,payload,before,NT_ACL_DELETE,false);
+        if (result.error!=NT_ERROR_SUCCESS) break;
+        result.error=acl_path_gate(s,payload,before,NT_ACL_DIR_DELETE_CHILD,true);
+        if (result.error!=NT_ERROR_SUCCESS) break;
+        result.error=acl_path_gate(s,sep+1,n-before-1,NT_ACL_DATA_WRITE,true);
+        if (result.error!=NT_ERROR_SUCCESS) break;
+        /* Replacement also requires DELETE on the existing target.
+         * A missing new target does not imply a permission grant. */
+        if (q->flags & 1u) {
+            char target[FS4_PATH_MAX+1];
+            memcpy(target,sep+1,n-before-1);
+            target[n-before-1]=0;
+            int t=nt_acl_policy_check_path(s->root_fd,target,false,
+                    &s->identity,NT_ACL_DELETE,&nt_acl_file_generic_mapping);
+            if (t==NT_ACL_POLICY_DENIED ||
+                (t==NT_ACL_POLICY_ERROR && errno!=ENOENT)) {
+                result.error=NT_ERROR_ACCESS_DENIED;
+                break;
+            }
+        }
         result.error = nt_MoveFileExW(path, other, q->flags) ?
                        NT_ERROR_SUCCESS : nt_GetLastError();
         break;
@@ -514,6 +605,10 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         if (!to_wide(payload, before, path) ||
             !to_wide(sep + 1, n - before - 1, other))
             break;
+        result.error=acl_path_gate(s,payload,before,NT_ACL_READ_ATTR,false);
+        if (result.error!=NT_ERROR_SUCCESS) break;
+        result.error=acl_path_gate(s,sep+1,n-before-1,NT_ACL_DATA_WRITE,true);
+        if (result.error!=NT_ERROR_SUCCESS) break;
         /* Existing/source is first in the wire format. The Win32 W API
          * accepts (new_name, existing_name). The physical file root and
          * every WAL/lease operation stay inside this trusted UID worker. */
