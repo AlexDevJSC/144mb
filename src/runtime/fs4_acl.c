@@ -212,7 +212,11 @@ bool fs4_acl_inherit(const void *parent,size_t parent_length,
                      void *out,size_t capacity,size_t *written)
 {
     struct acl_view inherited;
-    if (!written || !out || !parse(parent,parent_length,&inherited))
+    if (!written || !out) {
+        errno=EINVAL;
+        return false;
+    }
+    if (!parse(parent,parent_length,&inherited))
         return false;
     const unsigned char *source=inherited.bytes;
     unsigned char scratch[FS4_SD_LIMIT]={0};
