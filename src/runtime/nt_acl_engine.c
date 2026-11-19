@@ -267,6 +267,15 @@ int nt_acl_inherit_dacl(const uint8_t *parent_sd,size_t bytes,
     return NT_ACL_ALLOWED;
 }
 
+/* The SD, owner, group and output may point into the same caller
+ * allocation. Reject partial overlap rather than clobber a SID or parent
+ * descriptor midway through an inherited child build. */
+static bool acl_regions_overlap(const void *left,size_t left_bytes,
+                                const void *right,size_t right_bytes) {
+    const uintptr_t a=(uintptr_t)left, b=(uintptr_t)right;
+    return a<=b ? b-a<left_bytes : a-b<right_bytes;
+}
+
 /* Materialize an inherited self-relative SECURITY_DESCRIPTOR instead of
  * only returning its ACL bytes. The parent is not modified, and no caller
  * provided SID may be used until the trusted service authenticates it.
@@ -350,7 +359,9 @@ int nt_acl_inherit_descriptor(const uint8_t *parent_sd,size_t bytes,
     }
     /* Explicitly prohibit in-place mutation, which would invalidate SID
      * pointers supplied by the trusted caller before validation finishes. */
-    if (out==parent_sd || out==owner || out==group) {
+    if (acl_regions_overlap(out,total,parent_sd,bytes) ||
+        acl_regions_overlap(out,total,owner,owner_bytes) ||
+        acl_regions_overlap(out,total,group,group_bytes)) {
         free(raw);
         return NT_ACL_INVALID;
     }
