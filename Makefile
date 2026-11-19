@@ -511,6 +511,16 @@ $(BUILD_DIR)/object-broker-test: tests/object_broker_test.c $(RUNTIME_OBJECTS) s
 check-object-broker: $(BUILD_DIR)/nt-object-broker $(BUILD_DIR)/object-broker-test
 	sh tests/object_broker_smoke.sh "$(BUILD_DIR)/nt-object-broker" "$(BUILD_DIR)/object-broker-test"
 
+$(BUILD_DIR)/object-broker-malformed-test: tests/object_broker_malformed_test.c src/runtime/object_broker.c src/runtime/object_broker.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/object_broker_malformed_test.c src/runtime/object_broker.c -pthread $(LDLIBS) -o "$@"
+
+.PHONY: check-object-broker-malformed
+check-object-broker-malformed: $(BUILD_DIR)/object-broker-malformed-test
+	timeout 15s "$(BUILD_DIR)/object-broker-malformed-test"
+
+check: check-object-broker-malformed
+
 $(BUILD_DIR)/section-memory-test: tests/section_memory_test.c $(RUNTIME_OBJECTS) src/runtime/section_memory.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
 	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
