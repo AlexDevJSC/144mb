@@ -304,6 +304,7 @@ jobs:
         run: |
           python3 scripts/compare-stage4-priority-affinity.py \
             --windows build/stage4-windows-priority-affinity.txt \
+            --windows-probe build/stage4-windows-native.txt \
             --linux build/stage4-linux-priority-affinity.txt \
             --output build/stage4-priority-affinity-differential.json
           grep -F '"nt_scheduler_parity_verified": false' build/stage4-priority-affinity-differential.json
