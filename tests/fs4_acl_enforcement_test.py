@@ -25,6 +25,8 @@ GENERIC_READ_MASK = 0x00120089
 GENERIC_WRITE_MASK = 0x00120116
 DENIED = 5
 NOT_SUPPORTED = 50
+SECURITY_PATH = 25
+NATIVE_SECURITY = 26
 
 def sid(auth, *subs):
     return bytes((1, len(subs))) + auth.to_bytes(6, "big") + b"".join(
@@ -87,6 +89,21 @@ class BrokerACL(unittest.TestCase):
             self.assertEqual(err, 0)
             self.assertEqual(broker.call(READ, handle=handle, size=13),
                              (0, 0, 13, b"ACL-PROTECTED"))
+            # The actual saved DACL, not a forged POSIX-mode ACE,
+            # must be returned on both path and native HANDLE queries.
+            err, _, needed, sd_only = broker.call(
+                SECURITY_PATH, b"C:/policy.dat", access=4, disposition=128)
+            self.assertEqual(err, 0)
+            self.assertEqual(len(sd_only), needed)
+            self.assertEqual(sd_only[0], 1)
+            self.assertEqual(struct.unpack_from("<H", sd_only, 2)[0], 0x8004)
+            dacl_offset = struct.unpack_from("<I", sd_only, 16)[0]
+            self.assertEqual(dacl_offset, 20)
+            self.assertEqual(sd_only[28], 1, "first ACE must be the deny ACE")
+            err, needed, status, native_sd = broker.call(
+                NATIVE_SECURITY, handle=handle, access=4, size=128)
+            self.assertEqual((err, status, needed, native_sd),
+                             (0, 0, len(sd_only), sd_only))
             self.assertEqual(broker.call(CLOSE, handle=handle)[0], 0)
             for path in (b"C:/policy.dat", b"C:/alias.dat"):
                 self.assertEqual(broker.call(
