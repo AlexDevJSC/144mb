@@ -105,6 +105,10 @@ int32_t NT_MS_ABI nt_CreateSymbolicLinkW(const uint16_t *link_name, const uint16
 int32_t NT_MS_ABI nt_CreateSymbolicLinkA(const char *link_name, const char *target_name,
                                           uint32_t flags);
 int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path);
+int32_t NT_MS_ABI nt_CreateHardLinkW(const uint16_t *new_name, const uint16_t *existing_name,
+                                     const void *security);
+int32_t NT_MS_ABI nt_CreateHardLinkA(const char *new_name, const char *existing_name,
+                                     const void *security);
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags);
 int32_t NT_MS_ABI nt_MoveFileW(const uint16_t *source, const uint16_t *destination);
 int32_t NT_MS_ABI nt_CopyFileW(const uint16_t *source, const uint16_t *destination, int32_t fail_if_exists);
