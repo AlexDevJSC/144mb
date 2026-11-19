@@ -525,12 +525,22 @@ nt_status nt_runtime_section_duplicate(uintptr_t source, uint32_t access,
         pthread_mutex_unlock(&section_lock);
         return NT_STATUS_INVALID_HANDLE;
     }
-    if (!(options & 2u)) { /* only DUPLICATE_SAME_ACCESS in this base */
-        pthread_mutex_unlock(&section_lock);
-        return NT_STATUS_NOT_SUPPORTED;
+    /* SAME_ACCESS preserves the source grant. Otherwise attenuate
+     * only to one of the access profiles already accepted by
+     * OpenFileMappingW; a duplicate never acquires additional rights. */
+    uint32_t rights = original->allowed;
+    if (!(options & 2u)) {
+        if (!accept_access(access, &rights)) {
+            pthread_mutex_unlock(&section_lock);
+            return NT_STATUS_INVALID_PARAMETER;
+        }
+        if ((rights & ~original->allowed) != 0) {
+            pthread_mutex_unlock(&section_lock);
+            return NT_STATUS_ACCESS_DENIED;
+        }
     }
     struct section_handle *copy = allocate_handle(original->object,
-        original->allowed, (options & 4u) ? original->flags :
+        rights, (options & 4u) ? original->flags :
         (attributes & 2u) ? SECTION_HANDLE_INHERIT : 0);
     if (!copy) {
         pthread_mutex_unlock(&section_lock);
