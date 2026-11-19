@@ -135,6 +135,10 @@ static void inherit(void)
               0x8u,creator_owner,sizeof(creator_owner));
     n=add_ace(parent,n,FS4_ACE_ALLOW,FS4_ACE_OBJECT_INHERIT,
               0x4u,custom,sizeof(custom));
+    /* An OI-only CreatorOwner ACE must keep its placeholder when
+     * passing through a directory; substitute at the final file. */
+    n=add_ace(parent,n,FS4_ACE_ALLOW,FS4_ACE_OBJECT_INHERIT,
+              0x10u,creator_owner,sizeof(creator_owner));
     CHECK(fs4_acl_validate(parent,n));
     size_t nf=0,nd=0;
     CHECK(fs4_acl_inherit(parent,n,1234,5678,false,file,sizeof(file),&nf));
@@ -142,8 +146,8 @@ static void inherit(void)
                           sizeof(directory),&nd));
     CHECK(fs4_acl_validate(file,nf));
     CHECK(fs4_acl_validate(directory,nd));
-    CHECK(r16(file+56)==3); /* CI-only deny does NOT inherit to files */
-    CHECK(r16(directory+56)==4);
+    CHECK(r16(file+56)==4); /* CI-only deny does NOT inherit to files */
+    CHECK(r16(directory+56)==5);
     CHECK((r16(file+2) & 0x0400) != 0);
     unsigned char new_owner[16], new_group[16];
     fs4_acl_unix_sid(new_owner,1,1234);
@@ -164,7 +168,24 @@ static void inherit(void)
     size_t next=0;
     unsigned char subdir[FS4_SD_LIMIT];
     CHECK(fs4_acl_inherit(directory,nd,1250,9000,true,subdir,sizeof(subdir),&next));
-    CHECK(r16(subdir+56)==3); /* NP deny does not propagate; OI-only remains inherit-only */
+    CHECK(r16(subdir+56)==4); /* NP deny does not propagate; OI-only remains inherit-only */
+    size_t pos=r32(directory+16)+8;
+    for (int i=0;i<4;i++)
+        pos+=r16(directory+pos+2);
+    CHECK((directory[pos+1] & FS4_ACE_INHERIT_ONLY)!=0);
+    CHECK(r16(directory+pos+2)==20); /* placeholder, not Unix 16-byte SID */
+    CHECK(memcmp(directory+pos+8,creator_owner,sizeof(creator_owner))==0);
+    unsigned char leaf[FS4_SD_LIMIT], leaf_owner[16];
+    size_t leaf_n=0;
+    CHECK(fs4_acl_inherit(directory,nd,9999,8888,false,
+                           leaf,sizeof(leaf),&leaf_n));
+    fs4_acl_unix_sid(leaf_owner,1,9999);
+    const struct fs4_acl_token leaf_token=token(everyone,sizeof(everyone),
+                                                leaf_owner,sizeof(leaf_owner));
+    const struct fs4_acl_token intermediary=token(everyone,sizeof(everyone),
+                                                  new_owner,sizeof(new_owner));
+    CHECK(fs4_acl_check(leaf,leaf_n,&leaf_token,0x10u));
+    CHECK(!fs4_acl_check(leaf,leaf_n,&intermediary,0x10u));
     CHECK(!fs4_acl_inherit(parent,n,1234,5678,false,file,20,&nf));
     CHECK(errno==ENOSPC);
     CHECK(fs4_acl_validate(parent,n)); /* inherited copy did not mutate parent */
