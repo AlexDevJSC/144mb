@@ -4,6 +4,38 @@
 hardware físico y paridad de planificación **NO verificados** en esta entrega.
 Esta comprobación no habilita la transición al problema 5 (APC avanzadas).
 
+## Comparación explícita de CONTEXT_FLOATING_POINT (19-11-2026)
+
+La CI ejecuta una nueva fuente **nativa Windows compilada con MSVC**:
+`tests/windows/stage4_fp_context_probe.c`. Crea un hilo Windows
+`CREATE_SUSPENDED`, obtiene su `CONTEXT_FLOATING_POINT`, intenta
+modificar solamente el modo de redondeo MXCSR, comprueba la lectura
+posterior y restaura el valor previo antes de permitir su salida.
+Registra incluso fallos de `GetThreadContext`/`SetThreadContext`,
+sin alterar la evidencia para favorecer al backend Linux.
+
+En paralelo, `make check-runtime-supervisor-win32` registra en CI
+el resultado observable del supervisor Linux sobre un hilo PE real.
+`scripts/compare-stage4-fp-context.py` exige el esquema y origen
+Windows auténticos y etiqueta `NOT_DEMONSTRATED` si el runtime aún
+no demuestra el roundtrip FP o si Windows devuelve un error.
+Cuando ambos consten como correctos genera
+`CONSISTENT_NARROW_PROFILE`, **no** equivalencia NT.
+Ambos ejecutan escenarios diferentes (Windows: hilo creado suspendido;
+Linux: hilo PE detenido mediante supervisor autenticado): esta comparación
+se limita a las operaciones FP comunes y exige ampliar los fixtures
+para cubrir casos idénticos, grupos combinados, otros registros y errores.
+GitHub Windows-hosted es un kernel Windows real en VM, no validación
+física. Tampoco acredita Fedora/SELinux en hardware, AVX/XSAVE ni
+derechos de procesos arbitrarios.
+
+Artefactos CI:
+`stage4-windows-fp-context.txt`,
+`stage4-linux-context.log` y
+`stage4-context-differential.json`. La CI **no convierte diferencias en
+PASS**. Componente 4: **96 % → 96 % (+0 pp)** por instrumentación,
+sin afirmar paridad de contextos.
+
 ## Qué cuenta como evidencia
 
 | Prueba | Entorno | Evidencia válida | Qué NO prueba |
