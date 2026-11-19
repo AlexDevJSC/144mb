@@ -36,6 +36,25 @@ make check
 
 `tests/object_broker_smoke.sh` crea una carpeta temporal privada, inicia el servidor y ejecuta `tests/object_broker_test.c`. La prueba utiliza `fork + exec` para generar procesos Linux independientes, sin heredar los handles del test principal. Comprueba escritura de memoria compartida, señalización y consumo de eventos/semáforos, WaitAll, colisiones de nombres/tipos, múltiples clientes concurrentes, último cierre y limpieza de lease tras muerte del cliente. Verifica además que un socket configurado pero desaparecido no cambia silenciosamente a objetos locales.
 
+## Corrección de recursos del cliente — 19-11-2026
+
+La recepción `recvmsg(MSG_CMSG_CLOEXEC)` puede instalar descriptores
+`SCM_RIGHTS` **antes** de que el cliente valide el encabezado y el
+contenido de la respuesta. El cliente ahora recorre los mensajes auxiliares
+devueltos por el kernel y cierra todos esos FDs ante cualquier error de
+longitud, tipo, versión, truncamiento o derechos; el cierre por lease en
+la ruta de éxito no cambia. La prueba
+`make check-object-broker-malformed` crea un servidor SOCK_SEQPACKET
+mismo UID que inyecta respuestas con tipo erróneo, payload corto y
+`MSG_CTRUNC` con tres FDs, y compara el número de descriptores de
+`/proc/self/fd` después de cada petición. Este target se incorpora a
+`make check`.
+
+Esta corrección no implementa herencia general de HANDLE, broker global,
+duplicación remota, ACL Windows ni aislamiento entre procesos maliciosos
+del mismo UID. **Componente 4: 96 % → 96 % (+0 puntos)**; corrige
+un recurso de IPC sin ampliar los contratos Win32 soportados.
+
 ## Alcance y límites
 
 Esta es la base operativa del **broker por usuario**, no un Object Manager Windows completo:

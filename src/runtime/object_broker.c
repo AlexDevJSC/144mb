@@ -45,6 +45,30 @@ void nt_broker_release(struct nt_broker_resource *resource)
     };
 }
 
+/* recvmsg installs SCM_RIGHTS FDs even when the payload is short,
+ * malformed, or MSG_CTRUNC is set. All such FDs belong to the receiver.
+ * Walk the kernel-returned cmsgs before rejecting the reply so a hostile
+ * same-UID peer cannot exhaust this process's descriptor table. */
+static void close_received_rights(struct msghdr *message)
+{
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(message); cmsg;
+         cmsg = CMSG_NXTHDR(message, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET ||
+            cmsg->cmsg_type != SCM_RIGHTS ||
+            cmsg->cmsg_len < CMSG_LEN(sizeof(int)))
+            continue;
+        const size_t count =
+            (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        const unsigned char *data = (const unsigned char *)CMSG_DATA(cmsg);
+        for (size_t i = 0; i < count; ++i) {
+            int fd;
+            memcpy(&fd, data + i * sizeof(int), sizeof(fd));
+            if (fd >= 0)
+                (void)close(fd);
+        }
+    }
+}
+
 static bool verify_memfd(int fd, uint64_t expected)
 {
     struct stat st;
@@ -106,23 +130,23 @@ int nt_broker_acquire(const struct nt_broker_request *request,
         reply.magic != NT_BROKER_MAGIC ||
         reply.version != NT_BROKER_VERSION ||
         reply.kind != request->kind)
-        goto error;
+        goto received_error;
     int rights[2] = {-1, -1};
     int count = 0;
     for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&message); cmsg;
          cmsg = CMSG_NXTHDR(&message, cmsg)) {
         if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
             cmsg->cmsg_len < CMSG_LEN(sizeof(int)))
-            goto fd_error;
+            goto received_error;
         int incoming = (int)((cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int));
         if (count + incoming > 2)
-            goto fd_error;
+            goto received_error;
         memcpy(rights + count, CMSG_DATA(cmsg), (size_t)incoming * sizeof(int));
         count += incoming;
     }
     if (reply.result > NT_BROKER_INVALID ||
         (reply.result > NT_BROKER_EXISTS && count != 0))
-        goto fd_error;
+        goto received_error;
     if (reply.result != NT_BROKER_CREATED && reply.result != NT_BROKER_EXISTS) {
         close(sock);
         return (int)reply.result;
@@ -132,7 +156,7 @@ int nt_broker_acquire(const struct nt_broker_request *request,
     if (count != expected_count || !verify_memfd(rights[0], expected_size) ||
         (count == 2 && !verify_memfd(rights[1], 4096)) ||
         (reply.rights & request->rights) != request->rights)
-        goto fd_error;
+        goto received_error;
     resource->fd = rights[0];
     resource->gate_fd = count == 2 ? rights[1] : -1;
     resource->lease_fd = sock;
@@ -162,10 +186,8 @@ int nt_broker_acquire(const struct nt_broker_request *request,
 resource_error:
     nt_broker_release(resource);
     return NT_BROKER_TRANSPORT_ERROR;
-fd_error:
-    for (int i = 0; i < count; ++i)
-        if (rights[i] >= 0)
-            close(rights[i]);
+received_error:
+    close_received_rights(&message);
 error:
     close(sock);
     return NT_BROKER_TRANSPORT_ERROR;
