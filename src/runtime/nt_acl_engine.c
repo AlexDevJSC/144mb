@@ -39,12 +39,24 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
     uint16_t control=get16(sd+2);
     if (control&SD_SACL_PRESENT)
         return NT_ACL_UNSUPPORTED;
+    size_t sid_from[2]={0},sid_to[2]={0};
     for (int i=0;i<2;i++) {
         uint32_t offset=get32(sd+4+(size_t)i*4u);
-        if (offset && (offset%4u || offset>length ||
-                       !sid_valid(sd+offset,length-offset)))
-            return NT_ACL_INVALID;
+        if (offset) {
+            if (offset<SD_HEADER || offset%4u || offset>length ||
+                !sid_valid(sd+offset,length-offset))
+                return NT_ACL_INVALID;
+            const size_t sid_bytes=8u+(size_t)sd[offset+1]*4u;
+            sid_from[i]=offset;
+            sid_to[i]=(size_t)offset+sid_bytes;
+        }
     }
+    /* Security descriptor components cannot alias unrelated bytes.
+     * Same owner/group SID slot may legitimately be shared. */
+    if (sid_from[0] && sid_from[1] &&
+        sid_from[0]<sid_to[1] && sid_from[1]<sid_to[0] &&
+        (sid_from[0]!=sid_from[1] || sid_to[0]!=sid_to[1]))
+        return NT_ACL_INVALID;
     /* A non-null SACL offset when SACL_PRESENT is clear is malformed. */
     if (get32(sd+12))
         return NT_ACL_INVALID;
@@ -67,6 +79,10 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
         get16(p+2)>length-dacl || get16(p+6)!=0)
         return NT_ACL_INVALID;
     size_t total=get16(p+2);
+    for (int i=0;i<2;i++)
+        if (sid_from[i] && sid_from[i]<(size_t)dacl+total &&
+            (size_t)dacl<sid_to[i])
+            return NT_ACL_INVALID;
     size_t cursor=ACL_HEADER;
     unsigned count=get16(p+4);
     for (unsigned i=0;i<count;i++) {
