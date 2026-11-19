@@ -23,6 +23,12 @@ propietario o SID. Con DACL NULL no genera una ACL heredable.
 
 Comprobación: make check-nt-acl-engine
 
+Este cambio solo fortalece el evaluador aislado y sus regresiones. No
+habilita token impersonation, grupos deshabilitados/restringidos,
+privilegios, auditoría ni seguridad NT global. **Componente 4:
+96 % → 96 % (+0 puntos)**; no existe aún nuevo contrato de token
+autenticado aplicable a procesos Windows externos.
+
 **La política NO está conectada al acceso real del filesystem**:
 faltan token SID autenticado desde servicio UID, traducción de dominios y
 grupos, persistencia segura del descriptor en xattrs, SetFileSecurity,
