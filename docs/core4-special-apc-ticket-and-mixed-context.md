@@ -76,6 +76,17 @@ make -j2 check-runtime-supervisor-win32
 make -j2 check check-pe
 ```
 
+La nueva regresión `check-supervisor-mixed-rollback` compila dos
+supervisores de laboratorio separados. Ambos provocan, **después de
+dos escrituras reales de `PTRACE_SETREGSET`**, un readback falso
+exclusivamente en el binario de prueba. El primero exige restauración
+completa de GPR y FXSAVE, `STATUS_NOT_SUPPORTED` sin compromiso
+permanente y salida limpia del hijo. El segundo inyecta la imposibilidad
+de verificar el rollback y exige prohibición de CONT/DETACH,
+cuarentena del hilo y confirmación de la muerte del hijo mediante
+`pidfd`. La CI experimental ejecuta ambos casos; no hay macros de
+inyección habilitables por el PE invitado.
+
 La prueba de cancelación es un PE32+ freestanding que inicia un hilo
 y lo mantiene en una espera host no alertable. Encola un callback
 cancellable, comprueba el rechazo de un HANDLE solo-consulta, retira
