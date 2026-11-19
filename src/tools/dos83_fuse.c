@@ -57,11 +57,12 @@ static void fs4_stage_test_crash(const char *phase)
  * explicitly configured client UID. Kernel-supplied credentials (not paths
  * or caller-provided metadata) are checked at every entry point. */
 static bool service_mode;
+static bool metadata_selftest; /* only --selftest-metadata, NEVER production */
 static uid_t service_client_uid;
 static gid_t service_client_gid;
 static bool service_authorized(void)
 {
-    if (!service_mode)
+    if (!service_mode || metadata_selftest)
         return true;
     const struct fuse_context *ctx = fuse_get_context();
     return ctx && (ctx->uid == service_client_uid || ctx->uid == geteuid());
@@ -1470,11 +1471,103 @@ static int backend_selftest(void)
     return 0;
 }
 
+static int service_metadata_selftest(void)
+{
+    const char *name="FS4MetadataServiceFixture.dat";
+    const char *view="/FS4MetadataServiceFixture.dat";
+    const char *attr="user.fs4_metadata_test";
+    int fd=openat(lower_root,name,O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW|
+                  O_CLOEXEC,0600);
+    if (fd<0) {
+        perror("metadata fixture create");
+        return 1;
+    }
+    const bool created=write(fd,"DATA",4)==4 && fsync(fd)==0;
+    close(fd);
+    if (!created) {
+        (void)unlinkat(lower_root,name,0);
+        return 1;
+    }
+    const struct timespec dates[2]={
+        {.tv_sec=1577836800,.tv_nsec=123456700},
+        {.tv_sec=1609459200,.tv_nsec=123456700}
+    };
+    int error=0;
+    if (fs_setxattr(view,attr,"X",1,0)!=0 ||
+        fs_getxattr(view,attr,NULL,0)!=1) {
+        fprintf(stderr,"FAIL metadata user xattr grant\n");
+        error=1;
+    }
+    char observed[2]={0};
+    if (!error && (fs_getxattr(view,attr,observed,sizeof(observed))!=1 ||
+                   observed[0]!='X' ||
+                   fs_setxattr(view,"user.ntnative.secret","X",1,0)!=-EACCES ||
+                   fs_removexattr(view,"user.ntnative.secret")!=-EACCES ||
+                   fs_setxattr(view,"security.selinux","X",1,0)!=-EACCES ||
+                   fs_setxattr(view,attr,"X",4097,0)!=-EINVAL)) {
+        fprintf(stderr,"FAIL metadata reserved xattr confinement\n");
+        error=1;
+    }
+    if (!error && (fs_utimens(view,dates,NULL)!=0 ||
+                   fs_removexattr(view,attr)!=0 ||
+                   fs_getxattr(view,attr,NULL,0)!=-ENODATA ||
+                   fs_chmod(view,0777,NULL)!=-EPERM)) {
+        fprintf(stderr,"FAIL metadata timestamp/xattr/physical DAC boundary\n");
+        error=1;
+    }
+    fd=lower_open(view,O_RDONLY,0);
+    struct stat st;
+    if (!error && (fd<0 || fstat(fd,&st)!=0 ||
+                   st.st_mtim.tv_sec!=1609459200 ||
+                   st.st_mtim.tv_nsec!=123456700 ||
+                   (st.st_mode&0777)!=0600)) {
+        fprintf(stderr,"FAIL metadata timestamp persisted or DAC modified\n");
+        error=1;
+    }
+    if (fd>=0) close(fd);
+    const uintptr_t held=nt_CreateFileW(
+        u"C:\\FS4MetadataServiceFixture.dat",UINT32_C(0x80000000),
+        NT_FS_READ,NULL,3,0,0);
+    if (!error && held==UINTPTR_MAX) {
+        fprintf(stderr,"FAIL Win32 metadata lease test open\n");
+        error=1;
+    }
+    if (!error && (fs_setxattr(view,attr,"Y",1,0)!=-EBUSY ||
+                   fs_utimens(view,dates,NULL)!=-EBUSY)) {
+        fprintf(stderr,"FAIL metadata bypassed Win32 FILE_SHARE_WRITE\n");
+        error=1;
+    }
+    if (held!=UINTPTR_MAX)
+        (void)nt_CloseHandle(held);
+    if (!error && (fs_setxattr(view,attr,"Z",1,0)!=0 ||
+                   fs_removexattr(view,attr)!=0)) {
+        fprintf(stderr,"FAIL metadata lease not released\n");
+        error=1;
+    }
+    if (unlinkat(lower_root,name,0)!=0)
+        error=1;
+    if (!error)
+        puts("PASS offline FUSE UID metadata: Win32 FILETIME WAL, xattrs "
+             "under OFD leases, reserved metadata denied (mount not tested)");
+    return error;
+}
+
 int main(int argc, char **argv)
 {
     /* Service client identity is explicit; a test invocation cannot
      * accidentally enable allow_other or weaken backing permissions. */
-    if (argc == 8 && strcmp(argv[1], "--selftest") &&
+    if (argc == 3 && !strcmp(argv[1], "--selftest-metadata")) {
+        /* No mount, no credentials bypass in production. The test binary
+         * demands an owner-only disposable backing and current UID. */
+        if (geteuid()==0) {
+            fputs("Metadata selftest must be non-root\n",stderr);
+            return 2;
+        }
+        metadata_selftest=true;
+        service_mode=true;
+        service_client_uid=geteuid();
+        service_client_gid=getegid();
+    } else if (argc == 8 && strcmp(argv[1], "--selftest") &&
         !strcmp(argv[3], "-f") &&
         !strcmp(argv[4], "--service-client-uid") &&
         !strcmp(argv[6], "--service-client-gid")) {
@@ -1491,15 +1584,17 @@ int main(int argc, char **argv)
         service_mode = true;
         service_client_uid = (uid_t)uid;
         service_client_gid = (gid_t)gid;
-    } else if (!((argc == 3 && !strcmp(argv[1], "--selftest")) ||
+    } else if (!metadata_selftest &&
+               !((argc == 3 && !strcmp(argv[1], "--selftest")) ||
                  (argc >= 3 && argc <= 4 && strcmp(argv[1], "--selftest")))) {
         fprintf(stderr,
-                "Usage: %s --selftest BACKING | BACKING MOUNT [-f] | "
+                "Usage: %s --selftest BACKING | --selftest-metadata BACKING | BACKING MOUNT [-f] | "
                 "BACKING MOUNT -f --service-client-uid UID --service-client-gid GID\n",
                 argv[0]);
         return 2;
     }
-    const char *backing = !strcmp(argv[1], "--selftest") ? argv[2] : argv[1];
+    const char *backing = !strcmp(argv[1], "--selftest") || metadata_selftest ?
+                          argv[2] : argv[1];
     lower_root = open(backing, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (lower_root < 0 || !nt_runtime_set_file_root(backing)) {
         perror("nt-dos83-fuse: backing");
@@ -1513,6 +1608,8 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (metadata_selftest)
+        return service_metadata_selftest();
     if (!strcmp(argv[1], "--selftest"))
         return backend_selftest();
     if (argc < 3 || argc > 4) {
