@@ -4656,6 +4656,252 @@ int32_t NT_MS_ABI nt_DeleteFileW(const uint16_t *path)
     return wide_path(path, narrow) && change_path(narrow, REMOVE_FILE);
 }
 
+/* A hardlink is a second *name* for one existing regular-file inode.
+ * Only the protected private C: grant is authorized. The durable rename
+ * WAL has a distinct hardlink intent; every cold recovery must be able to
+ * distinguish no publication from publication of the exact original inode.
+ * No POSIX path is ever made visible to a remote PE guest. */
+static int32_t hardlink_utf8(const char *new_name, const char *existing_name)
+{
+    char to[PATH_MAX], from[PATH_MAX];
+    if (!guest_path(new_name, to) || !guest_path(existing_name, from)) {
+        nt_SetLastError(path_error(errno, true));
+        return 0;
+    }
+    if (!private_c_path(from) || !private_c_path(to)) {
+        /* Other DOS/UNC roots still require independent per-grant pending
+         * and ACL contracts; do not silently cross volume boundaries. */
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (nt_fs4_remote_mode())
+        return nt_fs4_remote_hardlink(from, to);
+
+    int root = -1, source_parent = -1, target_parent = -1;
+    int source_lock = -1, registry = -1, mutation_guard = -1;
+    int error = EACCES;
+    bool success = false;
+    const char *source_relative = from, *target_relative = to;
+    char source_leaf[NAME_MAX + 1], target_leaf[NAME_MAX + 1];
+    pthread_mutex_lock(&file_lock);
+    root = duplicate_root(&source_relative);
+    if (root < 0) {
+        error = errno;
+        goto done;
+    }
+    int target_root = duplicate_root(&target_relative);
+    if (target_root < 0) {
+        error = errno;
+        goto done;
+    }
+    struct stat root_info, other_root;
+    const bool same_grant =
+        fstat(root, &root_info) == 0 &&
+        fstat(target_root, &other_root) == 0 &&
+        root_info.st_dev == other_root.st_dev &&
+        root_info.st_ino == other_root.st_ino;
+    close(target_root);
+    if (!same_grant) {
+        error = EXDEV;
+        goto done;
+    }
+    /* file_lock -> physical WAL -> inode delete lock -> registry lock.
+     * The order matches cooperating CreateFile/MoveFile/DeleteFile.
+     * WAL guards the namespace throughout intent, link, fsync and alias. */
+    mutation_guard = nt_runtime_begin_namespace_mutation(to);
+    if (mutation_guard < 0) {
+        error = errno;
+        goto done;
+    }
+    source_parent = open_parent(root, source_relative, source_leaf);
+    if (source_parent < 0) {
+        error = errno;
+        goto done;
+    }
+    target_parent = open_parent(root, target_relative, target_leaf);
+    if (target_parent < 0) {
+        error = errno;
+        goto done;
+    }
+    struct stat original, destination;
+    if (fstatat(source_parent, source_leaf, &original,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+        error = errno;
+        goto done;
+    }
+    if (!S_ISREG(original.st_mode)) {
+        error = EACCES;
+        goto done;
+    }
+    if (fstatat(target_parent, target_leaf, &destination,
+                AT_SYMLINK_NOFOLLOW) == 0) {
+        error = EEXIST;
+        goto done;
+    }
+    if (errno != ENOENT) {
+        error = errno;
+        goto done;
+    }
+    if (file_blocks_delete(&original)) {
+        error = EBUSY;
+        goto done;
+    }
+    source_lock = lock_delete_target(source_parent, source_leaf, &original);
+    if (source_lock < 0) {
+        error = errno;
+        goto done;
+    }
+    registry = open_share_registry(&original);
+    if (registry < 0) {
+        error = errno;
+        goto done;
+    }
+    int locked;
+    do {
+        locked = flock(registry, LOCK_EX);
+    } while (locked < 0 && errno == EINTR);
+    if (locked != 0) {
+        error = errno;
+        goto done;
+    }
+    struct share_pending_record pending;
+    if (!read_share_pending(registry, &pending)) {
+        error = errno;
+        goto done;
+    }
+    if (pending.pending) {
+        error = EACCES;
+        goto done;
+    }
+    /* Record is synced BEFORE creating the second directory entry. The
+     * original and parent identities make replay fail closed if a host
+     * writer outside this protocol substituted a path after a crash. */
+    struct stat source_dir, target_dir, current;
+    if (fstat(source_parent, &source_dir) != 0 ||
+        fstat(target_parent, &target_dir) != 0 ||
+        fstatat(source_parent, source_leaf, &current,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+        current.st_dev != original.st_dev ||
+        current.st_ino != original.st_ino) {
+        error = EBUSY;
+        goto done;
+    }
+    struct dos83_wal_entry intent = {
+        .hardlink = true,
+        .root_dev = (uint64_t)root_info.st_dev,
+        .root_ino = (uint64_t)root_info.st_ino,
+        .file_dev = (uint64_t)original.st_dev,
+        .file_ino = (uint64_t)original.st_ino,
+        .from_dir_dev = (uint64_t)source_dir.st_dev,
+        .from_dir_ino = (uint64_t)source_dir.st_ino,
+        .to_dir_dev = (uint64_t)target_dir.st_dev,
+        .to_dir_ino = (uint64_t)target_dir.st_ino
+    };
+    if (snprintf(intent.from, sizeof(intent.from), "%s", source_relative) >=
+            (int)sizeof(intent.from) ||
+        snprintf(intent.to, sizeof(intent.to), "%s", target_relative) >=
+            (int)sizeof(intent.to)) {
+        error = ENAMETOOLONG;
+        goto done;
+    }
+    struct dos83_wal wal = {.fd = mutation_guard, .directory = -1};
+    if (!wal_write(&wal, &intent)) {
+        error = errno;
+        goto done;
+    }
+    dos83_test_crash("hardlink-after-wal");
+    /* linkat without SYMLINK_FOLLOW never traverses a final source link.
+     * Source is reverified while the real inode's flock is held. */
+    if (fstatat(source_parent, source_leaf, &current,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISREG(current.st_mode) ||
+        current.st_dev != original.st_dev ||
+        current.st_ino != original.st_ino ||
+        linkat(source_parent, source_leaf,
+               target_parent, target_leaf, 0) != 0) {
+        error = errno ? errno : EUCLEAN;
+        goto done; /* Leave durable intent for cold recovery. */
+    }
+    dos83_test_crash("hardlink-after-link");
+    if (fstatat(target_parent, target_leaf, &current,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISREG(current.st_mode) ||
+        current.st_dev != original.st_dev ||
+        current.st_ino != original.st_ino) {
+        error = EUCLEAN;
+        goto done;
+    }
+    if (!wal_sync_pinned(source_lock, false)) {
+        error = errno;
+        goto done;
+    }
+    dos83_test_crash("hardlink-after-inode-fsync");
+    if (!wal_sync_pinned(target_parent, true)) {
+        error = errno;
+        goto done;
+    }
+    dos83_test_crash("hardlink-after-parent-fsync");
+    char alias[14] = {0};
+    if (!dos83_assign_at(target_parent, target_leaf, alias)) {
+        error = errno ? errno : EUCLEAN;
+        goto done;
+    }
+    dos83_test_crash("hardlink-after-alias");
+    if (!wal_clear(&wal)) {
+        error = errno;
+        goto done;
+    }
+    dos83_test_crash("hardlink-after-wal-clear");
+    success = true;
+
+done:
+    /* A failed fsync or ambiguous inode leaves the intent visible. Never
+     * force-truncate the WAL or remove a name without knowing its identity. */
+    if (registry >= 0)
+        close(registry);
+    if (source_lock >= 0)
+        close(source_lock);
+    if (target_parent >= 0)
+        close(target_parent);
+    if (source_parent >= 0)
+        close(source_parent);
+    nt_runtime_end_namespace_mutation(mutation_guard);
+    if (root >= 0)
+        close(root);
+    pthread_mutex_unlock(&file_lock);
+    if (!success)
+        nt_SetLastError(path_error(error, false));
+    return success;
+}
+
+int32_t NT_MS_ABI nt_CreateHardLinkW(const uint16_t *new_name,
+                                     const uint16_t *existing_name,
+                                     const void *security)
+{
+    if (security != NULL) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    char target[PATH_MAX], source[PATH_MAX];
+    return wide_path(new_name, target) &&
+           wide_path(existing_name, source) &&
+           hardlink_utf8(target, source);
+}
+
+int32_t NT_MS_ABI nt_CreateHardLinkA(const char *new_name,
+                                     const char *existing_name,
+                                     const void *security)
+{
+    if (security != NULL) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    char target[PATH_MAX], source[PATH_MAX];
+    return file_ansi_to_utf8(new_name, target) &&
+           file_ansi_to_utf8(existing_name, source) &&
+           hardlink_utf8(target, source);
+}
+
 int32_t NT_MS_ABI nt_MoveFileExW(const uint16_t *source, const uint16_t *destination, uint32_t flags)
 {
     char from[PATH_MAX], to[PATH_MAX];
