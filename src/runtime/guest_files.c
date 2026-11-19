@@ -7846,6 +7846,13 @@ int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, 
         }
         /* Reuse the same WAL/lease/durable metadata path as SetFileTime,
          * for both local Win32 and an authenticated remote HANDLE. */
+        if (!basic.accessed && !basic.written) {
+            /* A no-op FILE_BASIC_INFO update still requires a valid,
+             * write-authorized HANDLE. Do not bypass permissions by
+             * delegating three null FILETIME pointers. */
+            const int fd=duplicate_handle(handle,FILE_WRITE);
+            return file_result(fd,fd>=0);
+        }
         const struct nt_file_time access_time = {
             (uint32_t)basic.accessed, (uint32_t)(basic.accessed >> 32)};
         const struct nt_file_time write_time = {
