@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <pthread.h>
@@ -985,24 +986,28 @@ static int fs_mkdir(const char *path, mode_t mode)
     char name[NAME_MAX + 1];
     int parent = lower_parent(path, name);
     int error = parent < 0 ? -errno : 0;
+    bool managed_parent=false;
     if (!error && service_mode && !metadata_selftest) {
-        /* mkdirat would expose a directory BEFORE attaching inherited
-         * ACLs. Until staged-directory rename/recovery is implemented,
-         * reject managed-parent mkdir rather than create an ACL bypass. */
         size_t needed=0;
         const int state=nt_acl_storage_read_fd(parent,NULL,0,&needed);
         if (state==NT_ACL_STORAGE_SHORT_BUFFER ||
             state==NT_ACL_STORAGE_PRESENT)
-            error=-ENOTSUP;
+            managed_parent=true;
         else if (state==NT_ACL_STORAGE_ERROR)
             error=-(errno ? errno : EUCLEAN);
     }
-    if (!error && mkdirat(parent, name, mode) != 0)
-        error = -errno;
-    if (!error) {
-        error = guest_refresh(path);
-        if (error)
-            (void)unlinkat(parent, name, AT_REMOVEDIR);
+    if (!error && managed_parent) {
+        /* Physical DAC remains service owner-only (0700). The inherited
+         * SD, not chmod, authorizes FUSE/PE clients after publication. */
+        error=acl_mkdir_staged(path,parent,name);
+    } else if (!error) {
+        if (mkdirat(parent,name,mode)!=0)
+            error=-errno;
+        if (!error) {
+            error=guest_refresh(path);
+            if (error)
+                (void)unlinkat(parent,name,AT_REMOVEDIR);
+        }
     }
     if (parent >= 0)
         close(parent);
