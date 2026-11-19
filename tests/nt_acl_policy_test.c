@@ -105,7 +105,7 @@ int main(void)
     assert(symlink("data",linkname)==0);
     assert(nt_acl_policy_check_path(root,"C:/nested/symlink",false,&alice,
         NT_ACL_DATA_READ,&nt_acl_file_generic_mapping)==NT_ACL_POLICY_ERROR);
-    uint8_t tiny[128]={0};
+    uint8_t tiny[512]={0};
     ssize_t stored=fgetxattr(file_fd,"user.ntnative.security.sd",tiny,sizeof(tiny));
     assert(stored>0);
     tiny[stored-1]^=0x80;
