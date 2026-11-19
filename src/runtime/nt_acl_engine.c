@@ -7,6 +7,7 @@
  */
 #include "nt_acl_engine.h"
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { SD_HEADER=20, SD_SELF_RELATIVE=0x8000, SD_DACL_PRESENT=4,
@@ -248,4 +249,141 @@ int nt_acl_inherit_dacl(const uint8_t *parent_sd,size_t bytes,
         pos+=size;
     }
     return NT_ACL_ALLOWED;
+}
+
+/* Materialize an inherited self-relative SECURITY_DESCRIPTOR instead of
+ * only returning its ACL bytes. The parent is not modified, and no caller
+ * provided SID may be used until the trusted service authenticates it.
+ * CREATOR_OWNER/GROUP are placeholders *inside inherited ACEs* only. */
+int nt_acl_inherit_descriptor(const uint8_t *parent_sd,size_t bytes,
+                              bool child_directory,
+                              const uint8_t *owner,size_t owner_bytes,
+                              const uint8_t *group,size_t group_bytes,
+                              uint8_t *out,size_t capacity,size_t *needed)
+{
+    static const uint8_t creator_owner[12]=
+        {1,1,0,0,0,0,0,3,0,0,0,0};
+    static const uint8_t creator_group[12]=
+        {1,1,0,0,0,0,0,3,1,0,0,0};
+    if (!needed)
+        return NT_ACL_INVALID;
+    *needed=0;
+    if (!owner || !group ||
+        !sid_valid(owner,owner_bytes) || !sid_valid(group,group_bytes) ||
+        owner_bytes!=8u+(size_t)owner[1]*4u ||
+        group_bytes!=8u+(size_t)group[1]*4u)
+        return NT_ACL_INVALID;
+
+    size_t raw_size=0;
+    int state=nt_acl_inherit_dacl(parent_sd,bytes,child_directory,
+                                  NULL,0,&raw_size);
+    if (state<0)
+        return state;
+    if (raw_size<ACL_HEADER || raw_size>UINT16_MAX)
+        return NT_ACL_INVALID;
+    uint8_t *raw=malloc(raw_size);
+    if (!raw)
+        return NT_ACL_UNSUPPORTED;
+    state=nt_acl_inherit_dacl(parent_sd,bytes,child_directory,
+                              raw,raw_size,&raw_size);
+    if (state!=NT_ACL_ALLOWED) {
+        free(raw);
+        return state;
+    }
+    /* Measure exact descriptor/ACE sizes before touching output. */
+    size_t acl_size=ACL_HEADER;
+    size_t pos=ACL_HEADER;
+    const unsigned count=get16(raw+4);
+    for (unsigned i=0;i<count;i++) {
+        size_t ace_size=get16(raw+pos+2);
+        const uint8_t *sid=raw+pos+ACE_BASE;
+        const uint8_t *replacement=NULL;
+        size_t replacement_size=0;
+        if (ace_size==20 && memcmp(sid,creator_owner,12)==0) {
+            replacement=owner;
+            replacement_size=owner_bytes;
+        } else if (ace_size==20 && memcmp(sid,creator_group,12)==0) {
+            replacement=group;
+            replacement_size=group_bytes;
+        }
+        if (replacement) {
+            if (replacement_size>UINT16_MAX-ACE_BASE) {
+                free(raw);
+                return NT_ACL_UNSUPPORTED;
+            }
+            ace_size=ACE_BASE+replacement_size;
+        }
+        if (ace_size>UINT16_MAX-acl_size) {
+            free(raw);
+            return NT_ACL_UNSUPPORTED;
+        }
+        acl_size+=ace_size;
+        pos+=get16(raw+pos+2);
+    }
+    /* SID sizes are always multiples of 4; self-relative offsets aligned. */
+    const size_t header_and_sids=SD_HEADER+owner_bytes+group_bytes;
+    if (header_and_sids>SIZE_MAX-acl_size) {
+        free(raw);
+        return NT_ACL_INVALID;
+    }
+    const size_t total=header_and_sids+acl_size;
+    *needed=total;
+    if (!out || capacity<total) {
+        free(raw);
+        return NT_ACL_DENIED;
+    }
+    /* Explicitly prohibit in-place mutation, which would invalidate SID
+     * pointers supplied by the trusted caller before validation finishes. */
+    if (out==parent_sd || out==owner || out==group) {
+        free(raw);
+        return NT_ACL_INVALID;
+    }
+    memset(out,0,total);
+    out[0]=1;
+    put16(out+2,SD_SELF_RELATIVE|SD_DACL_PRESENT);
+    const size_t group_offset=SD_HEADER+owner_bytes;
+    const size_t acl_offset=group_offset+group_bytes;
+    /* The bounded input sizes ensure these offsets fit 32 bits. */
+    out[4]=(uint8_t)SD_HEADER;
+    out[8]=(uint8_t)group_offset;
+    out[9]=(uint8_t)(group_offset>>8);
+    out[10]=(uint8_t)(group_offset>>16);
+    out[11]=(uint8_t)(group_offset>>24);
+    out[16]=(uint8_t)acl_offset;
+    out[17]=(uint8_t)(acl_offset>>8);
+    out[18]=(uint8_t)(acl_offset>>16);
+    out[19]=(uint8_t)(acl_offset>>24);
+    memcpy(out+SD_HEADER,owner,owner_bytes);
+    memcpy(out+group_offset,group,group_bytes);
+    uint8_t *acl=out+acl_offset;
+    acl[0]=2;
+    put16(acl+2,(uint16_t)acl_size);
+    put16(acl+4,(uint16_t)count);
+    pos=ACL_HEADER;
+    size_t dst=ACL_HEADER;
+    for (unsigned i=0;i<count;i++) {
+        const uint8_t *ace=raw+pos;
+        const size_t old_size=get16(ace+2);
+        const uint8_t *replacement=NULL;
+        size_t replacement_size=0;
+        if (old_size==20 &&
+            memcmp(ace+ACE_BASE,creator_owner,12)==0) {
+            replacement=owner;
+            replacement_size=owner_bytes;
+        } else if (old_size==20 &&
+                   memcmp(ace+ACE_BASE,creator_group,12)==0) {
+            replacement=group;
+            replacement_size=group_bytes;
+        }
+        const size_t new_size=replacement ? ACE_BASE+replacement_size : old_size;
+        memcpy(acl+dst,ace,replacement ? ACE_BASE : old_size);
+        put16(acl+dst+2,(uint16_t)new_size);
+        if (replacement)
+            memcpy(acl+dst+ACE_BASE,replacement,replacement_size);
+        dst+=new_size;
+        pos+=old_size;
+    }
+    free(raw);
+    return nt_acl_validate_descriptor(out,total)==NT_ACL_ALLOWED ?
+           NT_ACL_ALLOWED : NT_ACL_INVALID;
 }
