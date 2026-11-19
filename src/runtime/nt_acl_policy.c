@@ -155,25 +155,19 @@ static int confined_policy_fd(int root_fd,const char *path,bool parent)
             (width==2 && s[start]=='.' && s[start+1]=='.')) {
             errno=EINVAL;return -1;
         }
-        if ((width>=16 && memcmp(s+start,":ntnative-",10)==0) ||
-            (width>=10 && memcmp(s+start,":ntnative-",10)==0)) {
-            errno=EACCES;return -1;
-        }
-        if (i<n) {
-            if (used && used+1>=sizeof(safe)) {
-                errno=ENAMETOOLONG;return -1;
-            }
-            if (used) safe[used++]='/';
-        } else if (used && used+1>=sizeof(safe)) {
-            errno=ENAMETOOLONG;return -1;
+        if (used) {
+            if (used+1>=sizeof(safe)) {errno=ENAMETOOLONG;return -1;}
+            safe[used++]='/';
         }
         if (used+width>=sizeof(safe)) {
             errno=ENAMETOOLONG;return -1;
         }
         memcpy(safe+used,s+start,width);
         used+=width;
-        if (i<n) i++;
-        if (i==n) {errno=EINVAL;return -1;} /* trailing separator */
+        if (i<n) {
+            i++;
+            if (i==n) {errno=EINVAL;return -1;} /* trailing separator */
+        }
     }
     safe[used]=0;
     if (parent && used) {
