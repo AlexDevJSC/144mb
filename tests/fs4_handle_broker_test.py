@@ -100,6 +100,55 @@ class Broker:
             stderr.decode("utf-8", errors="replace"))
 
 class FileSystem4Handles(unittest.TestCase):
+    def test_preexisting_host_hardlink_names_share_inode_and_lease(self):
+        # This fixture uses os.link ONLY to prepare an existing inode; it
+        # does NOT claim that CreateHardLinkW or UID FUSE link is supported.
+        # Verify that two Win32 names cannot evade the same OFD share lease.
+        with tempfile.TemporaryDirectory(prefix="fs4-hardlink-identity-") as temp:
+            root = Path(temp) / "C"
+            root.mkdir(mode=0o700)
+            original = root / "original.bin"
+            alias = root / "secondname.bin"
+            original.write_bytes(b"SAME INODE")
+            os.link(original, alias)
+            before = original.stat()
+            self.assertEqual((before.st_dev, before.st_ino),
+                             (alias.stat().st_dev, alias.stat().st_ino))
+            self.assertEqual(before.st_nlink, 2)
+            first = Broker(root)
+            try:
+                second = Broker(root)
+            except BaseException:
+                first.close()
+                raise
+            try:
+                err, held, _, _ = first.call(
+                    OPEN, b"C:/original.bin", access=0x80000000,
+                    share=0, disposition=3)
+                self.assertEqual(err, 0)
+                self.assertEqual(second.call(
+                    OPEN, b"C:/secondname.bin", access=0x80000000,
+                    share=7, disposition=3)[0], 32,
+                    "separate names bypassed the shared-inode share lease")
+                self.assertEqual(first.call(CLOSE, handle=held)[0], 0)
+                err, alias_h, _, _ = second.call(
+                    OPEN, b"C:/secondname.bin", access=0x80000000,
+                    share=7, disposition=3)
+                self.assertEqual(err, 0)
+                self.assertEqual(second.call(
+                    READ, handle=alias_h, size=10),
+                    (0, 0, 10, b"SAME INODE"))
+                self.assertEqual(second.call(CLOSE, handle=alias_h)[0], 0)
+                self.assertEqual(second.call(DELETE, b"C:/original.bin")[0], 0)
+                self.assertFalse(original.exists())
+                self.assertEqual(alias.read_bytes(), b"SAME INODE")
+                self.assertEqual(alias.stat().st_nlink, 1)
+            finally:
+                try:
+                    first.close()
+                finally:
+                    second.close()
+
     def test_absolute_session_expiry_releases_open_lease(self):
         # A test-only 1s absolute deadline confirms that expiration actually
         # revokes all physical leases, even when no CLOSE request is sent.
