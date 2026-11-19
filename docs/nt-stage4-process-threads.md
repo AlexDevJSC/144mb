@@ -3,6 +3,40 @@
 Prioridad actual de acuerdo con [el orden de desarrollo](nt-core-development-order.md):
 **4 → 1 → 5 → 2 → 3 → 6 → 7** (nueva instrucción expresa del 14-11-2026; el orden original era 4 → 5 → 2 → 3 → 1 → 6 → 7). **Esta fase permanece activa** y el cargador PE/DLL no empieza hasta que se satisfagan los criterios de salida.
 
+## Contrato de terminación en retorno PE revisado (19-11-2026)
+
+`TerminateThread`/`NtTerminateThread` ofrecen una ruta **adicional**
+acotada para un hilo PE propio, ya iniciado y con TEB válido, que llega
+a la frontera de retorno de una importación Win32. La solicitud no
+detiene ni mata directamente el pthread Linux desde otro hilo:
+la publicación del bit pendiente es atómica, y únicamente el propio
+hilo invitado puede reconocerla después de que la función host haya
+soltado sus mutexes. Tras confirmar la fase guest, el destino marca
+ACK en la tabla de waitables y ejecuta su `ExitThread` habitual,
+con su código de salida solicitado.
+
+El emisor espera un ACK bajo `pthread_cond_clockwait`, máximo 500 ms.
+Si el destino permanece en código PE sin imports, en un import host
+bloqueado, en `HOST`/CET no seguro, en una suspensión `ptrace` o
+en otro proceso, devuelve `STATUS_NOT_SUPPORTED` sin dejar una
+solicitud de terminación tardía. Un ref adicional pinnea la identidad
+del objeto mientras `cond_wait` libera el mutex. Un alias que cierre
+el HANDLE no recicla el estado de hilo en mitad de una espera.
+
+Regresión `check-pe-async-supervisor`: primero intenta terminar un
+hilo ejecutando un bucle PE puro y exige rechazo; después crea un
+hilo PE que pasa continuamente por `Sleep(0)`, exige ACK seguro,
+terminación y código de salida observable al `WaitForSingleObject`.
+
+**No es suspensión o terminación asíncrona general**. La ruta
+sin imports requiere rediseñar la propiedad de los locks y pilas
+anfitrionas, probablemente con aislamiento de procesos, antes de
+prometer la semántica completa de `TerminateThread`. No se permite
+`pthread_cancel`, señales Linux arbitrarias, terminación de otro
+TID del host ni uso de `pidfd_send_signal` dirigido a un pthread.
+El componente 4 continúa **96 % → 96 % (+0 puntos)** hasta completar
+la suite y aceptación diferencial.
+
 ## Continuación 18-11-2026: revocación durante RPC del broker (#178)
 
 La entrega posterior a la [PR #177](https://github.com/AlexDevJSC/144mb/pull/177)
