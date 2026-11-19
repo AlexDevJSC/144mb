@@ -171,7 +171,13 @@ int import_fixture_entry(void)
         !resolved.api(SPECIAL_CALLBACK, thread, (ULONG_PTR)&state, 1u))
         return 104;
     if (WaitForSingleObject(thread, 12000) != WAIT_OBJECT_0 ||
-        !GetExitCodeThread(thread, &exit_code) || exit_code != 0x1acu ||
+        !GetExitCodeThread(thread, &exit_code))
+        return 105;
+    /* Preserve the exact observed CPU-context regression code. A caller
+     * must not collapse a corrupted register state to generic timeout. */
+    if (exit_code == 106u)
+        return 106;
+    if (exit_code != 0x1acu ||
         __atomic_load_n(&state.ordinary_calls, __ATOMIC_SEQ_CST) != 0u ||
         __atomic_load_n(&state.special_calls, __ATOMIC_SEQ_CST) != 1u ||
         __atomic_load_n(&state.callback_tid, __ATOMIC_SEQ_CST) != tid ||
