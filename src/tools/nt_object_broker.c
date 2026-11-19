@@ -31,6 +31,11 @@ struct broker_object {
 };
 struct broker_client {
     int fd, object;
+    /* Kernel credentials from the initial AF_UNIX connection. Each
+     * subsequent message must carry the same real sender identity. */
+    pid_t pid;
+    uid_t uid;
+    gid_t gid;
 };
 static struct broker_object objects[OBJECT_LIMIT];
 static struct broker_client clients[CLIENT_LIMIT];
@@ -192,7 +197,9 @@ static bool reply_to_client(int fd, const struct nt_broker_request *req,
     int count = 0;
     if (obj && (result == NT_BROKER_CREATED || result == NT_BROKER_EXISTS)) {
         reply.kind = obj->kind;
-        reply.rights = obj->rights;
+        /* The stored object's maximum grant is NOT the rights of every
+         * newly opened HANDLE. Echo only this request's checked subset. */
+        reply.rights = req->rights;
         reply.protect = obj->protect;
         reply.manual = obj->manual;
         reply.maximum = obj->maximum;
@@ -224,11 +231,61 @@ static void forget_client(struct broker_client *client)
     client->fd = -1;
     client->object = -1;
 }
+/* SCM_RIGHTS may be installed by recvmsg even on a rejected packet.
+ * Client requests must never contain host FDs; close every received
+ * descriptor rather than leaking resources into the shared broker. */
+static bool authenticated_request(struct broker_client *client,
+                                  struct nt_broker_request *req)
+{
+    char ancillary[CMSG_SPACE(sizeof(struct ucred)) +
+                   CMSG_SPACE(8 * sizeof(int))] = {0};
+    struct iovec iov = {.iov_base = req, .iov_len = sizeof(*req)};
+    struct msghdr message = {
+        .msg_iov = &iov, .msg_iovlen = 1,
+        .msg_control = ancillary, .msg_controllen = sizeof(ancillary)
+    };
+    const ssize_t n = recvmsg(client->fd, &message,
+                              MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+    struct ucred sender = {0};
+    unsigned credential_count = 0;
+    bool unexpected = false;
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&message); cmsg;
+         cmsg = CMSG_NXTHDR(&message, cmsg)) {
+        if (cmsg->cmsg_level == SOL_SOCKET &&
+            cmsg->cmsg_type == SCM_CREDENTIALS &&
+            cmsg->cmsg_len == CMSG_LEN(sizeof(struct ucred))) {
+            memcpy(&sender, CMSG_DATA(cmsg), sizeof(sender));
+            ++credential_count;
+        } else {
+            unexpected = true;
+            if (cmsg->cmsg_level == SOL_SOCKET &&
+                cmsg->cmsg_type == SCM_RIGHTS &&
+                cmsg->cmsg_len >= CMSG_LEN(sizeof(int))) {
+                const size_t count =
+                    (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                const unsigned char *fd_data =
+                    (const unsigned char *)CMSG_DATA(cmsg);
+                for (size_t i = 0; i < count; ++i) {
+                    int received_fd;
+                    memcpy(&received_fd, fd_data + i * sizeof(int),
+                           sizeof(received_fd));
+                    if (received_fd >= 0)
+                        (void)close(received_fd);
+                }
+            }
+        }
+    }
+    return n == (ssize_t)sizeof(*req) &&
+           !(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) &&
+           !unexpected && credential_count == 1 &&
+           sender.pid == client->pid && sender.uid == client->uid &&
+           sender.gid == client->gid;
+}
+
 static void accept_request(struct broker_client *client)
 {
     struct nt_broker_request req = {0};
-    ssize_t n = recv(client->fd, &req, sizeof(req), MSG_DONTWAIT);
-    if (n != (ssize_t)sizeof(req) || !valid_request(&req)) {
+    if (!authenticated_request(client, &req) || !valid_request(&req)) {
         forget_client(client);
         return;
     }
@@ -290,14 +347,20 @@ static int serve(int listener)
                 socklen_t len = sizeof(cred);
                 bool valid = getsockopt(fd, SOL_SOCKET, SO_PEERCRED,
                                         &cred, &len) == 0 &&
-                             len == sizeof(cred) && cred.uid == geteuid();
+                             len == sizeof(cred) && cred.uid == geteuid() &&
+                             cred.pid > 0 &&
+                             setsockopt(fd, SOL_SOCKET, SO_PASSCRED,
+                                        &(int){1}, sizeof(int)) == 0;
                 size_t i = 0;
                 while (i < CLIENT_LIMIT && clients[i].fd >= 0)
                     ++i;
                 if (!valid || i == CLIENT_LIMIT)
                     close(fd);
                 else
-                    clients[i] = (struct broker_client){.fd = fd, .object = -1};
+                    clients[i] = (struct broker_client){
+                        .fd = fd, .object = -1, .pid = cred.pid,
+                        .uid = cred.uid, .gid = cred.gid
+                    };
             }
         }
         for (nfds_t i = 1; i < count; ++i) {
