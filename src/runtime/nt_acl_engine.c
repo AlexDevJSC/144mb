@@ -91,9 +91,12 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
 }
 
 static bool token_has_sid(const struct nt_acl_token *token,
-                          const uint8_t *sid,size_t sid_size) {
+                          const uint8_t *sid,size_t sid_size,
+                          bool for_allow) {
     for (size_t i=0;i<token->count;i++)
-        if (token->sid[i] && token->length[i]==sid_size &&
+        if ((!for_allow ||
+             !(token->sid_flags[i] & NT_ACL_SID_DENY_ONLY)) &&
+            token->sid[i] && token->length[i]==sid_size &&
             memcmp(token->sid[i],sid,sid_size)==0)
             return true;
     return false;
