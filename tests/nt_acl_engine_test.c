@@ -84,6 +84,76 @@ int main(void) {
     token.sid_flags[1]=2; /* future/unknown attributes must fail closed */
     assert(nt_acl_access_check(sd,48,&token,1,&granted)==NT_ACL_INVALID);
     assert(granted==0);
-    puts("PASS self-relative SD, ordered ACE, deny-only SID and DACL inheritance");
+    /* GENERIC_* is object-specific. An authenticated caller MUST pass a
+     * mapping; the legacy API rejects generic masks instead of guessing. */
+    token.sid_flags[1]=0;
+    sd_init(sd,48,1);
+    add_ace(sd+28,0,0,UINT32_C(0x80000000),everyone,sizeof(everyone));
+    struct nt_acl_generic_mapping mapping={
+        .read=1,.write=2,.execute=4,.all=7
+    };
+    assert(nt_acl_access_check(sd,48,&token,UINT32_C(0x80000000),
+                               &granted)==NT_ACL_UNSUPPORTED);
+    assert(nt_acl_access_check_mapped(sd,48,&token,UINT32_C(0x80000000),
+                                     &mapping,&granted)==NT_ACL_ALLOWED);
+    assert(granted==1);
+    assert(nt_acl_access_check_mapped(sd,48,&token,UINT32_C(0x40000000),
+                                     &mapping,&granted)==NT_ACL_DENIED);
+    assert(granted==0);
+    const struct nt_acl_generic_mapping bad_mapping={
+        .read=UINT32_C(0x80000000)
+    };
+    assert(nt_acl_access_check_mapped(sd,48,&token,UINT32_C(0x80000000),
+                                     &bad_mapping,&granted)==NT_ACL_UNSUPPORTED);
+    assert(granted==0);
+
+    /* A complete child SD carries real authenticated owner+group SIDs
+     * and translates CREATOR_OWNER inside inherited ACEs. Its SID can
+     * be longer than the placeholder, so ACE+ACL sizes must be rebuilt. */
+    static const uint8_t creator_owner[12]=
+        {1,1,0,0,0,0,0,3,0,0,0,0};
+    static const uint8_t creator_group[12]=
+        {1,1,0,0,0,0,0,3,1,0,0,0};
+    sd_init(sd,68,2);
+    add_ace(sd+28,0,3,1,creator_owner,sizeof(creator_owner));
+    add_ace(sd+48,1,3,2,creator_group,sizeof(creator_group));
+    uint8_t child[128]={0};
+    size_t output_size=0;
+    assert(nt_acl_validate_descriptor(sd,68)==NT_ACL_ALLOWED);
+    assert(nt_acl_inherit_descriptor(sd,68,false,
+                                     alice,sizeof(alice),
+                                     everyone,sizeof(everyone),
+                                     NULL,0,&output_size)==NT_ACL_DENIED);
+    assert(output_size==104);
+    assert(nt_acl_inherit_descriptor(sd,68,false,
+                                     alice,sizeof(alice),
+                                     everyone,sizeof(everyone),
+                                     child,output_size-1,&output_size)==NT_ACL_DENIED);
+    assert(nt_acl_inherit_descriptor(sd,68,false,
+                                     alice,sizeof(alice),
+                                     everyone,sizeof(everyone),
+                                     child,sizeof(child),&output_size)==NT_ACL_ALLOWED);
+    assert(output_size==104 && nt_acl_validate_descriptor(child,output_size)==NT_ACL_ALLOWED);
+    assert((child[2]&4)!=0 && (child[3]&0x80)!=0);
+    assert(nt_acl_access_check(child,output_size,&token,1,&granted)==NT_ACL_ALLOWED);
+    assert(nt_acl_access_check(child,output_size,&token,2,&granted)==NT_ACL_DENIED);
+    /* NT ACE inheritance on intermediate directories must preserve the
+     * propagation flags while setting INHERITED_ACE. */
+    assert(nt_acl_inherit_descriptor(sd,68,true,
+                                     alice,sizeof(alice),
+                                     everyone,sizeof(everyone),
+                                     child,sizeof(child),&output_size)==NT_ACL_ALLOWED);
+    assert((child[20+16+12+8+1]&16)!=0);
+    /* Same descriptor is not a valid output for in-place rewriting. */
+    assert(nt_acl_inherit_descriptor(sd,68,true,
+                                     alice,sizeof(alice),
+                                     everyone,sizeof(everyone),
+                                     sd,sizeof(sd),&output_size)==NT_ACL_INVALID);
+    /* Foreign / unknown ACEs must fail closed with no child written. */
+    sd[28]=9;
+    assert(nt_acl_inherit_descriptor(sd,68,false,alice,sizeof(alice),
+                                     everyone,sizeof(everyone),child,
+                                     sizeof(child),&output_size)==NT_ACL_UNSUPPORTED);
+    puts("PASS self-relative SD, mapped generic ACEs and child creator SID inheritance");
     return 0;
 }
