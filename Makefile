@@ -587,6 +587,19 @@ check-fs4-handle-broker: $(BUILD_DIR)/nt-storage-handle-broker
 
 check: check-fs4-handle-broker
 
+# Only this broker variant contains deliberate SIGKILL hooks in its file
+# runtime. Production HANDLE workers never compile the injection code.
+$(BUILD_DIR)/nt-storage-handle-broker-crash: src/tools/nt_storage_handle_broker.c $(filter-out $(BUILD_DIR)/runtime-guest_files.o,$(RUNTIME_OBJECTS)) $(BUILD_DIR)/runtime-guest_files-crash.o src/runtime/winfile.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    $(filter %.c %.o,$^) $(LDLIBS) $(RUNTIME_LIBS) -o "$@"
+
+.PHONY: check-fs4-hardlink-wal
+check-fs4-hardlink-wal: $(BUILD_DIR)/nt-storage-handle-broker $(BUILD_DIR)/nt-storage-handle-broker-crash
+	PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -W error::ResourceWarning tests/fs4_hardlink_wal_test.py \
+	    "$(BUILD_DIR)/nt-storage-handle-broker" "$(BUILD_DIR)/nt-storage-handle-broker-crash"
+
+check: check-fs4-hardlink-wal
+
 .PHONY: check-fs4-service-supervisor
 check-fs4-service-supervisor:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_fs_service_supervisor.py'
