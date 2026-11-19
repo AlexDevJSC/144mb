@@ -150,12 +150,14 @@ static bool supported_flags(uint32_t flags, bool writing)
     const uint32_t readers = NT_SUP_CONTEXT_INTEGER |
         NT_SUP_CONTEXT_CONTROL | NT_SUP_CONTEXT_SEGMENTS |
         NT_SUP_CONTEXT_FLOATING_POINT;
-    /* Writing a legacy FXSAVE image is a separate, verified kernel
-     * transaction. Never permit mixed INTEGER|FP writes or control,
-     * segment and extended XSTATE groups via this RPC gate. */
+    /* Only kernel-verified INTEGER and legacy FXSAVE transactions,
+     * independently or as one rollback-protected two-regset mutation.
+     * CONTROL/SEGMENTS/DEBUG and variable XSTATE cannot be authorized. */
     if (writing)
         return flags == (base | NT_SUP_CONTEXT_INTEGER) ||
-               flags == (base | NT_SUP_CONTEXT_FLOATING_POINT);
+               flags == (base | NT_SUP_CONTEXT_FLOATING_POINT) ||
+               flags == (base | NT_SUP_CONTEXT_INTEGER |
+                                NT_SUP_CONTEXT_FLOATING_POINT);
     return (flags & base) == base && (flags & readers) != 0 &&
            (flags & ~(base | readers)) == 0;
 }
