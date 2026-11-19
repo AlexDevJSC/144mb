@@ -154,7 +154,7 @@ static void inherit(void)
                                       new_owner,sizeof(new_owner));
     CHECK(fs4_acl_check(file,nf,&t,0x9u)); /* CREATOR_OWNER substituted */
     CHECK(!fs4_acl_check(file,nf,&t,0x2u));
-    const size_t first_dir=directory[16]+8;
+    const size_t first_dir=(size_t)r32(directory+16)+8u;
     CHECK((directory[first_dir+1] & FS4_ACE_INHERITED)!=0);
     const size_t ci_deny=first_dir+r16(directory+first_dir+2);
     CHECK((directory[ci_deny+1] &
@@ -164,7 +164,7 @@ static void inherit(void)
     size_t next=0;
     unsigned char subdir[FS4_SD_LIMIT];
     CHECK(fs4_acl_inherit(directory,nd,1250,9000,true,subdir,sizeof(subdir),&next));
-    CHECK(r16(subdir+56)==2); /* CI/NP deny and OI-only ACE do not propagate */
+    CHECK(r16(subdir+56)==3); /* NP deny does not propagate; OI-only remains inherit-only */
     CHECK(!fs4_acl_inherit(parent,n,1234,5678,false,file,20,&nf));
     CHECK(errno==ENOSPC);
     CHECK(fs4_acl_validate(parent,n)); /* inherited copy did not mutate parent */
