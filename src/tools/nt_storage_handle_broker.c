@@ -37,7 +37,7 @@ enum { FS4_HELLO = 0, FS4_OPEN = 1, FS4_READ = 2, FS4_WRITE = 3,
        FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
        FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
        FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23,
-       FS4_HARDLINK=24 };
+       FS4_HARDLINK=24, FS4_SECURITY_PATH=25, FS4_NATIVE_SECURITY=26, FS4_TIME_SET=27, FS4_INFO_GET=28, FS4_INFO_SET=29 };
 struct fs4_request {
     uint32_t magic;
     uint16_t version, op;
@@ -368,6 +368,85 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         free_slot->native=duplicate;free_slot->capability=cap;
         free_slot->search=false;result.handle=cap;
         result.error=NT_ERROR_SUCCESS;break;
+    }
+    /* A bounded, read-only owner/group/DACL projection. The trusted
+     * runtime rejects SACL, extended POSIX ACLs and unknown SID mappings
+     * rather than fabricate an NTFS security descriptor. */
+    case FS4_SECURITY_PATH: {
+        if (q->handle || n != q->size || q->size > FS4_PATH_MAX ||
+            q->share || q->flags || q->offset != -1 ||
+            q->disposition > FS4_DATA_MAX || !to_wide(payload, n, path))
+            break;
+        uint32_t needed=0;
+        const bool ok=nt_GetFileSecurityW(path,q->access,output,
+                                         q->disposition,&needed)!=0;
+        result.error=ok ? NT_ERROR_SUCCESS : nt_GetLastError();
+        result.value=needed;
+        if (ok && needed<=FS4_DATA_MAX)
+            result.length=needed;
+        else if (ok)
+            result.error=NT_ERROR_GEN_FAILURE;
+        break;
+    }
+    case FS4_NATIVE_SECURITY: {
+        if (!slot || slot->search || n || q->share || q->disposition ||
+            q->flags || q->offset != -1 || q->size>FS4_DATA_MAX)
+            break;
+        uint32_t needed=0;
+        const nt_status status=nt_NtQuerySecurityObject(
+            slot->native,q->access,output,q->size,&needed);
+        result.error=NT_ERROR_SUCCESS; /* NTSTATUS is NOT LastError. */
+        result.value=(uint32_t)status;
+        result.handle=needed; /* metadata, NOT a HANDLE capability */
+        if (status==NT_STATUS_SUCCESS && needed<=FS4_DATA_MAX)
+            result.length=needed;
+        else if (status==NT_STATUS_SUCCESS)
+            result.error=NT_ERROR_GEN_FAILURE;
+        break;
+    }
+    /* SetFileTime payload: exactly three native FILETIME pairs, in
+     * creation/access/write order, with presence bits in flags. The
+     * worker checks the real HANDLE rights and WAL/fsync barriers. */
+    case FS4_TIME_SET: {
+        if (!slot || slot->search || n!=24 || q->size!=24 ||
+            q->access || q->share || q->disposition ||
+            q->offset!=-1 || !q->flags || (q->flags & ~7u))
+            break;
+        struct nt_file_time times[3];
+        memcpy(times,payload,sizeof(times));
+        const struct nt_file_time *created=(q->flags&1u) ? &times[0] : NULL;
+        const struct nt_file_time *accessed=(q->flags&2u) ? &times[1] : NULL;
+        const struct nt_file_time *written=(q->flags&4u) ? &times[2] : NULL;
+        result.error=nt_SetFileTime(slot->native,created,accessed,written) ?
+                     NT_ERROR_SUCCESS : nt_GetLastError();
+        break;
+    }
+    case FS4_INFO_GET: {
+        const uint32_t required=q->access==0 ? 40u :
+                                 q->access==1 ? 24u :
+                                 q->access==9 ? 8u : 0u;
+        if (!slot || slot->search || n || !required ||
+            q->size!=required || q->share || q->disposition ||
+            q->flags || q->offset!=-1)
+            break;
+        result.error=nt_GetFileInformationByHandleEx(
+            slot->native,(int32_t)q->access,output,required) ?
+                     NT_ERROR_SUCCESS : nt_GetLastError();
+        if (result.error==NT_ERROR_SUCCESS)
+            result.length=required;
+        break;
+    }
+    case FS4_INFO_SET: {
+        /* FILE_BASIC_INFO (class 0) only; existing local code explicitly
+         * refuses unmodelled changed time, attributes and NT ACL writes. */
+        if (!slot || slot->search || q->access!=0 || n!=40 ||
+            q->size!=40 || q->share || q->disposition ||
+            q->flags || q->offset!=-1)
+            break;
+        result.error=nt_SetFileInformationByHandle(
+            slot->native,0,payload,40) ?
+                     NT_ERROR_SUCCESS : nt_GetLastError();
+        break;
     }
     /* Raw NTSTATUS is returned in value; error remains zero for a valid
      * RPC even when the native operation fails. No guest pointers or FDs. */

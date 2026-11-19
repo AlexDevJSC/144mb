@@ -57,6 +57,29 @@ int main(void)
     CHECK(nt_GetProcessHandleCount(nt_GetCurrentProcess(), &count) &&
           count == initial + 3);
 
+    /* A new section alias is allowed to LOSE access but never gain it.
+     * Duplication cannot convert a read-only section into a writer. */
+    uintptr_t read_alias = 0;
+    CHECK(nt_DuplicateHandle(nt_GetCurrentProcess(), first,
+          nt_GetCurrentProcess(), &read_alias, 4, 0, 0) && read_alias != 0);
+    CHECK(nt_GetProcessHandleCount(nt_GetCurrentProcess(), &count) &&
+          count == initial + 4);
+    const uint8_t *read_view = nt_MapViewOfFile(read_alias, 4, 0, 0, 4096);
+    CHECK(read_view != NULL);
+    CHECK(!nt_MapViewOfFile(read_alias, 2, 0, 0, 4096) &&
+          nt_GetLastError() == NT_ERROR_ACCESS_DENIED);
+    uintptr_t rejected = UINTPTR_MAX;
+    CHECK(nt_NtDuplicateObject(nt_GetCurrentProcess(), read_alias,
+          nt_GetCurrentProcess(), &rejected, 2, 0, 0) ==
+          NT_STATUS_ACCESS_DENIED && rejected == 0);
+    rejected = UINTPTR_MAX;
+    CHECK(nt_NtDuplicateObject(nt_GetCurrentProcess(), read_alias,
+          nt_GetCurrentProcess(), &rejected, 8, 0, 0) ==
+          NT_STATUS_INVALID_PARAMETER && rejected == 0);
+    CHECK(nt_UnmapViewOfFile(read_view) && nt_CloseHandle(read_alias));
+    CHECK(nt_GetProcessHandleCount(nt_GetCurrentProcess(), &count) &&
+          count == initial + 3);
+
     unsigned char *writer = nt_MapViewOfFile(first, 2, 0, 0, 65536);
     unsigned char *reader = nt_MapViewOfFile(second, 4, 0, 0, 65536);
     unsigned char *copy = nt_MapViewOfFile(duplicate, 1, 0, 0, 65536);

@@ -23,10 +23,19 @@ $source = Join-Path $root "tests/windows/stage4_scheduler_probe.c"
 $fixture = Join-Path $root "tests/pe/thread_group_affinity_fixture.c"
 $quantumSource = Join-Path $root "tests/bench/scheduler_quantum_observation.c"
 $fpSource = Join-Path $root "tests/windows/stage4_fp_context_probe.c"
+# Compile these *same* existing PE fixture sources natively with MSVC.
+# The fixtures encode some NT144 limitations, so a nonzero native exit
+# is important differential data rather than a reason to hide the result.
+$priorityClassSource = Join-Path $root "tests/pe/priority_class_fixture.c"
+$priorityBoostSource = Join-Path $root "tests/pe/priority_boost_boundary_fixture.c"
+$processAffinitySource = Join-Path $root "tests/pe/process_affinity_mask_fixture.c"
 $exe = Join-Path $build "stage4-scheduler-native.exe"
 $fixtureExe = Join-Path $build "stage4-group-fixture-native.exe"
 $quantumExe = Join-Path $build "stage4-quantum-native.exe"
 $fpExe = Join-Path $build "stage4-fp-context-native.exe"
+$priorityClassExe = Join-Path $build "stage4-priority-class-native.exe"
+$priorityBoostExe = Join-Path $build "stage4-priority-boost-native.exe"
+$processAffinityExe = Join-Path $build "stage4-process-affinity-native.exe"
 $compileCmd = Join-Path $build "compile-stage4-windows.cmd"
 @"
 @echo off
@@ -40,6 +49,12 @@ if errorlevel 1 exit /b 1
 cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Fe:"$quantumExe" "$quantumSource" /link kernel32.lib
 if errorlevel 1 exit /b 1
 cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Fe:"$fpExe" "$fpSource" /link kernel32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Dimport_fixture_entry=main /Fe:"$priorityClassExe" "$priorityClassSource" /link kernel32.lib ntdll.lib
+if errorlevel 1 exit /b 1
+cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Dimport_fixture_entry=main /Fe:"$priorityBoostExe" "$priorityBoostSource" /link kernel32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /std:c11 /W4 /O2 /TC /D_WIN32_WINNT=0x0A00 /Dimport_fixture_entry=main /Fe:"$processAffinityExe" "$processAffinitySource" /link kernel32.lib
 exit /b %errorlevel%
 "@ | Set-Content -Encoding ASCII $compileCmd
 & cmd.exe /d /c "`"$compileCmd`""
@@ -69,6 +84,31 @@ $fixtureReport = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-linu
     "NOTE=This is the same tests/pe/thread_group_affinity_fixture.c used by Linux guest CI"
 ) | Set-Content -Encoding ASCII $fixtureReport
 Get-Content $fixtureReport
+# Observe the exact same four Win32 fixture implementations as Linux.
+# Priority-boost fixtures intentionally expect the unsupported NT144
+# default; their nonzero Windows exit MUST be recorded as a difference.
+$functionalReport = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-priority-affinity.txt"
+$rows = [System.Collections.Generic.List[string]]::new()
+$rows.Add("SCHEMA=ntnative.stage4.priority-affinity.functional.v1")
+$rows.Add("PLATFORM=WINDOWS_NATIVE")
+$rows.Add("COMMIT=$(git rev-parse HEAD)")
+$rows.Add("NT_SCHEDULER_PARITY_VERIFIED=NO")
+$rows.Add("THREAD_GROUP_EXIT=$fixtureExit")
+$probes = [ordered]@{
+    PROCESS_AFFINITY = $processAffinityExe
+    PRIORITY_CLASS = $priorityClassExe
+    PRIORITY_BOOST_BOUNDARY = $priorityBoostExe
+}
+# In PS7 a positive process exit code is not a PowerShell scripting error.
+# Fail only if launching the native binary itself cannot be performed.
+$PSNativeCommandUseErrorActionPreference = $false
+foreach ($probe in $probes.GetEnumerator()) {
+    & $probe.Value | Out-Null
+    $probeExit = $LASTEXITCODE
+    $rows.Add("$($probe.Key)_EXIT=$probeExit")
+}
+$rows | Set-Content -Encoding ASCII $functionalReport
+Get-Content $functionalReport
 # Same-source Windows/Linux scheduler contention observation, no NT quantum claim.
 $quantumReport = Join-Path (Split-Path -Parent $OutputPath) "stage4-windows-quantum.txt"
 & $quantumExe | Set-Content -Encoding ASCII $quantumReport

@@ -96,6 +96,27 @@ int main(void)
     }
     printf("THREAD_BOOST_TOGGLE=%s\n", thread_boost_ok ? "PASS" : "FAIL");
 
+    /* Windows-native reference independent of NT144's fixture assumption
+     * that the process initially has NORMAL_PRIORITY_CLASS. Test on our
+     * own suspended worker; restore before the first instruction runs. */
+    const int original_thread_priority = GetThreadPriority(thread);
+    BOOL thread_priority_roundtrip = FALSE;
+    if (original_thread_priority != THREAD_PRIORITY_ERROR_RETURN) {
+        const int requested_thread_priority =
+            original_thread_priority == THREAD_PRIORITY_BELOW_NORMAL ?
+            THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_BELOW_NORMAL;
+        if (SetThreadPriority(thread, requested_thread_priority)) {
+            const BOOL changed =
+                GetThreadPriority(thread) == requested_thread_priority;
+            const BOOL restored =
+                SetThreadPriority(thread, original_thread_priority);
+            thread_priority_roundtrip = changed && restored &&
+                GetThreadPriority(thread) == original_thread_priority;
+        }
+    }
+    printf("THREAD_PRIORITY_ROUNDTRIP=%s\n",
+           thread_priority_roundtrip ? "PASS" : "FAIL");
+
     int cross_ok = 0;
     int legacy_ok = 0;
     WORD chosen_group = before_ok ? before.Group : 0;
@@ -167,6 +188,48 @@ int main(void)
     printf("DYNAMIC_BOOST=%s\n", thread_boost_ok && process_boost_ok ?
            "CONTROL_AVAILABLE" : "CONTROL_FAILED");
     CloseHandle(thread);
+
+    /* Reversible priority class transaction on THIS disposable probe
+     * process. Never request REALTIME, privileged Linux nice, or touch a
+     * foreign PID. Record failure rather than guessing host capabilities. */
+    const DWORD original_class = GetPriorityClass(GetCurrentProcess());
+    const DWORD requested_class =
+        original_class == BELOW_NORMAL_PRIORITY_CLASS ?
+        NORMAL_PRIORITY_CLASS : BELOW_NORMAL_PRIORITY_CLASS;
+    BOOL process_class_roundtrip = FALSE;
+    if (original_class != 0 && SetPriorityClass(GetCurrentProcess(), requested_class)) {
+        const BOOL changed = GetPriorityClass(GetCurrentProcess()) == requested_class;
+        const BOOL restored = SetPriorityClass(GetCurrentProcess(), original_class);
+        process_class_roundtrip = changed && restored &&
+            GetPriorityClass(GetCurrentProcess()) == original_class;
+    }
+    printf("PROCESS_PRIORITY_CLASS_ROUNDTRIP=%s\n",
+           process_class_roundtrip ? "PASS" : "FAIL");
+
+    /* Test a real mask narrowing and verified restoration. The legacy
+     * process mask API is ambiguous for Windows 11 multi-group policy;
+     * never treat lack of a representable group as an observed pass. */
+    const char *affinity_roundtrip = "SKIP";
+    if (groups == 1 && process_ok && process_mask != 0) {
+        const DWORD_PTR single_cpu = process_mask & (~process_mask + 1);
+        BOOL changed = FALSE, restored = FALSE;
+        if (SetProcessAffinityMask(GetCurrentProcess(), single_cpu)) {
+            DWORD_PTR observed = 0, available = 0;
+            changed = GetProcessAffinityMask(GetCurrentProcess(), &observed,
+                                             &available) &&
+                      observed == single_cpu;
+            restored = SetProcessAffinityMask(GetCurrentProcess(), process_mask);
+            if (restored) {
+                observed = available = 0;
+                restored = GetProcessAffinityMask(GetCurrentProcess(), &observed,
+                                                   &available) &&
+                           observed == process_mask;
+            }
+        }
+        affinity_roundtrip = changed && restored ? "PASS" : "FAIL";
+    }
+    printf("PROCESS_AFFINITY_ROUNDTRIP=%s\n", affinity_roundtrip);
+    printf("NT_SCHEDULER_POLICY_PARITY=UNVERIFIED\n");
     return !groups || !total || sum != total || !before_ok || !selected.Mask ||
            !legacy_ok || !completed || !thread_boost_ok || !process_boost_ok ||
            (groups > 1 && !cross_ok);

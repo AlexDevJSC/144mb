@@ -2810,18 +2810,24 @@ static int close_file(struct guest_file *file)
 
 /* Duplicated descriptors share a Linux open-file description (and therefore
  * the seek offset), as a duplicated Windows file HANDLE does. They remain
- * independent entries in the guest handle table. Rights-preserving copies
- * are supported; reducing access rights needs a separate access-mask model. */
-static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
-                                       uint32_t options, uintptr_t *target)
+ * independent entries in the guest handle table. Restrict explicit rights
+ * to the already-normalized FILE_READ/WRITE/DELETE model: a guest must not
+ * turn a read-only source into a writable duplicate. */
+static nt_status duplicate_file_handle(uintptr_t source, uint32_t access,
+                                       uint32_t attributes, uint32_t options,
+                                       uintptr_t *target)
 {
     pthread_mutex_lock(&file_lock);
     const struct guest_file *original = find_handle(source);
     nt_status status = NT_STATUS_SUCCESS;
     if (!original) {
         status = NT_STATUS_INVALID_HANDLE;
-    } else if (!(options & 2u)) { /* DUPLICATE_SAME_ACCESS */
-        status = NT_STATUS_NOT_SUPPORTED;
+    } else if (!(options & 2u) &&
+               (access == 0 || (access & ~(FILE_READ | FILE_WRITE | FILE_DELETE)))) {
+        /* Other NT ACCESS_MASK forms need a dedicated generic mapping. */
+        status = NT_STATUS_INVALID_PARAMETER;
+    } else if (!(options & 2u) && (access & ~original->access)) {
+        status = NT_STATUS_ACCESS_DENIED;
     } else {
         struct guest_file *copy = new_file();
         if (!copy || next_handle == UINTPTR_MAX) {
@@ -2841,6 +2847,8 @@ static nt_status duplicate_file_handle(uintptr_t source, uint32_t attributes,
             } else {
                 *copy = *original;
                 copy->fd = fd;
+                if (!(options & 2u))
+                    copy->access = access;
                 copy->share_lease_fd = lease;
                 copy->path = path;
                 copy->handle = next_handle++;
@@ -3398,7 +3406,7 @@ nt_status NT_MS_ABI nt_NtDuplicateObject(uintptr_t source_process, uintptr_t sou
     if (status == NT_STATUS_INVALID_HANDLE)
         status = nt_runtime_section_duplicate(source, access, attributes, options, target);
     if (status == NT_STATUS_INVALID_HANDLE)
-        status = duplicate_file_handle(source, attributes, options, target);
+        status = duplicate_file_handle(source, access, attributes, options, target);
     if (status == NT_STATUS_SUCCESS && (options & 1u)) {
         /* After successful duplication each handle has an independent life. */
         const nt_status closed = nt_NtClose(source);
@@ -5468,8 +5476,10 @@ int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information
                                       void *descriptor, uint32_t size, uint32_t *needed)
 {
     if (nt_fs4_remote_mode()) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
+        char remote[PATH_MAX];
+        return wide_path(name,remote) &&
+               nt_fs4_remote_get_security(remote,information,
+                                          descriptor,size,needed);
     }
     char narrow[PATH_MAX], path[PATH_MAX];
     if (!wide_path(name, narrow))
@@ -5503,6 +5513,15 @@ nt_status NT_MS_ABI nt_NtQuerySecurityObject(uintptr_t handle, uint32_t informat
 {
     if (!needed)
         return NT_STATUS_ACCESS_VIOLATION;
+    if (nt_fs4_remote_handle(handle)) {
+        if (!descriptor)
+            return NT_STATUS_ACCESS_VIOLATION;
+        const uint32_t saved=nt_GetLastError();
+        const nt_status status=nt_fs4_remote_native_security(
+            handle,information,descriptor,length,needed);
+        nt_SetLastError(saved); /* Native queries do not set LastError. */
+        return status;
+    }
     const int fd = duplicate_handle(handle, FILE_READ);
     if (fd < 0)
         return nt_file_error(path_error(errno, false));
@@ -7763,10 +7782,8 @@ _Static_assert(sizeof(struct standard_file_info) == 24, "FILE_STANDARD_INFO layo
 
 int32_t NT_MS_ABI nt_GetFileInformationByHandleEx(uintptr_t handle, int32_t kind, void *info, uint32_t size)
 {
-    if (nt_fs4_remote_handle(handle)) {
-        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
-        return 0;
-    }
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_info_get(handle,kind,info,size);
     if (info == NULL) {
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
@@ -7869,6 +7886,8 @@ int32_t NT_MS_ABI nt_GetFileInformationByHandle(uintptr_t handle,
 int32_t NT_MS_ABI nt_GetFileTime(uintptr_t handle, struct nt_file_time *created,
                                 struct nt_file_time *accessed, struct nt_file_time *written)
 {
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_get_time(handle,created,accessed,written);
     const int fd = duplicate_handle(handle, 0);
     if (fd < 0)
         return file_result(fd, false);
@@ -7899,22 +7918,62 @@ int32_t NT_MS_ABI nt_SetFileTime(uintptr_t handle, const struct nt_file_time *cr
 {
     if (!created && !accessed && !written)
         return 1;
-    const int fd = duplicate_handle(handle, FILE_WRITE);
-    if (fd < 0)
-        return file_result(fd, false);
-    bool valid = true;
-    if (created) {
-        const uint64_t value = ticks(*created);
-        valid = write_guest_xattr(fd, WIN_BIRTH_XATTR, &value, sizeof(value)) == 0;
+    if (nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_set_time(handle,created,accessed,written);
+    /* Metadata changes must not race a cooperating rename/delete on C:.
+     * Match file_lock -> WAL lock ordering of truncate_guest_handle().
+     * A return of success means the pinned inode was actually fsynced. */
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *file=find_handle(handle);
+    int error=0, fd=-1, guard=-1;
+    if (!file)
+        error=EBADF;
+    else if (!(file->access & FILE_WRITE))
+        error=EACCES;
+    if (!error && file->path && private_c_path(file->path)) {
+        char absolute[PATH_MAX+3];
+        if (snprintf(absolute,sizeof(absolute),"C:/%s",file->path) >=
+            (int)sizeof(absolute))
+            error=ENAMETOOLONG;
+        else {
+            guard=nt_runtime_begin_namespace_mutation(absolute);
+            if (guard<0)
+                error=errno ? errno : EUCLEAN;
+        }
     }
-    if (valid && (accessed || written)) {
-        const struct timespec dates[2] = {
-            accessed ? to_timespec(ticks(*accessed)) : (struct timespec){0, UTIME_OMIT},
-            written ? to_timespec(ticks(*written)) : (struct timespec){0, UTIME_OMIT}
+    if (!error) {
+        fd=fcntl(file->fd,F_DUPFD_CLOEXEC,3);
+        if (fd<0)
+            error=errno;
+    }
+    /* An all-zero FILETIME is the Windows 'leave unchanged' sentinel. */
+    if (!error && created && ticks(*created)!=0) {
+        const uint64_t value=ticks(*created);
+        if (write_guest_xattr(fd,WIN_BIRTH_XATTR,&value,sizeof(value))!=0)
+            error=errno;
+    }
+    if (!error && (accessed || written)) {
+        const struct timespec dates[2]={
+            accessed ? to_timespec(ticks(*accessed)) :
+                       (struct timespec){0,UTIME_OMIT},
+            written ? to_timespec(ticks(*written)) :
+                      (struct timespec){0,UTIME_OMIT}
         };
-        valid = futimens(fd, dates) == 0;
+        if (futimens(fd,dates)!=0)
+            error=errno;
     }
-    return file_result(fd, valid);
+    if (!error && !wal_sync_pinned(fd,false))
+        error=errno ? errno : EIO;
+    if (fd>=0)
+        close(fd);
+    if (guard>=0)
+        nt_runtime_end_namespace_mutation(guard);
+    pthread_mutex_unlock(&file_lock);
+    if (error) {
+        nt_SetLastError(path_error(error,false));
+        return 0;
+    }
+    return 1;
 }
 
 /* FILE_DISPOSITION_INFO (FileInfoByHandleClass=4) contains a single
@@ -8005,6 +8064,8 @@ int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, 
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return 0;
     }
+    if (kind == 0 && nt_fs4_remote_handle(handle))
+        return nt_fs4_remote_info_set(handle,kind,info,size);
     if (kind == 4) {
         if (size < 1) {
             nt_SetLastError(NT_ERROR_INSUFFICIENT_BUFFER);
@@ -8040,9 +8101,22 @@ int32_t NT_MS_ABI nt_SetFileInformationByHandle(uintptr_t handle, int32_t kind, 
             nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
             return 0;
         }
-        const struct timespec dates[] = {to_timespec(basic.accessed), to_timespec(basic.written)};
-        const int fd = duplicate_handle(handle, FILE_WRITE);
-        return file_result(fd, fd >= 0 && futimens(fd, dates) == 0);
+        /* Reuse the same WAL/lease/durable metadata path as SetFileTime,
+         * for both local Win32 and an authenticated remote HANDLE. */
+        if (!basic.accessed && !basic.written) {
+            /* A no-op FILE_BASIC_INFO update still requires a valid,
+             * write-authorized HANDLE. Do not bypass permissions by
+             * delegating three null FILETIME pointers. */
+            const int fd=duplicate_handle(handle,FILE_WRITE);
+            return file_result(fd,fd>=0);
+        }
+        const struct nt_file_time access_time = {
+            (uint32_t)basic.accessed, (uint32_t)(basic.accessed >> 32)};
+        const struct nt_file_time write_time = {
+            (uint32_t)basic.written, (uint32_t)(basic.written >> 32)};
+        return nt_SetFileTime(handle,
+                              NULL, basic.accessed ? &access_time : NULL,
+                              basic.written ? &write_time : NULL);
     }
     nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
     return 0;
