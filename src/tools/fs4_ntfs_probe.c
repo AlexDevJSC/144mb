@@ -103,6 +103,22 @@ int main(int argc, char **argv)
     bool hardlink_readable = hardlink_created &&
         probe_bytes_match(hardlink, bytes, sizeof(bytes)-1);
     if (hardlink_readable) {
+        /* A second directory entry needs an independently resolvable
+         * 8.3 alias; inheriting the source inode's alias is incorrect. */
+        uint16_t link_short[512] = {0};
+        uint16_t source_short[512] = {0};
+        const uint32_t link_len =
+            nt_GetShortPathNameW(hardlink, link_short, 512);
+        const uint32_t source_len =
+            nt_GetShortPathNameW(existing, source_short, 512);
+        hardlink_readable = link_len > 0 && link_len < 512 &&
+                            source_len > 0 && source_len < 512 &&
+                            probe_has_tilde(link_short, link_len) &&
+                            memcmp(link_short, source_short,
+                                   (link_len < source_len ?
+                                    link_len : source_len) * sizeof(uint16_t)) != 0;
+    }
+    if (hardlink_readable) {
         /* Windows hardlinks are two names for ONE file identity, not a
          * byte-for-byte copy. The runtime must observe the same inode. */
         uintptr_t first = nt_CreateFileW(existing, UINT32_C(0x80000000), 7,
