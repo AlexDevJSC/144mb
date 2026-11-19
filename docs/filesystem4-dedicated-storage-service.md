@@ -63,10 +63,13 @@ SELinux revisado, y los binarios del proyecto compilados.
 
 ## Límites y puertas pendientes
 
-- NO hay todavía adaptador IPC de handles para el runtime PE. NO ejecutar
-  PE bajo la cuenta del servicio, ni dar al PE un bind de escritura al
-  backing. El modo --pe del supervisor antiguo sigue siendo diferente,
-  SIN aislamiento por UID de servicio; la nueva ruta cubre Linux/FUSE.
+- El adaptador PE por IPC v3 existe **solo en modo experimental opt-in**:
+  `nt-fs-supervisor --experimental-pe-ipc` más la autorización explícita
+  `NT_STORAGE_EXPERIMENTAL_HANDLES=1`. No ejecutar PE bajo la cuenta
+  del servicio ni darle un bind de escritura al backing. El modo antiguo
+  `--pe --lower` sigue siendo diferente y NO ofrece aislamiento por
+  UID de servicio. Permanecen pendientes las operaciones de hardlinks,
+  cobertura NTFS restante y validación adversaria en Fedora físico.
 - La autorización actual cubre todo un UID cliente, no una sesión o token
   por proceso. Un proceso adicional del mismo UID puede usar la vista;
   otro UID no. Revocación de UID requiere cambiar configuración y reiniciar.
