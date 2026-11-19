@@ -22,7 +22,8 @@
 #include <unistd.h>
 
 #if !defined(NT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH) && \
-    !defined(NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH)
+    !defined(NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH) && \
+    !defined(NT_SUP_TEST_FORCE_MIXED_VERIFY_MISMATCH)
 #error "This test is only for forced verification failure"
 #endif
 #ifdef NT_SUP_TEST_FORCE_GPR_VERIFY_MISMATCH
@@ -129,7 +130,9 @@ int main(void)
         goto cleanup;
 
     _Alignas(16) struct nt_context64 original = {0};
-#ifdef NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH
+#if defined(NT_SUP_TEST_FORCE_MIXED_VERIFY_MISMATCH)
+    original.flags = 0x10000au;
+#elif defined(NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH)
     original.flags = 0x100008u;
 #else
     original.flags = 0x100003u;
@@ -137,7 +140,14 @@ int main(void)
     if (nt_supervisor_nt_get_context(&thread, &original) != NT_STATUS_SUCCESS)
         goto cleanup;
     _Alignas(16) struct nt_context64 edited = original;
-#ifdef NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH
+#ifdef NT_SUP_TEST_FORCE_MIXED_VERIFY_MISMATCH
+    edited.flags = 0x10000au;
+    edited.rax ^= UINT64_C(0x5555666677778888);
+    edited.mxcsr ^= UINT32_C(0x2000);
+    memcpy(edited.floating + 24, &edited.mxcsr, sizeof(edited.mxcsr));
+    if (nt_supervisor_nt_set_context(&thread, &edited) != NT_STATUS_NOT_SUPPORTED)
+        goto cleanup;
+#elif defined(NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH)
     edited.flags = 0x100008u;
     edited.mxcsr ^= UINT32_C(0x2000);
     memcpy(edited.floating + 24, &edited.mxcsr, sizeof(edited.mxcsr));
@@ -156,7 +166,8 @@ int main(void)
         goto cleanup;
 #endif
 #if defined(NT_SUP_TEST_FORCE_GPR_ROLLBACK_FAILURE) || \
-    defined(NT_SUP_TEST_FORCE_FP_ROLLBACK_FAILURE)
+    defined(NT_SUP_TEST_FORCE_FP_ROLLBACK_FAILURE) || \
+    defined(NT_SUP_TEST_FORCE_MIXED_ROLLBACK_FAILURE)
     /* The requested mutation reached the kernel, but readback failed
      * and rollback was forced to fail. No DETACH of these regs is legal.
      * Only the pidfd-pinned child can be terminated. */
@@ -188,7 +199,12 @@ int main(void)
     restored.flags = original.flags;
     if (nt_supervisor_nt_get_context(&thread, &restored) != NT_STATUS_SUCCESS)
         goto cleanup;
-#ifdef NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH
+#if defined(NT_SUP_TEST_FORCE_MIXED_VERIFY_MISMATCH)
+    if (restored.rax != original.rax ||
+        restored.mxcsr != original.mxcsr ||
+        memcmp(restored.floating, original.floating, 512) != 0)
+        goto cleanup;
+#elif defined(NT_SUP_TEST_FORCE_FP_VERIFY_MISMATCH)
     if (restored.mxcsr != original.mxcsr ||
         memcmp(restored.floating, original.floating, 512) != 0)
         goto cleanup;
