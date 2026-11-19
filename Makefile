@@ -622,6 +622,18 @@ check-fs4-acl-policy: $(BUILD_DIR)/fs4-acl-policy-test
 
 check: check-fs4-acl-policy
 
+# Protected internal DACL xattr read/write/fsync and inheritance on
+# unpublished O_TMPFILE. NOT exposed as Win32 SetFileSecurityW yet.
+$(BUILD_DIR)/fs4-acl-storage-test: tests/fs4_acl_storage_test.c src/runtime/fs4_acl.c src/runtime/fs4_acl_storage.c src/runtime/fs4_acl.h src/runtime/fs4_acl_storage.h | $(BUILD_DIR)
+	$(CC) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
+	    tests/fs4_acl_storage_test.c src/runtime/fs4_acl.c src/runtime/fs4_acl_storage.c -o "$@"
+
+.PHONY: check-fs4-acl-storage
+check-fs4-acl-storage: $(BUILD_DIR)/fs4-acl-storage-test
+	$(BUILD_DIR)/fs4-acl-storage-test
+
+check: check-fs4-acl-storage
+
 check: check-fs4-security-metadata
 
 # Win64 PE fixture imports kernel32 and advapi32; it runs through our
