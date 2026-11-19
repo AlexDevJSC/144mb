@@ -97,7 +97,8 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
     _Alignas(16) struct nt_context64 snapshot = {0};
     snapshot.flags = flags;
     /* Windows CONTEXT x64 ABI fields, populated only for requested groups.
-     * Neither debug registers nor FP/XSTATE are promised here. */
+     * DEBUG and extended XSTATE are not promised; the 512-byte legacy FP
+     * group has its own separately verified STOPPED-only write path. */
     if (flags & NT_SUP_CONTEXT_CONTROL) {
         snapshot.rip = regs.rip;
         snapshot.rsp = regs.rsp;
