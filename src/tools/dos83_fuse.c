@@ -1995,14 +1995,26 @@ static int service_acl_selftest(void)
         failure=1;
     if (!failure && (
         fs_unlink("/ACLManagedParent/Child")!=-EACCES ||
-        fs_mkdir("/ACLManagedParent/UnsafeDir",0700)!=-ENOTSUP ||
         fs_setxattr("/ACLManagedParent/Child",
                     "user.ntnative.security.sd","X",1,0)!=-EACCES ||
         fs_getxattr("/ACLManagedParent/Child",
                     "user.ntnative.security.sd",NULL,0)!=-ENODATA ||
         fs_chmod("/ACLManagedParent/Child",0777,NULL)!=-EPERM))
         failure=1;
+    if (!failure && fs_mkdir("/ACLManagedParent/SafeDir",0755)!=0)
+        failure=1;
+    int new_dir=lower_open("/ACLManagedParent/SafeDir",
+                          O_RDONLY|O_DIRECTORY,0);
+    if (!failure && (new_dir<0 ||
+        nt_acl_storage_read_fd(new_dir,child,sizeof(child),&sd_size)!=
+            NT_ACL_STORAGE_PRESENT ||
+        fstat(new_dir,&st)!=0 ||
+        (st.st_mode&0777)!=0700 ||
+        fs_rmdir("/ACLManagedParent/SafeDir")!=-EACCES))
+        failure=1;
+    if (new_dir>=0) close(new_dir);
     if (unlinkat(lower_root,"ACLManagedParent/Child",0)!=0 ||
+        unlinkat(lower_root,"ACLManagedParent/SafeDir",AT_REMOVEDIR)!=0 ||
         unlinkat(lower_root,"ACLManagedParent",AT_REMOVEDIR)!=0)
         failure=1;
     close(parent);
@@ -2010,8 +2022,8 @@ static int service_acl_selftest(void)
         fprintf(stderr,"FAIL offline managed FUSE DACL inheritance/denial\n");
         return 1;
     }
-    puts("PASS offline FUSE managed DACL inherited before publication, "
-         "read/write grant and delete/chmod denied (mount not tested)");
+    puts("PASS offline FUSE managed file+directory DACL inherited before "
+         "atomic publication; delete/chmod denied (mount not tested)");
     return 0;
 }
 
