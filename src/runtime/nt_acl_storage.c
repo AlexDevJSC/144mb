@@ -11,6 +11,7 @@
 #include "nt_acl_storage.h"
 #include "nt_acl_engine.h"
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -62,6 +63,23 @@ static bool valid_inode(int fd,struct stat *st) {
     }
     return true;
 }
+/* O_PATH pins the exact inode without exercising its host read DAC.
+ * Linux fgetxattr(O_PATH) returns EBADF; /proc/self/fd/N remains bound to
+ * the same file description (not a new guest-controlled path). */
+static ssize_t read_acl_xattr(int fd,void *out,size_t capacity)
+{
+    ssize_t result=fgetxattr(fd,NT_ACL_XATTR,out,capacity);
+    if (result<0 && errno==EBADF) {
+        char path[64];
+        const int count=snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
+        if (count<=0 || (size_t)count>=sizeof(path)) {
+            errno=ENAMETOOLONG;return -1;
+        }
+        result=getxattr(path,NT_ACL_XATTR,out,capacity);
+    }
+    return result;
+}
+
 int nt_acl_storage_read_fd(int fd,uint8_t *out,size_t capacity,
                            size_t *needed)
 {
@@ -72,7 +90,7 @@ int nt_acl_storage_read_fd(int fd,uint8_t *out,size_t capacity,
         if (!errno) errno=EINVAL;
         return NT_ACL_STORAGE_ERROR;
     }
-    ssize_t size=fgetxattr(fd,NT_ACL_XATTR,NULL,0);
+    ssize_t size=read_acl_xattr(fd,NULL,0);
     if (size<0) {
         if (errno==ENODATA)
             return NT_ACL_STORAGE_ABSENT;
@@ -85,7 +103,7 @@ int nt_acl_storage_read_fd(int fd,uint8_t *out,size_t capacity,
     }
     uint8_t *record=malloc((size_t)size);
     if (!record) {errno=ENOMEM;return NT_ACL_STORAGE_ERROR;}
-    const ssize_t got=fgetxattr(fd,NT_ACL_XATTR,record,(size_t)size);
+    const ssize_t got=read_acl_xattr(fd,record,(size_t)size);
     int result=NT_ACL_STORAGE_ERROR;
     if (got!=size || memcmp(record,magic,sizeof(magic))!=0 ||
         load32(record+8)!=(uint32_t)(size-HEADER_BYTES) ||
