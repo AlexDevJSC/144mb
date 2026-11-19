@@ -44,6 +44,14 @@ int nt_acl_access_check_mapped(const uint8_t *sd, size_t bytes,
  * header). No writes to filesystem; never accept a malformed SD to xattr. */
 int nt_acl_validate_descriptor(const uint8_t *sd, size_t bytes);
 
+/* Return only the requested OWNER=1, GROUP=2 and DACL=4 sections of an
+ * already-validated self-relative descriptor, preserving DACL control bits.
+ * No SACL or unsupported SECURITY_INFORMATION values; no silent omission.
+ * Result 0 means buffer too small; *needed always reports exact bytes. */
+int nt_acl_project_descriptor(const uint8_t *sd,size_t bytes,
+                              uint32_t information,uint8_t *out,
+                              size_t capacity,size_t *needed);
+
 /* Materialize a CHILD self-relative descriptor with authenticated owner
  * and group SIDs, carrying forward inherited ACEs (including arbitrary
  * binary SID values). CREATOR_OWNER/GROUP SIDs are substituted using the
