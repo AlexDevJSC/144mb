@@ -1768,6 +1768,117 @@ static int service_metadata_selftest(void)
     return error;
 }
 
+/* Explicit non-mounted managed ACL test. Only --selftest-acl can
+ * supply an authenticated local UID/GID in place of a kernel FUSE request;
+ * service_mode without this test flag always calls fuse_get_context. */
+static void fs4_acl_test_put16(uint8_t *p,uint16_t value)
+{
+    p[0]=(uint8_t)value;p[1]=(uint8_t)(value>>8);
+}
+static void fs4_acl_test_put32(uint8_t *p,uint32_t value)
+{
+    for (unsigned i=0;i<4;i++) p[i]=(uint8_t)(value>>(i*8));
+}
+static void fs4_acl_test_sid(uint8_t *p,uint32_t kind,uint32_t value)
+{
+    memset(p,0,16);
+    p[0]=1;p[1]=2;p[7]=22;
+    fs4_acl_test_put32(p+8,kind);
+    fs4_acl_test_put32(p+12,value);
+}
+static int service_acl_selftest(void)
+{
+    static const uint8_t everyone[12]={1,1,0,0,0,0,0,1,0,0,0,0};
+    if (mkdirat(lower_root,"ACLManagedParent",0700)!=0)
+        return 1;
+    int parent=openat(lower_root,"ACLManagedParent",
+                       O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if (parent<0)
+        return 1;
+    uint8_t parent_sd[104]={0};
+    parent_sd[0]=1;
+    fs4_acl_test_put16(parent_sd+2,UINT16_C(0x8004));
+    fs4_acl_test_put32(parent_sd+4,20);
+    fs4_acl_test_put32(parent_sd+8,36);
+    fs4_acl_test_put32(parent_sd+16,52);
+    fs4_acl_test_sid(parent_sd+20,1,(uint32_t)geteuid());
+    fs4_acl_test_sid(parent_sd+36,2,(uint32_t)getegid());
+    parent_sd[52]=2;
+    fs4_acl_test_put16(parent_sd+54,52);
+    fs4_acl_test_put16(parent_sd+56,2);
+    parent_sd[60]=1; /* Inherited deny DELETE from Everyone */
+    parent_sd[61]=3; /* OI | CI */
+    fs4_acl_test_put16(parent_sd+62,20);
+    fs4_acl_test_put32(parent_sd+64,NT_ACL_DELETE);
+    memcpy(parent_sd+68,everyone,12);
+    parent_sd[80]=0; /* Inherited allow for authenticated owner */
+    parent_sd[81]=3; /* OI | CI */
+    fs4_acl_test_put16(parent_sd+82,24);
+    fs4_acl_test_put32(parent_sd+84,
+        NT_ACL_DATA_READ|NT_ACL_DATA_WRITE|NT_ACL_DATA_APPEND|
+        NT_ACL_READ_EA|NT_ACL_WRITE_EA|NT_ACL_READ_ATTR|
+        NT_ACL_WRITE_ATTR|NT_ACL_READ_CONTROL|NT_ACL_WRITE_DAC|
+        NT_ACL_DIR_DELETE_CHILD);
+    fs4_acl_test_sid(parent_sd+88,1,(uint32_t)geteuid());
+    if (!nt_acl_storage_write_trusted_fd(parent,parent_sd,sizeof(parent_sd))) {
+        close(parent);
+        return 1;
+    }
+    struct fuse_file_info fi={.flags=O_RDWR};
+    int create=fs_create("/ACLManagedParent/Child",0600,&fi);
+    if (create==-EOPNOTSUPP || create==-ENOTSUP) {
+        printf("SKIP offline managed FUSE ACL: backing has no O_TMPFILE\n");
+        close(parent);
+        return 0;
+    }
+    if (create!=0) {
+        fprintf(stderr,"FAIL managed FUSE O_TMPFILE create: %d\n",create);
+        close(parent);
+        return 1;
+    }
+    int failure=0;
+    if (fs_write("/ACLManagedParent/Child","ACL",3,0,&fi)!=3 ||
+        fs_release("/ACLManagedParent/Child",&fi)!=0)
+        failure=1;
+    int fd=lower_open("/ACLManagedParent/Child",O_RDONLY,0);
+    size_t sd_size=0;
+    uint8_t child[256]={0};
+    if (!failure && (fd<0 ||
+        nt_acl_storage_read_fd(fd,child,sizeof(child),&sd_size)!=
+            NT_ACL_STORAGE_PRESENT ||
+        sd_size<60 || sd_size>sizeof(child)))
+        failure=1;
+    struct stat st;
+    if (!failure && (fstat(fd,&st)!=0 ||
+        (st.st_mode&0777)!=0600))
+        failure=1;
+    if (fd>=0) close(fd);
+    struct fuse_file_info again={.flags=O_RDONLY};
+    if (!failure && (fs_open("/ACLManagedParent/Child",&again)!=0 ||
+        fs_release("/ACLManagedParent/Child",&again)!=0))
+        failure=1;
+    if (!failure && (
+        fs_unlink("/ACLManagedParent/Child")!=-EACCES ||
+        fs_mkdir("/ACLManagedParent/UnsafeDir",0700)!=-ENOTSUP ||
+        fs_setxattr("/ACLManagedParent/Child",
+                    "user.ntnative.security.sd","X",1,0)!=-EACCES ||
+        fs_getxattr("/ACLManagedParent/Child",
+                    "user.ntnative.security.sd",NULL,0)!=-ENODATA ||
+        fs_chmod("/ACLManagedParent/Child",0777,NULL)!=-EPERM))
+        failure=1;
+    if (unlinkat(lower_root,"ACLManagedParent/Child",0)!=0 ||
+        unlinkat(lower_root,"ACLManagedParent",AT_REMOVEDIR)!=0)
+        failure=1;
+    close(parent);
+    if (failure) {
+        fprintf(stderr,"FAIL offline managed FUSE DACL inheritance/denial\n");
+        return 1;
+    }
+    puts("PASS offline FUSE managed DACL inherited before publication, "
+         "read/write grant and delete/chmod denied (mount not tested)");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     /* Service client identity is explicit; a test invocation cannot
