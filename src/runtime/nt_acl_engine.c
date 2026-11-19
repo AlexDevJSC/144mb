@@ -178,6 +178,102 @@ int nt_acl_project_descriptor(const uint8_t *sd,size_t bytes,
            NT_ACL_ALLOWED : NT_ACL_INVALID;
 }
 
+/* Never translate named or DENY ACEs into chmod. Only a canonical,
+ * explicitly recognized owner/group/Everyone three-allow policy has an
+ * unambiguous POSIX mode rendering. */
+static int simple_mode_aces(const uint8_t *sd,size_t bytes,
+                            uint32_t *mode,size_t offsets[3])
+{
+    static const uint8_t everyone[12]=
+        {1,1,0,0,0,0,0,1,0,0,0,0};
+    struct acl acl={0};
+    int valid=sd_acl(sd,bytes,&acl);
+    if (valid!=NT_ACL_ALLOWED)
+        return valid;
+    if (acl.null_dacl || acl.count!=3)
+        return NT_ACL_UNSUPPORTED;
+    const uint32_t owner=get32(sd+4),group=get32(sd+8);
+    if (!owner || !group)
+        return NT_ACL_UNSUPPORTED;
+    size_t cursor=ACL_HEADER;
+    uint32_t projected=0;
+    for (unsigned i=0;i<3;i++) {
+        const uint8_t *ace=acl.start+cursor;
+        const size_t length=get16(ace+2);
+        const uint8_t *sid=ace+ACE_BASE;
+        const size_t sidlen=length-ACE_BASE;
+        const uint8_t *expected=i==0 ? sd+owner :
+                                i==1 ? sd+group : everyone;
+        const size_t expected_len=i==0 ? 8u+(size_t)sd[owner+1]*4u :
+                                  i==1 ? 8u+(size_t)sd[group+1]*4u :
+                                         sizeof(everyone);
+        if (ace[0]!=ACE_ALLOW ||
+            (ace[1]&ACE_INHERIT_ONLY) ||
+            sidlen!=expected_len ||
+            memcmp(sid,expected,sidlen)!=0)
+            return NT_ACL_UNSUPPORTED;
+        const uint32_t rights=get32(ace+4);
+        const uint32_t bits=((rights&1u) ? 4u : 0u) |
+                            ((rights&2u) ? 2u : 0u) |
+                            ((rights&32u) ? 1u : 0u);
+        projected |= bits<<(6u-3u*i);
+        if (offsets)
+            offsets[i]=(size_t)(acl.start-sd)+cursor;
+        cursor+=length;
+    }
+    if (mode) *mode=projected;
+    return NT_ACL_ALLOWED;
+}
+int nt_acl_simple_mode(const uint8_t *sd,size_t bytes,uint32_t *mode)
+{
+    if (!mode) return NT_ACL_INVALID;
+    *mode=0;
+    return simple_mode_aces(sd,bytes,mode,NULL);
+}
+static uint32_t chmod_rights(uint32_t bits,bool owner)
+{
+    uint32_t rights=owner ? (UINT32_C(0x00020000) |
+                             UINT32_C(0x00040000)) : 0u;
+    if (bits&4u)
+        rights|=UINT32_C(0x00120089); /* GENERIC_READ concrete mask */
+    if (bits&2u)
+        rights|=UINT32_C(0x00120156); /* WRITE incl directory delete-child */
+    if (bits&1u)
+        rights|=UINT32_C(0x001200a0); /* GENERIC_EXECUTE concrete mask */
+    return rights;
+}
+int nt_acl_chmod_simple_descriptor(const uint8_t *sd,size_t bytes,
+                                   uint32_t mode,uint8_t *out,
+                                   size_t capacity,size_t *needed)
+{
+    if (!needed || mode>0777u)
+        return NT_ACL_INVALID;
+    *needed=0;
+    size_t ace_offsets[3]={0};
+    const int state=simple_mode_aces(sd,bytes,NULL,ace_offsets);
+    if (state!=NT_ACL_ALLOWED)
+        return state;
+    *needed=bytes;
+    if (!out || capacity<bytes)
+        return NT_ACL_DENIED;
+    const uintptr_t a=(uintptr_t)out,b=(uintptr_t)sd;
+    if ((a<=b && b-a<bytes) || (a>b && a-b<bytes))
+        return NT_ACL_INVALID;
+    memcpy(out,sd,bytes);
+    for (unsigned i=0;i<3;i++) {
+        const uint32_t rights=chmod_rights(
+            (mode>>(6u-i*3u))&7u,i==0);
+        for (unsigned j=0;j<4;j++)
+            out[ace_offsets[i]+4+j]=(uint8_t)(rights>>(j*8));
+    }
+    /* chmod rewrites this simple DACL explicitly; do not silently
+     * re-inherit a different parent ACE later. */
+    const uint16_t control=(get16(out+2)|UINT16_C(0x1000)) &
+                           (uint16_t)~UINT16_C(0x0400);
+    put16(out+2,control);
+    return nt_acl_validate_descriptor(out,bytes);
+}
+
 static bool map_generic(uint32_t *rights,
                         const struct nt_acl_generic_mapping *mapping)
 {
