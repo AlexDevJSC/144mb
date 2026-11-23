@@ -54,6 +54,17 @@ int import_fixture_entry(void)
         GetLastError()!=ERROR_ACCESS_DENIED)
         return 15;
 
+    /* The local, unbrokered runtime must never pretend it accepted an
+     * NT DACL write. Both real advapi32 imports are checked by the PE
+     * loader; only the authenticated service has a writable DACL API. */
+    if (SetFileSecurityW(path,DACL_SECURITY_INFORMATION,security) ||
+        GetLastError()!=ERROR_NOT_SUPPORTED)
+        return 20;
+    if (SetFileSecurityA("C:\\fs4-security-metadata-fixture.dat",
+                         DACL_SECURITY_INFORMATION,security) ||
+        GetLastError()!=ERROR_NOT_SUPPORTED)
+        return 21;
+
     FILE_BASIC_INFO basic={0};
     if (!GetFileInformationByHandleEx(h,FileBasicInfo,&basic,sizeof(basic)) ||
         (uint64_t)basic.CreationTime.QuadPart != created_ticks ||
