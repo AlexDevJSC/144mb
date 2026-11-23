@@ -1109,6 +1109,17 @@ check-pe-cancel-special-apc: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/cancel-s
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/cancel-special-apc-fixture.exe
 
+# Cooperative cancellation can be requested after a callback begins;
+# the PE callback checks the request at a safe Win32 import boundary,
+# returns normally, and the runtime records a terminal outcome.
+$(BUILD_DIR)/special-apc-lifecycle-fixture.exe: tests/pe/special_apc_lifecycle_fixture.c $(BUILD_DIR)/fixture-nt_apc.a | $(BUILD_DIR)
+	$(MINGW_CC) $(WARN_CFLAGS) $(PE_FIXTURE_CFLAGS) $(PE_FIXTURE_LDFLAGS) -o "$@" "$<" $(BUILD_DIR)/fixture-nt_apc.a -lkernel32
+
+.PHONY: check-pe-special-apc-lifecycle
+check-pe-special-apc-lifecycle: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/special-apc-lifecycle-fixture.exe
+	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
+	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/special-apc-lifecycle-fixture.exe
+
 # A genuine PE busy loop contains no import, wait or yield in the
 # interval between entering the loop and handling a remote special APC.
 # Its kernel signal path is independent of the import-return checkpoint.
@@ -1130,7 +1141,7 @@ check-pe-async-special-apc-seh: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/async-special-apc-seh-fixture.exe
 
-check-pe-apc: check-pe-cancel-special-apc $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe $(BUILD_DIR)/special-apc-seh-fixture.exe
+check-pe-apc: check-pe-special-apc-lifecycle check-pe-cancel-special-apc $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe $(BUILD_DIR)/special-apc-seh-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/apc-fixture.exe
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
