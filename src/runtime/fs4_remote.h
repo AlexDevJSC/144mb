@@ -50,6 +50,12 @@ int32_t nt_fs4_remote_handle_info(uintptr_t handle, struct nt_handle_file_info *
 int32_t nt_fs4_remote_get_security(const char *path, uint32_t information,
                                    void *descriptor, uint32_t length,
                                    uint32_t *needed);
+int32_t nt_fs4_remote_set_security(const char *path,uint32_t information,
+                                   const void *descriptor,uint32_t length);
+nt_status nt_fs4_remote_native_set_security(uintptr_t handle,
+                                            uint32_t information,
+                                            const void *descriptor,
+                                            uint32_t length);
 nt_status nt_fs4_remote_native_security(uintptr_t handle, uint32_t information,
                                         void *descriptor, uint32_t length,
                                         uint32_t *needed);
