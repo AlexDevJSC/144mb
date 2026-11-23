@@ -4,6 +4,8 @@ EXPORTS
     NtQueueApcThreadEx
     NtNativeQueueSpecialApc
     NtNativeCancelSpecialApc
+    NtNativeQuerySpecialApc
+    NtNativeSpecialApcCancelRequested
     NtAlertThread
     NtAlertResumeThread
     NtWaitForSingleObject
