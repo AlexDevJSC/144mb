@@ -212,6 +212,77 @@ static uint32_t acl_open_gate(struct session *s,const unsigned char *path,
     return NT_ERROR_ACCESS_DENIED;
 }
 
+/* End-to-end ACL writes are gated by BOTH authenticated token rights
+ * and the physical NT share/delete-pending lease. Caller retains WAL.
+ * A denial never creates or replaces a security xattr. */
+static uint32_t fs4_set_pinned_dacl(struct session *s,int fd,
+                                   const uint8_t *sd,size_t bytes)
+{
+    int lease=nt_runtime_acquire_linux_nt_lease(
+        fd,NT_FS_WRITE,NT_FS_SHARE_ALL);
+    if (lease<0)
+        return errno==EAGAIN || errno==EACCES ?
+               NT_ERROR_SHARING_VIOLATION : NT_ERROR_ACCESS_DENIED;
+    const int state=nt_acl_policy_set_dacl_fd(fd,&s->identity,sd,bytes);
+    const int error=errno;
+    nt_runtime_release_linux_nt_lease(&lease);
+    if (state==NT_ACL_POLICY_ALLOWED)
+        return NT_ERROR_SUCCESS;
+    if (state==NT_ACL_POLICY_DENIED)
+        return NT_ERROR_ACCESS_DENIED;
+    return error==ENOTSUP || error==EINVAL ?
+           NT_ERROR_NOT_SUPPORTED : NT_ERROR_ACCESS_DENIED;
+}
+
+static uint32_t fs4_set_path_dacl(struct session *s,
+                                 const unsigned char *path,size_t path_size,
+                                 const uint8_t *sd,size_t bytes)
+{
+    if (!valid_path(path,path_size) || path_size>FS4_PATH_MAX)
+        return NT_ERROR_INVALID_PARAMETER;
+    char dos[FS4_PATH_MAX+1];
+    memcpy(dos,path,path_size);
+    dos[path_size]=0;
+    int guard=nt_runtime_begin_namespace_mutation(dos);
+    if (guard<0)
+        return NT_ERROR_ACCESS_DENIED;
+    /* Use the same pinned C: root and openat2 confinement as the policy
+     * check; a client cannot follow symlinks or escape through another
+     * mount. The actual ACE check is on this exact FD, not a stale path. */
+    struct open_how how={
+        .flags=O_RDONLY|O_CLOEXEC|O_NOFOLLOW,
+        .resolve=RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV
+    };
+    int fd=(int)syscall(SYS_openat2,s->root_fd,dos+3,&how,sizeof(how));
+    uint32_t answer=NT_ERROR_ACCESS_DENIED;
+    if (fd>=0) {
+        answer=fs4_set_pinned_dacl(s,fd,sd,bytes);
+        close(fd);
+    } else if (errno==ENOENT) answer=NT_ERROR_FILE_NOT_FOUND;
+    nt_runtime_end_namespace_mutation(guard);
+    return answer;
+}
+
+static uint32_t fs4_set_handle_dacl(struct session *s,
+                                   struct session_handle *slot,
+                                   const uint8_t *sd,size_t bytes)
+{
+    if (!slot || slot->search ||
+        !(slot->security_grants&NT_ACL_WRITE_DAC))
+        return NT_ERROR_ACCESS_DENIED;
+    char dos[PATH_MAX];
+    int fd=nt_runtime_fs4_pin_security_handle(slot->native,dos,sizeof(dos));
+    if (fd<0) return NT_ERROR_INVALID_HANDLE;
+    int guard=nt_runtime_begin_namespace_mutation(dos);
+    uint32_t answer=NT_ERROR_ACCESS_DENIED;
+    if (guard>=0) {
+        answer=fs4_set_pinned_dacl(s,fd,sd,bytes);
+        nt_runtime_end_namespace_mutation(guard);
+    }
+    close(fd);
+    return answer;
+}
+
 static bool view_alive(const char *view)
 {
     if (view == NULL || view[0] != '/')
@@ -502,6 +573,29 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
             result.length=needed;
         else if (status==NT_STATUS_SUCCESS)
             result.error=NT_ERROR_GEN_FAILURE;
+        break;
+    }
+    /* DACL_SECURITY_INFORMATION writes only. The descriptor is a
+     * validated, immutable binary blob supplied by a guest; owner and
+     * group are ALWAYS taken from existing SD or verified peer token. */
+    case FS4_SECURITY_SET_PATH: {
+        if (q->handle || q->access!=4 || q->flags ||
+            q->offset!=-1 || q->share<4 ||
+            q->share>FS4_PATH_MAX || q->disposition<28 ||
+            q->size>FS4_DATA_MAX || q->size!=q->share+q->disposition ||
+            n!=q->size || !to_wide(payload,q->share,path))
+            break;
+        result.error=fs4_set_path_dacl(
+            s,payload,q->share,payload+q->share,q->disposition);
+        break;
+    }
+    case FS4_SECURITY_SET_HANDLE: {
+        if (!slot || slot->search || q->access!=4 ||
+            q->share || q->disposition || q->flags ||
+            q->offset!=-1 || q->size<28 ||
+            q->size>FS4_DATA_MAX || n!=q->size)
+            break;
+        result.error=fs4_set_handle_dacl(s,slot,payload,n);
         break;
     }
     /* SetFileTime payload: exactly three native FILETIME pairs, in
