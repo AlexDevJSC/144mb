@@ -29,7 +29,8 @@ enum {
     NT_SUP_CONTEXT_CONTROL = 0x1,
     NT_SUP_CONTEXT_INTEGER = 0x2,
     NT_SUP_CONTEXT_SEGMENTS = 0x4,
-    NT_SUP_CONTEXT_FLOATING_POINT = 0x8
+    NT_SUP_CONTEXT_FLOATING_POINT = 0x8,
+    NT_SUP_CONTEXT_DEBUG_REGISTERS = 0x10
 };
 
 nt_status nt_supervisor_nt_suspend_thread(struct nt_supervisor_nt_thread *state,
