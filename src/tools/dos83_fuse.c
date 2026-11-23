@@ -2138,6 +2138,23 @@ static int service_acl_selftest(void)
         (host_mode.st_mode&0777)!=0600 ||
         fs_chmod("/ACLModeFixture",04755,NULL)!=-ENOTSUP))
         failure=1;
+    if (!failure) {
+        struct nt_acl_peer_token real={0},other={0};
+        if (nt_acl_peer_token_init(&real,geteuid(),getegid(),
+                                    NULL,0,NULL)!=0 ||
+            nt_acl_peer_token_init(&other,(uid_t)(geteuid()+1u),
+                                    (gid_t)(getegid()+1u),
+                                    NULL,0,NULL)!=0 ||
+            nt_acl_policy_check_path(
+                lower_root,"/ACLModeFixture",false,&real,
+                NT_ACL_DATA_WRITE,&nt_acl_file_generic_mapping)!=
+                NT_ACL_POLICY_ALLOWED ||
+            nt_acl_policy_check_path(
+                lower_root,"/ACLModeFixture",false,&other,
+                NT_ACL_DATA_WRITE,&nt_acl_file_generic_mapping)!=
+                NT_ACL_POLICY_DENIED)
+            failure=1;
+    }
     if (modefd>=0) close(modefd);
     if (unlinkat(lower_root,"ACLModeFixture",0)!=0)
         failure=1;
