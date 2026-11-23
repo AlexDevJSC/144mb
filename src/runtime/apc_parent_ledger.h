@@ -2,6 +2,7 @@
 #ifndef NT_APC_PARENT_LEDGER_H
 #define NT_APC_PARENT_LEDGER_H
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Parent-only, bounded, per-authenticated-child-session replay guard.
