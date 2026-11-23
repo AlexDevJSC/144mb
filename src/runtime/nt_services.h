@@ -26,6 +26,7 @@
 #define NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED ((nt_status)UINT32_C(0xc0000047))
 #define NT_STATUS_NOT_SUPPORTED ((nt_status)UINT32_C(0xc00000bb))
 #define NT_STATUS_NOT_FOUND ((nt_status)UINT32_C(0xc0000225))
+#define NT_STATUS_PENDING INT32_C(0x00000103)
 #define NT_STATUS_END_OF_FILE ((nt_status)UINT32_C(0xc0000011))
 
 struct nt_guest_unicode_string;
