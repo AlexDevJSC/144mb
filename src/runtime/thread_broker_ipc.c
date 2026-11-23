@@ -461,6 +461,10 @@ void nt_broker_server_loop(int fd,
     struct nt_supervisor_control_server *control =
         nt_supervisor_control_server_create();
     if (!control) return;
+    /* A parent-session ledger is deliberately independent of the child's
+     * queue/receipt ring. It records authenticated START and RETURN,
+     * rejects replay and never asserts that ptrace observed execution. */
+    struct nt_apc_parent_ledger apc_ledger = {0};
     for (;;) {
         if (!live_child(peer))
             break;
@@ -614,6 +618,12 @@ void nt_broker_server_loop(int fd,
                 (const struct nt_broker_apc_request *)(const void *)&authenticated;
             if (!has_apc || request.thread_id != 0 || request.access != 0 ||
                 apc->generation == 0 || apc->callback == 0 ||
+                apc->reserved != 0 ||
+                (apc->phase == NT_APC_PHASE_AUTHORIZE ? apc->ticket != 0 :
+                 (apc->ticket == 0 ||
+                  (apc->phase != NT_APC_PHASE_START &&
+                   apc->phase != NT_APC_PHASE_DONE &&
+                   apc->phase != NT_APC_PHASE_ABORT))) ||
                 !nt_broker_supervisor_query_owned(requester, request.capability,
                     NT_BROKER_SUPERVISOR_SET_CONTEXT, &info))
                 break;
@@ -626,6 +636,15 @@ void nt_broker_server_loop(int fd,
             }
             response.status = (uint32_t)nt_supervisor_control_server_authorize_apc(
                 peer, &info, (uintptr_t)apc->callback);
+            /* Only a kernel-registered same-generation thread and
+             * loader-pinned callback may mutate the parent ledger. An
+             * isolated AUTH probe neither opens nor completes a ticket. */
+            if (response.status == (uint32_t)NT_STATUS_SUCCESS &&
+                apc->phase != NT_APC_PHASE_AUTHORIZE &&
+                !nt_apc_parent_transition(&apc_ledger,
+                    info.guest_thread_id, info.generation, apc->callback,
+                    apc->ticket, apc->phase))
+                response.status = (uint32_t)NT_STATUS_ACCESS_DENIED;
             break;
         }
         case NT_BROKER_RPC_SUP_SUSPEND:
