@@ -29,7 +29,7 @@ DOS83_FUSE_TARGET = $(BUILD_DIR)/nt-dos83-fuse
 else
 DOS83_FUSE_TARGET =
 endif
-RUNTIME_PARTS = fs4_acl guest_boundary guest_hardware_fault guest_async_apc exports system global_memory unicode crt crt_stdio guest_files fs4_remote user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
+RUNTIME_PARTS = guest_boundary guest_hardware_fault guest_async_apc exports system global_memory unicode crt crt_stdio guest_files fs4_remote nt_acl_engine nt_acl_storage nt_acl_policy user_folders process virtual_memory section_memory object_broker nt_core_information dynamic_tls environment sync threads fluid crypto winsock nls registry raw_input exceptions exception_callbacks \
                 gdi_memory printer menus menu_view messages desktop desktop_resources controls \
                 dialogs file_dialogs clipboard guest_thread display_config child_process thread_broker_auth thread_broker_registry thread_broker_ipc thread_supervisor_control_server shell console
 RUNTIME_OBJECTS = $(addprefix $(BUILD_DIR)/runtime-,$(addsuffix .o,$(RUNTIME_PARTS))) $(BUILD_DIR)/runtime-context.o $(BUILD_DIR)/counter.o $(BUILD_DIR)/runtime-thread-supervisor-core.o $(BUILD_DIR)/runtime-guest_boundary_import.o $(BUILD_DIR)/runtime-thread-supervisor-nt-bridge.o
@@ -650,30 +650,12 @@ check-fs4-security-metadata: $(BUILD_DIR)/nt-storage-handle-broker
 	PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -W error::ResourceWarning \
 	    tests/fs4_security_metadata_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
 
-# Pure bounded NT security descriptor and ordered DACL evaluator.
-# No production ACL write path is claimed until every file operation
-# passes an authenticated per-process token to this policy engine.
-$(BUILD_DIR)/fs4-acl-policy-test: tests/fs4_acl_policy_test.c src/runtime/fs4_acl.c src/runtime/fs4_acl.h | $(BUILD_DIR)
-	$(CC) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    tests/fs4_acl_policy_test.c src/runtime/fs4_acl.c -o "$@"
-
-.PHONY: check-fs4-acl-policy
-check-fs4-acl-policy: $(BUILD_DIR)/fs4-acl-policy-test
-	$(BUILD_DIR)/fs4-acl-policy-test
-
-check: check-fs4-acl-policy
-
-# Protected internal DACL xattr read/write/fsync and inheritance on
-# unpublished O_TMPFILE. NOT exposed as Win32 SetFileSecurityW yet.
-$(BUILD_DIR)/fs4-acl-storage-test: tests/fs4_acl_storage_test.c src/runtime/fs4_acl.c src/runtime/fs4_acl_storage.c src/runtime/fs4_acl.h src/runtime/fs4_acl_storage.h | $(BUILD_DIR)
-	$(CC) $(INCLUDES) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) \
-	    tests/fs4_acl_storage_test.c src/runtime/fs4_acl.c src/runtime/fs4_acl_storage.c -o "$@"
-
-.PHONY: check-fs4-acl-storage
-check-fs4-acl-storage: $(BUILD_DIR)/fs4-acl-storage-test
-	$(BUILD_DIR)/fs4-acl-storage-test
-
-check: check-fs4-acl-storage
+# Compatibility aliases: both legacy FS4 ACL suites are now exercised by
+# the ONE canonical NT engine and ONE checksummed inode store.
+.PHONY: check-fs4-acl-policy check-fs4-acl-storage
+check-fs4-acl-policy: check-nt-acl-engine check-nt-acl-policy
+check-fs4-acl-storage: check-nt-acl-storage
+check: check-fs4-acl-policy check-fs4-acl-storage
 
 check: check-fs4-security-metadata
 
@@ -742,6 +724,42 @@ check-nt-acl-engine: $(BUILD_DIR)/nt-acl-engine-test
 	"$(BUILD_DIR)/nt-acl-engine-test"
 
 check: check-nt-acl-engine
+
+# Trusted-only SD persistence using a pinned inode, not an ACL setter for PE.
+$(BUILD_DIR)/nt-acl-storage-test: tests/nt_acl_storage_test.c src/runtime/nt_acl_storage.c src/runtime/nt_acl_engine.c src/runtime/nt_acl_storage.h src/runtime/nt_acl_engine.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) \
+	    tests/nt_acl_storage_test.c src/runtime/nt_acl_storage.c src/runtime/nt_acl_engine.c -o "$@"
+
+.PHONY: check-nt-acl-storage
+check-nt-acl-storage: $(BUILD_DIR)/nt-acl-storage-test
+	"$(BUILD_DIR)/nt-acl-storage-test"
+
+check: check-nt-acl-storage
+
+# Common, read-only ACL gate compiled into the service UID runtime.
+$(BUILD_DIR)/nt-acl-policy-test: tests/nt_acl_policy_test.c src/runtime/nt_acl_policy.c src/runtime/nt_acl_storage.c src/runtime/nt_acl_engine.c src/runtime/nt_acl_policy.h src/runtime/nt_acl_storage.h src/runtime/nt_acl_engine.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) \
+	    tests/nt_acl_policy_test.c src/runtime/nt_acl_policy.c src/runtime/nt_acl_storage.c src/runtime/nt_acl_engine.c -o "$@"
+
+.PHONY: check-nt-acl-policy
+check-nt-acl-policy: $(BUILD_DIR)/nt-acl-policy-test
+	"$(BUILD_DIR)/nt-acl-policy-test"
+
+check: check-nt-acl-policy
+
+.PHONY: check-fs4-acl-enforcement
+check-fs4-acl-enforcement: $(BUILD_DIR)/nt-storage-handle-broker
+	PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -W error::ResourceWarning \
+	    tests/fs4_acl_enforcement_test.py "$(BUILD_DIR)/nt-storage-handle-broker"
+
+check: check-fs4-acl-enforcement
+
+.PHONY: check-fs4-fuse-acl
+check-fs4-fuse-acl: $(BUILD_DIR)/nt-dos83-fuse
+	PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error::ResourceWarning python3 -W error::ResourceWarning \
+	    tests/fs4_fuse_acl_test.py "$(BUILD_DIR)/nt-dos83-fuse"
+
+check: check-fs4-fuse-acl
 
 .PHONY: check-fs4-reparse-wal
 check-fs4-reparse-wal: $(BUILD_DIR)/nt-dos83-mediator
