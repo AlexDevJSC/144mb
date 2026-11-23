@@ -994,10 +994,15 @@ nt_status nt_broker_client_supervisor_set_context(uint64_t cap,
     if (!context) return NT_STATUS_INVALID_PARAMETER;
     return control_rpc(NT_BROKER_RPC_SUP_SET_CONTEXT, cap, 0, context, NULL, NULL);
 }
-nt_status nt_broker_client_supervisor_authorize_apc(
-    uint64_t capability, uint64_t generation, uintptr_t callback)
+nt_status nt_broker_client_supervisor_apc_transition(
+    uint64_t capability, uint64_t generation, uintptr_t callback,
+    uint64_t ticket, uint32_t phase)
 {
-    if (capability == 0 || generation == 0 || callback == 0)
+    if (capability == 0 || generation == 0 || callback == 0 ||
+        (phase == NT_APC_PHASE_AUTHORIZE ? ticket != 0 :
+         (ticket == 0 || (phase != NT_APC_PHASE_START &&
+                          phase != NT_APC_PHASE_DONE &&
+                          phase != NT_APC_PHASE_ABORT))))
         return NT_STATUS_INVALID_PARAMETER;
     pthread_mutex_lock(&client_lock);
     nt_status result = NT_STATUS_NOT_SUPPORTED;
@@ -1012,6 +1017,8 @@ nt_status nt_broker_client_supervisor_authorize_apc(
         memcpy(request.request.secret, client_secret, sizeof(client_secret));
         request.generation = generation;
         request.callback = (uint64_t)callback;
+        request.ticket = ticket;
+        request.phase = phase;
         begin_client_rpc_locked();
         struct nt_thread_broker_reply reply = {0};
         const bool received =
@@ -1033,6 +1040,13 @@ nt_status nt_broker_client_supervisor_authorize_apc(
     }
     pthread_mutex_unlock(&client_lock);
     return result;
+}
+
+nt_status nt_broker_client_supervisor_authorize_apc(
+    uint64_t capability, uint64_t generation, uintptr_t callback)
+{
+    return nt_broker_client_supervisor_apc_transition(
+        capability, generation, callback, 0, NT_APC_PHASE_AUTHORIZE);
 }
 
 bool nt_broker_client_supervisor_close(uint64_t capability)
