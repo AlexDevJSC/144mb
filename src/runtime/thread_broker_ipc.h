@@ -17,6 +17,7 @@ enum { NT_BROKER_RPC_VERSION = 4, NT_BROKER_RPC_REGISTER = 1,
        NT_BROKER_RPC_SUP_PROBE_GUEST = 10,
        NT_BROKER_RPC_SUP_SUSPEND = 11, NT_BROKER_RPC_SUP_RESUME = 12,
        NT_BROKER_RPC_SUP_GET_CONTEXT = 13, NT_BROKER_RPC_SUP_SET_CONTEXT = 14,
+       NT_BROKER_RPC_SUP_APC_AUTHORIZE = 15,
        NT_BROKER_SERVER_ENABLE_PTRACE_PROBE = 0x10000000u,
        NT_BROKER_SERVER_ENABLE_THREAD_CONTROL = 0x20000000u };
 struct nt_broker_rpc {
@@ -42,6 +43,14 @@ struct nt_broker_context_request {
 struct nt_broker_context_reply {
     struct nt_thread_broker_reply reply;
     struct nt_context64 context;
+};
+/* Private parent-owned APC authorization: callback and generation must
+ * come from a live, SET_CONTEXT-scoped supervisor lease. There are no
+ * raw host TIDs or guest-supplied stack pointers in this operation. */
+struct nt_broker_apc_request {
+    struct nt_broker_rpc request;
+    uint64_t generation;
+    uint64_t callback;
 };
 struct nt_broker_hello {
     uint32_t magic, version;
@@ -105,6 +114,10 @@ nt_status nt_broker_client_supervisor_get_context(uint64_t capability,
                                                    struct nt_context64 *context);
 nt_status nt_broker_client_supervisor_set_context(uint64_t capability,
                                                    const struct nt_context64 *context);
+/* Attests loader-pinned code + generation-pinned TEB in the parent.
+ * This is an authorization receipt, not a claim of ptrace delivery. */
+nt_status nt_broker_client_supervisor_authorize_apc(
+    uint64_t capability, uint64_t generation, uintptr_t callback);
 bool nt_broker_client_supervisor_close(uint64_t capability);
 
 
