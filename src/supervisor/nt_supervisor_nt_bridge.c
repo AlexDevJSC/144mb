@@ -340,6 +340,55 @@ static nt_status set_integer_fp_context(struct nt_supervisor_nt_thread *state,
     return NT_STATUS_NOT_SUPPORTED;
 }
 
+/* Bounded real CONTEXT_CONTROL write for a suspended, authenticated
+ * owned PE thread. A guest may change arithmetic condition codes but
+ * may NOT move RIP/RSP/RBP, selectors, IF, TF or privileged flags.
+ * Arbitrary control-flow rewrites lack a stack/unwind ownership proof
+ * and remain unsupported. The complete kernel PRSTATUS is verified. */
+static nt_status set_control_condition_flags(
+    struct nt_supervisor_nt_thread *state, const struct nt_context64 *context)
+{
+    struct user_regs_struct before = {0};
+    if (nt_supervisor_get_guest_context(state->tracer, &state->scope, &before))
+        return translate_ptrace_error(errno);
+    enum { CONDITION_MASK = 0x8d5u };
+    if (context->rip != before.rip || context->rsp != before.rsp ||
+        context->rbp != before.rbp || context->cs != (uint16_t)before.cs ||
+        context->ss != (uint16_t)before.ss ||
+        ((uint64_t)context->eflags & ~UINT64_C(CONDITION_MASK)) !=
+        (before.eflags & ~UINT64_C(CONDITION_MASK)))
+        return NT_STATUS_NOT_SUPPORTED;
+    struct user_regs_struct changed = before;
+    changed.eflags = (before.eflags & ~UINT64_C(CONDITION_MASK)) |
+                     (context->eflags & CONDITION_MASK);
+    if (changed.eflags == before.eflags)
+        return NT_STATUS_SUCCESS;
+    state->unsafe_register_state = true;
+    struct iovec io = {.iov_base = &changed, .iov_len = sizeof(changed)};
+    const bool wrote = ptrace(PTRACE_SETREGSET, state->tracer->tid,
+        (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
+        io.iov_len == sizeof(changed);
+    struct user_regs_struct actual = {0};
+    const bool verified = wrote &&
+        nt_supervisor_get_registers(state->tracer, &actual) == 0 &&
+        memcmp(&actual, &changed, sizeof(changed)) == 0;
+    if (verified) {
+        state->unsafe_register_state = false;
+        return NT_STATUS_SUCCESS;
+    }
+    io = (struct iovec){.iov_base = &before, .iov_len = sizeof(before)};
+    const bool rolled_back = ptrace(PTRACE_SETREGSET, state->tracer->tid,
+        (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
+        io.iov_len == sizeof(before) &&
+        nt_supervisor_get_registers(state->tracer, &actual) == 0 &&
+        memcmp(&actual, &before, sizeof(before)) == 0;
+    if (rolled_back)
+        state->unsafe_register_state = false;
+    else
+        state->tracer->compromised = true;
+    return NT_STATUS_NOT_SUPPORTED;
+}
+
 nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
                                        const struct nt_context64 *context)
 {
@@ -348,13 +397,17 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
         return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
-    /* CONTROL / SEGMENTS / DEBUG / variable XSTATE remain unsupported.
-     * Allow exactly INTEGER, legacy FXSAVE, or their verified combination. */
-    if (!valid_context(context, NT_SUP_CONTEXT_INTEGER |
+    /* Arithmetic-only CONTROL, INTEGER and legacy FXSAVE are real
+     * bounded transactions. Other CONTROL changes, SEGMENTS, DEBUG
+     * and variable XSTATE still fail closed. */
+    if (!valid_context(context, NT_SUP_CONTEXT_CONTROL |
+                                NT_SUP_CONTEXT_INTEGER |
                                 NT_SUP_CONTEXT_FLOATING_POINT))
         return NT_STATUS_NOT_SUPPORTED;
     if (state->suspend_count == 0) return NT_STATUS_NOT_SUPPORTED;
     const uint32_t groups = context->flags & ~NT_SUP_CONTEXT_AMD64;
+    if (groups == NT_SUP_CONTEXT_CONTROL)
+        return set_control_condition_flags(state, context);
     if (groups == (NT_SUP_CONTEXT_INTEGER | NT_SUP_CONTEXT_FLOATING_POINT))
         return set_integer_fp_context(state, context);
     if (groups == NT_SUP_CONTEXT_FLOATING_POINT)
