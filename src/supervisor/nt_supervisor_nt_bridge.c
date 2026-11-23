@@ -105,7 +105,8 @@ static nt_status set_inactive_guest_debug_addresses(
     uint64_t before[6] = {0}, actual[6] = {0};
     nt_status status = read_guest_debug_regs(state, before);
     if (status != NT_STATUS_SUCCESS) return status;
-    if (before[5] != 0 || context->debug[5] != before[5] ||
+    if ((before[5] & UINT64_C(0xff)) != 0 ||
+        context->debug[5] != before[5] ||
         context->debug[4] != before[4])
         return NT_STATUS_NOT_SUPPORTED;
     for (unsigned i = 0; i < 4; ++i) {
