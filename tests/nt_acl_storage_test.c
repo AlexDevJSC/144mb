@@ -92,6 +92,17 @@ int main(void) {
     assert(nt_acl_storage_write_trusted_fd(fd,sd,sizeof(sd)));
     assert(nt_acl_storage_read_fd(fd,received,sizeof(received),&needed)==
            NT_ACL_STORAGE_PRESENT);
+    /* The former fs4_acl_storage writer used a different, unchecked
+     * user.ntnative.ntacl-v1 representation. Presence of BOTH encodings
+     * must never grant access or select one by accident. */
+    assert(fsetxattr(fd,"user.ntnative.ntacl-v1",sd,sizeof(sd),0)==0);
+    assert(nt_acl_storage_read_fd(fd,received,sizeof(received),&needed)==
+           NT_ACL_STORAGE_ERROR && errno==EUCLEAN);
+    assert(!nt_acl_storage_write_trusted_fd(fd,sd,sizeof(sd)) &&
+           errno==EUCLEAN);
+    assert(fremovexattr(fd,"user.ntnative.ntacl-v1")==0);
+    assert(nt_acl_storage_read_fd(fd,received,sizeof(received),&needed)==
+           NT_ACL_STORAGE_PRESENT);
     sd[28]=9; /* unsupported ACE may never become a stored ACL */
     assert(!nt_acl_storage_write_trusted_fd(fd,sd,sizeof(sd)) &&
            errno==EINVAL);
