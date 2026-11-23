@@ -30,6 +30,9 @@ int nt_runtime_begin_namespace_mutation(const char *path);
  * Never exported to a guest DLL. The caller owns the returned dup FD. */
 int nt_runtime_fs4_pin_security_handle(uintptr_t handle,
                                        char *path, size_t capacity);
+int32_t nt_runtime_fs4_query_security_handle(uintptr_t handle,
+                  uint32_t information,void *descriptor,uint32_t size,
+                  uint32_t *needed);
 void nt_runtime_end_namespace_mutation(int guard);
 bool nt_runtime_refresh_dos83_path(const char *path);
 bool nt_runtime_reconcile_host_rename(const char *old_path, const char *new_path);
