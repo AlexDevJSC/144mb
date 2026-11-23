@@ -39,7 +39,7 @@ jobs:
             check-dos83-sigkill check-dos83-alias-durability \
             check-dos83-wal-io-failure check-dos83-pending-delete-durability \
             check-dos83-namespace-durability check-dos83-pending-wal-admission \
-            check-dos83-all-grants check-dos83-bad-source check-nt-acl-engine check-nt-acl-storage check-nt-acl-policy check-fs4-acl-enforcement check-fs4-fuse-acl \
+            check-dos83-all-grants check-dos83-bad-source check-nt-acl-engine check-nt-acl-storage check-nt-acl-policy check-fs4-acl-enforcement check-fs4-acl-setter check-fs4-fuse-acl \
             2>&1 | tee fs4-linux-regression.log
           if grep -Eiq 'SKIP.*(mounted.FUSE|FUSE|Landlock|Bubblewrap|sandbox|large junction)' fs4-linux-regression.log; then
             echo '::warning::INCOMPLETE: FS4 physical isolation/mounted FUSE checks skipped on this CI runner; Fedora acceptance remains pending'
