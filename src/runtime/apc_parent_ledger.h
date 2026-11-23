@@ -46,7 +46,10 @@ static inline bool nt_apc_parent_transition(
         }
         /* Only reclaim a retired generation; an active generation
          * must keep its high-water mark to reject replay. */
-        if (!spare && candidate->thread_id == 0)
+        if (!spare && (candidate->thread_id == 0 ||
+                       (candidate->thread_id == thread_id &&
+                        candidate->generation != generation &&
+                        candidate->active_ticket == 0)))
             spare = candidate;
     }
     if (!slot && phase == NT_APC_PHASE_START) {
