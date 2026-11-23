@@ -250,6 +250,30 @@ int main(void) {
     assert(nt_acl_chmod_simple_descriptor(mode_sd,sizeof(mode_sd),0644,
                                           mode_new,sizeof(mode_new),
                                           &output_size)==NT_ACL_UNSUPPORTED);
-    puts("PASS self-relative SD, long SID, DACL inheritance, mapped rights and fail-closed virtual chmod");
+    /* Win32 DACL_SECURITY_INFORMATION may supply only an ACL: immutable
+     * owner/group are retained from the existing SD, not borrowed from
+     * a guest-supplied SID. */
+    uint8_t new_dacl[48]={0}, merged[160]={0};
+    sd_init(new_dacl,48,1);
+    add_ace(new_dacl+28,1,0,2,everyone,sizeof(everyone));
+    size_t merged_len=0;
+    assert(nt_acl_replace_dacl(NULL,0,new_dacl,48,
+                               alice,sizeof(alice),everyone,sizeof(everyone),
+                               merged,sizeof(merged),&merged_len)==NT_ACL_ALLOWED);
+    assert(merged_len==76 && nt_acl_validate_descriptor(merged,merged_len)==NT_ACL_ALLOWED);
+    assert(nt_acl_replace_dacl(merged,merged_len,new_dacl,48,
+                               host_b.sid_bytes[0],16,host_b.sid_bytes[1],16,
+                               NULL,0,&output_size)==NT_ACL_DENIED);
+    assert(output_size==76);
+    uint8_t replaced[160]={0};
+    assert(nt_acl_replace_dacl(merged,merged_len,new_dacl,48,
+                               host_b.sid_bytes[0],16,host_b.sid_bytes[1],16,
+                               replaced,sizeof(replaced),&output_size)==NT_ACL_ALLOWED);
+    assert(memcmp(replaced+20,alice,16)==0);
+    new_dacl[16]=0;
+    assert(nt_acl_replace_dacl(merged,merged_len,new_dacl,48,
+                               alice,sizeof(alice),everyone,sizeof(everyone),
+                               replaced,sizeof(replaced),&output_size)==NT_ACL_UNSUPPORTED);
+    puts("PASS self-relative SD, long SID, inherited DACL, mapped rights, merge and virtual chmod");
     return 0;
 }
