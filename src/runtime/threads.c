@@ -52,6 +52,9 @@ struct guest_apc {
     /* Nonzero only for explicitly cancellable NTNative special APCs. */
     uint64_t cancellation_ticket;
     bool cancellation_requested;
+    /* Captured only from authenticated, parent-issued thread generation.
+     * Zero means the trusted runtime ran without a parent broker. */
+    uint64_t parent_generation;
 };
 enum { APC_STATE_PENDING = 1, APC_STATE_RUNNING = 2,
        APC_STATE_COMPLETED = 3, APC_STATE_CANCELLED = 4,
@@ -492,6 +495,35 @@ static void invoke_apc(struct guest_apc *apc)
     free(apc);
 }
 
+/* The callback itself can attest START and RETURN to the existing
+ * authenticated supervisor channel. The kernel TID is read by trusted
+ * runtime code, NOT supplied by the PE; a changed session generation or
+ * lost ACK makes the operation ambiguous, never a fabricated completion.
+ * No ptrace or external callback stack is accepted in this path. */
+static bool special_apc_parent_receipt(struct guest_apc *apc)
+{
+    if (!apc || apc->parent_generation == 0)
+        return true; /* no parent broker in standalone runtime */
+    struct nt_broker_thread_info identity = {0};
+    uint64_t capability = 0;
+    if (!nt_broker_client_supervisor_open((uint32_t)gettid(),
+            THREAD_SET_CONTEXT, &identity, &capability))
+        return false;
+    uintptr_t callback = 0;
+    if (apc->native)
+        memcpy(&callback, &apc->native, sizeof(callback));
+    else
+        memcpy(&callback, &apc->user, sizeof(callback));
+    bool okay = identity.guest_process_id == (uint32_t)getpid() &&
+        identity.guest_thread_id == (uint32_t)gettid() &&
+        identity.generation == apc->parent_generation &&
+        nt_broker_client_supervisor_authorize_apc(
+            capability, identity.generation, callback) == NT_STATUS_SUCCESS;
+    if (!nt_broker_client_supervisor_close(capability))
+        okay = false;
+    return okay;
+}
+
 /* Async-signal-safe read of a TLS atomic flag. The signal handler NEVER
  * consumes the APC or touches wait_lock. It merely redirects control to
  * the trusted runtime's preallocated dispatch stack. */
@@ -558,18 +590,25 @@ void nt_runtime_special_apc_checkpoint(void)
         pthread_mutex_unlock(&wait_lock);
         if (!apc)
             break;
-        current_ticketed_special_apc = apc->cancellation_ticket ? apc : NULL;
-        /* Must execute outside all host locks, on the actual target PE
-         * thread and its existing private APC stack. */
-        if (apc->native)
-            apc->native((void *)apc->first,
-                        (void *)apc->second, (void *)apc->third);
-        else
-            apc->user(apc->first);
+        const bool start_ack = special_apc_parent_receipt(apc);
+        current_ticketed_special_apc = start_ack && apc->cancellation_ticket ?
+            apc : NULL;
+        /* Never execute an unacknowledged callback. A broker disconnect
+         * after admission invalidates the parent generation and blocks
+         * even a callback that was already dequeued. */
+        if (start_ack) {
+            if (apc->native)
+                apc->native((void *)apc->first,
+                            (void *)apc->second, (void *)apc->third);
+            else
+                apc->user(apc->first);
+        }
         current_ticketed_special_apc = NULL;
+        const bool return_ack = start_ack && special_apc_parent_receipt(apc);
         pthread_mutex_lock(&wait_lock);
         if (queue->executing == apc) {
             record_apc_receipt_locked(queue, apc->cancellation_ticket,
+                !return_ack ? APC_STATE_ABORTED :
                 apc->cancellation_requested ?
                 APC_STATE_COMPLETED_AFTER_REQUEST : APC_STATE_COMPLETED);
             queue->executing = NULL;
@@ -618,7 +657,8 @@ bool nt_runtime_supervisor_open_thread_handle(uintptr_t handle, uint32_t rights,
     struct nt_broker_thread_info *identity, uint64_t *capability);
 
 static nt_status parent_authorize_special_apc(uintptr_t handle,
-                                               uintptr_t callback)
+                                               uintptr_t callback,
+                                               uint64_t *generation)
 {
     if (!nt_broker_client_is_attached() || handle == UINTPTR_MAX - 1)
         return NT_STATUS_SUCCESS; /* self pseudo-handle uses local TEB */
@@ -632,6 +672,8 @@ static nt_status parent_authorize_special_apc(uintptr_t handle,
     if (!nt_broker_client_supervisor_close(capability) &&
         result == NT_STATUS_SUCCESS)
         result = NT_STATUS_NOT_SUPPORTED;
+    if (result == NT_STATUS_SUCCESS && generation != NULL)
+        *generation = identity.generation;
     return result;
 }
 
@@ -653,10 +695,12 @@ static nt_status queue_apc_common(uintptr_t handle,
      * waitable mutex across the authenticated parent IPC round trip. */
     const bool supervised = special && handle != UINTPTR_MAX - 1 &&
                             nt_broker_client_is_attached();
+    uint64_t parent_generation = 0;
     if (supervised) {
         pthread_mutex_lock(&supervisor_gate_lock);
         const nt_status auth = trusted_special_apc_entry(callback) ?
-            parent_authorize_special_apc(handle, callback) : NT_STATUS_NOT_SUPPORTED;
+            parent_authorize_special_apc(handle, callback,
+                                         &parent_generation) : NT_STATUS_NOT_SUPPORTED;
         if (auth != NT_STATUS_SUCCESS) {
             pthread_mutex_unlock(&supervisor_gate_lock);
             return auth;
@@ -706,7 +750,8 @@ static nt_status queue_apc_common(uintptr_t handle,
             } else {
                 *apc = (struct guest_apc){
                     .user = user, .native = native,
-                    .first = first, .second = second, .third = third
+                    .first = first, .second = second, .third = third,
+                    .parent_generation = parent_generation
                 };
                 if (ticket_out) {
                     apc->cancellation_ticket = next_special_apc_ticket++;
