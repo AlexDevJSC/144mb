@@ -378,6 +378,7 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         free_slot->search = false;
         free_slot->security_grants = secure |
             ((q->access & (UINT32_C(0x80000000)|
+                            UINT32_C(0x40000000)|
                             UINT32_C(0x10000000))) ?
                            NT_ACL_READ_CONTROL : 0u);
         result.handle = capability;
@@ -564,8 +565,21 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
             q->flags || q->offset != -1 || q->size>FS4_DATA_MAX)
             break;
         uint32_t needed=0;
-        const nt_status status=nt_NtQuerySecurityObject(
-            slot->native,q->access,output,q->size,&needed);
+        /* READ_CONTROL belongs to this authenticated capability; the
+         * native DATA_READ check must not be substituted for NT security
+         * rights, nor may a read-only HANDLE acquire WRITE_DAC. */
+        nt_status status=NT_STATUS_ACCESS_DENIED;
+        if ((slot->security_grants&NT_ACL_READ_CONTROL)!=0) {
+            if (nt_runtime_fs4_query_security_handle(
+                    slot->native,q->access,output,q->size,&needed))
+                status=NT_STATUS_SUCCESS;
+            else if (nt_GetLastError()==NT_ERROR_INSUFFICIENT_BUFFER)
+                status=(nt_status)UINT32_C(0xc0000023);
+            else if (nt_GetLastError()==NT_ERROR_INVALID_PARAMETER)
+                status=NT_STATUS_INVALID_PARAMETER;
+            else if (nt_GetLastError()==NT_ERROR_NOT_SUPPORTED)
+                status=NT_STATUS_NOT_SUPPORTED;
+        }
         result.error=NT_ERROR_SUCCESS; /* NTSTATUS is NOT LastError. */
         result.value=(uint32_t)status;
         result.handle=needed; /* metadata, NOT a HANDLE capability */
