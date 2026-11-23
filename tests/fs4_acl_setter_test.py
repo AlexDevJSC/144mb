@@ -29,6 +29,7 @@ OWNER = sid(22, 1, os.geteuid())
 GROUP = sid(22, 2, os.getegid())
 READ_MASK = 0x00120089
 WRITE_MASK = 0x00120116
+WRITE_EXCLUSIVE_MASK = WRITE_MASK & ~READ_MASK
 
 
 class BrokerDACLWriter(unittest.TestCase):
@@ -60,7 +61,7 @@ class BrokerDACLWriter(unittest.TestCase):
         attacker_owner = sid(22, 1, 31337)
         new = descriptor([
             (0, 0, READ_MASK, EVERYONE),
-            (1, 0, WRITE_MASK, EVERYONE),
+            (1, 0, WRITE_EXCLUSIVE_MASK, EVERYONE),
         ], owner=attacker_owner)
         self.assertEqual(self.path_write(new)[0], 0)
         saved = self.read_dacl()
