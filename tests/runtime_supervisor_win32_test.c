@@ -276,8 +276,41 @@ static int NT_MS_ABI test_entry(void)
     if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_NOT_SUPPORTED)
         return 64;
 
+    /* The parent can now read real DR0-DR3, DR6 and DR7, never zero
+     * placeholders. Changes to inactive address slots must round-trip
+     * through Linux PTRACE_POKEUSER/PEEKUSER while DR7 stays disabled. */
+    _Alignas(16) struct nt_context64 debug_before = {0};
+    debug_before.flags = 0x100010u;
+    if (nt_NtGetContextThread(thread, &debug_before) != NT_STATUS_SUCCESS ||
+        (debug_before.debug[5] & UINT64_C(0xff)) != 0)
+        return 65;
+    _Alignas(16) struct nt_context64 debug_changed = debug_before;
+    debug_changed.debug[0] = context.rip;
+    if (nt_NtSetContextThread(thread, &debug_changed) != NT_STATUS_SUCCESS)
+        return 66;
+    _Alignas(16) struct nt_context64 debug_observed = {0};
+    debug_observed.flags = 0x100010u;
+    if (nt_NtGetContextThread(thread, &debug_observed) != NT_STATUS_SUCCESS ||
+        memcmp(debug_observed.debug, debug_changed.debug,
+               sizeof(debug_before.debug)) != 0)
+        return 67;
+    if (nt_NtSetContextThread(thread, &debug_before) != NT_STATUS_SUCCESS)
+        return 68;
+    debug_observed.flags = 0x100010u;
+    if (nt_NtGetContextThread(thread, &debug_observed) != NT_STATUS_SUCCESS ||
+        memcmp(debug_observed.debug, debug_before.debug,
+               sizeof(debug_before.debug)) != 0)
+        return 69;
+    debug_changed = debug_before;
+    debug_changed.debug[5] ^= UINT64_C(1); /* active breakpoint is forbidden */
+    if (nt_NtSetContextThread(thread, &debug_changed) != NT_STATUS_NOT_SUPPORTED)
+        return 70;
+    debug_changed = debug_before;
+    debug_changed.debug[0] = (uint64_t)(uintptr_t)&debug_changed;
+    if (nt_NtSetContextThread(thread, &debug_changed) != NT_STATUS_NOT_SUPPORTED)
+        return 71;
     _Alignas(16) struct nt_context64 invalid = {0};
-    invalid.flags = 0x100010u; /* debug registers not yet supported */
+    invalid.flags = 0x100040u; /* variable CONTEXT_XSTATE not represented */
     if (nt_NtGetContextThread(thread, &invalid) != NT_STATUS_INVALID_PARAMETER)
         return 35;
     native_previous = UINT32_MAX;
