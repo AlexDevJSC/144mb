@@ -23,6 +23,10 @@ READ_GENERIC = 0x80000000
 WRITE_GENERIC = 0x40000000
 GENERIC_READ_MASK = 0x00120089
 GENERIC_WRITE_MASK = 0x00120116
+# A DENY of GENERIC_WRITE also denies shared READ_CONTROL/SYNCHRONIZE
+# if used verbatim. To test ordinary data read + data write denial,
+# deny ONLY write-exclusive bits, not their shared standard rights.
+WRITE_EXCLUSIVE_MASK = GENERIC_WRITE_MASK & ~GENERIC_READ_MASK
 DENIED = 5
 NOT_SUPPORTED = 50
 SECURITY_PATH = 25
@@ -77,7 +81,7 @@ class BrokerACL(unittest.TestCase):
         data = self.root / "policy.dat"
         data.write_bytes(b"ACL-PROTECTED")
         grant(data, [
-            (1, 0, GENERIC_WRITE_MASK | 0x00010000, EVERYONE),
+            (1, 0, WRITE_EXCLUSIVE_MASK | 0x00010000, EVERYONE),
             (0, 0, GENERIC_READ_MASK, EVERYONE),
         ])
         os.link(data, self.root / "alias.dat")
