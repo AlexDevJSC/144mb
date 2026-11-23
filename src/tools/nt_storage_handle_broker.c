@@ -227,7 +227,7 @@ static uintptr_t fs4_create_managed_file(struct session *s,
 {
     *failure=NT_ERROR_ACCESS_DENIED;
     if (!valid_path(name,n) || n>FS4_PATH_MAX ||
-        (desired & ~UINT32_C(0xc0050000))!=0 ||
+        (desired & ~UINT32_C(0xc0070000))!=0 ||
         (desired&UINT32_C(0xc0000000))==0 ||
         (share&~7u)!=0 ||
         (disposition!=1 && disposition!=2 && disposition!=4) ||
