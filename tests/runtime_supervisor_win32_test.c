@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include "compat.h"
 #include "sync.h"
+#include "thread_broker_ipc.h"
 #include "ntnative/guest_boundary_runtime.h"
 #include "nt_services.h"
 
