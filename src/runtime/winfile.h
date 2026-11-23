@@ -25,6 +25,11 @@ bool nt_runtime_namespace_mutation_admissible(const char *path);
  * makes a FUSE POSIX mutation atomic with respect to cooperative renames.
  * It does NOT journal an interrupted direct create/mkdir/truncate. */
 int nt_runtime_begin_namespace_mutation(const char *path);
+/* Trusted storage broker only: pin an existing Win32 file HANDLE to its
+ * exact Linux inode and copy its normalized DOS path for WAL admission.
+ * Never exported to a guest DLL. The caller owns the returned dup FD. */
+int nt_runtime_fs4_pin_security_handle(uintptr_t handle,
+                                       char *path, size_t capacity);
 void nt_runtime_end_namespace_mutation(int guard);
 bool nt_runtime_refresh_dos83_path(const char *path);
 bool nt_runtime_reconcile_host_rename(const char *old_path, const char *new_path);
