@@ -116,6 +116,14 @@ int main(void)
     uint8_t denyflags[2]={0,2};
     assert(nt_acl_peer_token_init(&supp,1002,2002,groups,2,denyflags)==-1);
     assert(nt_acl_peer_token_init(&supp,1002,2002,groups,30,NULL)==-1);
+    /* A duplicate of the authenticated primary group cannot be silently
+     * demoted by conflicting deny-only supplementary-group metadata. */
+    gid_t repeated[1]={2002};
+    uint8_t deny_primary[1]={NT_ACL_SID_DENY_ONLY};
+    assert(nt_acl_peer_token_init(&supp,1002,2002,repeated,1,
+                                  deny_primary)==-1 && errno==EINVAL);
+    assert(nt_acl_peer_token_init(&supp,1002,2002,repeated,1,
+                                  NULL)==0 && supp.token.count==3);
     assert(fremovexattr(file_fd,"user.ntnative.security.sd")==0);
     assert(nt_acl_policy_check_fd(file_fd,&alice,NT_ACL_DATA_WRITE,
          &nt_acl_file_generic_mapping)==NT_ACL_POLICY_ABSENT);
