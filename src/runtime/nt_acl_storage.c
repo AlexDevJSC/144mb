@@ -124,7 +124,11 @@ int nt_acl_storage_read_fd(int fd,uint8_t *out,size_t capacity,
         load64(record+24)!=(uint64_t)st.st_ino ||
         load64(record+32)!=record_hash(record,(size_t)size) ||
         nt_acl_validate_descriptor(record+HEADER_BYTES,
-                                   (size_t)size-HEADER_BYTES)!=NT_ACL_ALLOWED) {
+                                   (size_t)size-HEADER_BYTES)!=NT_ACL_ALLOWED ||
+        /* A NULL/absent DACL means unrestricted access on Windows. The
+         * service intentionally never persists an unbounded grant. */
+        (record[HEADER_BYTES+2]&4u)==0 ||
+        load32(record+HEADER_BYTES+16)==0) {
         errno=EUCLEAN; /* malformed, substituted inode, or unknown ACE */
     } else {
         *needed=(size_t)size-HEADER_BYTES;
@@ -144,7 +148,9 @@ bool nt_acl_storage_write_trusted_fd(int fd,const uint8_t *descriptor,
 {
     if (fd<0 || !descriptor || bytes<20 ||
         bytes>NT_ACL_SD_MAX_BYTES ||
-        nt_acl_validate_descriptor(descriptor,bytes)!=NT_ACL_ALLOWED) {
+        nt_acl_validate_descriptor(descriptor,bytes)!=NT_ACL_ALLOWED ||
+        (descriptor[2]&4u)==0 ||
+        load32(descriptor+16)==0) {
         errno=EINVAL;
         return false;
     }
