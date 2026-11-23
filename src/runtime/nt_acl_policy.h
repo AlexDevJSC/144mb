@@ -35,6 +35,15 @@ int nt_acl_policy_check_fd(int fd, const struct nt_acl_peer_token *peer,
                            uint32_t requested,
                            const struct nt_acl_generic_mapping *mapping);
 
+/* TRUSTED SERVICE ONLY. Install DACL_SECURITY_INFORMATION on a pinned
+ * inode after the caller acquired namespace WAL and an appropriate share
+ * lease; verify WRITE_DAC against the kernel-derived peer token. Existing
+ * owner/group remain immutable; unmanaged inode is bootstrapped with the
+ * trusted peer owner/group. Returns policy ALLOWED or DENIED/ERROR.
+ * No guest memory pointers, and no owner/SACL privilege escalation. */
+int nt_acl_policy_set_dacl_fd(int fd, const struct nt_acl_peer_token *peer,
+                              const uint8_t *input, size_t input_bytes);
+
 /* Resolve only beneath a pinned root with no symlink/mount escapes.
  * DOS names begin C:/, POSIX names begin /; root itself is ".".
  * If parent=true, check the object's immediate parent directory instead. */
