@@ -215,6 +215,166 @@ static uint32_t acl_open_gate(struct session *s,const unsigned char *path,
 /* End-to-end ACL writes are gated by BOTH authenticated token rights
  * and the physical NT share/delete-pending lease. Caller retains WAL.
  * A denial never creates or replaces a security xattr. */
+/* PE managed-parent creation: build inherited SD on O_TMPFILE before
+ * publishing any name. The private inode holds its NT OFD lease before
+ * linkat, preventing another PE/FUSE open from bypassing share checks.
+ * The service WAL protects parent policy admission and the name change. */
+static uintptr_t fs4_create_managed_file(struct session *s,
+                                         const unsigned char *name,size_t n,
+                                         uint32_t desired,uint32_t share,
+                                         uint32_t disposition,uint32_t flags,
+                                         uint32_t *failure)
+{
+    *failure=NT_ERROR_ACCESS_DENIED;
+    if (!valid_path(name,n) || n>FS4_PATH_MAX ||
+        (desired & ~UINT32_C(0xc0050000))!=0 ||
+        (desired&UINT32_C(0xc0000000))==0 ||
+        (share&~7u)!=0 ||
+        (disposition!=1 && disposition!=2 && disposition!=4) ||
+        (flags & ~(UINT32_C(0x80)))!=0) {
+        *failure=NT_ERROR_NOT_SUPPORTED;
+        return UINTPTR_MAX;
+    }
+    char dos[FS4_PATH_MAX+1];
+    memcpy(dos,name,n);dos[n]=0;
+    int guard=nt_runtime_begin_namespace_mutation(dos);
+    if (guard<0) return UINTPTR_MAX;
+    uintptr_t result=UINTPTR_MAX;
+    int dir=-1,fd=-1,lease=-1;
+    uint8_t *parent_sd=NULL,*child_sd=NULL;
+    const char *relative=dos+3;
+    const char *slash=strrchr(relative,'/');
+    const char *leaf=slash ? slash+1 : relative;
+    size_t parent_bytes=slash ? (size_t)(slash-relative) : 0;
+    if (!*leaf || parent_bytes>=FS4_PATH_MAX)
+        goto done;
+    char parent_path[FS4_PATH_MAX+1];
+    if (parent_bytes) memcpy(parent_path,relative,parent_bytes);
+    parent_path[parent_bytes]=0;
+    struct open_how how={
+        .flags=O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC,
+        .resolve=RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV
+    };
+    dir=(int)syscall(SYS_openat2,s->root_fd,
+                      parent_bytes ? parent_path : ".",&how,sizeof(how));
+    if (dir<0) goto done;
+    const int parent_grant=nt_acl_policy_check_fd(
+        dir,&s->identity,NT_ACL_DATA_WRITE,
+        &nt_acl_directory_generic_mapping);
+    if (parent_grant!=NT_ACL_POLICY_ALLOWED)
+        goto done; /* ABSENT is never authorization for this special path */
+    struct stat existing;
+    if (fstatat(dir,leaf,&existing,AT_SYMLINK_NOFOLLOW)==0) {
+        *failure=NT_ERROR_ALREADY_EXISTS;
+        goto done;
+    }
+    if (errno!=ENOENT) goto done;
+    parent_sd=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!parent_sd) { *failure=NT_ERROR_NOT_ENOUGH_MEMORY;goto done; }
+    size_t parent_len=0;
+    if (nt_acl_storage_read_fd(dir,parent_sd,NT_ACL_SD_MAX_BYTES,
+                               &parent_len)!=NT_ACL_STORAGE_PRESENT)
+        goto done;
+    size_t required=0;
+    int state=nt_acl_inherit_descriptor(
+        parent_sd,parent_len,false,
+        s->identity.token.sid[0],s->identity.token.length[0],
+        s->identity.token.sid[1],s->identity.token.length[1],
+        NULL,0,&required);
+    if (state!=NT_ACL_DENIED || required<28 ||
+        required>NT_ACL_SD_MAX_BYTES) {
+        *failure=NT_ERROR_NOT_SUPPORTED;
+        goto done;
+    }
+    child_sd=malloc(required);
+    if (!child_sd) { *failure=NT_ERROR_NOT_ENOUGH_MEMORY;goto done; }
+    state=nt_acl_inherit_descriptor(
+        parent_sd,parent_len,false,
+        s->identity.token.sid[0],s->identity.token.length[0],
+        s->identity.token.sid[1],s->identity.token.length[1],
+        child_sd,required,&required);
+    if (state!=NT_ACL_ALLOWED) {
+        *failure=NT_ERROR_NOT_SUPPORTED;
+        goto done;
+    }
+    uint32_t granted=0;
+    const uint32_t requested=desired & UINT32_C(0xc0010000);
+    state=nt_acl_access_check_mapped(
+        child_sd,required,&s->identity.token,
+        requested & ~NT_ACL_DELETE,
+        &nt_acl_file_generic_mapping,&granted);
+    if (state!=NT_ACL_ALLOWED) goto done;
+    if ((desired&NT_ACL_DELETE)!=0 &&
+        nt_acl_access_check_mapped(child_sd,required,
+                     &s->identity.token,NT_ACL_DELETE,
+                     &nt_acl_file_generic_mapping,&granted)!=NT_ACL_ALLOWED)
+        goto done;
+    fd=openat(dir,".",O_TMPFILE|O_RDWR|O_CLOEXEC,0600);
+    if (fd<0) {
+        *failure=NT_ERROR_NOT_SUPPORTED; /* never O_CREAT fallback */
+        goto done;
+    }
+    if (!nt_acl_storage_write_trusted_fd(fd,child_sd,required))
+        goto done;
+    uint32_t data_access=
+        ((desired&UINT32_C(0x80000000)) ? NT_FS_READ : 0u) |
+        ((desired&UINT32_C(0x40000000)) ? NT_FS_WRITE : 0u) |
+        ((desired&NT_ACL_DELETE) ? NT_FS_DELETE : 0u);
+    lease=nt_runtime_acquire_linux_nt_lease(fd,data_access,share);
+    if (lease<0) {
+        *failure=NT_ERROR_SHARING_VIOLATION;
+        goto done;
+    }
+    if (fsync(fd)!=0) goto done;
+    if (linkat(fd,"",dir,leaf,AT_EMPTY_PATH)!=0) {
+        *failure=errno==EEXIST ? NT_ERROR_FILE_EXISTS : NT_ERROR_ACCESS_DENIED;
+        goto done;
+    }
+    bool published=true;
+    if (fsync(dir)!=0) {
+        /* If durable publication cannot be confirmed, no success HANDLE
+         * may escape; remove ONLY if same pinned inode still at this name. */
+        struct stat current,expected;
+        if (fstat(fd,&expected)==0 &&
+            fstatat(dir,leaf,&current,AT_SYMLINK_NOFOLLOW)==0 &&
+            current.st_dev==expected.st_dev &&
+            current.st_ino==expected.st_ino)
+            (void)unlinkat(dir,leaf,0);
+        goto done;
+    }
+    if (!nt_runtime_refresh_dos83_path(dos)) {
+        struct stat current,expected;
+        if (fstat(fd,&expected)==0 &&
+            fstatat(dir,leaf,&current,AT_SYMLINK_NOFOLLOW)==0 &&
+            current.st_dev==expected.st_dev &&
+            current.st_ino==expected.st_ino)
+            (void)unlinkat(dir,leaf,0);
+        goto done;
+    }
+    result=nt_runtime_fs4_adopt_preleased_file(
+        fd,lease,dos,desired,share);
+    if (result==UINTPTR_MAX && published) {
+        struct stat current,expected;
+        if (fstat(fd,&expected)==0 &&
+            fstatat(dir,leaf,&current,AT_SYMLINK_NOFOLLOW)==0 &&
+            current.st_dev==expected.st_dev &&
+            current.st_ino==expected.st_ino)
+            (void)unlinkat(dir,leaf,0);
+    }
+    if (result!=UINTPTR_MAX) {
+        fd=-1;lease=-1; /* ownership moved into Win32 HANDLE table */
+        *failure=NT_ERROR_SUCCESS;
+    }
+done:
+    free(child_sd);
+    free(parent_sd);
+    if (lease>=0) nt_runtime_release_linux_nt_lease(&lease);
+    if (fd>=0) close(fd);
+    if (dir>=0) close(dir);
+    nt_runtime_end_namespace_mutation(guard);
+    return result;
+}
+
 static uint32_t fs4_set_pinned_dacl(struct session *s,int fd,
                                    const uint8_t *sd,size_t bytes)
 {
@@ -344,7 +504,10 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
             break;
         }
         result.error=acl_open_gate(s,payload,n,q->access,q->disposition);
-        if (result.error!=NT_ERROR_SUCCESS)
+        const bool inherited_creation=
+            result.error==NT_ERROR_NOT_SUPPORTED &&
+            (q->disposition==1 || q->disposition==2 || q->disposition==4);
+        if (result.error!=NT_ERROR_SUCCESS && !inherited_creation)
             break;
         /* The runtime's real FD opens with DATA rights only. Security
          * rights exist exclusively as broker-side capability grants from
@@ -354,11 +517,15 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
             result.error=NT_ERROR_NOT_SUPPORTED;
             break; /* no privilege model for owner replacement */
         }
-        const uintptr_t native = nt_CreateFileW(
-            path,q->access & ~UINT32_C(0x000e0000),q->share,
-            NULL,q->disposition,q->flags,0);
+        const uintptr_t native=inherited_creation ?
+            fs4_create_managed_file(
+                s,payload,n,q->access,q->share,q->disposition,q->flags,
+                &result.error) :
+            nt_CreateFileW(
+                path,q->access & ~UINT32_C(0x000e0000),q->share,
+                NULL,q->disposition,q->flags,0);
         if (native == UINTPTR_MAX) {
-            result.error = nt_GetLastError();
+            if (!inherited_creation) result.error = nt_GetLastError();
             break;
         }
         uint64_t capability = 0;
