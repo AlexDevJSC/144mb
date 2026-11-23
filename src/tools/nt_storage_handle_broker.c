@@ -1041,7 +1041,10 @@ static int serve(struct session *s)
                 request.op == FS4_RENAME ? "after-rename" :
                 request.op == FS4_DELETE ? "after-delete" :
                 request.op == FS4_ATTR_SET ? "after-attribute" :
-                request.op == FS4_NATIVE_SET ? "after-native-set" : NULL;
+                request.op == FS4_NATIVE_SET ? "after-native-set" :
+                (request.op == FS4_SECURITY_SET_PATH ||
+                 request.op == FS4_SECURITY_SET_HANDLE) ?
+                 "after-security-set" : NULL;
             if (fault && phase && strcmp(fault, phase) == 0)
                 (void)raise(SIGKILL);
         }
