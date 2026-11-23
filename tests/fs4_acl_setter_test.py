@@ -106,6 +106,36 @@ class BrokerDACLWriter(unittest.TestCase):
         offset = struct.unpack_from("<I", saved, 16)[0]
         self.assertEqual(saved[offset+8], 0)
 
+    def test_sigkill_after_fsync_recovery_preserves_security(self):
+        # Only the offline worker understands this crash flag. The
+        # app never controls production fault injection.
+        crash = Broker(self.root, crash="after-security-set")
+        saved_sd = descriptor([
+            (1, 0, WRITE_MASK, EVERYONE),
+            (0, 0, READ_MASK, EVERYONE),
+        ])
+        path = b"C:/secured.dat"
+        try:
+            with self.assertRaises(AssertionError):
+                crash.call(SET_PATH, path + saved_sd, access=4,
+                           share=len(path), disposition=len(saved_sd))
+        finally:
+            crash.close(expected_returncode=-9)
+        self.assertEqual(self.read_dacl()[0], 1)
+        self.assertTrue(os.getxattr(self.file,
+                        "user.ntnative.security.sd").startswith(b"NTSD0001"))
+        restarted = Broker(self.root)
+        try:
+            self.assertEqual(restarted.call(
+                OPEN, path, access=WRITE, share=7,
+                disposition=3)[0], ERR_ACCESS)
+            self.assertEqual(restarted.call(
+                OPEN, b"C:/alias.dat", access=WRITE, share=7,
+                disposition=3)[0], ERR_ACCESS)
+            self.assertEqual(self.file.read_bytes(), b"UNMODIFIED")
+        finally:
+            restarted.close()
+
     def test_malformed_and_unauthorized_write_cannot_mutate_xattr(self):
         valid = descriptor([(0, 0, READ_MASK | WRITE_MASK, OWNER)])
         self.assertEqual(self.path_write(valid)[0], 0)
