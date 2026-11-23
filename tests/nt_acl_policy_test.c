@@ -105,6 +105,29 @@ int main(void)
     assert(symlink("data",linkname)==0);
     assert(nt_acl_policy_check_path(root,"C:/nested/symlink",false,&alice,
         NT_ACL_DATA_READ,&nt_acl_file_generic_mapping)==NT_ACL_POLICY_ERROR);
+    /* DACL-only setter: a different authenticated UID cannot write the
+     * DACL, but the owner can; changing it preserves the owner SID and
+     * affects all hardlinks of the same inode. */
+    uint8_t replacement[48]={0},stored_sd[256]={0};
+    replacement[0]=1;put16(replacement+2,0x8004);
+    put32(replacement+16,20);
+    replacement[20]=2;put16(replacement+22,28);
+    put16(replacement+24,1);
+    replacement[28]=1;put16(replacement+30,20);
+    put32(replacement+32,NT_ACL_DATA_WRITE);
+    memcpy(replacement+36,everyone,sizeof(everyone));
+    assert(nt_acl_policy_set_dacl_fd(file_fd,&bob,replacement,48)==
+           NT_ACL_POLICY_DENIED);
+    assert(nt_acl_policy_set_dacl_fd(file_fd,&alice,replacement,48)==
+           NT_ACL_POLICY_ALLOWED);
+    size_t sd_length=0;
+    assert(nt_acl_storage_read_fd(file_fd,stored_sd,sizeof(stored_sd),
+                                  &sd_length)==NT_ACL_STORAGE_PRESENT);
+    assert(sd_length>=76 && memcmp(stored_sd+20,alice.token.sid[0],16)==0);
+    assert(nt_acl_policy_check_path(root,"C:/nested/hardlink",false,&bob,
+        NT_ACL_DATA_WRITE,&nt_acl_file_generic_mapping)==NT_ACL_POLICY_DENIED);
+    assert(nt_acl_policy_check_fd(file_fd,&alice,NT_ACL_WRITE_DAC,
+        &nt_acl_file_generic_mapping)==NT_ACL_POLICY_ALLOWED);
     uint8_t tiny[512]={0};
     ssize_t stored=fgetxattr(file_fd,"user.ntnative.security.sd",tiny,sizeof(tiny));
     assert(stored>0);
