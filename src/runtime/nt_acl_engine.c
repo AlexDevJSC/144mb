@@ -107,11 +107,91 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
     return NT_ACL_ALLOWED;
 }
 
+static bool acl_regions_overlap(const void *left,size_t left_bytes,
+                                const void *right,size_t right_bytes);
+
 /* A parsed self-relative SD is the minimum condition for persistence.
  * This does not authenticate its owner or prove an access grant. */
 int nt_acl_validate_descriptor(const uint8_t *sd,size_t bytes) {
     struct acl acl={0};
     return sd_acl(sd,bytes,&acl);
+}
+
+static void acl_put32(uint8_t *p,uint32_t v) {
+    for (unsigned i=0;i<4;i++) p[i]=(uint8_t)(v>>(8u*i));
+}
+
+/* Replace one DACL, not the object owner. A guest's owner/group SID fields
+ * are ignored for DACL_SECURITY_INFORMATION; the trusted peer identity or
+ * immutable persisted owner/group are used instead. In particular a guest
+ * cannot send a fabricated owner SID to gain the owner's WRITE_DAC. */
+int nt_acl_replace_dacl(const uint8_t *existing,size_t existing_bytes,
+                        const uint8_t *incoming,size_t incoming_bytes,
+                        const uint8_t *trusted_owner,size_t owner_bytes,
+                        const uint8_t *trusted_group,size_t group_bytes,
+                        uint8_t *out,size_t capacity,size_t *needed)
+{
+    if (!needed) return NT_ACL_INVALID;
+    *needed=0;
+    if (!incoming || !trusted_owner || !trusted_group ||
+        !sid_valid(trusted_owner,owner_bytes) ||
+        !sid_valid(trusted_group,group_bytes) ||
+        owner_bytes!=8u+(size_t)trusted_owner[1]*4u ||
+        group_bytes!=8u+(size_t)trusted_group[1]*4u)
+        return NT_ACL_INVALID;
+    if (nt_acl_validate_descriptor(incoming,incoming_bytes)!=NT_ACL_ALLOWED)
+        return NT_ACL_UNSUPPORTED;
+    const uint16_t ctrl=get16(incoming+2);
+    const uint32_t dacl=get32(incoming+16);
+    if (!(ctrl&SD_DACL_PRESENT) || !dacl || dacl>incoming_bytes ||
+        incoming_bytes-dacl<ACL_HEADER)
+        return NT_ACL_UNSUPPORTED;
+    /* A NULL DACL unconditionally grants all Windows rights. */
+    size_t acl_bytes=get16(incoming+dacl+2);
+    if (acl_bytes<ACL_HEADER || acl_bytes>incoming_bytes-dacl)
+        return NT_ACL_INVALID;
+    const uint8_t *owner=trusted_owner,*group=trusted_group;
+    if (existing) {
+        if (nt_acl_validate_descriptor(existing,existing_bytes)!=NT_ACL_ALLOWED)
+            return NT_ACL_UNSUPPORTED;
+        const uint32_t owner_pos=get32(existing+4);
+        const uint32_t group_pos=get32(existing+8);
+        if (!owner_pos || !group_pos)
+            return NT_ACL_UNSUPPORTED;
+        owner=existing+owner_pos;
+        group=existing+group_pos;
+        owner_bytes=8u+(size_t)owner[1]*4u;
+        group_bytes=8u+(size_t)group[1]*4u;
+    } else if (existing_bytes) {
+        return NT_ACL_INVALID;
+    }
+    if (owner_bytes>UINT32_MAX-SD_HEADER ||
+        group_bytes>UINT32_MAX-(SD_HEADER+owner_bytes))
+        return NT_ACL_INVALID;
+    size_t total=SD_HEADER+owner_bytes+group_bytes;
+    if (acl_bytes>SIZE_MAX-total || total+acl_bytes>UINT32_MAX)
+        return NT_ACL_UNSUPPORTED;
+    total+=acl_bytes;
+    *needed=total;
+    if (!out || capacity<total)
+        return NT_ACL_DENIED;
+    /* Avoid truncating in-place owner, group or DACL sections. */
+    if (acl_regions_overlap(out,total,incoming,incoming_bytes) ||
+        (existing && acl_regions_overlap(out,total,existing,existing_bytes)) ||
+        acl_regions_overlap(out,total,trusted_owner,owner_bytes) ||
+        acl_regions_overlap(out,total,trusted_group,group_bytes))
+        return NT_ACL_INVALID;
+    memset(out,0,total);
+    out[0]=1;
+    put16(out+2,SD_SELF_RELATIVE|SD_DACL_PRESENT|
+          (ctrl&UINT16_C(0x1400))); /* DACL_PROTECTED / AUTO_INHERITED */
+    acl_put32(out+4,SD_HEADER);
+    acl_put32(out+8,(uint32_t)(SD_HEADER+owner_bytes));
+    acl_put32(out+16,(uint32_t)(SD_HEADER+owner_bytes+group_bytes));
+    memcpy(out+SD_HEADER,owner,owner_bytes);
+    memcpy(out+SD_HEADER+owner_bytes,group,group_bytes);
+    memcpy(out+SD_HEADER+owner_bytes+group_bytes,incoming+dacl,acl_bytes);
+    return nt_acl_validate_descriptor(out,total);
 }
 
 /* Filter a persisted self-relative descriptor using the same strict
