@@ -136,6 +136,13 @@ int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information
                                       void *descriptor, uint32_t size, uint32_t *needed);
 int32_t NT_MS_ABI nt_GetFileSecurityA(const char *name, uint32_t information,
                                       void *descriptor, uint32_t size, uint32_t *needed);
+int32_t NT_MS_ABI nt_SetFileSecurityW(const uint16_t *name,uint32_t information,
+                                      const void *descriptor);
+int32_t NT_MS_ABI nt_SetFileSecurityA(const char *name,uint32_t information,
+                                      const void *descriptor);
+nt_status NT_MS_ABI nt_NtSetSecurityObject(uintptr_t handle,
+                                            uint32_t information,
+                                            const void *descriptor);
 uint32_t NT_MS_ABI nt_GetLogicalDrives(void);
 uint32_t NT_MS_ABI nt_GetDriveTypeW(const uint16_t *root);
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer);
