@@ -1147,20 +1147,85 @@ static int fs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
-    /* An authorized FUSE client must never chmod the physical backing
-     * root from 0700 to a public mode, or change lower DAC at all.
-     * Permissions exposed by the FUSE view are intentionally not POSIX-
-     * mutable until an isolated permission mapping exists. */
-    if (service_mode)
-        return -EPERM;
-    int fd = fi ? (int)fi->fh : lower_open(path, O_RDONLY, 0);
-    if (fd < 0)
-        return -errno;
-    int result = fchmod(fd, mode);
-    int error = errno;
-    if (!fi)
-        close(fd);
-    return result == 0 ? 0 : -error;
+    if (!service_mode) {
+        int fd=fi ? (int)fi->fh : lower_open(path,O_RDONLY,0);
+        if (fd<0) return -errno;
+        int code=fchmod(fd,mode);
+        int error=errno;
+        if (!fi) close(fd);
+        return code==0 ? 0 : -error;
+    }
+    /* Virtual chmod is a DACL edit, NEVER host fchmod. Reject non-POSIX
+     * mode bits, unowned/unknown DACLs and named/DENY ACEs whose intent
+     * cannot be faithfully rendered as 3-ACE owner/group/Everyone. */
+    if (mode & ~0777u)
+        return -ENOTSUP;
+    int authorized=view_acl_check(path,NT_ACL_WRITE_DAC,false);
+    if (authorized)
+        return authorized;
+    pthread_mutex_lock(&namespace_lock);
+    int wal=guest_mutation_begin(path);
+    if (wal<0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return wal;
+    }
+    int fd=lower_open(path,O_RDONLY,0);
+    int err=fd<0 ? -errno : 0;
+    struct stat pinned={0},old_handle={0};
+    if (!err && fstat(fd,&pinned)!=0)
+        err=-errno;
+    if (!err && fi &&
+        (fstat((int)fi->fh,&old_handle)!=0 ||
+         pinned.st_dev!=old_handle.st_dev ||
+         pinned.st_ino!=old_handle.st_ino))
+        err=-EBUSY;
+    if (!err && !S_ISREG(pinned.st_mode) && !S_ISDIR(pinned.st_mode))
+        err=-ENOTSUP;
+    int lease=-1;
+    if (!err && S_ISREG(pinned.st_mode)) {
+        lease=nt_runtime_acquire_linux_nt_lease(
+            fd,NT_FS_WRITE,NT_FS_SHARE_ALL);
+        if (lease<0)
+            err=-EBUSY;
+    }
+    uint8_t *old=malloc(NT_ACL_SD_MAX_BYTES);
+    uint8_t *changed=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!err && (!old || !changed))
+        err=-ENOMEM;
+    size_t length=0,needed=0;
+    if (!err) {
+        const int state=nt_acl_storage_read_fd(
+            fd,old,NT_ACL_SD_MAX_BYTES,&length);
+        if (state!=NT_ACL_STORAGE_PRESENT)
+            err=state==NT_ACL_STORAGE_ABSENT ? -EPERM :
+                -(errno ? errno : EUCLEAN);
+    }
+    if (!err) {
+        const int status=nt_acl_chmod_simple_descriptor(
+            old,length,(uint32_t)mode,changed,
+            NT_ACL_SD_MAX_BYTES,&needed);
+        if (status!=NT_ACL_ALLOWED)
+            err=status==NT_ACL_UNSUPPORTED ? -ENOTSUP : -EINVAL;
+    }
+    if (!err) {
+        struct nt_acl_peer_token token={0};
+        if (view_acl_token(&token)!=0)
+            err=-EACCES;
+        else {
+            const int status=nt_acl_policy_set_dacl_fd(
+                fd,&token,changed,needed);
+            if (status!=NT_ACL_POLICY_ALLOWED)
+                err=status==NT_ACL_POLICY_DENIED ? -EACCES :
+                    -(errno ? errno : EIO);
+        }
+    }
+    free(changed);
+    free(old);
+    nt_runtime_release_linux_nt_lease(&lease);
+    if (fd>=0) close(fd);
+    nt_runtime_end_namespace_mutation(wal);
+    pthread_mutex_unlock(&namespace_lock);
+    return err;
 }
 
 /* Convert a POSIX timestamp to the 100-ns Win32 FILETIME epoch.
