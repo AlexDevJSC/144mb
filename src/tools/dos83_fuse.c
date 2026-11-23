@@ -2088,7 +2088,7 @@ static int service_acl_selftest(void)
                     "user.ntnative.security.sd","X",1,0)!=-EACCES ||
         fs_getxattr("/ACLManagedParent/Child",
                     "user.ntnative.security.sd",NULL,0)!=-ENODATA ||
-        fs_chmod("/ACLManagedParent/Child",0777,NULL)!=-EPERM))
+        fs_chmod("/ACLManagedParent/Child",0777,NULL)!=-ENOTSUP))
         failure=1;
     if (!failure && fs_mkdir("/ACLManagedParent/SafeDir",0755)!=0)
         failure=1;
@@ -2102,6 +2102,45 @@ static int service_acl_selftest(void)
         fs_rmdir("/ACLManagedParent/SafeDir")!=-EACCES))
         failure=1;
     if (new_dir>=0) close(new_dir);
+    /* A canonical simple three-ACE DACL permits *virtual* chmod. The
+     * physical mode MUST remain 0600 under the storage service UID. */
+    int modefd=openat(lower_root,"ACLModeFixture",O_CREAT|O_EXCL|
+                      O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600);
+    if (modefd<0) failure=1;
+    uint8_t simple[132]={0};
+    simple[0]=1;
+    fs4_acl_test_put16(simple+2,UINT16_C(0x8004));
+    fs4_acl_test_put32(simple+4,20);
+    fs4_acl_test_put32(simple+8,36);
+    fs4_acl_test_put32(simple+16,52);
+    fs4_acl_test_sid(simple+20,1,(uint32_t)geteuid());
+    fs4_acl_test_sid(simple+36,2,(uint32_t)getegid());
+    simple[52]=2;
+    fs4_acl_test_put16(simple+54,80);
+    fs4_acl_test_put16(simple+56,3);
+    simple[60]=0;
+    fs4_acl_test_put16(simple+62,24);
+    fs4_acl_test_put32(simple+64,UINT32_C(0x001f01ff));
+    fs4_acl_test_sid(simple+68,1,(uint32_t)geteuid());
+    simple[84]=0;
+    fs4_acl_test_put16(simple+86,24);
+    fs4_acl_test_sid(simple+92,2,(uint32_t)getegid());
+    simple[108]=0;
+    fs4_acl_test_put16(simple+110,20);
+    memcpy(simple+116,everyone,12);
+    if (!failure && !nt_acl_storage_write_trusted_fd(modefd,simple,sizeof(simple)))
+        failure=1;
+    struct stat virtual_mode={0},host_mode={0};
+    if (!failure && (fs_chmod("/ACLModeFixture",0640,NULL)!=0 ||
+        fs_getattr("/ACLModeFixture",&virtual_mode,NULL)!=0 ||
+        fstat(modefd,&host_mode)!=0 ||
+        (virtual_mode.st_mode&0777)!=0640 ||
+        (host_mode.st_mode&0777)!=0600 ||
+        fs_chmod("/ACLModeFixture",04755,NULL)!=-ENOTSUP))
+        failure=1;
+    if (modefd>=0) close(modefd);
+    if (unlinkat(lower_root,"ACLModeFixture",0)!=0)
+        failure=1;
     if (unlinkat(lower_root,"ACLManagedParent/Child",0)!=0 ||
         unlinkat(lower_root,"ACLManagedParent/SafeDir",AT_REMOVEDIR)!=0 ||
         unlinkat(lower_root,"ACLManagedParent",AT_REMOVEDIR)!=0)
@@ -2112,7 +2151,7 @@ static int service_acl_selftest(void)
         return 1;
     }
     puts("PASS offline FUSE managed file+directory DACL inherited before "
-         "atomic publication; delete/chmod denied (mount not tested)");
+         "atomic publication; complex chmod denied, simple chmod virtual (mount not tested)");
     return 0;
 }
 
