@@ -173,7 +173,8 @@ static bool supported_flags(uint32_t flags, bool writing)
      * independently or as one rollback-protected two-regset mutation.
      * CONTROL/SEGMENTS/DEBUG and variable XSTATE cannot be authorized. */
     if (writing)
-        return flags == (base | NT_SUP_CONTEXT_INTEGER) ||
+        return flags == (base | NT_SUP_CONTEXT_CONTROL) ||
+               flags == (base | NT_SUP_CONTEXT_INTEGER) ||
                flags == (base | NT_SUP_CONTEXT_FLOATING_POINT) ||
                flags == (base | NT_SUP_CONTEXT_INTEGER |
                                 NT_SUP_CONTEXT_FLOATING_POINT);
