@@ -378,11 +378,22 @@ done:
 static uint32_t fs4_set_pinned_dacl(struct session *s,int fd,
                                    const uint8_t *sd,size_t bytes)
 {
-    int lease=nt_runtime_acquire_linux_nt_lease(
-        fd,NT_FS_WRITE,NT_FS_SHARE_ALL);
-    if (lease<0)
-        return errno==EAGAIN || errno==EACCES ?
-               NT_ERROR_SHARING_VIOLATION : NT_ERROR_ACCESS_DENIED;
+    struct stat inode={0};
+    if (fstat(fd,&inode)!=0)
+        return NT_ERROR_INVALID_HANDLE;
+    /* There are no regular-file OFD sharing records for directories.
+     * A directory security update is still protected by the namespace
+     * WAL held by the caller, never a naked host chmod/fsetxattr. */
+    if (!S_ISREG(inode.st_mode) && !S_ISDIR(inode.st_mode))
+        return NT_ERROR_NOT_SUPPORTED;
+    int lease=-1;
+    if (S_ISREG(inode.st_mode)) {
+        lease=nt_runtime_acquire_linux_nt_lease(
+            fd,NT_FS_WRITE,NT_FS_SHARE_ALL);
+        if (lease<0)
+            return errno==EAGAIN || errno==EACCES ?
+                   NT_ERROR_SHARING_VIOLATION : NT_ERROR_ACCESS_DENIED;
+    }
     const int state=nt_acl_policy_set_dacl_fd(fd,&s->identity,sd,bytes);
     const int error=errno;
     nt_runtime_release_linux_nt_lease(&lease);
