@@ -122,7 +122,7 @@ class BrokerACL(unittest.TestCase):
         finally:
             broker.close()
 
-    def test_unmanaged_dacl_parent_cannot_publish_uninherited_child(self):
+    def test_pe_create_inherits_dacl_before_publication(self):
         parent = self.root / "managed"
         parent.mkdir()
         grant(parent, [
@@ -130,10 +130,25 @@ class BrokerACL(unittest.TestCase):
         ])
         broker = Broker(self.root)
         try:
+            err, handle, _, _ = broker.call(
+                OPEN, b"C:/managed/child.txt", access=WRITE_GENERIC,
+                share=7, disposition=1)
+            if err == NOT_SUPPORTED:
+                self.skipTest("backing does not support safely leased O_TMPFILE creation")
+            self.assertEqual(err, 0)
+            child = parent / "child.txt"
+            self.assertTrue(child.exists())
             self.assertEqual(broker.call(
-                OPEN, b"C:/managed/unsafe.txt", access=WRITE_GENERIC,
-                share=7, disposition=1)[0], NOT_SUPPORTED)
-            self.assertFalse((parent / "unsafe.txt").exists())
+                WRITE, b"SAFE", handle=handle, size=4)[0], 0)
+            self.assertEqual(broker.call(CLOSE, handle=handle)[0], 0)
+            self.assertTrue(os.getxattr(child, SECURITY).startswith(b"NTSD0001"))
+            err, _, count, sd = broker.call(
+                SECURITY_PATH, b"C:/managed/child.txt", access=4,
+                disposition=2048)
+            self.assertEqual(err, 0)
+            self.assertEqual(count, len(sd))
+            dacl = struct.unpack_from("<I", sd, 16)[0]
+            self.assertTrue(sd[dacl+8+1] & 16, "inherited ACE flag")
         finally:
             broker.close()
 
