@@ -558,6 +558,32 @@ static void clear_apcs_locked(struct guest_apc_queue *queue)
     *queue = (struct guest_apc_queue){0};
 }
 
+/* Actual guest HANDLE -> parent-owned supervisor lease. The parent
+ * validates SCM_CREDENTIALS, pidfd, live TID generation, TEB and the
+ * loader's trusted immutable executable image inventory. The parent
+ * authorizes local guest delivery, but NEVER receives a guest stack
+ * pointer or arbitrary ptrace injection request from the PE. */
+bool nt_runtime_supervisor_open_thread_handle(uintptr_t handle, uint32_t rights,
+    struct nt_broker_thread_info *identity, uint64_t *capability);
+
+static nt_status parent_authorize_special_apc(uintptr_t handle,
+                                               uintptr_t callback)
+{
+    if (!nt_broker_client_is_attached() || handle == UINTPTR_MAX - 1)
+        return NT_STATUS_SUCCESS; /* self pseudo-handle uses local TEB */
+    struct nt_broker_thread_info identity = {0};
+    uint64_t capability = 0;
+    if (!nt_runtime_supervisor_open_thread_handle(handle,
+            THREAD_SET_CONTEXT, &identity, &capability))
+        return NT_STATUS_NOT_SUPPORTED;
+    nt_status result = nt_broker_client_supervisor_authorize_apc(
+        capability, identity.generation, callback);
+    if (!nt_broker_client_supervisor_close(capability) &&
+        result == NT_STATUS_SUCCESS)
+        result = NT_STATUS_NOT_SUPPORTED;
+    return result;
+}
+
 static nt_status queue_apc_common(uintptr_t handle,
                                 guest_user_apc user, guest_native_apc native,
                                 uintptr_t first, uintptr_t second, uintptr_t third,
@@ -565,6 +591,26 @@ static nt_status queue_apc_common(uintptr_t handle,
 {
     if ((user == NULL) == (native == NULL) || (ticket_out && !special))
         return NT_STATUS_INVALID_PARAMETER;
+    uintptr_t callback = 0;
+    _Static_assert(sizeof(callback) == sizeof(native) &&
+                   sizeof(callback) == sizeof(user), "PE32+ AMD64 pointers");
+    if (native != NULL)
+        memcpy(&callback, &native, sizeof(callback));
+    else
+        memcpy(&callback, &user, sizeof(callback));
+    /* Lock order mirrors CloseHandle: gate -> wait_lock. Never hold the
+     * waitable mutex across the authenticated parent IPC round trip. */
+    const bool supervised = special && handle != UINTPTR_MAX - 1 &&
+                            nt_broker_client_is_attached();
+    if (supervised) {
+        pthread_mutex_lock(&supervisor_gate_lock);
+        const nt_status auth = trusted_special_apc_entry(callback) ?
+            parent_authorize_special_apc(handle, callback) : NT_STATUS_NOT_SUPPORTED;
+        if (auth != NT_STATUS_SUCCESS) {
+            pthread_mutex_unlock(&supervisor_gate_lock);
+            return auth;
+        }
+    }
     pthread_mutex_lock(&wait_lock);
     struct guest_apc_queue *queue = NULL;
     nt_status status = NT_STATUS_SUCCESS;
@@ -593,13 +639,6 @@ static nt_status queue_apc_common(uintptr_t handle,
                               &wait_state(object)->apcs;
     }
     if (queue != NULL) {
-        uintptr_t callback = 0;
-        _Static_assert(sizeof(callback) == sizeof(native) &&
-                       sizeof(callback) == sizeof(user), "PE32+ AMD64 pointers");
-        if (native != NULL)
-            memcpy(&callback, &native, sizeof(callback));
-        else
-            memcpy(&callback, &user, sizeof(callback));
         if (special && !trusted_special_apc_entry(callback)) {
             status = NT_STATUS_NOT_SUPPORTED;
         } else if (queue->count >= MAX_PENDING_APC) {
@@ -658,6 +697,8 @@ static nt_status queue_apc_common(uintptr_t handle,
         }
     }
     pthread_mutex_unlock(&wait_lock);
+    if (supervised)
+        pthread_mutex_unlock(&supervisor_gate_lock);
     return status;
 }
 
