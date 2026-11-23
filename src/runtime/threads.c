@@ -49,15 +49,32 @@ struct guest_apc {
     guest_user_apc user;
     guest_native_apc native;
     uintptr_t first, second, third;
-    /* Nonzero only for explicitly cancellable NTNative special APCs. */
+    /* Public tickets are only for NtNativeQueueSpecialApc. All special
+     * callbacks have a separate monotonic internal parent ledger token;
+     * QueueUserAPC2 must not evict ticketed completion receipts. */
     uint64_t cancellation_ticket;
+    uint64_t dispatch_ticket;
+    bool cancellation_requested;
+    /* Captured only from authenticated, parent-issued thread generation.
+     * Zero means the trusted runtime ran without a parent broker. */
+    uint64_t parent_generation;
 };
+enum { APC_STATE_PENDING = 1, APC_STATE_RUNNING = 2,
+       APC_STATE_COMPLETED = 3, APC_STATE_CANCELLED = 4,
+       APC_STATE_COMPLETED_AFTER_REQUEST = 5, APC_STATE_ABORTED = 6,
+       APC_COMPLETION_HISTORY = 64 };
+struct guest_apc_receipt { uint64_t ticket; uint32_t state; };
 struct guest_apc_queue {
     struct guest_apc *head, *tail;
     uint32_t count;
     /* Only special queues consult this lock-free indicator from the PE
      * import-return path. Mutation remains serialized by wait_lock. */
     _Atomic bool available;
+    /* A popped callback remains owned by its canonical target thread,
+     * even though it no longer appears among the cancelable queued nodes. */
+    struct guest_apc *executing;
+    struct guest_apc_receipt receipts[APC_COMPLETION_HISTORY];
+    uint32_t receipt_index;
 };
 /* The bounded Linux backend can boost a guest by one Linux nice step
  * and automatically restore its original base after a monotonic deadline.
@@ -144,6 +161,7 @@ static _Thread_local struct guest_apc_queue primary_apcs, primary_special_apcs;
  * boundary. Dispatch pending APCs only after the current callback returns
  * or when a later unrelated safe-point is reached. */
 static _Thread_local bool special_apc_dispatching;
+static _Thread_local struct guest_apc *current_ticketed_special_apc;
 /* Weak in narrow standalone thread tests which link no PE signal gateway. */
 extern bool nt_runtime_guest_async_apc_nudge(pthread_t target)
     __attribute__((weak));
@@ -461,6 +479,14 @@ static void cooperative_suspend_checkpoint_locked(void)
     pthread_cond_broadcast(&wait_changed);
 }
 
+static void record_apc_receipt_locked(struct guest_apc_queue *queue,
+                                      uint64_t ticket, uint32_t state)
+{
+    if (!ticket) return;
+    queue->receipts[queue->receipt_index++ % APC_COMPLETION_HISTORY] =
+        (struct guest_apc_receipt){.ticket=ticket, .state=state};
+}
+
 static void invoke_apc(struct guest_apc *apc)
 {
     if (apc == NULL)
@@ -470,6 +496,37 @@ static void invoke_apc(struct guest_apc *apc)
     else
         apc->user(apc->first);
     free(apc);
+}
+
+/* The callback itself can attest START and RETURN to the existing
+ * authenticated supervisor channel. The kernel TID is read by trusted
+ * runtime code, NOT supplied by the PE; a changed session generation or
+ * lost ACK makes the operation ambiguous, never a fabricated completion.
+ * No ptrace or external callback stack is accepted in this path. */
+static bool special_apc_parent_receipt(struct guest_apc *apc,
+                                       uint32_t phase)
+{
+    if (!apc || apc->parent_generation == 0)
+        return true; /* no parent broker in standalone runtime */
+    struct nt_broker_thread_info identity = {0};
+    uint64_t capability = 0;
+    if (!nt_broker_client_supervisor_open((uint32_t)gettid(),
+            THREAD_SET_CONTEXT, &identity, &capability))
+        return false;
+    uintptr_t callback = 0;
+    if (apc->native)
+        memcpy(&callback, &apc->native, sizeof(callback));
+    else
+        memcpy(&callback, &apc->user, sizeof(callback));
+    bool okay = identity.guest_process_id == (uint32_t)getpid() &&
+        identity.guest_thread_id == (uint32_t)gettid() &&
+        identity.generation == apc->parent_generation &&
+        nt_broker_client_supervisor_apc_transition(
+            capability, identity.generation, callback,
+            apc->dispatch_ticket, phase) == NT_STATUS_SUCCESS;
+    if (!nt_broker_client_supervisor_close(capability))
+        okay = false;
+    return okay;
 }
 
 /* Async-signal-safe read of a TLS atomic flag. The signal handler NEVER
@@ -531,12 +588,49 @@ void nt_runtime_special_apc_checkpoint(void)
     /* Bound each crossing: callbacks can re-queue themselves. */
     for (unsigned delivered = 0; delivered < 8; ++delivered) {
         pthread_mutex_lock(&wait_lock);
-        struct guest_apc *apc =
-            pop_apc_queue_locked(current_special_apcs());
+        struct guest_apc_queue *queue = current_special_apcs();
+        struct guest_apc *apc = pop_apc_queue_locked(queue);
+        if (apc != NULL)
+            queue->executing = apc;
         pthread_mutex_unlock(&wait_lock);
         if (!apc)
             break;
-        invoke_apc(apc);
+        const bool start_ack =
+            special_apc_parent_receipt(apc, NT_APC_PHASE_START);
+        pthread_mutex_lock(&wait_lock);
+        /* A canceler can win the race while START authentication is
+         * blocking on IPC. No PE callback has run yet, so cancel now
+         * rather than allowing a stale dequeued request to execute. */
+        const bool cancelled_before_entry = apc->cancellation_requested;
+        pthread_mutex_unlock(&wait_lock);
+        current_ticketed_special_apc =
+            start_ack && !cancelled_before_entry && apc->cancellation_ticket ?
+            apc : NULL;
+        /* Never execute an unacknowledged or already-cancelled callback.
+         * A broker disconnect after admission invalidates its generation. */
+        if (start_ack && !cancelled_before_entry) {
+            if (apc->native)
+                apc->native((void *)apc->first,
+                            (void *)apc->second, (void *)apc->third);
+            else
+                apc->user(apc->first);
+        }
+        current_ticketed_special_apc = NULL;
+        const bool return_ack = start_ack &&
+            special_apc_parent_receipt(apc, cancelled_before_entry ?
+                NT_APC_PHASE_ABORT : NT_APC_PHASE_DONE);
+        pthread_mutex_lock(&wait_lock);
+        if (queue->executing == apc) {
+            record_apc_receipt_locked(queue, apc->cancellation_ticket,
+                !return_ack ? APC_STATE_ABORTED :
+                cancelled_before_entry ? APC_STATE_CANCELLED :
+                apc->cancellation_requested ?
+                APC_STATE_COMPLETED_AFTER_REQUEST : APC_STATE_COMPLETED);
+            queue->executing = NULL;
+        }
+        pthread_cond_broadcast(&wait_changed);
+        pthread_mutex_unlock(&wait_lock);
+        free(apc);
         if (nt_guest_boundary_nonlocal_poisoned())
             break;
     }
@@ -547,6 +641,13 @@ void nt_runtime_special_apc_checkpoint(void)
  * belongs to its canonical THREAD slot even after every HANDLE is closed. */
 static void clear_apcs_locked(struct guest_apc_queue *queue)
 {
+    if (queue->executing != NULL) {
+        record_apc_receipt_locked(queue,
+            queue->executing->cancellation_ticket, APC_STATE_ABORTED);
+        free(queue->executing); /* ExitThread may unwind out of callback */
+        queue->executing = NULL;
+        current_ticketed_special_apc = NULL;
+    }
     struct guest_apc *apc = queue->head;
     while (apc != NULL) {
         struct guest_apc *next = apc->next;
@@ -555,7 +656,40 @@ static void clear_apcs_locked(struct guest_apc_queue *queue)
     }
     /* Accesses are serialized by wait_lock; publish empty before the
      * underlying thread slot can be recycled. */
-    *queue = (struct guest_apc_queue){0};
+    queue->head = queue->tail = NULL;
+    queue->count = 0;
+    atomic_store_explicit(&queue->available, false, memory_order_release);
+    /* Keep bounded terminal receipts until the last HANDLE is closed.
+     * A recycled canonical slot starts with zeroed receipt history. */
+}
+
+/* Actual guest HANDLE -> parent-owned supervisor lease. The parent
+ * validates SCM_CREDENTIALS, pidfd, live TID generation, TEB and the
+ * loader's trusted immutable executable image inventory. The parent
+ * authorizes local guest delivery, but NEVER receives a guest stack
+ * pointer or arbitrary ptrace injection request from the PE. */
+bool nt_runtime_supervisor_open_thread_handle(uintptr_t handle, uint32_t rights,
+    struct nt_broker_thread_info *identity, uint64_t *capability);
+
+static nt_status parent_authorize_special_apc(uintptr_t handle,
+                                               uintptr_t callback,
+                                               uint64_t *generation)
+{
+    if (!nt_broker_client_is_attached() || handle == UINTPTR_MAX - 1)
+        return NT_STATUS_SUCCESS; /* self pseudo-handle uses local TEB */
+    struct nt_broker_thread_info identity = {0};
+    uint64_t capability = 0;
+    if (!nt_runtime_supervisor_open_thread_handle(handle,
+            THREAD_SET_CONTEXT, &identity, &capability))
+        return NT_STATUS_NOT_SUPPORTED;
+    nt_status result = nt_broker_client_supervisor_authorize_apc(
+        capability, identity.generation, callback);
+    if (!nt_broker_client_supervisor_close(capability) &&
+        result == NT_STATUS_SUCCESS)
+        result = NT_STATUS_NOT_SUPPORTED;
+    if (result == NT_STATUS_SUCCESS && generation != NULL)
+        *generation = identity.generation;
+    return result;
 }
 
 static nt_status queue_apc_common(uintptr_t handle,
@@ -565,6 +699,28 @@ static nt_status queue_apc_common(uintptr_t handle,
 {
     if ((user == NULL) == (native == NULL) || (ticket_out && !special))
         return NT_STATUS_INVALID_PARAMETER;
+    uintptr_t callback = 0;
+    _Static_assert(sizeof(callback) == sizeof(native) &&
+                   sizeof(callback) == sizeof(user), "PE32+ AMD64 pointers");
+    if (native != NULL)
+        memcpy(&callback, &native, sizeof(callback));
+    else
+        memcpy(&callback, &user, sizeof(callback));
+    /* Lock order mirrors CloseHandle: gate -> wait_lock. Never hold the
+     * waitable mutex across the authenticated parent IPC round trip. */
+    const bool supervised = special && handle != UINTPTR_MAX - 1 &&
+                            nt_broker_client_is_attached();
+    uint64_t parent_generation = 0;
+    if (supervised) {
+        pthread_mutex_lock(&supervisor_gate_lock);
+        const nt_status auth = trusted_special_apc_entry(callback) ?
+            parent_authorize_special_apc(handle, callback,
+                                         &parent_generation) : NT_STATUS_NOT_SUPPORTED;
+        if (auth != NT_STATUS_SUCCESS) {
+            pthread_mutex_unlock(&supervisor_gate_lock);
+            return auth;
+        }
+    }
     pthread_mutex_lock(&wait_lock);
     struct guest_apc_queue *queue = NULL;
     nt_status status = NT_STATUS_SUCCESS;
@@ -593,13 +749,6 @@ static nt_status queue_apc_common(uintptr_t handle,
                               &wait_state(object)->apcs;
     }
     if (queue != NULL) {
-        uintptr_t callback = 0;
-        _Static_assert(sizeof(callback) == sizeof(native) &&
-                       sizeof(callback) == sizeof(user), "PE32+ AMD64 pointers");
-        if (native != NULL)
-            memcpy(&callback, &native, sizeof(callback));
-        else
-            memcpy(&callback, &user, sizeof(callback));
         if (special && !trusted_special_apc_entry(callback)) {
             status = NT_STATUS_NOT_SUPPORTED;
         } else if (queue->count >= MAX_PENDING_APC) {
@@ -608,7 +757,7 @@ static nt_status queue_apc_common(uintptr_t handle,
             struct guest_apc *apc = calloc(1, sizeof(*apc));
             if (apc == NULL) {
                 status = NT_STATUS_NO_MEMORY;
-            } else if (ticket_out && next_special_apc_ticket == 0) {
+            } else if (special && next_special_apc_ticket == 0) {
                 /* The ticket sequence must never wrap and alias a past
                  * cancel target even if an old HANDLE was recycled. */
                 free(apc);
@@ -616,11 +765,19 @@ static nt_status queue_apc_common(uintptr_t handle,
             } else {
                 *apc = (struct guest_apc){
                     .user = user, .native = native,
-                    .first = first, .second = second, .third = third
+                    .first = first, .second = second, .third = third,
+                    .parent_generation = parent_generation
                 };
-                if (ticket_out) {
-                    apc->cancellation_ticket = next_special_apc_ticket++;
-                    *ticket_out = apc->cancellation_ticket;
+                /* Every special APC, including legacy QueueUserAPC2,
+                 * receives a private monotonic token for the parent
+                 * START/DONE ledger. Only the opt-in NTNATIVE extension
+                 * returns this token as an application-visible ticket. */
+                if (special) {
+                    apc->dispatch_ticket = next_special_apc_ticket++;
+                    if (ticket_out) {
+                        apc->cancellation_ticket = apc->dispatch_ticket;
+                        *ticket_out = apc->cancellation_ticket;
+                    }
                 }
                 if (queue->tail != NULL)
                     queue->tail->next = apc;
@@ -658,6 +815,8 @@ static nt_status queue_apc_common(uintptr_t handle,
         }
     }
     pthread_mutex_unlock(&wait_lock);
+    if (supervised)
+        pthread_mutex_unlock(&supervisor_gate_lock);
     return status;
 }
 
@@ -768,9 +927,17 @@ nt_status NT_MS_ABI nt_NtNativeCancelSpecialApc(uintptr_t thread,
             previous = current;
             current = current->next;
         }
-        if (current == NULL)
-            status = NT_STATUS_NOT_FOUND;
-        else {
+        if (current == NULL) {
+            if (queue->executing != NULL &&
+                queue->executing->cancellation_ticket == ticket) {
+                /* This requests cooperative cancellation; it does NOT
+                 * preempt the guest CPU or revert existing side effects. */
+                queue->executing->cancellation_requested = true;
+                status = NT_STATUS_PENDING;
+            } else {
+                status = NT_STATUS_NOT_FOUND;
+            }
+        } else {
             if (previous)
                 previous->next = current->next;
             else
@@ -781,6 +948,8 @@ nt_status NT_MS_ABI nt_NtNativeCancelSpecialApc(uintptr_t thread,
             if (queue->count == 0)
                 atomic_store_explicit(&queue->available, false,
                                       memory_order_release);
+            record_apc_receipt_locked(queue, current->cancellation_ticket,
+                                      APC_STATE_CANCELLED);
             free(current);
             /* The signal dispatcher may have already captured a guest
              * context. It must check the queue again under wait_lock,
@@ -791,6 +960,72 @@ nt_status NT_MS_ABI nt_NtNativeCancelSpecialApc(uintptr_t thread,
     }
     pthread_mutex_unlock(&wait_lock);
     return status;
+}
+
+/* Explicitly different states, never a guessed success. This
+ * extension queries the canonical object's bounded receipt history:
+ * a historical ticket may expire from the ring and then returns
+ * STATUS_NOT_FOUND, never a fabricated COMPLETED state. */
+nt_status NT_MS_ABI nt_NtNativeQuerySpecialApc(
+    uintptr_t thread, uint64_t ticket, uint32_t *state)
+{
+    if (!state || ticket == 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&wait_lock);
+    struct guest_apc_queue *queue = NULL;
+    nt_status result = NT_STATUS_SUCCESS;
+    if (thread == UINTPTR_MAX - 1) {
+        queue = nt_guest_thread_teb() ? current_special_apcs() : NULL;
+        if (!queue) result = NT_STATUS_NOT_SUPPORTED;
+    } else {
+        struct waitable *object = find_waitable(thread);
+        if (!object)
+            result = NT_STATUS_INVALID_HANDLE;
+        else if (object->kind != THREAD)
+            result = NT_STATUS_OBJECT_TYPE_MISMATCH;
+        else if (!(object->access & THREAD_SET_CONTEXT))
+            result = NT_STATUS_ACCESS_DENIED;
+        else if (wait_state(object)->owner_pid != (uint32_t)getpid())
+            result = NT_STATUS_NOT_SUPPORTED;
+        else
+            queue = &wait_state(object)->special_apcs;
+    }
+    if (queue) {
+        result = NT_STATUS_NOT_FOUND;
+        for (struct guest_apc *node = queue->head; node; node = node->next)
+            if (node->cancellation_ticket == ticket) {
+                *state = APC_STATE_PENDING;
+                result = NT_STATUS_SUCCESS;
+                break;
+            }
+        if (result != NT_STATUS_SUCCESS && queue->executing &&
+            queue->executing->cancellation_ticket == ticket) {
+            *state = APC_STATE_RUNNING;
+            result = NT_STATUS_SUCCESS;
+        }
+        if (result != NT_STATUS_SUCCESS)
+            for (unsigned i = 0; i < APC_COMPLETION_HISTORY; ++i)
+                if (queue->receipts[i].ticket == ticket) {
+                    *state = queue->receipts[i].state;
+                    result = NT_STATUS_SUCCESS;
+                    break;
+                }
+    }
+    pthread_mutex_unlock(&wait_lock);
+    return result;
+}
+
+/* Invoked by a callback itself at a safe voluntary checkpoint, outside
+ * Linux signal handlers. A canceling thread can request cancellation
+ * after execution began; only the callback knows how to release locks,
+ * unwind stack frames and return safely. */
+uint32_t NT_MS_ABI nt_NtNativeSpecialApcCancelRequested(void)
+{
+    pthread_mutex_lock(&wait_lock);
+    const bool requested = current_ticketed_special_apc != NULL &&
+        current_ticketed_special_apc->cancellation_requested;
+    pthread_mutex_unlock(&wait_lock);
+    return requested ? 1u : 0u;
 }
 
 nt_status NT_MS_ABI nt_NtAlertThread(uintptr_t handle)
@@ -3299,7 +3534,8 @@ nt_status NT_MS_ABI nt_NtAlertResumeThread(uintptr_t handle, uint32_t *previous)
  * ability to stop arbitrary PE instructions still require a separate safe
  * context-restoration mechanism. Win32 and native NTSTATUS share rights
  * checks, but only Win32 modifies LastError. */
-enum { CONTEXT_AMD64 = 0x100000, CONTEXT_CORE_GROUPS = 0x0f };
+enum { CONTEXT_AMD64 = 0x100000, CONTEXT_CORE_GROUPS = 0x1f,
+       CONTEXT_DEBUG_GROUP = 0x10 };
 
 static nt_status get_guest_thread_context(uintptr_t handle, struct nt_context64 *output)
 {
@@ -3348,6 +3584,8 @@ static nt_status get_guest_thread_context(uintptr_t handle, struct nt_context64 
         else if (!state->cooperative_pause_acknowledged ||
                  !state->cooperative_context_valid || state->suspend_count == 0)
             result = NT_STATUS_NOT_SUPPORTED;
+        else if (requested & CONTEXT_DEBUG_GROUP)
+            result = NT_STATUS_NOT_SUPPORTED; /* no kernel DRs in software capture */
         else {
             /* Groups requested by the caller are the only supported x64
              * groups (control, integer, segments, legacy floating point).

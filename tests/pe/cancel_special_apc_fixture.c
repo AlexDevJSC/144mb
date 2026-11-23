@@ -14,6 +14,7 @@ __declspec(dllimport) LONG NTAPI NtNativeQueueSpecialApc(
     HANDLE, void (NTAPI *)(void *, void *, void *),
     void *, void *, void *, uint64_t *);
 __declspec(dllimport) LONG NTAPI NtNativeCancelSpecialApc(HANDLE, uint64_t);
+__declspec(dllimport) LONG NTAPI NtNativeQuerySpecialApc(HANDLE, uint64_t, DWORD *);
 
 static volatile DWORD called, observed_thread;
 static DWORD WINAPI controlled_worker(void *argument)
@@ -68,12 +69,19 @@ int import_fixture_entry(void)
                                 (void *)(uintptr_t)0x146u, &revoked) !=
             STATUS_OK || revoked == 0)
         return 15;
+    DWORD apc_state = 0;
+    if (NtNativeQuerySpecialApc(thread, revoked, &apc_state) != STATUS_OK ||
+        apc_state != 1u)
+        return 25;
     if (NtNativeCancelSpecialApc(query, revoked) != STATUS_ACCESS_DENIED ||
         NtNativeCancelSpecialApc(thread, 0) != (LONG)STATUS_INVALID_PARAMETER)
         return 16;
     if (NtNativeCancelSpecialApc(thread, revoked) != STATUS_OK ||
         NtNativeCancelSpecialApc(thread, revoked) != STATUS_NOT_FOUND)
         return 17;
+    if (NtNativeQuerySpecialApc(thread, revoked, &apc_state) != STATUS_OK ||
+        apc_state != 4u)
+        return 26;
     /* A stale ticket must NEVER refer to a later APC in the same queue. */
     if (NtNativeQueueSpecialApc(thread, delivered,
                                 (void *)(uintptr_t)0x144u,
@@ -97,6 +105,9 @@ int import_fixture_entry(void)
         return 21;
     if (NtNativeCancelSpecialApc(thread, retained) != STATUS_THREAD_IS_TERMINATING)
         return 22;
+    if (NtNativeQuerySpecialApc(thread, retained, &apc_state) != STATUS_OK ||
+        apc_state != 3u)
+        return 27;
     if (!CloseHandle(thread) || !CloseHandle(events[0]) ||
         !CloseHandle(events[1]))
         return 23;

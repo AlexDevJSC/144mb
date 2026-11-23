@@ -144,17 +144,38 @@ static bool owned_guest_scope(
     return true;
 }
 
+nt_status nt_supervisor_control_server_authorize_apc(
+    const struct nt_thread_broker_registered_peer *peer,
+    const struct nt_broker_thread_info *identity, uintptr_t callback)
+{
+    struct nt_supervisor_guest_scope scope = {0};
+    if (!callback || !owned_guest_scope(peer, identity, &scope))
+        return NT_STATUS_NOT_SUPPORTED;
+    /* The trusted parent acquired this executable inventory BEFORE
+     * forking the child. No guest-supplied image metadata or host
+     * pointer can expand it via the IPC request. */
+    bool executable = callback >= scope.code_begin &&
+                      callback < scope.code_end;
+    for (size_t i = 0; !executable &&
+         i < scope.additional_code_count; ++i)
+        executable = callback >= scope.additional_code[i].begin &&
+                     callback < scope.additional_code[i].end;
+    return executable ? NT_STATUS_SUCCESS : NT_STATUS_NOT_SUPPORTED;
+}
+
 static bool supported_flags(uint32_t flags, bool writing)
 {
     const uint32_t base = NT_SUP_CONTEXT_AMD64;
     const uint32_t readers = NT_SUP_CONTEXT_INTEGER |
         NT_SUP_CONTEXT_CONTROL | NT_SUP_CONTEXT_SEGMENTS |
-        NT_SUP_CONTEXT_FLOATING_POINT;
+        NT_SUP_CONTEXT_FLOATING_POINT | NT_SUP_CONTEXT_DEBUG_REGISTERS;
     /* Only kernel-verified INTEGER and legacy FXSAVE transactions,
      * independently or as one rollback-protected two-regset mutation.
      * CONTROL/SEGMENTS/DEBUG and variable XSTATE cannot be authorized. */
     if (writing)
-        return flags == (base | NT_SUP_CONTEXT_INTEGER) ||
+        return flags == (base | NT_SUP_CONTEXT_CONTROL) ||
+               flags == (base | NT_SUP_CONTEXT_DEBUG_REGISTERS) ||
+               flags == (base | NT_SUP_CONTEXT_INTEGER) ||
                flags == (base | NT_SUP_CONTEXT_FLOATING_POINT) ||
                flags == (base | NT_SUP_CONTEXT_INTEGER |
                                 NT_SUP_CONTEXT_FLOATING_POINT);

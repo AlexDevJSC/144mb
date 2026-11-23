@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include "compat.h"
 #include "sync.h"
+#include "thread_broker_ipc.h"
 #include "ntnative/guest_boundary_runtime.h"
 #include "nt_services.h"
 
@@ -146,6 +147,59 @@ static int NT_MS_ABI test_entry(void)
     if (nt_NtGetContextThread(thread, &native_context) != NT_STATUS_SUCCESS ||
         native_context.rip != context.rip || native_context.rsp != context.rsp)
         return 31;
+    /* This is a *protocol-only* fixture: the trusted parent owns the
+     * test's pinned instruction interval. START/DONE messages alone do
+     * NOT assert that a callback was actually executed by this C test.
+     * Verify the authenticated ledger against replay/misordered ACKs. */
+    struct nt_broker_thread_info apc_identity = {0};
+    uint64_t apc_cap = 0;
+    const uintptr_t callback_pc = (uintptr_t)native_context.rip;
+    if (!nt_runtime_supervisor_open_thread_handle(thread,
+            NT_BROKER_SUPERVISOR_SET_CONTEXT, &apc_identity, &apc_cap) ||
+        apc_identity.guest_thread_id != tid ||
+        nt_broker_client_supervisor_authorize_apc(
+            apc_cap, apc_identity.generation, callback_pc) != NT_STATUS_SUCCESS)
+        return 80;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation + 1, callback_pc, 1,
+            NT_APC_PHASE_START) != NT_STATUS_ACCESS_DENIED ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_DONE) != NT_STATUS_ACCESS_DENIED)
+        return 81;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_START) != NT_STATUS_SUCCESS)
+        return 82;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 2,
+            NT_APC_PHASE_START) != NT_STATUS_ACCESS_DENIED ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_START) != NT_STATUS_ACCESS_DENIED)
+        return 83;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_DONE) != NT_STATUS_SUCCESS ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_DONE) != NT_STATUS_ACCESS_DENIED ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_START) != NT_STATUS_ACCESS_DENIED)
+        return 84;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 2,
+            NT_APC_PHASE_START) != NT_STATUS_SUCCESS ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 2,
+            NT_APC_PHASE_ABORT) != NT_STATUS_SUCCESS ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 2,
+            NT_APC_PHASE_DONE) != NT_STATUS_ACCESS_DENIED ||
+        !nt_broker_client_supervisor_close(apc_cap))
+        return 85;
+
     _Alignas(16) struct nt_context64 integer = context;
     integer.flags = 0x100002u;
     const uint64_t rax = integer.rax;
@@ -239,8 +293,78 @@ static int NT_MS_ABI test_entry(void)
     combined.flags = 0x10001au; /* DEBUG|INTEGER|FP */
     if (nt_NtSetContextThread(thread, &combined) != NT_STATUS_NOT_SUPPORTED)
         return 56;
+    /* Real CONTROL subset: reversible CPU carry flag without changing
+     * RIP/RSP/RBP, selectors, IF or TF of this suspended owned guest.
+     * Read the actual kernel PRSTATUS after each authenticated RPC. */
+    _Alignas(16) struct nt_context64 control = {0};
+    control.flags = 0x100001u;
+    if (nt_NtGetContextThread(thread, &control) != NT_STATUS_SUCCESS)
+        return 57;
+    _Alignas(16) struct nt_context64 changed_control = control;
+    changed_control.eflags ^= 1u;
+    if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_SUCCESS)
+        return 58;
+    _Alignas(16) struct nt_context64 checked_control = {0};
+    checked_control.flags = 0x100001u;
+    if (nt_NtGetContextThread(thread, &checked_control) != NT_STATUS_SUCCESS ||
+        checked_control.eflags != changed_control.eflags ||
+        checked_control.rip != control.rip ||
+        checked_control.rsp != control.rsp)
+        return 59;
+    if (nt_NtSetContextThread(thread, &control) != NT_STATUS_SUCCESS)
+        return 60;
+    checked_control.flags = 0x100001u;
+    if (nt_NtGetContextThread(thread, &checked_control) != NT_STATUS_SUCCESS ||
+        checked_control.eflags != control.eflags)
+        return 61;
+    changed_control = control;
+    changed_control.rip += 1u; /* arbitrary PC rewrite is NOT trusted */
+    if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_NOT_SUPPORTED)
+        return 62;
+    changed_control = control;
+    changed_control.rsp -= 16u; /* no authenticated stack replacement */
+    if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_NOT_SUPPORTED)
+        return 63;
+    changed_control = control;
+    changed_control.eflags ^= 0x200u; /* IF is not guest-controlled */
+    if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_NOT_SUPPORTED)
+        return 64;
+
+    /* The parent can now read real DR0-DR3, DR6 and DR7, never zero
+     * placeholders. Changes to inactive address slots must round-trip
+     * through Linux PTRACE_POKEUSER/PEEKUSER while DR7 stays disabled. */
+    _Alignas(16) struct nt_context64 debug_before = {0};
+    debug_before.flags = 0x100010u;
+    if (nt_NtGetContextThread(thread, &debug_before) != NT_STATUS_SUCCESS ||
+        (debug_before.debug[5] & UINT64_C(0xff)) != 0)
+        return 65;
+    _Alignas(16) struct nt_context64 debug_changed = debug_before;
+    debug_changed.debug[0] = context.rip;
+    if (nt_NtSetContextThread(thread, &debug_changed) != NT_STATUS_SUCCESS)
+        return 66;
+    _Alignas(16) struct nt_context64 debug_observed = {0};
+    debug_observed.flags = 0x100010u;
+    if (nt_NtGetContextThread(thread, &debug_observed) != NT_STATUS_SUCCESS ||
+        memcmp(debug_observed.debug, debug_changed.debug,
+               sizeof(debug_before.debug)) != 0)
+        return 67;
+    if (nt_NtSetContextThread(thread, &debug_before) != NT_STATUS_SUCCESS)
+        return 68;
+    debug_observed.flags = 0x100010u;
+    if (nt_NtGetContextThread(thread, &debug_observed) != NT_STATUS_SUCCESS ||
+        memcmp(debug_observed.debug, debug_before.debug,
+               sizeof(debug_before.debug)) != 0)
+        return 69;
+    debug_changed = debug_before;
+    debug_changed.debug[5] ^= UINT64_C(1); /* active breakpoint is forbidden */
+    if (nt_NtSetContextThread(thread, &debug_changed) != NT_STATUS_NOT_SUPPORTED)
+        return 70;
+    debug_changed = debug_before;
+    debug_changed.debug[0] = (uint64_t)(uintptr_t)&debug_changed;
+    if (nt_NtSetContextThread(thread, &debug_changed) != NT_STATUS_NOT_SUPPORTED)
+        return 71;
     _Alignas(16) struct nt_context64 invalid = {0};
-    invalid.flags = 0x100010u; /* debug registers not yet supported */
+    invalid.flags = 0x100040u; /* variable CONTEXT_XSTATE not represented */
     if (nt_NtGetContextThread(thread, &invalid) != NT_STATUS_INVALID_PARAMETER)
         return 35;
     native_previous = UINT32_MAX;

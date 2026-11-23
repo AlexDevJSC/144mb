@@ -26,6 +26,7 @@
 #define NT_STATUS_SEMAPHORE_LIMIT_EXCEEDED ((nt_status)UINT32_C(0xc0000047))
 #define NT_STATUS_NOT_SUPPORTED ((nt_status)UINT32_C(0xc00000bb))
 #define NT_STATUS_NOT_FOUND ((nt_status)UINT32_C(0xc0000225))
+#define NT_STATUS_PENDING INT32_C(0x00000103)
 #define NT_STATUS_END_OF_FILE ((nt_status)UINT32_C(0xc0000011))
 
 struct nt_guest_unicode_string;
@@ -89,6 +90,12 @@ nt_status NT_MS_ABI nt_NtNativeQueueSpecialApc(uintptr_t thread,
     void (NT_MS_ABI *routine)(void *, void *, void *),
     void *context, void *first, void *second, uint64_t *ticket);
 nt_status NT_MS_ABI nt_NtNativeCancelSpecialApc(uintptr_t thread, uint64_t ticket);
+/* State 1=queued, 2=running, 3=completed, 4=cancelled-before-start,
+ * 5=completed-after-cancel-request, 6=aborted by target teardown.
+ * A running cancellation is cooperative: STATUS_PENDING, not success. */
+nt_status NT_MS_ABI nt_NtNativeQuerySpecialApc(
+    uintptr_t thread, uint64_t ticket, uint32_t *state);
+uint32_t NT_MS_ABI nt_NtNativeSpecialApcCancelRequested(void);
 nt_status NT_MS_ABI nt_NtAlertThread(uintptr_t thread);
 nt_status NT_MS_ABI nt_NtAlertResumeThread(uintptr_t thread, uint32_t *previous);
 nt_status NT_MS_ABI nt_NtTestAlert(void);

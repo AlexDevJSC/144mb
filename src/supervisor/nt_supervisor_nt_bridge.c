@@ -3,6 +3,7 @@
 #include "nt_supervisor_nt_bridge.h"
 #include <errno.h>
 #include <linux/elf.h>
+#include <stddef.h>
 #include <string.h>
 #include <sys/ptrace.h>
 #include <sys/uio.h>
@@ -74,6 +75,84 @@ static bool valid_context(const struct nt_context64 *context, uint32_t supported
            (flags & ~(NT_SUP_CONTEXT_AMD64 | supported)) == 0;
 }
 
+/* Read kernel DR0–DR3,DR6,DR7 only on a stopped authenticated
+ * guest. PEEKUSER requires the exact tracer-owned PID/TID; never trust
+ * guest-supplied Linux offsets or kernel register values. */
+static nt_status read_guest_debug_regs(struct nt_supervisor_nt_thread *state,
+                                       uint64_t out[6])
+{
+    static const unsigned debug_index[6] = {0, 1, 2, 3, 6, 7};
+    for (unsigned i = 0; i < 6; ++i) {
+        const uintptr_t offset = offsetof(struct user, u_debugreg[0]) +
+            debug_index[i] * sizeof(((struct user *)0)->u_debugreg[0]);
+        errno = 0;
+        const long observed = ptrace(PTRACE_PEEKUSER, state->tracer->tid,
+                                     (void *)offset, NULL);
+        if (errno != 0)
+            return translate_ptrace_error(errno);
+        out[i] = (uint64_t)(unsigned long)observed;
+    }
+    return NT_STATUS_SUCCESS;
+}
+
+/* Address-only DR0..DR3 writes while DR7 is disabled. No guest-triggered
+ * hardware watchpoints, global breakpoints, DR6 status mutation or host
+ * debugger interference. This does NOT implement full Windows DEBUG group
+ * write semantics. Any ambiguous write quarantines the pinned guest. */
+static nt_status set_inactive_guest_debug_addresses(
+    struct nt_supervisor_nt_thread *state, const struct nt_context64 *context)
+{
+    uint64_t before[6] = {0}, actual[6] = {0};
+    nt_status status = read_guest_debug_regs(state, before);
+    if (status != NT_STATUS_SUCCESS) return status;
+    if ((before[5] & UINT64_C(0xff)) != 0 ||
+        context->debug[5] != before[5] ||
+        context->debug[4] != before[4])
+        return NT_STATUS_NOT_SUPPORTED;
+    for (unsigned i = 0; i < 4; ++i) {
+        const uintptr_t pc = (uintptr_t)context->debug[i];
+        bool valid = pc == 0 ||
+            (pc >= state->scope.code_begin && pc < state->scope.code_end);
+        for (size_t j = 0; !valid &&
+             j < state->scope.additional_code_count; ++j)
+            valid = pc >= state->scope.additional_code[j].begin &&
+                    pc < state->scope.additional_code[j].end;
+        if (!valid) return NT_STATUS_NOT_SUPPORTED;
+    }
+    state->unsafe_register_state = true;
+    bool wrote = true;
+    for (unsigned i = 0; i < 4; ++i) {
+        const uintptr_t offset = offsetof(struct user, u_debugreg[0]) +
+                                 i * sizeof(((struct user *)0)->u_debugreg[0]);
+        if (ptrace(PTRACE_POKEUSER, state->tracer->tid, (void *)offset,
+                   (void *)(uintptr_t)context->debug[i]) == -1) {
+            wrote = false;
+            break;
+        }
+    }
+    const bool verified = wrote &&
+        read_guest_debug_regs(state, actual) == NT_STATUS_SUCCESS &&
+        memcmp(actual, context->debug, sizeof(actual)) == 0;
+    if (verified) {
+        state->unsafe_register_state = false;
+        return NT_STATUS_SUCCESS;
+    }
+    bool restored = true;
+    for (unsigned i = 0; i < 4; ++i) {
+        const uintptr_t offset = offsetof(struct user, u_debugreg[0]) +
+                                 i * sizeof(((struct user *)0)->u_debugreg[0]);
+        if (ptrace(PTRACE_POKEUSER, state->tracer->tid, (void *)offset,
+                   (void *)(uintptr_t)before[i]) == -1)
+            restored = false;
+    }
+    if (restored && read_guest_debug_regs(state, actual) == NT_STATUS_SUCCESS &&
+        memcmp(actual, before, sizeof(actual)) == 0)
+        state->unsafe_register_state = false;
+    else
+        state->tracer->compromised = true;
+    return NT_STATUS_NOT_SUPPORTED;
+}
+
 nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
                                        struct nt_context64 *context)
 {
@@ -84,7 +163,8 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
         return NT_STATUS_ACCESS_DENIED;
     const uint32_t supported = NT_SUP_CONTEXT_CONTROL |
                                NT_SUP_CONTEXT_INTEGER | NT_SUP_CONTEXT_SEGMENTS |
-                               NT_SUP_CONTEXT_FLOATING_POINT;
+                               NT_SUP_CONTEXT_FLOATING_POINT |
+                               NT_SUP_CONTEXT_DEBUG_REGISTERS;
     if (!valid_context(context, supported)) return NT_STATUS_INVALID_PARAMETER;
     if (state->suspend_count == 0) return NT_STATUS_NOT_SUPPORTED;
     struct user_regs_struct regs;
@@ -128,6 +208,12 @@ nt_status nt_supervisor_nt_get_context(struct nt_supervisor_nt_thread *state,
         snapshot.es = (uint16_t)regs.es;
         snapshot.fs = (uint16_t)regs.fs;
         snapshot.gs = (uint16_t)regs.gs;
+    }
+    if (flags & NT_SUP_CONTEXT_DEBUG_REGISTERS) {
+        const nt_status debug_status =
+            read_guest_debug_regs(state, snapshot.debug);
+        if (debug_status != NT_STATUS_SUCCESS)
+            return debug_status; /* never partially commit output */
     }
     if (flags & NT_SUP_CONTEXT_FLOATING_POINT) {
         /* Linux AMD64 NT_PRFPREG is a 512-byte FXSAVE-compatible image
@@ -340,6 +426,55 @@ static nt_status set_integer_fp_context(struct nt_supervisor_nt_thread *state,
     return NT_STATUS_NOT_SUPPORTED;
 }
 
+/* Bounded real CONTEXT_CONTROL write for a suspended, authenticated
+ * owned PE thread. A guest may change arithmetic condition codes but
+ * may NOT move RIP/RSP/RBP, selectors, IF, TF or privileged flags.
+ * Arbitrary control-flow rewrites lack a stack/unwind ownership proof
+ * and remain unsupported. The complete kernel PRSTATUS is verified. */
+static nt_status set_control_condition_flags(
+    struct nt_supervisor_nt_thread *state, const struct nt_context64 *context)
+{
+    struct user_regs_struct before = {0};
+    if (nt_supervisor_get_guest_context(state->tracer, &state->scope, &before))
+        return translate_ptrace_error(errno);
+    enum { CONDITION_MASK = 0x8d5u };
+    if (context->rip != before.rip || context->rsp != before.rsp ||
+        context->rbp != before.rbp || context->cs != (uint16_t)before.cs ||
+        context->ss != (uint16_t)before.ss ||
+        ((uint64_t)context->eflags & ~(uint64_t)CONDITION_MASK) !=
+        (before.eflags & ~(uint64_t)CONDITION_MASK))
+        return NT_STATUS_NOT_SUPPORTED;
+    struct user_regs_struct changed = before;
+    changed.eflags = (before.eflags & ~(uint64_t)CONDITION_MASK) |
+                     (context->eflags & CONDITION_MASK);
+    if (changed.eflags == before.eflags)
+        return NT_STATUS_SUCCESS;
+    state->unsafe_register_state = true;
+    struct iovec io = {.iov_base = &changed, .iov_len = sizeof(changed)};
+    const bool wrote = ptrace(PTRACE_SETREGSET, state->tracer->tid,
+        (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
+        io.iov_len == sizeof(changed);
+    struct user_regs_struct actual = {0};
+    const bool verified = wrote &&
+        nt_supervisor_get_registers(state->tracer, &actual) == 0 &&
+        memcmp(&actual, &changed, sizeof(changed)) == 0;
+    if (verified) {
+        state->unsafe_register_state = false;
+        return NT_STATUS_SUCCESS;
+    }
+    io = (struct iovec){.iov_base = &before, .iov_len = sizeof(before)};
+    const bool rolled_back = ptrace(PTRACE_SETREGSET, state->tracer->tid,
+        (void *)(uintptr_t)NT_PRSTATUS, &io) == 0 &&
+        io.iov_len == sizeof(before) &&
+        nt_supervisor_get_registers(state->tracer, &actual) == 0 &&
+        memcmp(&actual, &before, sizeof(before)) == 0;
+    if (rolled_back)
+        state->unsafe_register_state = false;
+    else
+        state->tracer->compromised = true;
+    return NT_STATUS_NOT_SUPPORTED;
+}
+
 nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
                                        const struct nt_context64 *context)
 {
@@ -348,13 +483,20 @@ nt_status nt_supervisor_nt_set_context(struct nt_supervisor_nt_thread *state,
         return NT_STATUS_THREAD_IS_TERMINATING;
     if (!has_right(state, NT_SUP_THREAD_SET_CONTEXT))
         return NT_STATUS_ACCESS_DENIED;
-    /* CONTROL / SEGMENTS / DEBUG / variable XSTATE remain unsupported.
-     * Allow exactly INTEGER, legacy FXSAVE, or their verified combination. */
-    if (!valid_context(context, NT_SUP_CONTEXT_INTEGER |
-                                NT_SUP_CONTEXT_FLOATING_POINT))
+    /* Arithmetic-only CONTROL, INTEGER and legacy FXSAVE are real
+     * bounded transactions. Other CONTROL changes, SEGMENTS, DEBUG
+     * and variable XSTATE still fail closed. */
+    if (!valid_context(context, NT_SUP_CONTEXT_CONTROL |
+                                NT_SUP_CONTEXT_INTEGER |
+                                NT_SUP_CONTEXT_FLOATING_POINT |
+                                NT_SUP_CONTEXT_DEBUG_REGISTERS))
         return NT_STATUS_NOT_SUPPORTED;
     if (state->suspend_count == 0) return NT_STATUS_NOT_SUPPORTED;
     const uint32_t groups = context->flags & ~NT_SUP_CONTEXT_AMD64;
+    if (groups == NT_SUP_CONTEXT_CONTROL)
+        return set_control_condition_flags(state, context);
+    if (groups == NT_SUP_CONTEXT_DEBUG_REGISTERS)
+        return set_inactive_guest_debug_addresses(state, context);
     if (groups == (NT_SUP_CONTEXT_INTEGER | NT_SUP_CONTEXT_FLOATING_POINT))
         return set_integer_fp_context(state, context);
     if (groups == NT_SUP_CONTEXT_FLOATING_POINT)

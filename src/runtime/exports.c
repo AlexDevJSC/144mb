@@ -261,6 +261,8 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(QueueApcThreadEx),
     EXPORT("NtNativeQueueSpecialApc", nt_NtNativeQueueSpecialApc),
     EXPORT("NtNativeCancelSpecialApc", nt_NtNativeCancelSpecialApc),
+    EXPORT("NtNativeQuerySpecialApc", nt_NtNativeQuerySpecialApc),
+    EXPORT("NtNativeSpecialApcCancelRequested", nt_NtNativeSpecialApcCancelRequested),
     NT_EXPORT(AlertThread),
     NT_EXPORT(AlertResumeThread),
     NT_EXPORT(TestAlert),

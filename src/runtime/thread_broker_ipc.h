@@ -1,15 +1,16 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef NTNATIVE_THREAD_BROKER_IPC_H
 #define NTNATIVE_THREAD_BROKER_IPC_H
-/* v4 private host protocol. It is NOT a Windows ABI or a guest-controlled
+/* v5 private host protocol. It is NOT a Windows ABI or a guest-controlled
  * ability to issue Linux syscalls. Every request checks kernel credentials,
  * registered pidfd and the session token. Thread mutations require a
  * separate explicit HOST-only control grant and verified guest scope. */
 #include "thread_broker_registry.h"
+#include "apc_parent_ledger.h"
 #include <stdbool.h>
 #include <stdint.h>
 
-enum { NT_BROKER_RPC_VERSION = 4, NT_BROKER_RPC_REGISTER = 1,
+enum { NT_BROKER_RPC_VERSION = 5, NT_BROKER_RPC_REGISTER = 1,
        NT_BROKER_RPC_UNREGISTER = 2, NT_BROKER_RPC_OPEN = 3,
        NT_BROKER_RPC_QUERY = 4, NT_BROKER_RPC_CLOSE = 5,
        NT_BROKER_RPC_SUP_OPEN = 6, NT_BROKER_RPC_SUP_QUERY = 7,
@@ -17,6 +18,7 @@ enum { NT_BROKER_RPC_VERSION = 4, NT_BROKER_RPC_REGISTER = 1,
        NT_BROKER_RPC_SUP_PROBE_GUEST = 10,
        NT_BROKER_RPC_SUP_SUSPEND = 11, NT_BROKER_RPC_SUP_RESUME = 12,
        NT_BROKER_RPC_SUP_GET_CONTEXT = 13, NT_BROKER_RPC_SUP_SET_CONTEXT = 14,
+       NT_BROKER_RPC_SUP_APC_AUTHORIZE = 15,
        NT_BROKER_SERVER_ENABLE_PTRACE_PROBE = 0x10000000u,
        NT_BROKER_SERVER_ENABLE_THREAD_CONTROL = 0x20000000u };
 struct nt_broker_rpc {
@@ -42,6 +44,17 @@ struct nt_broker_context_request {
 struct nt_broker_context_reply {
     struct nt_thread_broker_reply reply;
     struct nt_context64 context;
+};
+/* Private parent-owned APC authorization: callback and generation must
+ * come from a live, SET_CONTEXT-scoped supervisor lease. There are no
+ * raw host TIDs or guest-supplied stack pointers in this operation. */
+struct nt_broker_apc_request {
+    struct nt_broker_rpc request;
+    uint64_t generation;
+    uint64_t callback;
+    uint64_t ticket;
+    uint32_t phase; /* 0 authorize; 1 START; 2 DONE; 3 ABORT */
+    uint32_t reserved;
 };
 struct nt_broker_hello {
     uint32_t magic, version;
@@ -105,6 +118,16 @@ nt_status nt_broker_client_supervisor_get_context(uint64_t capability,
                                                    struct nt_context64 *context);
 nt_status nt_broker_client_supervisor_set_context(uint64_t capability,
                                                    const struct nt_context64 *context);
+/* Attests loader-pinned code + generation-pinned TEB in the parent.
+ * This is an authorization receipt, not a claim of ptrace delivery. */
+nt_status nt_broker_client_supervisor_authorize_apc(
+    uint64_t capability, uint64_t generation, uintptr_t callback);
+/* Parent-owned lifecycle acknowledgement. This requires an existing
+ * SET_CONTEXT lease for the exact generation, and does not grant ptrace
+ * execution or arbitrary callback stack ownership. */
+nt_status nt_broker_client_supervisor_apc_transition(
+    uint64_t capability, uint64_t generation, uintptr_t callback,
+    uint64_t ticket, uint32_t phase);
 bool nt_broker_client_supervisor_close(uint64_t capability);
 
 
