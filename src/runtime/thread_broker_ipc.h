@@ -51,6 +51,9 @@ struct nt_broker_apc_request {
     struct nt_broker_rpc request;
     uint64_t generation;
     uint64_t callback;
+    uint64_t ticket;
+    uint32_t phase; /* 0 authorize; 1 START; 2 DONE; 3 ABORT */
+    uint32_t reserved;
 };
 struct nt_broker_hello {
     uint32_t magic, version;
@@ -118,6 +121,12 @@ nt_status nt_broker_client_supervisor_set_context(uint64_t capability,
  * This is an authorization receipt, not a claim of ptrace delivery. */
 nt_status nt_broker_client_supervisor_authorize_apc(
     uint64_t capability, uint64_t generation, uintptr_t callback);
+/* Parent-owned lifecycle acknowledgement. This requires an existing
+ * SET_CONTEXT lease for the exact generation, and does not grant ptrace
+ * execution or arbitrary callback stack ownership. */
+nt_status nt_broker_client_supervisor_apc_transition(
+    uint64_t capability, uint64_t generation, uintptr_t callback,
+    uint64_t ticket, uint32_t phase);
 bool nt_broker_client_supervisor_close(uint64_t capability);
 
 
