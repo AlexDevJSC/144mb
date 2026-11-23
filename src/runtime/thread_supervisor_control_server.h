@@ -24,6 +24,12 @@ void nt_supervisor_control_server_destroy(
 void nt_supervisor_control_server_abort_unacked_context(
     struct nt_supervisor_control_server *,
     const struct nt_broker_thread_info *);
+/* For public API requests, authorize only a TEB-attached owned thread
+ * and an address in the parent's immutable PE loader code inventory.
+ * This helper never seizes or modifies a Linux thread. */
+nt_status nt_supervisor_control_server_authorize_apc(
+    const struct nt_thread_broker_registered_peer *peer,
+    const struct nt_broker_thread_info *identity, uintptr_t callback);
 nt_status nt_supervisor_control_server_call(
     struct nt_supervisor_control_server *,
     const struct nt_thread_broker_registered_peer *,
