@@ -9,12 +9,14 @@
 #include "winfile.h"
 #include "nt_services.h"
 #include "nt_acl_policy.h"
+#include "nt_acl_storage.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <linux/limits.h>
+#include <linux/openat2.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -25,6 +27,7 @@
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -39,7 +42,8 @@ enum { FS4_HELLO = 0, FS4_OPEN = 1, FS4_READ = 2, FS4_WRITE = 3,
        FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
        FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
        FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23,
-       FS4_HARDLINK=24, FS4_SECURITY_PATH=25, FS4_NATIVE_SECURITY=26, FS4_TIME_SET=27, FS4_INFO_GET=28, FS4_INFO_SET=29 };
+       FS4_HARDLINK=24, FS4_SECURITY_PATH=25, FS4_NATIVE_SECURITY=26, FS4_TIME_SET=27, FS4_INFO_GET=28, FS4_INFO_SET=29,
+       FS4_SECURITY_SET_PATH=30, FS4_SECURITY_SET_HANDLE=31 };
 struct fs4_request {
     uint32_t magic;
     uint16_t version, op;
@@ -57,7 +61,8 @@ struct fs4_reply {
 _Static_assert(sizeof(struct fs4_request) == 56, "FS4 request ABI");
 _Static_assert(sizeof(struct fs4_reply) == 32, "FS4 reply ABI");
 
-struct session_handle { uint64_t capability; uintptr_t native; bool search; };
+struct session_handle { uint64_t capability; uintptr_t native; bool search;
+                        uint32_t security_grants; };
 struct session { int socket_fd; const char *view; bool offline_test;
                  int root_fd; struct nt_acl_peer_token identity;
                  uint64_t nonce; struct session_handle entries[FS4_HANDLE_MAX]; };
@@ -169,7 +174,11 @@ static uint32_t acl_open_gate(struct session *s,const unsigned char *path,
                               size_t length,uint32_t desired,
                               uint32_t disposition)
 {
-    uint32_t required=desired&(UINT32_C(0xf0000000)|UINT32_C(0x000f0000));
+    /* Do not drop explicit FILE_READ_DATA / FILE_WRITE_DATA bits:
+     * otherwise a low-level NtCreateFile could bypass a managed DACL
+     * by avoiding GENERIC_READ/WRITE. */
+    uint32_t required=desired & (
+        UINT32_C(0xf0000000)|UINT32_C(0x000f0000)|UINT32_C(0x000001ff));
     if (!required)
         required=NT_ACL_READ_ATTR;
     if (!valid_path(path,length))
@@ -266,8 +275,17 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         result.error=acl_open_gate(s,payload,n,q->access,q->disposition);
         if (result.error!=NT_ERROR_SUCCESS)
             break;
-        const uintptr_t native = nt_CreateFileW(path, q->access, q->share, NULL,
-                                                 q->disposition, q->flags, 0);
+        /* The runtime's real FD opens with DATA rights only. Security
+         * rights exist exclusively as broker-side capability grants from
+         * acl_open_gate; the guest never gains Linux backing access. */
+        const uint32_t secure=q->access & UINT32_C(0x000e0000);
+        if (secure & NT_ACL_WRITE_OWNER) {
+            result.error=NT_ERROR_NOT_SUPPORTED;
+            break; /* no privilege model for owner replacement */
+        }
+        const uintptr_t native = nt_CreateFileW(
+            path,q->access & ~UINT32_C(0x000e0000),q->share,
+            NULL,q->disposition,q->flags,0);
         if (native == UINTPTR_MAX) {
             result.error = nt_GetLastError();
             break;
@@ -287,6 +305,10 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         free_slot->native = native;
         free_slot->capability = capability;
         free_slot->search = false;
+        free_slot->security_grants = secure |
+            ((q->access & (UINT32_C(0x80000000)|
+                            UINT32_C(0x10000000))) ?
+                           NT_ACL_READ_CONTROL : 0u);
         result.handle = capability;
         result.error = NT_ERROR_SUCCESS;
         break;
@@ -439,7 +461,9 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
             result.error=NT_ERROR_GEN_FAILURE;break;
         }
         free_slot->native=duplicate;free_slot->capability=cap;
-        free_slot->search=false;result.handle=cap;
+        free_slot->search=false;
+        free_slot->security_grants=slot->security_grants; /* SAME_ACCESS */
+        result.handle=cap;
         result.error=NT_ERROR_SUCCESS;break;
     }
     /* A bounded, read-only owner/group/DACL projection. The trusted
