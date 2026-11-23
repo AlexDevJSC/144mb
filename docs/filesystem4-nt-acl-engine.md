@@ -1,5 +1,15 @@
 # FileSystem4 — núcleo de seguridad NTFS nativo (prototipo)
 
+> **Actualización posterior, PR #214:** el motor añade GenericMapping
+> explícito para traducir derechos GENERIC_*, SID Unix sintéticos derivados
+> de un UID/GID que el llamador debe autenticar, generación de un descriptor
+> hijo self-relative con CREATOR_OWNER/GROUP y almacenamiento interno de
+> SD en un xattr con comprobación de inode. Véase
+> [contrato de la nueva fase](filesystem4-acl-descriptor-inheritance-20261119.md).
+> Este documento conserva el alcance original del evaluador: la política
+> todavía **no se aplica a todas las operaciones PE/FUSE** y el setter DACL
+> continúa sin habilitarse.
+
 Esta rama añade un evaluador de SECURITY_DESCRIPTOR_RELATIVE con ACL_REVISION
 2, SID binarios, ACE ACCESS_ALLOWED/ACCESS_DENIED, DACL nula o vacía y
 herencia explícita OI/CI/INHERIT_ONLY/NO_PROPAGATE. Las ACE se evalúan en su
