@@ -168,7 +168,7 @@ static bool supported_flags(uint32_t flags, bool writing)
     const uint32_t base = NT_SUP_CONTEXT_AMD64;
     const uint32_t readers = NT_SUP_CONTEXT_INTEGER |
         NT_SUP_CONTEXT_CONTROL | NT_SUP_CONTEXT_SEGMENTS |
-        NT_SUP_CONTEXT_FLOATING_POINT;
+        NT_SUP_CONTEXT_FLOATING_POINT | NT_SUP_CONTEXT_DEBUG_REGISTERS;
     /* Only kernel-verified INTEGER and legacy FXSAVE transactions,
      * independently or as one rollback-protected two-regset mutation.
      * CONTROL/SEGMENTS/DEBUG and variable XSTATE cannot be authorized. */
