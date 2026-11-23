@@ -510,6 +510,7 @@ void nt_broker_server_loop(int fd,
         case NT_BROKER_RPC_UNREGISTER:
             if (request.access == 0 && request.capability == 0) {
                 nt_supervisor_control_server_revoke_tid(control, request.thread_id);
+                nt_apc_parent_revoke_thread(&apc_ledger, request.thread_id);
                 nt_broker_unregister_guest_thread(requester,
                                                  (pid_t)request.thread_id);
                 response.status = 0;
