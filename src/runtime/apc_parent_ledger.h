@@ -26,6 +26,20 @@ struct nt_apc_parent_ledger {
     struct nt_apc_parent_thread threads[NT_APC_PARENT_THREADS];
 };
 
+/* Authenticated UNREGISTER/child session revocation invalidates even a
+ * callback that vanished mid-flight. Never reuse its generation as proof
+ * of completion; further messages require a fresh broker lease. */
+static inline void nt_apc_parent_revoke_thread(
+    struct nt_apc_parent_ledger *ledger, uint32_t thread_id)
+{
+    if (!ledger || !thread_id) return;
+    for (unsigned i = 0; i < NT_APC_PARENT_THREADS; ++i) {
+        struct nt_apc_parent_thread *slot = &ledger->threads[i];
+        if (slot->thread_id == thread_id)
+            *slot = (struct nt_apc_parent_thread){0};
+    }
+}
+
 static inline bool nt_apc_parent_transition(
     struct nt_apc_parent_ledger *ledger,
     uint32_t thread_id, uint64_t generation,
