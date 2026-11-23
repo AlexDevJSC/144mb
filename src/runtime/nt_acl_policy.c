@@ -72,10 +72,15 @@ int nt_acl_peer_token_init(struct nt_acl_peer_token *out,
             }
         }
         if (duplicate<next) {
-            /* Do not turn a deny-only SID into an allow SID by aliasing
-             * a supplementary group with primary or an earlier group. */
-            if (deny_only && deny_only[i])
-                out->token.sid_flags[duplicate]=NT_ACL_SID_DENY_ONLY;
+            /* A duplicate group must not silently change an authenticated
+             * primary/earlier group from enabled to deny-only (or vice
+             * versa). Conflicting attributes have no canonical identity. */
+            const uint8_t flag=deny_only ? deny_only[i] : 0u;
+            if (out->token.sid_flags[duplicate]!=flag) {
+                errno=EINVAL;
+                memset(out,0,sizeof(*out));
+                return -1;
+            }
             continue;
         }
         if (next>=31) {
