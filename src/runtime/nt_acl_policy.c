@@ -181,6 +181,58 @@ int nt_acl_policy_check_fd(int fd,const struct nt_acl_peer_token *peer,
     return NT_ACL_POLICY_ERROR;
 }
 
+int nt_acl_policy_set_dacl_fd(int fd,const struct nt_acl_peer_token *peer,
+                              const uint8_t *input,size_t input_bytes)
+{
+    if (fd<0 || !peer || peer->token.count<3 ||
+        !peer->token.sid[0] || !peer->token.sid[1] ||
+        !input || input_bytes<28 || input_bytes>NT_ACL_SD_MAX_BYTES) {
+        errno=EINVAL;
+        return NT_ACL_POLICY_ERROR;
+    }
+    /* Permission validation and writing MUST be under one caller-owned WAL.
+     * This helper does not claim to start or release the global lock. */
+    const int grant=nt_acl_policy_check_fd(
+        fd,peer,NT_ACL_WRITE_DAC,&nt_acl_file_generic_mapping);
+    if (grant!=NT_ACL_POLICY_ALLOWED && grant!=NT_ACL_POLICY_ABSENT)
+        return grant;
+    uint8_t *existing=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!existing) {errno=ENOMEM;return NT_ACL_POLICY_ERROR;}
+    size_t old_bytes=0;
+    int read=nt_acl_storage_read_fd(fd,existing,NT_ACL_SD_MAX_BYTES,&old_bytes);
+    if (read!=NT_ACL_STORAGE_PRESENT && read!=NT_ACL_STORAGE_ABSENT) {
+        int error=errno;
+        free(existing);
+        errno=error ? error : EUCLEAN;
+        return NT_ACL_POLICY_ERROR;
+    }
+    uint8_t *out=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!out) {free(existing);errno=ENOMEM;return NT_ACL_POLICY_ERROR;}
+    size_t needed=0;
+    const int state=nt_acl_replace_dacl(
+        read==NT_ACL_STORAGE_PRESENT ? existing : NULL,
+        read==NT_ACL_STORAGE_PRESENT ? old_bytes : 0,
+        input,input_bytes,
+        peer->token.sid[0],peer->token.length[0],
+        peer->token.sid[1],peer->token.length[1],
+        out,NT_ACL_SD_MAX_BYTES,&needed);
+    free(existing);
+    if (state!=NT_ACL_ALLOWED || needed>NT_ACL_SD_MAX_BYTES) {
+        free(out);
+        errno=state==NT_ACL_DENIED ? ERANGE :
+              state==NT_ACL_UNSUPPORTED ? ENOTSUP : EINVAL;
+        return NT_ACL_POLICY_ERROR;
+    }
+    const bool committed=nt_acl_storage_write_trusted_fd(fd,out,needed);
+    const int error=errno;
+    free(out);
+    if (!committed) {
+        errno=error ? error : EIO;
+        return NT_ACL_POLICY_ERROR;
+    }
+    return NT_ACL_POLICY_ALLOWED;
+}
+
 static int confined_policy_fd(int root_fd,const char *path,bool parent)
 {
     if (!path || root_fd<0) {errno=EINVAL;return -1;}
