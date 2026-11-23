@@ -1019,8 +1019,13 @@ nt_status nt_broker_client_supervisor_authorize_apc(
             receive_exact_reply(client_socket, &reply, sizeof(reply), 4000);
         const bool canceled = finish_client_rpc_locked();
         if (!received || canceled || reply.magic != NT_THREAD_BROKER_MAGIC ||
-            reply.process_id != (uint32_t)getpid() ||
-            reply.thread_id == 0 || reply.generation != generation) {
+            reply.process_id != (uint32_t)getpid()) {
+            abandon_client_session_locked();
+        } else if (reply.status == (uint32_t)NT_STATUS_SUCCESS &&
+                   (reply.thread_id == 0 || reply.generation != generation)) {
+            /* A claimed successful admission must match the exact
+             * generation. A genuine ACCESS_DENIED on stale generation,
+             * however, is NOT a broken transport session. */
             abandon_client_session_locked();
         } else {
             result = (nt_status)reply.status;
