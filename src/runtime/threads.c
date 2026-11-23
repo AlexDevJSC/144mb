@@ -591,12 +591,18 @@ void nt_runtime_special_apc_checkpoint(void)
         if (!apc)
             break;
         const bool start_ack = special_apc_parent_receipt(apc);
-        current_ticketed_special_apc = start_ack && apc->cancellation_ticket ?
+        pthread_mutex_lock(&wait_lock);
+        /* A canceler can win the race while START authentication is
+         * blocking on IPC. No PE callback has run yet, so cancel now
+         * rather than allowing a stale dequeued request to execute. */
+        const bool cancelled_before_entry = apc->cancellation_requested;
+        pthread_mutex_unlock(&wait_lock);
+        current_ticketed_special_apc =
+            start_ack && !cancelled_before_entry && apc->cancellation_ticket ?
             apc : NULL;
-        /* Never execute an unacknowledged callback. A broker disconnect
-         * after admission invalidates the parent generation and blocks
-         * even a callback that was already dequeued. */
-        if (start_ack) {
+        /* Never execute an unacknowledged or already-cancelled callback.
+         * A broker disconnect after admission invalidates its generation. */
+        if (start_ack && !cancelled_before_entry) {
             if (apc->native)
                 apc->native((void *)apc->first,
                             (void *)apc->second, (void *)apc->third);
@@ -604,11 +610,13 @@ void nt_runtime_special_apc_checkpoint(void)
                 apc->user(apc->first);
         }
         current_ticketed_special_apc = NULL;
-        const bool return_ack = start_ack && special_apc_parent_receipt(apc);
+        const bool return_ack = start_ack &&
+            (cancelled_before_entry || special_apc_parent_receipt(apc));
         pthread_mutex_lock(&wait_lock);
         if (queue->executing == apc) {
             record_apc_receipt_locked(queue, apc->cancellation_ticket,
                 !return_ack ? APC_STATE_ABORTED :
+                cancelled_before_entry ? APC_STATE_CANCELLED :
                 apc->cancellation_requested ?
                 APC_STATE_COMPLETED_AFTER_REQUEST : APC_STATE_COMPLETED);
             queue->executing = NULL;
