@@ -44,6 +44,17 @@ int nt_acl_access_check_mapped(const uint8_t *sd, size_t bytes,
  * header). No writes to filesystem; never accept a malformed SD to xattr. */
 int nt_acl_validate_descriptor(const uint8_t *sd, size_t bytes);
 
+/* DACL_SECURITY_INFORMATION=4 only. Merge a bounded self-relative
+ * incoming DACL with immutable owner/group from existing SD; if the
+ * inode was unmanaged, bootstrap owner/group from TRUSTED peer token.
+ * Refuses NULL DACL, SACL, unsupported ACEs and partial/aliased outputs.
+ * No filesystem side effects: the caller MUST check WRITE_DAC under WAL. */
+int nt_acl_replace_dacl(const uint8_t *existing, size_t existing_bytes,
+                        const uint8_t *incoming, size_t incoming_bytes,
+                        const uint8_t *trusted_owner, size_t owner_bytes,
+                        const uint8_t *trusted_group, size_t group_bytes,
+                        uint8_t *out, size_t capacity, size_t *needed);
+
 /* Return only the requested OWNER=1, GROUP=2 and DACL=4 sections of an
  * already-validated self-relative descriptor, preserving DACL control bits.
  * No SACL or unsupported SECURITY_INFORMATION values; no silent omission.
