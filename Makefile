@@ -1120,6 +1120,17 @@ check-pe-special-apc-lifecycle: $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/speci
 	SDL_VIDEODRIVER=offscreen SDL_FRAMEBUFFER_ACCELERATION=0 timeout 20s \
 	    $(BUILD_DIR)/pe-external-host $(BUILD_DIR)/special-apc-lifecycle-fixture.exe
 
+# Parent-owned START/DONE/ABORT ledger: synthetic replay tests run
+# independently of the PE callback and without any ptrace privileges.
+$(BUILD_DIR)/apc-parent-ledger-test: tests/apc_parent_ledger_test.c src/runtime/apc_parent_ledger.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/runtime $(WARN_CFLAGS) $(CFLAGS) $(LDFLAGS) tests/apc_parent_ledger_test.c -o "$@"
+
+.PHONY: check-apc-parent-ledger
+check-apc-parent-ledger: $(BUILD_DIR)/apc-parent-ledger-test
+	timeout 10s $(BUILD_DIR)/apc-parent-ledger-test
+
+check: check-apc-parent-ledger
+
 # A genuine PE busy loop contains no import, wait or yield in the
 # interval between entering the loop and handling a remote special APC.
 # Its kernel signal path is independent of the import-return checkpoint.
