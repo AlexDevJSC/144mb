@@ -69,6 +69,25 @@ static int NT_MS_ABI test_guest_entry(void)
                NT_BROKER_SUPERVISOR_GET_CONTEXT, &queried) ||
         queried.generation != identity.generation)
         return 14;
+    /* A valid parent lease may not authorize a mismatched-generation
+     * APC, and a denial must not tear down the authenticated channel.
+     * The test host intentionally supplies no executable PE callback,
+     * so only negative authorizations are meaningful in this fixture. */
+    struct nt_broker_thread_info apc_identity = {0};
+    uint64_t apc_cap = 0;
+    if (!nt_runtime_supervisor_open_thread_handle(thread,
+            NT_BROKER_SUPERVISOR_SET_CONTEXT, &apc_identity, &apc_cap))
+        return 19;
+    if (nt_broker_client_supervisor_authorize_apc(apc_cap,
+            apc_identity.generation + 1, UINT64_C(0x140001000)) !=
+            NT_STATUS_ACCESS_DENIED ||
+        nt_broker_client_supervisor_authorize_apc(apc_cap,
+            apc_identity.generation, 0) != NT_STATUS_INVALID_PARAMETER ||
+        !nt_broker_client_supervisor_query(apc_cap,
+            NT_BROKER_SUPERVISOR_SET_CONTEXT, &queried) ||
+        queried.generation != apc_identity.generation ||
+        !nt_broker_client_supervisor_close(apc_cap))
+        return 20; /* negative auth must not revoke other live leases */
     uint64_t rip = UINT64_C(0x5151);
     if (nt_broker_client_supervisor_probe(capability, &rip) ||
         rip != UINT64_C(0x5151))
