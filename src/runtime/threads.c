@@ -3467,7 +3467,8 @@ nt_status NT_MS_ABI nt_NtAlertResumeThread(uintptr_t handle, uint32_t *previous)
  * ability to stop arbitrary PE instructions still require a separate safe
  * context-restoration mechanism. Win32 and native NTSTATUS share rights
  * checks, but only Win32 modifies LastError. */
-enum { CONTEXT_AMD64 = 0x100000, CONTEXT_CORE_GROUPS = 0x0f };
+enum { CONTEXT_AMD64 = 0x100000, CONTEXT_CORE_GROUPS = 0x1f,
+       CONTEXT_DEBUG_GROUP = 0x10 };
 
 static nt_status get_guest_thread_context(uintptr_t handle, struct nt_context64 *output)
 {
@@ -3516,6 +3517,8 @@ static nt_status get_guest_thread_context(uintptr_t handle, struct nt_context64 
         else if (!state->cooperative_pause_acknowledged ||
                  !state->cooperative_context_valid || state->suspend_count == 0)
             result = NT_STATUS_NOT_SUPPORTED;
+        else if (requested & CONTEXT_DEBUG_GROUP)
+            result = NT_STATUS_NOT_SUPPORTED; /* no kernel DRs in software capture */
         else {
             /* Groups requested by the caller are the only supported x64
              * groups (control, integer, segments, legacy floating point).
