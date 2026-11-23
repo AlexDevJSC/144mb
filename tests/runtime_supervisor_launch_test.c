@@ -5,6 +5,7 @@
 #include "compat.h"
 #include "sync.h"
 #include "thread_broker_ipc.h"
+#include "nt_services.h"
 
 #include <sched.h>
 #include <stdatomic.h>
