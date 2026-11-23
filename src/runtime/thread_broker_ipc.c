@@ -297,7 +297,8 @@ static bool wait_for_authenticated_request(int fd,
 
 static bool receive_authenticated_rpc(int fd,
     const struct nt_thread_broker_registered_peer *peer,
-    struct nt_broker_context_request *out, bool *has_context)
+    struct nt_broker_context_request *out, bool *has_context,
+    bool *has_apc)
 {
     if (!live_child(peer) || !fd_seqpacket(fd))
         return false;
@@ -318,10 +319,14 @@ static bool receive_authenticated_rpc(int fd,
     };
     const ssize_t read_bytes = recvmsg(fd, &message, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
     const bool extended = read_bytes == (ssize_t)sizeof(packet);
+    const bool apc_frame =
+        read_bytes == (ssize_t)sizeof(struct nt_broker_apc_request);
     const struct nt_broker_rpc request = packet.request;
-    if ((read_bytes != (ssize_t)sizeof(request) && !extended) ||
+    if ((read_bytes != (ssize_t)sizeof(request) && !extended && !apc_frame) ||
         (extended && request.operation != NT_BROKER_RPC_SUP_SET_CONTEXT) ||
+        (apc_frame && request.operation != NT_BROKER_RPC_SUP_APC_AUTHORIZE) ||
         (!extended && request.operation == NT_BROKER_RPC_SUP_SET_CONTEXT) ||
+        (!apc_frame && request.operation == NT_BROKER_RPC_SUP_APC_AUTHORIZE) ||
         (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0)
         return false;
     unsigned credential_count = 0;
@@ -347,6 +352,7 @@ static bool receive_authenticated_rpc(int fd,
         return false;
     *out = packet;
     *has_context = extended;
+    *has_apc = apc_frame;
     return true;
 }
 
@@ -465,8 +471,9 @@ void nt_broker_server_loop(int fd,
         if (available < 0 || !(active.revents & POLLIN))
             break;
         struct nt_broker_context_request authenticated = {0};
-        bool has_context = false;
-        if (!receive_authenticated_rpc(fd, peer, &authenticated, &has_context))
+        bool has_context = false, has_apc = false;
+        if (!receive_authenticated_rpc(fd, peer, &authenticated,
+                                       &has_context, &has_apc))
             break; /* Fail closed on disconnect, bad protocol or impersonation. */
         const struct nt_broker_rpc request = authenticated.request;
         struct nt_thread_broker_reply response = {
@@ -475,7 +482,7 @@ void nt_broker_server_loop(int fd,
              * capability, never a positive value that Windows might
              * interpret as success or an information-level status. */
             .status = request.operation >= NT_BROKER_RPC_SUP_SUSPEND &&
-                      request.operation <= NT_BROKER_RPC_SUP_SET_CONTEXT ?
+                      request.operation <= NT_BROKER_RPC_SUP_APC_AUTHORIZE ?
                       (uint32_t)NT_STATUS_ACCESS_DENIED : 1u
         };
         /* GET_CONTEXT replies are extended even on authorization or
@@ -602,6 +609,25 @@ void nt_broker_server_loop(int fd,
                 }
             }
             break;
+        case NT_BROKER_RPC_SUP_APC_AUTHORIZE: {
+            const struct nt_broker_apc_request *apc =
+                (const struct nt_broker_apc_request *)(const void *)&authenticated;
+            if (!has_apc || request.thread_id != 0 || request.access != 0 ||
+                apc->generation == 0 || apc->callback == 0 ||
+                !nt_broker_supervisor_query_owned(requester, request.capability,
+                    NT_BROKER_SUPERVISOR_SET_CONTEXT, &info))
+                break;
+            response.process_id = info.guest_process_id;
+            response.thread_id = info.guest_thread_id;
+            response.generation = info.generation;
+            if (info.generation != apc->generation) {
+                response.status = (uint32_t)NT_STATUS_ACCESS_DENIED;
+                break;
+            }
+            response.status = (uint32_t)nt_supervisor_control_server_authorize_apc(
+                peer, &info, (uintptr_t)apc->callback);
+            break;
+        }
         case NT_BROKER_RPC_SUP_SUSPEND:
         case NT_BROKER_RPC_SUP_RESUME:
         case NT_BROKER_RPC_SUP_GET_CONTEXT:
@@ -968,6 +994,42 @@ nt_status nt_broker_client_supervisor_set_context(uint64_t cap,
     if (!context) return NT_STATUS_INVALID_PARAMETER;
     return control_rpc(NT_BROKER_RPC_SUP_SET_CONTEXT, cap, 0, context, NULL, NULL);
 }
+nt_status nt_broker_client_supervisor_authorize_apc(
+    uint64_t capability, uint64_t generation, uintptr_t callback)
+{
+    if (capability == 0 || generation == 0 || callback == 0)
+        return NT_STATUS_INVALID_PARAMETER;
+    pthread_mutex_lock(&client_lock);
+    nt_status result = NT_STATUS_NOT_SUPPORTED;
+    if (client_socket >= 0) {
+        struct nt_broker_apc_request request = {0};
+        request.request = (struct nt_broker_rpc){
+            .magic = NT_THREAD_BROKER_MAGIC,
+            .version = NT_BROKER_RPC_VERSION,
+            .operation = NT_BROKER_RPC_SUP_APC_AUTHORIZE,
+            .capability = capability
+        };
+        memcpy(request.request.secret, client_secret, sizeof(client_secret));
+        request.generation = generation;
+        request.callback = (uint64_t)callback;
+        begin_client_rpc_locked();
+        struct nt_thread_broker_reply reply = {0};
+        const bool received =
+            send_packet(client_socket, &request, sizeof(request)) &&
+            receive_exact_reply(client_socket, &reply, sizeof(reply), 4000);
+        const bool canceled = finish_client_rpc_locked();
+        if (!received || canceled || reply.magic != NT_THREAD_BROKER_MAGIC ||
+            reply.process_id != (uint32_t)getpid() ||
+            reply.thread_id == 0 || reply.generation != generation) {
+            abandon_client_session_locked();
+        } else {
+            result = (nt_status)reply.status;
+        }
+    }
+    pthread_mutex_unlock(&client_lock);
+    return result;
+}
+
 bool nt_broker_client_supervisor_close(uint64_t capability)
 {
     return capability != 0 &&
