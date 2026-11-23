@@ -30,6 +30,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/xattr.h>
 #include <termios.h>
 #include <time.h>
@@ -5533,6 +5534,121 @@ static int32_t security_descriptor_from_fd(int fd, uint32_t information,
     }
     memcpy(descriptor, bytes, total);
     return 1;
+}
+
+/* SetFileSecurity has no descriptor size parameter. Use Linux's safe
+ * same-process read syscall to copy only the self-relative components we
+ * have verified to be bounded. A bad PE pointer cannot SIGSEGV the
+ * storage service, and a guest never controls its own token identity. */
+static bool security_guest_copy(const void *guest,size_t offset,
+                                void *destination,size_t length)
+{
+    if (!guest || (uintptr_t)guest>UINTPTR_MAX-offset ||
+        (uintptr_t)guest+offset>UINTPTR_MAX-length)
+        return false;
+    struct iovec local={.iov_base=destination,.iov_len=length};
+    struct iovec remote={.iov_base=(void *)((uintptr_t)guest+offset),
+                         .iov_len=length};
+    return syscall(SYS_process_vm_readv,getpid(),&local,1,
+                   &remote,1,0)==(ssize_t)length;
+}
+static uint32_t security_get32(const uint8_t *p)
+{
+    return (uint32_t)p[0]|((uint32_t)p[1]<<8)|
+           ((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
+}
+static bool security_copy_guest_descriptor(const void *guest,
+                                           uint8_t out[2048],
+                                           uint32_t *used)
+{
+    uint8_t header[20]={0};
+    if (!used || !security_guest_copy(guest,0,header,sizeof(header)) ||
+        header[0]!=1 || header[1]!=0 ||
+        (header[3]&0x80u)==0 ||
+        (header[2]&4u)==0 || (header[2]&0x10u)!=0 ||
+        security_get32(header+12)!=0)
+        return false;
+    size_t max=20;
+    for (int i=0;i<3;i++) {
+        const uint32_t offset=security_get32(
+            header+(i==2 ? 16 : 4+i*4));
+        if (!offset) {
+            if (i==2) return false; /* NULL DACL */
+            continue;
+        }
+        if (offset<20 || offset>2040 || (offset&3u))
+            return false;
+        uint8_t mini[8]={0};
+        if (!security_guest_copy(guest,offset,mini,sizeof(mini)))
+            return false;
+        size_t needed=0;
+        if (i==2) {
+            needed=(size_t)mini[2]|((size_t)mini[3]<<8);
+            if (mini[0]!=2 || needed<8)
+                return false;
+        } else {
+            if (mini[0]!=1 || mini[1]>15)
+                return false;
+            needed=8u+(size_t)mini[1]*4u;
+        }
+        if (needed>2048-offset)
+            return false;
+        if (max<offset+needed)
+            max=offset+needed;
+    }
+    if (!security_guest_copy(guest,0,out,max) ||
+        nt_acl_validate_descriptor(out,max)!=NT_ACL_ALLOWED)
+        return false;
+    *used=(uint32_t)max;
+    return true;
+}
+
+int32_t NT_MS_ABI nt_SetFileSecurityW(const uint16_t *name,
+                                      uint32_t information,
+                                      const void *descriptor)
+{
+    if (information!=4) {
+        nt_SetLastError((information&8u) ? NT_ERROR_ACCESS_DENIED :
+                       NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (!nt_fs4_remote_mode()) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0; /* no ambient UID-based local setter */
+    }
+    uint8_t sd[2048]={0};
+    uint32_t size=0;
+    if (!security_copy_guest_descriptor(descriptor,sd,&size)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    char path[PATH_MAX];
+    return wide_path(name,path) &&
+           nt_fs4_remote_set_security(path,information,sd,size);
+}
+
+int32_t NT_MS_ABI nt_SetFileSecurityA(const char *name,
+                                      uint32_t information,
+                                      const void *descriptor)
+{
+    uint16_t wide[PATH_MAX];
+    return file_ansi_to_wide(name,wide) &&
+           nt_SetFileSecurityW(wide,information,descriptor);
+}
+
+nt_status NT_MS_ABI nt_NtSetSecurityObject(uintptr_t handle,
+                                            uint32_t information,
+                                            const void *descriptor)
+{
+    if (information!=4)
+        return NT_STATUS_NOT_SUPPORTED;
+    if (!nt_fs4_remote_handle(handle))
+        return NT_STATUS_NOT_SUPPORTED;
+    uint8_t sd[2048]={0};
+    uint32_t size=0;
+    if (!security_copy_guest_descriptor(descriptor,sd,&size))
+        return NT_STATUS_INVALID_PARAMETER;
+    return nt_fs4_remote_native_set_security(handle,information,sd,size);
 }
 
 int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information,
