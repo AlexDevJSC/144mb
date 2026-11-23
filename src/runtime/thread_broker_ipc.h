@@ -6,6 +6,7 @@
  * registered pidfd and the session token. Thread mutations require a
  * separate explicit HOST-only control grant and verified guest scope. */
 #include "thread_broker_registry.h"
+#include "apc_parent_ledger.h"
 #include <stdbool.h>
 #include <stdint.h>
 
