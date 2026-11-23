@@ -49,8 +49,11 @@ struct guest_apc {
     guest_user_apc user;
     guest_native_apc native;
     uintptr_t first, second, third;
-    /* Nonzero only for explicitly cancellable NTNative special APCs. */
+    /* Public tickets are only for NtNativeQueueSpecialApc. All special
+     * callbacks have a separate monotonic internal parent ledger token;
+     * QueueUserAPC2 must not evict ticketed completion receipts. */
     uint64_t cancellation_ticket;
+    uint64_t dispatch_ticket;
     bool cancellation_requested;
     /* Captured only from authenticated, parent-issued thread generation.
      * Zero means the trusted runtime ran without a parent broker. */
@@ -520,7 +523,7 @@ static bool special_apc_parent_receipt(struct guest_apc *apc,
         identity.generation == apc->parent_generation &&
         nt_broker_client_supervisor_apc_transition(
             capability, identity.generation, callback,
-            apc->cancellation_ticket, phase) == NT_STATUS_SUCCESS;
+            apc->dispatch_ticket, phase) == NT_STATUS_SUCCESS;
     if (!nt_broker_client_supervisor_close(capability))
         okay = false;
     return okay;
@@ -770,9 +773,11 @@ static nt_status queue_apc_common(uintptr_t handle,
                  * START/DONE ledger. Only the opt-in NTNATIVE extension
                  * returns this token as an application-visible ticket. */
                 if (special) {
-                    apc->cancellation_ticket = next_special_apc_ticket++;
-                    if (ticket_out)
+                    apc->dispatch_ticket = next_special_apc_ticket++;
+                    if (ticket_out) {
+                        apc->cancellation_ticket = apc->dispatch_ticket;
                         *ticket_out = apc->cancellation_ticket;
+                    }
                 }
                 if (queue->tail != NULL)
                     queue->tail->next = apc;
