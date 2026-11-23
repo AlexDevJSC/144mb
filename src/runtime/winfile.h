@@ -28,6 +28,11 @@ int nt_runtime_begin_namespace_mutation(const char *path);
 /* Trusted storage broker only: pin an existing Win32 file HANDLE to its
  * exact Linux inode and copy its normalized DOS path for WAL admission.
  * Never exported to a guest DLL. The caller owns the returned dup FD. */
+/* Trusted staging path. Takes ownership of BOTH descriptors only
+ * after success; caller retains ownership on failure. The inode already
+ * carries inherited DACL and durable share lease before name publication. */
+uintptr_t nt_runtime_fs4_adopt_preleased_file(int fd,int lease,
+                const char *dos_path,uint32_t desired,uint32_t share);
 int nt_runtime_fs4_pin_security_handle(uintptr_t handle,
                                        char *path, size_t capacity);
 int32_t nt_runtime_fs4_query_security_handle(uintptr_t handle,
