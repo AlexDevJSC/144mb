@@ -25,6 +25,19 @@ bool nt_runtime_namespace_mutation_admissible(const char *path);
  * makes a FUSE POSIX mutation atomic with respect to cooperative renames.
  * It does NOT journal an interrupted direct create/mkdir/truncate. */
 int nt_runtime_begin_namespace_mutation(const char *path);
+/* Trusted storage broker only: pin an existing Win32 file HANDLE to its
+ * exact Linux inode and copy its normalized DOS path for WAL admission.
+ * Never exported to a guest DLL. The caller owns the returned dup FD. */
+/* Trusted staging path. Takes ownership of BOTH descriptors only
+ * after success; caller retains ownership on failure. The inode already
+ * carries inherited DACL and durable share lease before name publication. */
+uintptr_t nt_runtime_fs4_adopt_preleased_file(int fd,int lease,
+                const char *dos_path,uint32_t desired,uint32_t share);
+int nt_runtime_fs4_pin_security_handle(uintptr_t handle,
+                                       char *path, size_t capacity);
+int32_t nt_runtime_fs4_query_security_handle(uintptr_t handle,
+                  uint32_t information,void *descriptor,uint32_t size,
+                  uint32_t *needed);
 void nt_runtime_end_namespace_mutation(int guard);
 bool nt_runtime_refresh_dos83_path(const char *path);
 bool nt_runtime_reconcile_host_rename(const char *old_path, const char *new_path);
@@ -131,6 +144,13 @@ int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information
                                       void *descriptor, uint32_t size, uint32_t *needed);
 int32_t NT_MS_ABI nt_GetFileSecurityA(const char *name, uint32_t information,
                                       void *descriptor, uint32_t size, uint32_t *needed);
+int32_t NT_MS_ABI nt_SetFileSecurityW(const uint16_t *name,uint32_t information,
+                                      const void *descriptor);
+int32_t NT_MS_ABI nt_SetFileSecurityA(const char *name,uint32_t information,
+                                      const void *descriptor);
+int32_t NT_MS_ABI nt_NtSetSecurityObject(uintptr_t handle,
+                                            uint32_t information,
+                                            const void *descriptor);
 uint32_t NT_MS_ABI nt_GetLogicalDrives(void);
 uint32_t NT_MS_ABI nt_GetDriveTypeW(const uint16_t *root);
 uint32_t NT_MS_ABI nt_GetCurrentDirectoryW(uint32_t size, uint16_t *buffer);

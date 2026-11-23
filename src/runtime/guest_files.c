@@ -5,6 +5,8 @@
 #include "winbase.h"
 #include "winfile.h"
 #include "fs4_remote.h"
+#include "nt_acl_engine.h"
+#include "nt_acl_storage.h"
 #include "section_memory.h"
 #include "sync.h"
 #include "user_folders.h"
@@ -28,6 +30,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/xattr.h>
 #include <termios.h>
 #include <time.h>
@@ -2094,6 +2097,77 @@ static struct guest_file *find_handle(uintptr_t handle)
     return NULL;
 }
 
+uintptr_t nt_runtime_fs4_adopt_preleased_file(int fd,int lease,
+                const char *dos_path,uint32_t desired,uint32_t share)
+{
+    if (fd<0 || lease<0 || !dos_path ||
+        strncmp(dos_path,"C:/",3)!=0 ||
+        (desired & ~(UINT32_C(0xc0010000)))!=0 ||
+        (share & ~7u)!=0) {
+        errno=EINVAL;
+        return UINTPTR_MAX;
+    }
+    struct stat inode={0};
+    if (fstat(fd,&inode)!=0 || !S_ISREG(inode.st_mode)) {
+        errno=EINVAL;
+        return UINTPTR_MAX;
+    }
+    char normalized[PATH_MAX];
+    if (!guest_path(dos_path,normalized) ||
+        !private_c_path(normalized)) {
+        errno=EACCES;
+        return UINTPTR_MAX;
+    }
+    char *owned=strdup(normalized);
+    if (!owned) {errno=ENOMEM;return UINTPTR_MAX;}
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *slot=new_file();
+    uintptr_t result=UINTPTR_MAX;
+    if (slot && next_handle<=UINTPTR_MAX-16) {
+        result=next_handle;
+        next_handle+=16;
+        *slot=(struct guest_file){
+            .owner=WIN_HANDLE,.handle=result,.fd=fd,
+            .access=((desired&UINT32_C(0x80000000)) ? FILE_READ : 0u) |
+                    ((desired&UINT32_C(0x40000000)) ? FILE_WRITE : 0u) |
+                    ((desired&UINT32_C(0x00010000)) ? FILE_DELETE : 0u),
+            .share=share,.share_lease_fd=lease,
+            .device=inode.st_dev,.inode=inode.st_ino,.path=owned
+        };
+        owned=NULL; /* fd and lease transferred only after success */
+    }
+    pthread_mutex_unlock(&file_lock);
+    free(owned);
+    if (result==UINTPTR_MAX) errno=ENOMEM;
+    return result;
+}
+
+int nt_runtime_fs4_pin_security_handle(uintptr_t handle,
+                                       char *path,size_t capacity)
+{
+    if (!path || capacity<4) {errno=EINVAL;return -1;}
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file=find_handle(handle);
+    int fd=-1;
+    int error=0;
+    if (!file || !file->path || file->reparse_handle) {
+        error=EBADF;
+    } else {
+        const size_t n=strnlen(file->path,capacity);
+        if (n>=capacity)
+            error=ENAMETOOLONG;
+        else {
+            memcpy(path,file->path,n+1);
+            fd=fcntl(file->fd,F_DUPFD_CLOEXEC,3);
+            if (fd<0)
+                error=errno;
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    if (error) errno=error;
+    return fd;
+}
+
 /* A user-mode completion port is a per-process queue, never a Linux root
  * capability or a handle to an arbitrary host process. This initial API
  * covers file OVERLAPPED completions and manually posted packets. */
@@ -2497,7 +2571,8 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return UINTPTR_MAX;
     }
-    if ((desired & ~(generic_read | generic_write | UINT32_C(0x00010000))) != 0 ||
+    if ((desired & ~(generic_read | generic_write |
+                     UINT32_C(0x000f0000))) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
         (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
@@ -2525,6 +2600,10 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     if (!guest_path(input, path)) {
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
+    }
+    if ((desired & UINT32_C(0x000e0000)) && !nt_fs4_remote_mode()) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return UINTPTR_MAX; /* no unauthenticated local ACL bypass */
     }
     /* In PE service mode, the HANDLE never opens the Linux backing here.
      * The dedicated-UID Win32 broker owns its real FD and share leases. */
@@ -4556,7 +4635,7 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
         return NT_STATUS_INVALID_PARAMETER;
     /* Keep the explicitly supported access and create-option subset narrow.
      * In particular do not pretend READ_CONTROL/WRITE_DAC or reparse support. */
-    const uint32_t supported_access = UINT32_C(0xc0110003);
+    const uint32_t supported_access = UINT32_C(0xc01f0003);
     const uint32_t supported_options = UINT32_C(0x00001060);
     if (!disposition || attributes->root || attributes->security || attributes->qos ||
         (attributes->attributes & ~0x42u) || (allocation && *allocation) || ea || ea_length ||
@@ -4603,6 +4682,7 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
         desired |= UINT32_C(0x40000000);
     if (access & 0x10000u)
         desired |= UINT32_C(0x10000);
+    desired |= access & UINT32_C(0x000e0000);
     const uint32_t win_flags = file_attributes |
         ((options & 0x1000u) ? FILE_FLAG_DELETE_ON_CLOSE : 0u);
     const struct security_attributes security = {sizeof(security), NULL, (attributes->attributes & 2u) != 0};
@@ -5401,6 +5481,41 @@ static int32_t security_descriptor_from_fd(int fd, uint32_t information,
         return 0;
     }
 
+    /* Prefer a managed NT SD on this pinned inode. Its owner/group/DACL
+     * are never silently overwritten by a POSIX mode projection. An
+     * invalid or corrupted record fails closed, including on hardlink
+     * aliases of the same physical inode. */
+    uint8_t *persisted=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!persisted) {
+        nt_SetLastError(NT_ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    size_t actual=0;
+    const int stored=nt_acl_storage_read_fd(
+        fd,persisted,NT_ACL_SD_MAX_BYTES,&actual);
+    if (stored==NT_ACL_STORAGE_PRESENT) {
+        size_t projected=0;
+        const int state=nt_acl_project_descriptor(persisted,actual,
+                        information,descriptor,size,&projected);
+        free(persisted);
+        if (projected>UINT32_MAX) {
+            nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+            return 0;
+        }
+        *needed=(uint32_t)projected;
+        if (state==NT_ACL_ALLOWED)
+            return 1;
+        nt_SetLastError(state==NT_ACL_DENIED ?
+                        NT_ERROR_INSUFFICIENT_BUFFER :
+                        NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    free(persisted);
+    if (stored!=NT_ACL_STORAGE_ABSENT) {
+        nt_SetLastError(NT_ERROR_ACCESS_DENIED);
+        return 0;
+    }
+
     struct stat st;
     const int status = fstat(fd, &st);
     const int stat_error = errno;
@@ -5470,6 +5585,140 @@ static int32_t security_descriptor_from_fd(int fd, uint32_t information,
     }
     memcpy(descriptor, bytes, total);
     return 1;
+}
+
+/* The authenticated broker has already checked READ_CONTROL; it may
+ * query the exact opened inode even when a Windows HANDLE has no DATA_READ
+ * permission. Never expose the resulting Linux FD to the guest process. */
+int32_t nt_runtime_fs4_query_security_handle(uintptr_t handle,
+                  uint32_t information,void *descriptor,uint32_t size,
+                  uint32_t *needed)
+{
+    char dos[PATH_MAX];
+    int fd=nt_runtime_fs4_pin_security_handle(handle,dos,sizeof(dos));
+    if (fd<0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    int32_t result=security_descriptor_from_fd(
+        fd,information,descriptor,size,needed);
+    close(fd);
+    return result;
+}
+
+/* SetFileSecurity has no descriptor size parameter. Use Linux's safe
+ * same-process read syscall to copy only the self-relative components we
+ * have verified to be bounded. A bad PE pointer cannot SIGSEGV the
+ * storage service, and a guest never controls its own token identity. */
+static bool security_guest_copy(const void *guest,size_t offset,
+                                void *destination,size_t length)
+{
+    if (!guest || (uintptr_t)guest>UINTPTR_MAX-offset ||
+        (uintptr_t)guest+offset>UINTPTR_MAX-length)
+        return false;
+    struct iovec local={.iov_base=destination,.iov_len=length};
+    struct iovec remote={.iov_base=(void *)((uintptr_t)guest+offset),
+                         .iov_len=length};
+    return syscall(SYS_process_vm_readv,getpid(),&local,1,
+                   &remote,1,0)==(ssize_t)length;
+}
+static uint32_t security_get32(const uint8_t *p)
+{
+    return (uint32_t)p[0]|((uint32_t)p[1]<<8)|
+           ((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
+}
+static bool security_copy_guest_descriptor(const void *guest,
+                                           uint8_t out[2048],
+                                           uint32_t *used)
+{
+    uint8_t header[20]={0};
+    if (!used || !security_guest_copy(guest,0,header,sizeof(header)) ||
+        header[0]!=1 || header[1]!=0 ||
+        (header[3]&0x80u)==0 ||
+        (header[2]&4u)==0 || (header[2]&0x10u)!=0 ||
+        security_get32(header+12)!=0)
+        return false;
+    size_t max=20;
+    for (int i=0;i<3;i++) {
+        const uint32_t offset=security_get32(
+            header+(i==2 ? 16 : 4+i*4));
+        if (!offset) {
+            if (i==2) return false; /* NULL DACL */
+            continue;
+        }
+        if (offset<20 || offset>2040 || (offset&3u))
+            return false;
+        uint8_t mini[8]={0};
+        if (!security_guest_copy(guest,offset,mini,sizeof(mini)))
+            return false;
+        size_t needed=0;
+        if (i==2) {
+            needed=(size_t)mini[2]|((size_t)mini[3]<<8);
+            if (mini[0]!=2 || needed<8)
+                return false;
+        } else {
+            if (mini[0]!=1 || mini[1]>15)
+                return false;
+            needed=8u+(size_t)mini[1]*4u;
+        }
+        if (needed>2048-offset)
+            return false;
+        if (max<offset+needed)
+            max=offset+needed;
+    }
+    if (!security_guest_copy(guest,0,out,max) ||
+        nt_acl_validate_descriptor(out,max)!=NT_ACL_ALLOWED)
+        return false;
+    *used=(uint32_t)max;
+    return true;
+}
+
+int32_t NT_MS_ABI nt_SetFileSecurityW(const uint16_t *name,
+                                      uint32_t information,
+                                      const void *descriptor)
+{
+    if (information!=4) {
+        nt_SetLastError((information&8u) ? NT_ERROR_ACCESS_DENIED :
+                       NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if (!nt_fs4_remote_mode()) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0; /* no ambient UID-based local setter */
+    }
+    uint8_t sd[2048]={0};
+    uint32_t size=0;
+    if (!security_copy_guest_descriptor(descriptor,sd,&size)) {
+        nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    char path[PATH_MAX];
+    return wide_path(name,path) &&
+           nt_fs4_remote_set_security(path,information,sd,size);
+}
+
+int32_t NT_MS_ABI nt_SetFileSecurityA(const char *name,
+                                      uint32_t information,
+                                      const void *descriptor)
+{
+    uint16_t wide[PATH_MAX];
+    return file_ansi_to_wide(name,wide) &&
+           nt_SetFileSecurityW(wide,information,descriptor);
+}
+
+nt_status NT_MS_ABI nt_NtSetSecurityObject(uintptr_t handle,
+                                            uint32_t information,
+                                            const void *descriptor)
+{
+    if (information!=4)
+        return NT_STATUS_NOT_SUPPORTED;
+    if (!nt_fs4_remote_handle(handle))
+        return NT_STATUS_NOT_SUPPORTED;
+    uint8_t sd[2048]={0};
+    uint32_t size=0;
+    if (!security_copy_guest_descriptor(descriptor,sd,&size))
+        return NT_STATUS_INVALID_PARAMETER;
+    return nt_fs4_remote_native_set_security(handle,information,sd,size);
 }
 
 int32_t NT_MS_ABI nt_GetFileSecurityW(const uint16_t *name, uint32_t information,

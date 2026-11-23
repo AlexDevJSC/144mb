@@ -14,12 +14,15 @@
 #define FUSE_USE_VERSION 35
 #include "compat.h"
 #include "winfile.h"
+#include "nt_acl_policy.h"
+#include "nt_acl_storage.h"
 
 #include <fuse3/fuse.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <pthread.h>
@@ -31,6 +34,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/random.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -40,6 +44,8 @@
 /* All FUSE callbacks operate in the backing namespace, NOT through VIEW.
  * Otherwise a FUSE request would recurse into itself and deadlock. */
 static int lower_root = -1;
+/* Private service-only source directory for atomic ACL-protected mkdir. */
+static int acl_staging_root = -1;
 static pthread_mutex_t namespace_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Enable fault injection exclusively for --selftest. Production service
  * mounting never arms these SIGKILL hooks, regardless of environment. */
@@ -58,16 +64,75 @@ static void fs4_stage_test_crash(const char *phase)
  * or caller-provided metadata) are checked at every entry point. */
 static bool service_mode;
 static bool metadata_selftest; /* only --selftest-metadata, NEVER production */
+static bool managed_acl_selftest; /* only --selftest-acl, NEVER production */
 static uid_t service_client_uid;
 static gid_t service_client_gid;
 static bool service_authorized(void)
 {
-    if (!service_mode || metadata_selftest)
+    if (!service_mode || metadata_selftest || managed_acl_selftest)
         return true;
     const struct fuse_context *ctx = fuse_get_context();
     return ctx && (ctx->uid == service_client_uid || ctx->uid == geteuid());
 }
 
+
+/* FUSE uid/gid/pid come from the kernel request context; getgroups()
+ * is resolved by libfuse for that request. Never derive groups from an
+ * application-controlled xattr, memory block or filename. */
+static int view_acl_token(struct nt_acl_peer_token *token)
+{
+    if (managed_acl_selftest) {
+        const int count=getgroups(0,NULL);
+        if (count<0 || count>29) return -EACCES;
+        gid_t groups[29]={0};
+        if (count && getgroups(count,groups)!=count) return -EACCES;
+        return nt_acl_peer_token_init(token,geteuid(),getegid(),
+                           groups,(size_t)count,NULL)==0 ? 0 : -EACCES;
+    }
+    const struct fuse_context *ctx=fuse_get_context();
+    if (!ctx) return -EACCES;
+    const int count=fuse_getgroups(0,NULL);
+    if (count<0 || count>29) return -EACCES;
+    gid_t groups[29]={0};
+    if (count>0 && fuse_getgroups(count,groups)!=count)
+        return -EACCES;
+    return nt_acl_peer_token_init(token,ctx->uid,ctx->gid,
+                                  groups,(size_t)count,NULL)==0 ? 0 : -EACCES;
+}
+static int view_acl_check(const char *path,uint32_t rights,bool parent)
+{
+    /* Never authorize a process through a fake FUSE context during the
+     * no-mount selftests. Production service mode is the only gate. */
+    if (!service_mode || metadata_selftest)
+        return 0;
+    struct nt_acl_peer_token token={0};
+    const int peer=view_acl_token(&token);
+    if (peer) return peer;
+    int status=nt_acl_policy_check_path(lower_root,path,parent,&token,
+                       rights,parent ? &nt_acl_directory_generic_mapping :
+                                       &nt_acl_file_generic_mapping);
+    if (status==NT_ACL_POLICY_ALLOWED || status==NT_ACL_POLICY_ABSENT)
+        return 0;
+    return status==NT_ACL_POLICY_DENIED ? -EACCES :
+            -(errno ? errno : EACCES);
+}
+/* When replacing a destination, ENOENT means there is no existing inode
+ * whose DACL can be bypassed; every other read error is fail-closed. */
+static int view_acl_replace_target(const char *path)
+{
+    if (!service_mode || metadata_selftest)
+        return 0;
+    struct nt_acl_peer_token token={0};
+    const int peer=view_acl_token(&token);
+    if (peer) return peer;
+    int state=nt_acl_policy_check_path(lower_root,path,false,&token,
+                         NT_ACL_DELETE,&nt_acl_file_generic_mapping);
+    if (state==NT_ACL_POLICY_ALLOWED || state==NT_ACL_POLICY_ABSENT)
+        return 0;
+    if (state==NT_ACL_POLICY_ERROR && errno==ENOENT)
+        return 0;
+    return -EACCES;
+}
 
 /* NT-compatible files opt into the existing CreateFile OFD lease registry.
  * A separate live lease for each FUSE FD preserves independent lifetimes. */
@@ -163,8 +228,11 @@ static const char *relpath(const char *path)
     }
     /* Clients must not see or alter the authoritative share-lease files. */
     static const char hidden[] = "/:ntnative-file-leases";
+    static const char acl_hidden[] = "/:ntnative-acl-stage";
     const size_t n = sizeof(hidden) - 1;
-    if (!strncmp(path, hidden, n) && (path[n] == '/' || path[n] == '\0')) {
+    const size_t a = sizeof(acl_hidden) - 1;
+    if ((!strncmp(path, hidden, n) && (path[n] == '/' || path[n] == '\0')) ||
+        (!strncmp(path,acl_hidden,a) && (path[a]=='/' || path[a]=='\0'))) {
         errno = EACCES;
         return NULL;
     }
@@ -292,6 +360,8 @@ static int fs_getattr(const char *path, struct stat *st,
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_READ_ATTR,false);
+    if (acl) return acl;
     int fd = fi && fi->fh ? (int)fi->fh : lower_open(path, O_PATH, 0);
     if (fd < 0)
         return -errno;
@@ -300,6 +370,30 @@ static int fs_getattr(const char *path, struct stat *st,
     if (result == 0 && service_mode) {
         st->st_uid = service_client_uid;
         st->st_gid = service_client_gid;
+        /* Only the exact canonical owner/group/Everyone ALLOW policy can
+         * be rendered as POSIX st_mode. A named or DENY ACE is NOT chmod
+         * and must not be converted to an over-permissive host mode. */
+        uint8_t *sd=malloc(NT_ACL_SD_MAX_BYTES);
+        if (!sd) {
+            error=ENOMEM;
+            result=-1;
+        } else {
+            size_t length=0;
+            int state=nt_acl_storage_read_fd(
+                fd,sd,NT_ACL_SD_MAX_BYTES,&length);
+            if (state==NT_ACL_STORAGE_PRESENT) {
+                uint32_t mode=0;
+                if (nt_acl_simple_mode(sd,length,&mode)==NT_ACL_ALLOWED)
+                    st->st_mode=(st->st_mode & ~(mode_t)0777) |
+                                (mode_t)mode;
+                else
+                    st->st_mode&=~(mode_t)0777; /* unknown => no DAC grant */
+            } else if (state==NT_ACL_STORAGE_ERROR) {
+                error=errno ? errno : EUCLEAN;
+                result=-1;
+            }
+            free(sd);
+        }
     }
     if (!fi || !fi->fh)
         close(fd);
@@ -310,6 +404,8 @@ static int fs_opendir(const char *path, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DATA_READ,false);
+    if (acl) return acl;
     int fd = lower_open(path, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0)
         return -errno;
@@ -348,7 +444,8 @@ static int fs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler,
             break;
         }
         if (!strcmp(path, "/") &&
-            !strcmp(entry->d_name, ":ntnative-file-leases"))
+            (!strcmp(entry->d_name, ":ntnative-file-leases") ||
+             !strcmp(entry->d_name, ":ntnative-acl-stage")))
             continue;
         const long cookie = telldir(dir);
         if (cookie < 0) {
@@ -375,6 +472,13 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    const int mode=fi->flags&O_ACCMODE;
+    uint32_t rights=mode==O_RDONLY ? NT_ACL_DATA_READ :
+                    mode==O_WRONLY ? NT_ACL_DATA_WRITE :
+                    NT_ACL_DATA_READ|NT_ACL_DATA_WRITE;
+    if (fi->flags&O_TRUNC) rights|=NT_ACL_DATA_WRITE;
+    int acl=view_acl_check(path,rights,false);
+    if (acl) return acl;
     /* Never truncate before share admission: a Windows handle can reject
      * this write, and a rejected FUSE open must not mutate the file. */
     const bool truncate = (fi->flags & O_TRUNC) != 0;
@@ -443,6 +547,73 @@ static int fs_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
+/* If a parent has a managed DACL, the new regular inode must receive
+ * an inherited SD while still unnamed. FUSE may not publish a file with
+ * only the parent's admission check and a missing child ACL. */
+static int fs4_inherit_unpublished_inode(int parent,int child,
+                                         bool child_directory,
+                                         uint32_t requested)
+{
+    if (!service_mode || metadata_selftest)
+        return 0;
+    uint8_t *source=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!source)
+        return -ENOMEM;
+    size_t size=0;
+    int result=nt_acl_storage_read_fd(parent,source,NT_ACL_SD_MAX_BYTES,&size);
+    if (result==NT_ACL_STORAGE_ABSENT) {
+        free(source);
+        return 0;
+    }
+    if (result!=NT_ACL_STORAGE_PRESENT) {
+        int error=errno ? errno : EUCLEAN;
+        free(source);
+        return -error;
+    }
+    struct nt_acl_peer_token token={0};
+    int authorized=view_acl_token(&token);
+    if (authorized) {
+        free(source);
+        return authorized;
+    }
+    size_t needed=0;
+    const uint8_t *owner=token.token.sid[0];
+    const uint8_t *group=token.token.sid[1];
+    int state=nt_acl_inherit_descriptor(source,size,child_directory,
+                                owner,token.token.length[0],
+                                group,token.token.length[1],
+                                NULL,0,&needed);
+    if (state!=NT_ACL_DENIED || !needed ||
+        needed>NT_ACL_SD_MAX_BYTES) {
+        free(source);
+        return -ENOTSUP;
+    }
+    uint8_t *child_sd=malloc(needed);
+    if (!child_sd) {free(source);return -ENOMEM;}
+    state=nt_acl_inherit_descriptor(source,size,child_directory,
+                                owner,token.token.length[0],
+                                group,token.token.length[1],
+                                child_sd,needed,&needed);
+    free(source);
+    if (state!=NT_ACL_ALLOWED) {
+        free(child_sd);
+        return -ENOTSUP;
+    }
+    /* The child is not yet visible. If the inherited DACL does not grant
+     * the requested initial open rights, do not publish the inode. */
+    uint32_t granted=0;
+    state=nt_acl_access_check_mapped(child_sd,needed,&token.token,requested,
+                                     &nt_acl_file_generic_mapping,&granted);
+    if (state!=NT_ACL_ALLOWED || (granted&requested)!=requested) {
+        free(child_sd);
+        return -EACCES;
+    }
+    const bool stored=nt_acl_storage_write_trusted_fd(child,child_sd,needed);
+    const int error=errno;
+    free(child_sd);
+    return stored ? 0 : -(error ? error : EIO);
+}
+
 /* Dedicated storage UID uses staged inode publication. */
 /* Publish the inode only AFTER it holds a compatible OFD FILE_SHARE
  * lease. A normal O_CREAT makes the inode visible before share admission:
@@ -477,6 +648,10 @@ static int fs_create_staged_service(const char *path, mode_t mode,
         if (!error)
             lease = -1; /* lifecycle transferred to FUSE view registry */
     }
+    if (!error)
+        error=fs4_inherit_unpublished_inode(parent,fd,false,
+                        access_mode==O_RDWR ? NT_ACL_DATA_READ|NT_ACL_DATA_WRITE :
+                                             NT_ACL_DATA_WRITE);
     if (!error)
         fs4_stage_test_crash("post-lease");
     bool published = false;
@@ -538,6 +713,8 @@ static int fs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DATA_WRITE,true);
+    if (acl) return acl;
     /* Acquire process-local namespace_lock before physical WAL, matching
      * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
      * two concurrent FUSE callbacks during namespace mutations. */
@@ -651,6 +828,12 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
+    /* FUSE fi is an already-authorized open capability; a path-only
+     * truncate must obtain WRITE_DATA permission before any effect. */
+    if (!fi) {
+        int acl=view_acl_check(path,NT_ACL_DATA_WRITE,false);
+        if (acl) return acl;
+    }
     if (size < 0)
         return -EINVAL;
     int guard = guest_mutation_begin(path);
@@ -686,10 +869,135 @@ static int fs_truncate(const char *path, off_t size, struct fuse_file_info *fi)
     return error;
 }
 
+/* A hidden, service-owned staging directory makes a new directory's
+ * inherited SD durable BEFORE its final name is visible. Recovery removes
+ * only empty orphaned stages, never follows symlinks or trusts a guest
+ * staging path. No public fallback to mkdirat under a managed DACL. */
+static int acl_stage_prepare(void)
+{
+    if (!service_mode)
+        return 0;
+    if (mkdirat(lower_root,":ntnative-acl-stage",0700)!=0 &&
+        errno!=EEXIST)
+        return -errno;
+    acl_staging_root=openat(lower_root,":ntnative-acl-stage",
+                     O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if (acl_staging_root<0)
+        return -errno;
+    struct stat st;
+    if (fstat(acl_staging_root,&st)!=0 ||
+        !S_ISDIR(st.st_mode) || st.st_uid!=geteuid() ||
+        (st.st_mode&077u)!=0)
+        return -EACCES;
+    DIR *dir=fdopendir(dup(acl_staging_root));
+    if (!dir)
+        return -errno;
+    int err=0;
+    for (;;) {
+        errno=0;
+        const struct dirent *entry=readdir(dir);
+        if (!entry) {
+            if (errno) err=-errno;
+            break;
+        }
+        if (!strcmp(entry->d_name,".") || !strcmp(entry->d_name,".."))
+            continue;
+        if (strncmp(entry->d_name,"dir-",4)!=0) {
+            err=-EUCLEAN;
+            break;
+        }
+        struct stat item;
+        if (fstatat(acl_staging_root,entry->d_name,
+                    &item,AT_SYMLINK_NOFOLLOW)!=0 ||
+            !S_ISDIR(item.st_mode) || item.st_uid!=geteuid() ||
+            (item.st_mode&077u)!=0 ||
+            unlinkat(acl_staging_root,entry->d_name,
+                     AT_REMOVEDIR)!=0) {
+            err=-EUCLEAN; /* Never remove nonempty or foreign entries. */
+            break;
+        }
+    }
+    closedir(dir);
+    if (!err && fsync(acl_staging_root)!=0)
+        err=-errno;
+    return err;
+}
+
+static int acl_mkdir_staged(const char *path,int parent,const char *name)
+{
+    if (acl_staging_root<0)
+        return -EACCES;
+    uint64_t nonce=0;
+    char stage_name[32];
+    bool stage_created=false;
+    for (int i=0;i<8;i++) {
+        if (getrandom(&nonce,sizeof(nonce),0)!=(ssize_t)sizeof(nonce))
+            return -EIO;
+        const int n=snprintf(stage_name,sizeof(stage_name),
+                              "dir-%016" PRIx64,nonce);
+        if (n<0 || (size_t)n>=sizeof(stage_name))
+            return -EINVAL;
+        if (mkdirat(acl_staging_root,stage_name,0700)==0) {
+            stage_created=true;
+            break;
+        }
+        if (errno!=EEXIST)
+            return -errno;
+    }
+    if (!stage_created)
+        return -EEXIST;
+    int fd=openat(acl_staging_root,stage_name,
+                  O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    int err=fd<0 ? -errno : 0;
+    if (!err)
+        err=fs4_inherit_unpublished_inode(parent,fd,true,
+                         NT_ACL_READ_ATTR|NT_ACL_DATA_READ);
+    struct stat original={0};
+    if (!err && fstat(fd,&original)!=0)
+        err=-errno;
+    bool visible=false;
+    if (!err) {
+        if (renameat2(acl_staging_root,stage_name,parent,name,
+                      RENAME_NOREPLACE)!=0)
+            err=-errno;
+        else
+            visible=true;
+    }
+    if (!err) {
+        int destination=openat(parent,".",
+               O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+        if (destination<0)
+            err=-errno;
+        else {
+            if (fsync(destination)!=0)
+                err=-errno;
+            close(destination);
+        }
+    }
+    if (!err && fsync(acl_staging_root)!=0)
+        err=-errno;
+    if (!err)
+        err=guest_refresh(path);
+    if (err && visible) {
+        struct stat current;
+        if (fstatat(parent,name,&current,AT_SYMLINK_NOFOLLOW)==0 &&
+            current.st_dev==original.st_dev &&
+            current.st_ino==original.st_ino)
+            (void)unlinkat(parent,name,AT_REMOVEDIR);
+    }
+    if (!visible)
+        (void)unlinkat(acl_staging_root,stage_name,AT_REMOVEDIR);
+    if (fd>=0)
+        close(fd);
+    return err;
+}
+
 static int fs_mkdir(const char *path, mode_t mode)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DIR_ADD_SUBDIR,true);
+    if (acl) return acl;
     /* Acquire process-local namespace_lock before physical WAL, matching
      * unlink/rmdir/rename. The previous reverse order could ABBA-deadlock
      * two concurrent FUSE callbacks during namespace mutations. */
@@ -702,12 +1010,28 @@ static int fs_mkdir(const char *path, mode_t mode)
     char name[NAME_MAX + 1];
     int parent = lower_parent(path, name);
     int error = parent < 0 ? -errno : 0;
-    if (!error && mkdirat(parent, name, mode) != 0)
-        error = -errno;
-    if (!error) {
-        error = guest_refresh(path);
-        if (error)
-            (void)unlinkat(parent, name, AT_REMOVEDIR);
+    bool managed_parent=false;
+    if (!error && service_mode && !metadata_selftest) {
+        size_t needed=0;
+        const int state=nt_acl_storage_read_fd(parent,NULL,0,&needed);
+        if (state==NT_ACL_STORAGE_SHORT_BUFFER ||
+            state==NT_ACL_STORAGE_PRESENT)
+            managed_parent=true;
+        else if (state==NT_ACL_STORAGE_ERROR)
+            error=-(errno ? errno : EUCLEAN);
+    }
+    if (!error && managed_parent) {
+        /* Physical DAC remains service owner-only (0700). The inherited
+         * SD, not chmod, authorizes FUSE/PE clients after publication. */
+        error=acl_mkdir_staged(path,parent,name);
+    } else if (!error) {
+        if (mkdirat(parent,name,mode)!=0)
+            error=-errno;
+        if (!error) {
+            error=guest_refresh(path);
+            if (error)
+                (void)unlinkat(parent,name,AT_REMOVEDIR);
+        }
     }
     if (parent >= 0)
         close(parent);
@@ -734,6 +1058,10 @@ static int fs_unlink(const char *path)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DELETE,false);
+    if (acl) return acl;
+    acl=view_acl_check(path,NT_ACL_DIR_DELETE_CHILD,true);
+    if (acl) return acl;
     uint16_t wide[PATH_MAX];
     int error = guest_wide(path, wide);
     if (error)
@@ -748,6 +1076,10 @@ static int fs_rmdir(const char *path)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_DELETE,false);
+    if (acl) return acl;
+    acl=view_acl_check(path,NT_ACL_DIR_DELETE_CHILD,true);
+    if (acl) return acl;
     uint16_t wide[PATH_MAX];
     int error = guest_wide(path, wide);
     if (error)
@@ -762,6 +1094,16 @@ static int fs_rename(const char *from, const char *to, unsigned int flags)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(from,NT_ACL_DELETE,false);
+    if (acl) return acl;
+    acl=view_acl_check(from,NT_ACL_DIR_DELETE_CHILD,true);
+    if (acl) return acl;
+    acl=view_acl_check(to,NT_ACL_DATA_WRITE,true);
+    if (acl) return acl;
+    if (!(flags&RENAME_NOREPLACE)) {
+        acl=view_acl_replace_target(to);
+        if (acl) return acl;
+    }
     if (flags & ~(unsigned int)RENAME_NOREPLACE)
         return -ENOTSUP;
     uint16_t old[PATH_MAX], replacement[PATH_MAX];
@@ -829,20 +1171,85 @@ static int fs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     if (!service_authorized())
         return -EACCES;
-    /* An authorized FUSE client must never chmod the physical backing
-     * root from 0700 to a public mode, or change lower DAC at all.
-     * Permissions exposed by the FUSE view are intentionally not POSIX-
-     * mutable until an isolated permission mapping exists. */
-    if (service_mode)
-        return -EPERM;
-    int fd = fi ? (int)fi->fh : lower_open(path, O_RDONLY, 0);
-    if (fd < 0)
-        return -errno;
-    int result = fchmod(fd, mode);
-    int error = errno;
-    if (!fi)
-        close(fd);
-    return result == 0 ? 0 : -error;
+    if (!service_mode) {
+        int fd=fi ? (int)fi->fh : lower_open(path,O_RDONLY,0);
+        if (fd<0) return -errno;
+        int code=fchmod(fd,mode);
+        int error=errno;
+        if (!fi) close(fd);
+        return code==0 ? 0 : -error;
+    }
+    /* Virtual chmod is a DACL edit, NEVER host fchmod. Reject non-POSIX
+     * mode bits, unowned/unknown DACLs and named/DENY ACEs whose intent
+     * cannot be faithfully rendered as 3-ACE owner/group/Everyone. */
+    if (mode & ~0777u)
+        return -ENOTSUP;
+    int authorized=view_acl_check(path,NT_ACL_WRITE_DAC,false);
+    if (authorized)
+        return authorized;
+    pthread_mutex_lock(&namespace_lock);
+    int wal=guest_mutation_begin(path);
+    if (wal<0) {
+        pthread_mutex_unlock(&namespace_lock);
+        return wal;
+    }
+    int fd=lower_open(path,O_RDONLY,0);
+    int err=fd<0 ? -errno : 0;
+    struct stat pinned={0},old_handle={0};
+    if (!err && fstat(fd,&pinned)!=0)
+        err=-errno;
+    if (!err && fi &&
+        (fstat((int)fi->fh,&old_handle)!=0 ||
+         pinned.st_dev!=old_handle.st_dev ||
+         pinned.st_ino!=old_handle.st_ino))
+        err=-EBUSY;
+    if (!err && !S_ISREG(pinned.st_mode) && !S_ISDIR(pinned.st_mode))
+        err=-ENOTSUP;
+    int lease=-1;
+    if (!err && S_ISREG(pinned.st_mode)) {
+        lease=nt_runtime_acquire_linux_nt_lease(
+            fd,NT_FS_WRITE,NT_FS_SHARE_ALL);
+        if (lease<0)
+            err=-EBUSY;
+    }
+    uint8_t *old=malloc(NT_ACL_SD_MAX_BYTES);
+    uint8_t *changed=malloc(NT_ACL_SD_MAX_BYTES);
+    if (!err && (!old || !changed))
+        err=-ENOMEM;
+    size_t length=0,needed=0;
+    if (!err) {
+        const int state=nt_acl_storage_read_fd(
+            fd,old,NT_ACL_SD_MAX_BYTES,&length);
+        if (state!=NT_ACL_STORAGE_PRESENT)
+            err=state==NT_ACL_STORAGE_ABSENT ? -EPERM :
+                -(errno ? errno : EUCLEAN);
+    }
+    if (!err) {
+        const int status=nt_acl_chmod_simple_descriptor(
+            old,length,(uint32_t)mode,changed,
+            NT_ACL_SD_MAX_BYTES,&needed);
+        if (status!=NT_ACL_ALLOWED)
+            err=status==NT_ACL_UNSUPPORTED ? -ENOTSUP : -EINVAL;
+    }
+    if (!err) {
+        struct nt_acl_peer_token token={0};
+        if (view_acl_token(&token)!=0)
+            err=-EACCES;
+        else {
+            const int status=nt_acl_policy_set_dacl_fd(
+                fd,&token,changed,needed);
+            if (status!=NT_ACL_POLICY_ALLOWED)
+                err=status==NT_ACL_POLICY_DENIED ? -EACCES :
+                    -(errno ? errno : EIO);
+        }
+    }
+    free(changed);
+    free(old);
+    nt_runtime_release_linux_nt_lease(&lease);
+    if (fd>=0) close(fd);
+    nt_runtime_end_namespace_mutation(wal);
+    pthread_mutex_unlock(&namespace_lock);
+    return err;
 }
 
 /* Convert a POSIX timestamp to the 100-ns Win32 FILETIME epoch.
@@ -871,6 +1278,8 @@ static int fs_utimens(const char *path, const struct timespec times[2],
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_WRITE_ATTR,false);
+    if (acl) return acl;
     if (!service_mode) {
         int fd=fi ? (int)fi->fh : lower_open(path,O_RDONLY,0);
         if (fd<0) return -errno;
@@ -970,6 +1379,8 @@ static int fs4_service_xattr_mutation(const char *path,const char *name,
                                      const char *value,size_t size,int flags,
                                      bool remove)
 {
+    int acl=view_acl_check(path,NT_ACL_WRITE_EA,false);
+    if (acl) return acl;
     if (!ordinary_xattr(name))
         return -EACCES;
     if ((!remove && (size>4096 || (size && !value) ||
@@ -1015,6 +1426,8 @@ static int fs_getxattr(const char *path, const char *name, char *value,
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_READ_EA,false);
+    if (acl) return acl;
     if (reserved_xattr(name) ||
         (service_mode && strncmp(name, "user.", 5) != 0))
         return -ENODATA;
@@ -1067,6 +1480,8 @@ static int fs_listxattr(const char *path, char *buffer, size_t capacity)
 {
     if (!service_authorized())
         return -EACCES;
+    int acl=view_acl_check(path,NT_ACL_READ_EA,false);
+    if (acl) return acl;
     int fd = lower_open(path, O_RDONLY, 0);
     if (fd < 0)
         return -errno;
@@ -1578,11 +1993,199 @@ static int service_metadata_selftest(void)
     return error;
 }
 
+/* Explicit non-mounted managed ACL test. Only --selftest-acl can
+ * supply an authenticated local UID/GID in place of a kernel FUSE request;
+ * service_mode without this test flag always calls fuse_get_context. */
+static void fs4_acl_test_put16(uint8_t *p,uint16_t value)
+{
+    p[0]=(uint8_t)value;p[1]=(uint8_t)(value>>8);
+}
+static void fs4_acl_test_put32(uint8_t *p,uint32_t value)
+{
+    for (unsigned i=0;i<4;i++) p[i]=(uint8_t)(value>>(i*8));
+}
+static void fs4_acl_test_sid(uint8_t *p,uint32_t kind,uint32_t value)
+{
+    memset(p,0,16);
+    p[0]=1;p[1]=2;p[7]=22;
+    fs4_acl_test_put32(p+8,kind);
+    fs4_acl_test_put32(p+12,value);
+}
+static int service_acl_selftest(void)
+{
+    static const uint8_t everyone[12]={1,1,0,0,0,0,0,1,0,0,0,0};
+    if (mkdirat(lower_root,"ACLManagedParent",0700)!=0)
+        return 1;
+    int parent=openat(lower_root,"ACLManagedParent",
+                       O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if (parent<0)
+        return 1;
+    uint8_t parent_sd[104]={0};
+    parent_sd[0]=1;
+    fs4_acl_test_put16(parent_sd+2,UINT16_C(0x8004));
+    fs4_acl_test_put32(parent_sd+4,20);
+    fs4_acl_test_put32(parent_sd+8,36);
+    fs4_acl_test_put32(parent_sd+16,52);
+    fs4_acl_test_sid(parent_sd+20,1,(uint32_t)geteuid());
+    fs4_acl_test_sid(parent_sd+36,2,(uint32_t)getegid());
+    parent_sd[52]=2;
+    fs4_acl_test_put16(parent_sd+54,52);
+    fs4_acl_test_put16(parent_sd+56,2);
+    parent_sd[60]=1; /* Inherited deny DELETE from Everyone */
+    parent_sd[61]=3; /* OI | CI */
+    fs4_acl_test_put16(parent_sd+62,20);
+    fs4_acl_test_put32(parent_sd+64,NT_ACL_DELETE);
+    memcpy(parent_sd+68,everyone,12);
+    parent_sd[80]=0; /* Inherited allow for authenticated owner */
+    parent_sd[81]=3; /* OI | CI */
+    fs4_acl_test_put16(parent_sd+82,24);
+    fs4_acl_test_put32(parent_sd+84,
+        NT_ACL_DATA_READ|NT_ACL_DATA_WRITE|NT_ACL_DATA_APPEND|
+        NT_ACL_READ_EA|NT_ACL_WRITE_EA|NT_ACL_READ_ATTR|
+        NT_ACL_WRITE_ATTR|NT_ACL_READ_CONTROL|NT_ACL_WRITE_DAC|
+        NT_ACL_DIR_DELETE_CHILD);
+    fs4_acl_test_sid(parent_sd+88,1,(uint32_t)geteuid());
+    if (!nt_acl_storage_write_trusted_fd(parent,parent_sd,sizeof(parent_sd))) {
+        close(parent);
+        return 1;
+    }
+    struct fuse_file_info fi={.flags=O_RDWR};
+    int create=fs_create("/ACLManagedParent/Child",0600,&fi);
+    if (create==-EOPNOTSUPP || create==-ENOTSUP) {
+        printf("SKIP offline managed FUSE ACL: backing has no O_TMPFILE\n");
+        close(parent);
+        return 0;
+    }
+    if (create!=0) {
+        fprintf(stderr,"FAIL managed FUSE O_TMPFILE create: %d\n",create);
+        close(parent);
+        return 1;
+    }
+    int failure=0;
+    if (fs_write("/ACLManagedParent/Child","ACL",3,0,&fi)!=3 ||
+        fs_release("/ACLManagedParent/Child",&fi)!=0)
+        failure=1;
+    int fd=lower_open("/ACLManagedParent/Child",O_RDONLY,0);
+    size_t sd_size=0;
+    uint8_t child[256]={0};
+    if (!failure && (fd<0 ||
+        nt_acl_storage_read_fd(fd,child,sizeof(child),&sd_size)!=
+            NT_ACL_STORAGE_PRESENT ||
+        sd_size<60 || sd_size>sizeof(child)))
+        failure=1;
+    struct stat st;
+    if (!failure && (fstat(fd,&st)!=0 ||
+        (st.st_mode&0777)!=0600))
+        failure=1;
+    if (fd>=0) close(fd);
+    struct fuse_file_info again={.flags=O_RDONLY};
+    if (!failure && (fs_open("/ACLManagedParent/Child",&again)!=0 ||
+        fs_release("/ACLManagedParent/Child",&again)!=0))
+        failure=1;
+    if (!failure && (
+        fs_unlink("/ACLManagedParent/Child")!=-EACCES ||
+        fs_setxattr("/ACLManagedParent/Child",
+                    "user.ntnative.security.sd","X",1,0)!=-EACCES ||
+        fs_getxattr("/ACLManagedParent/Child",
+                    "user.ntnative.security.sd",NULL,0)!=-ENODATA ||
+        fs_chmod("/ACLManagedParent/Child",0777,NULL)!=-ENOTSUP))
+        failure=1;
+    if (!failure && fs_mkdir("/ACLManagedParent/SafeDir",0755)!=0)
+        failure=1;
+    int new_dir=lower_open("/ACLManagedParent/SafeDir",
+                          O_RDONLY|O_DIRECTORY,0);
+    if (!failure && (new_dir<0 ||
+        nt_acl_storage_read_fd(new_dir,child,sizeof(child),&sd_size)!=
+            NT_ACL_STORAGE_PRESENT ||
+        fstat(new_dir,&st)!=0 ||
+        (st.st_mode&0777)!=0700 ||
+        fs_rmdir("/ACLManagedParent/SafeDir")!=-EACCES))
+        failure=1;
+    if (new_dir>=0) close(new_dir);
+    /* A canonical simple three-ACE DACL permits *virtual* chmod. The
+     * physical mode MUST remain 0600 under the storage service UID. */
+    int modefd=openat(lower_root,"ACLModeFixture",O_CREAT|O_EXCL|
+                      O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600);
+    if (modefd<0) failure=1;
+    uint8_t simple[128]={0};
+    simple[0]=1;
+    fs4_acl_test_put16(simple+2,UINT16_C(0x8004));
+    fs4_acl_test_put32(simple+4,20);
+    fs4_acl_test_put32(simple+8,36);
+    fs4_acl_test_put32(simple+16,52);
+    fs4_acl_test_sid(simple+20,1,(uint32_t)geteuid());
+    fs4_acl_test_sid(simple+36,2,(uint32_t)getegid());
+    simple[52]=2;
+    fs4_acl_test_put16(simple+54,76);
+    fs4_acl_test_put16(simple+56,3);
+    simple[60]=0;
+    fs4_acl_test_put16(simple+62,24);
+    fs4_acl_test_put32(simple+64,UINT32_C(0x001f01ff));
+    fs4_acl_test_sid(simple+68,1,(uint32_t)geteuid());
+    simple[84]=0;
+    fs4_acl_test_put16(simple+86,24);
+    fs4_acl_test_sid(simple+92,2,(uint32_t)getegid());
+    simple[108]=0;
+    fs4_acl_test_put16(simple+110,20);
+    memcpy(simple+116,everyone,12);
+    if (!failure && !nt_acl_storage_write_trusted_fd(modefd,simple,sizeof(simple)))
+        failure=1;
+    struct stat virtual_mode={0},host_mode={0};
+    if (!failure && (fs_chmod("/ACLModeFixture",0640,NULL)!=0 ||
+        fs_getattr("/ACLModeFixture",&virtual_mode,NULL)!=0 ||
+        fstat(modefd,&host_mode)!=0 ||
+        (virtual_mode.st_mode&0777)!=0640 ||
+        (host_mode.st_mode&0777)!=0600 ||
+        fs_chmod("/ACLModeFixture",04755,NULL)!=-ENOTSUP))
+        failure=1;
+    if (!failure) {
+        struct nt_acl_peer_token real={0},other={0};
+        if (nt_acl_peer_token_init(&real,geteuid(),getegid(),
+                                    NULL,0,NULL)!=0 ||
+            nt_acl_peer_token_init(&other,(uid_t)(geteuid()+1u),
+                                    (gid_t)(getegid()+1u),
+                                    NULL,0,NULL)!=0 ||
+            nt_acl_policy_check_path(
+                lower_root,"/ACLModeFixture",false,&real,
+                NT_ACL_DATA_WRITE,&nt_acl_file_generic_mapping)!=
+                NT_ACL_POLICY_ALLOWED ||
+            nt_acl_policy_check_path(
+                lower_root,"/ACLModeFixture",false,&other,
+                NT_ACL_DATA_WRITE,&nt_acl_file_generic_mapping)!=
+                NT_ACL_POLICY_DENIED)
+            failure=1;
+    }
+    if (modefd>=0) close(modefd);
+    if (unlinkat(lower_root,"ACLModeFixture",0)!=0)
+        failure=1;
+    if (unlinkat(lower_root,"ACLManagedParent/Child",0)!=0 ||
+        unlinkat(lower_root,"ACLManagedParent/SafeDir",AT_REMOVEDIR)!=0 ||
+        unlinkat(lower_root,"ACLManagedParent",AT_REMOVEDIR)!=0)
+        failure=1;
+    close(parent);
+    if (failure) {
+        fprintf(stderr,"FAIL offline managed FUSE DACL inheritance/denial\n");
+        return 1;
+    }
+    puts("PASS offline FUSE managed file+directory DACL inherited before "
+         "atomic publication; complex chmod denied, simple chmod virtual (mount not tested)");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     /* Service client identity is explicit; a test invocation cannot
      * accidentally enable allow_other or weaken backing permissions. */
-    if (argc == 3 && !strcmp(argv[1], "--selftest-metadata")) {
+    if (argc == 3 && !strcmp(argv[1], "--selftest-acl")) {
+        if (geteuid()==0) {
+            fputs("ACL selftest must be non-root\n",stderr);
+            return 2;
+        }
+        managed_acl_selftest=true;
+        service_mode=true;
+        service_client_uid=geteuid();
+        service_client_gid=getegid();
+    } else if (argc == 3 && !strcmp(argv[1], "--selftest-metadata")) {
         /* No mount, no credentials bypass in production. The test binary
          * demands an owner-only disposable backing and current UID. */
         if (geteuid()==0) {
@@ -1610,17 +2213,17 @@ int main(int argc, char **argv)
         service_mode = true;
         service_client_uid = (uid_t)uid;
         service_client_gid = (gid_t)gid;
-    } else if (!metadata_selftest &&
+    } else if (!metadata_selftest && !managed_acl_selftest &&
                !((argc == 3 && !strcmp(argv[1], "--selftest")) ||
                  (argc >= 3 && argc <= 4 && strcmp(argv[1], "--selftest")))) {
         fprintf(stderr,
-                "Usage: %s --selftest BACKING | --selftest-metadata BACKING | BACKING MOUNT [-f] | "
+                "Usage: %s --selftest BACKING | --selftest-metadata BACKING | --selftest-acl BACKING | BACKING MOUNT [-f] | "
                 "BACKING MOUNT -f --service-client-uid UID --service-client-gid GID\n",
                 argv[0]);
         return 2;
     }
-    const char *backing = !strcmp(argv[1], "--selftest") || metadata_selftest ?
-                          argv[2] : argv[1];
+    const char *backing = !strcmp(argv[1], "--selftest") || metadata_selftest ||
+                          managed_acl_selftest ? argv[2] : argv[1];
     lower_root = open(backing, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (lower_root < 0 || !nt_runtime_set_file_root(backing)) {
         perror("nt-dos83-fuse: backing");
@@ -1633,9 +2236,16 @@ int main(int argc, char **argv)
             fputs("Service backing must be private and owner-only\n", stderr);
             return 2;
         }
+        const int staged=acl_stage_prepare();
+        if (staged) {
+            fprintf(stderr,"Cannot recover private ACL staging: %d\n",staged);
+            return 2;
+        }
     }
     if (metadata_selftest)
         return service_metadata_selftest();
+    if (managed_acl_selftest)
+        return service_acl_selftest();
     if (!strcmp(argv[1], "--selftest"))
         return backend_selftest();
     if (argc < 3 || argc > 4) {

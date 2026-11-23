@@ -293,7 +293,18 @@ class Security(unittest.TestCase):
             pos = code.index("static int fs_" + name + "(")
             brace = code.index("{", pos)
             self.assertIn("!service_authorized()", code[brace:brace + 120], name)
-        self.assertIn("if (service_mode)\n        return -EPERM;", code)
+        # The old invariant was "chmod EPERM in service mode".
+        # The replacement is stronger: virtual chmod may update ONLY a
+        # canonical NT DACL after token, lease and WAL authorization;
+        # physical backing fchmod must stay inside !service_mode.
+        chmod = code.split("static int fs_chmod(", 1)[1].split(
+            "/* Convert a POSIX timestamp", 1)[0]
+        self.assertIn("if (!service_mode) {", chmod)
+        self.assertLess(chmod.index("if (!service_mode) {"),
+                        chmod.index("fchmod(fd,mode)"))
+        self.assertIn("nt_acl_chmod_simple_descriptor(", chmod)
+        self.assertIn("nt_acl_policy_set_dacl_fd(", chmod)
+        self.assertIn("nt_runtime_end_namespace_mutation(wal)", chmod)
         self.assertIn("default_permissions,allow_other", code)
 
 

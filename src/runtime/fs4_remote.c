@@ -30,7 +30,8 @@ enum { FS4_MAGIC=0x34465348u, FS4_VERSION=3, FS4_MAX=2048,
        FS4_FIND_NEXT=15, FS4_FIND_CLOSE=16, FS4_DUPLICATE=17,
        FS4_READ_AT=18, FS4_WRITE_AT=19, FS4_HANDLE_INFO=20,
        FS4_NATIVE_QUERY=21, FS4_NATIVE_SET=22, FS4_NATIVE_FLUSH=23,
-       FS4_HARDLINK=24, FS4_SECURITY_PATH=25, FS4_NATIVE_SECURITY=26, FS4_TIME_SET=27, FS4_INFO_GET=28, FS4_INFO_SET=29 };
+       FS4_HARDLINK=24, FS4_SECURITY_PATH=25, FS4_NATIVE_SECURITY=26, FS4_TIME_SET=27, FS4_INFO_GET=28, FS4_INFO_SET=29,
+       FS4_SECURITY_SET_PATH=30, FS4_SECURITY_SET_HANDLE=31 };
 struct request {
     uint32_t magic;
     uint16_t version, op;
@@ -452,7 +453,7 @@ int32_t nt_fs4_remote_get_security(const char *path,uint32_t information,
     size_t n=0;
     if(!checked_path(path,&n)) return 0;
     struct reply reply={0};
-    unsigned char local[128]={0};
+    unsigned char local[FS4_MAX]={0};
     const uint32_t limit=descriptor ?
         (length<sizeof(local) ? length : (uint32_t)sizeof(local)) : 0u;
     pthread_mutex_lock(&guard);
@@ -474,13 +475,61 @@ int32_t nt_fs4_remote_get_security(const char *path,uint32_t information,
     return ok;
 }
 
+int32_t nt_fs4_remote_set_security(const char *path,uint32_t information,
+                                   const void *descriptor,uint32_t length)
+{
+    size_t n=0;
+    if(information!=4 || !descriptor || length<28 ||
+       !checked_path(path,&n) || n>FS4_MAX ||
+       length>FS4_MAX-(uint32_t)n) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    uint8_t local[FS4_MAX];
+    memcpy(local,path,n);
+    memcpy(local+n,descriptor,length);
+    pthread_mutex_lock(&guard);
+    struct reply response={0};
+    bool ok=request(FS4_SECURITY_SET_PATH,0,-1,4,(uint32_t)n,length,0,
+                    local,(uint32_t)n+length,(uint32_t)n+length,
+                    &response,NULL,0);
+    pthread_mutex_unlock(&guard);
+    return ok;
+}
+
+nt_status nt_fs4_remote_native_set_security(uintptr_t handle,
+                                            uint32_t information,
+                                            const void *descriptor,uint32_t length)
+{
+    if(information!=4 || !descriptor || length<28 || length>FS4_MAX)
+        return NT_STATUS_NOT_SUPPORTED;
+    const uint32_t previous=nt_GetLastError();
+    pthread_mutex_lock(&guard);
+    struct remote_entry *entry=find_entry(handle);
+    if(!entry || entry->search) {
+        pthread_mutex_unlock(&guard);
+        return NT_STATUS_INVALID_HANDLE;
+    }
+    struct reply response={0};
+    bool ok=request(FS4_SECURITY_SET_HANDLE,entry->cap,-1,4,0,0,0,
+                    descriptor,length,length,&response,NULL,0);
+    const uint32_t error=nt_GetLastError();
+    pthread_mutex_unlock(&guard);
+    nt_SetLastError(previous);
+    if(ok) return NT_STATUS_SUCCESS;
+    return error==NT_ERROR_NOT_SUPPORTED ? NT_STATUS_NOT_SUPPORTED :
+           error==NT_ERROR_INVALID_PARAMETER ? NT_STATUS_INVALID_PARAMETER :
+           error==NT_ERROR_INVALID_HANDLE ? NT_STATUS_INVALID_HANDLE :
+           NT_STATUS_ACCESS_DENIED;
+}
+
 nt_status nt_fs4_remote_native_security(uintptr_t handle,uint32_t information,
                                         void *descriptor,uint32_t length,
                                         uint32_t *needed)
 {
     if(!needed || !descriptor) return NT_STATUS_INVALID_PARAMETER;
-    const uint32_t bound=length>128 ? 128 : length;
-    unsigned char local[128]={0};
+    const uint32_t bound=length>FS4_MAX ? FS4_MAX : length;
+    unsigned char local[FS4_MAX]={0};
     pthread_mutex_lock(&guard);
     struct remote_entry *entry=find_entry(handle);
     if(!entry || entry->search) {

@@ -7,6 +7,7 @@
  */
 #include "nt_acl_engine.h"
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { SD_HEADER=20, SD_SELF_RELATIVE=0x8000, SD_DACL_PRESENT=4,
@@ -38,12 +39,24 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
     uint16_t control=get16(sd+2);
     if (control&SD_SACL_PRESENT)
         return NT_ACL_UNSUPPORTED;
+    size_t sid_from[2]={0},sid_to[2]={0};
     for (int i=0;i<2;i++) {
         uint32_t offset=get32(sd+4+(size_t)i*4u);
-        if (offset && (offset%4u || offset>length ||
-                       !sid_valid(sd+offset,length-offset)))
-            return NT_ACL_INVALID;
+        if (offset) {
+            if (offset<SD_HEADER || offset%4u || offset>length ||
+                !sid_valid(sd+offset,length-offset))
+                return NT_ACL_INVALID;
+            const size_t sid_bytes=8u+(size_t)sd[offset+1]*4u;
+            sid_from[i]=offset;
+            sid_to[i]=(size_t)offset+sid_bytes;
+        }
     }
+    /* Security descriptor components cannot alias unrelated bytes.
+     * Same owner/group SID slot may legitimately be shared. */
+    if (sid_from[0] && sid_from[1] &&
+        sid_from[0]<sid_to[1] && sid_from[1]<sid_to[0] &&
+        (sid_from[0]!=sid_from[1] || sid_to[0]!=sid_to[1]))
+        return NT_ACL_INVALID;
     /* A non-null SACL offset when SACL_PRESENT is clear is malformed. */
     if (get32(sd+12))
         return NT_ACL_INVALID;
@@ -66,6 +79,10 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
         get16(p+2)>length-dacl || get16(p+6)!=0)
         return NT_ACL_INVALID;
     size_t total=get16(p+2);
+    for (int i=0;i<2;i++)
+        if (sid_from[i] && sid_from[i]<(size_t)dacl+total &&
+            (size_t)dacl<sid_to[i])
+            return NT_ACL_INVALID;
     size_t cursor=ACL_HEADER;
     unsigned count=get16(p+4);
     for (unsigned i=0;i<count;i++) {
@@ -90,6 +107,271 @@ static int sd_acl(const uint8_t *sd,size_t length,struct acl *acl) {
     return NT_ACL_ALLOWED;
 }
 
+static bool acl_regions_overlap(const void *left,size_t left_bytes,
+                                const void *right,size_t right_bytes);
+
+/* A parsed self-relative SD is the minimum condition for persistence.
+ * This does not authenticate its owner or prove an access grant. */
+int nt_acl_validate_descriptor(const uint8_t *sd,size_t bytes) {
+    struct acl acl={0};
+    return sd_acl(sd,bytes,&acl);
+}
+
+static void acl_put32(uint8_t *p,uint32_t v) {
+    for (unsigned i=0;i<4;i++) p[i]=(uint8_t)(v>>(8u*i));
+}
+
+/* Replace one DACL, not the object owner. A guest's owner/group SID fields
+ * are ignored for DACL_SECURITY_INFORMATION; the trusted peer identity or
+ * immutable persisted owner/group are used instead. In particular a guest
+ * cannot send a fabricated owner SID to gain the owner's WRITE_DAC. */
+int nt_acl_replace_dacl(const uint8_t *existing,size_t existing_bytes,
+                        const uint8_t *incoming,size_t incoming_bytes,
+                        const uint8_t *trusted_owner,size_t owner_bytes,
+                        const uint8_t *trusted_group,size_t group_bytes,
+                        uint8_t *out,size_t capacity,size_t *needed)
+{
+    if (!needed) return NT_ACL_INVALID;
+    *needed=0;
+    if (!incoming || !trusted_owner || !trusted_group ||
+        !sid_valid(trusted_owner,owner_bytes) ||
+        !sid_valid(trusted_group,group_bytes) ||
+        owner_bytes!=8u+(size_t)trusted_owner[1]*4u ||
+        group_bytes!=8u+(size_t)trusted_group[1]*4u)
+        return NT_ACL_INVALID;
+    if (nt_acl_validate_descriptor(incoming,incoming_bytes)!=NT_ACL_ALLOWED)
+        return NT_ACL_UNSUPPORTED;
+    const uint16_t ctrl=get16(incoming+2);
+    const uint32_t dacl=get32(incoming+16);
+    if (!(ctrl&SD_DACL_PRESENT) || !dacl || dacl>incoming_bytes ||
+        incoming_bytes-dacl<ACL_HEADER)
+        return NT_ACL_UNSUPPORTED;
+    /* A NULL DACL unconditionally grants all Windows rights. */
+    size_t acl_bytes=get16(incoming+dacl+2);
+    if (acl_bytes<ACL_HEADER || acl_bytes>incoming_bytes-dacl)
+        return NT_ACL_INVALID;
+    const uint8_t *owner=trusted_owner,*group=trusted_group;
+    if (existing) {
+        if (nt_acl_validate_descriptor(existing,existing_bytes)!=NT_ACL_ALLOWED)
+            return NT_ACL_UNSUPPORTED;
+        const uint32_t owner_pos=get32(existing+4);
+        const uint32_t group_pos=get32(existing+8);
+        if (!owner_pos || !group_pos)
+            return NT_ACL_UNSUPPORTED;
+        owner=existing+owner_pos;
+        group=existing+group_pos;
+        owner_bytes=8u+(size_t)owner[1]*4u;
+        group_bytes=8u+(size_t)group[1]*4u;
+    } else if (existing_bytes) {
+        return NT_ACL_INVALID;
+    }
+    if (owner_bytes>UINT32_MAX-SD_HEADER ||
+        group_bytes>UINT32_MAX-(SD_HEADER+owner_bytes))
+        return NT_ACL_INVALID;
+    size_t total=SD_HEADER+owner_bytes+group_bytes;
+    if (acl_bytes>SIZE_MAX-total || total+acl_bytes>UINT32_MAX)
+        return NT_ACL_UNSUPPORTED;
+    total+=acl_bytes;
+    *needed=total;
+    if (!out || capacity<total)
+        return NT_ACL_DENIED;
+    /* Avoid truncating in-place owner, group or DACL sections. */
+    if (acl_regions_overlap(out,total,incoming,incoming_bytes) ||
+        (existing && acl_regions_overlap(out,total,existing,existing_bytes)) ||
+        acl_regions_overlap(out,total,trusted_owner,owner_bytes) ||
+        acl_regions_overlap(out,total,trusted_group,group_bytes))
+        return NT_ACL_INVALID;
+    memset(out,0,total);
+    out[0]=1;
+    put16(out+2,SD_SELF_RELATIVE|SD_DACL_PRESENT|
+          (ctrl&UINT16_C(0x1400))); /* DACL_PROTECTED / AUTO_INHERITED */
+    acl_put32(out+4,SD_HEADER);
+    acl_put32(out+8,(uint32_t)(SD_HEADER+owner_bytes));
+    acl_put32(out+16,(uint32_t)(SD_HEADER+owner_bytes+group_bytes));
+    memcpy(out+SD_HEADER,owner,owner_bytes);
+    memcpy(out+SD_HEADER+owner_bytes,group,group_bytes);
+    memcpy(out+SD_HEADER+owner_bytes+group_bytes,incoming+dacl,acl_bytes);
+    return nt_acl_validate_descriptor(out,total);
+}
+
+/* Filter a persisted self-relative descriptor using the same strict
+ * parser as DACL access checks. Return selected information only: a
+ * DACL-only read must not leak owner/group SID bytes. */
+int nt_acl_project_descriptor(const uint8_t *sd,size_t bytes,
+                              uint32_t information,uint8_t *out,
+                              size_t capacity,size_t *needed)
+{
+    if (!needed || !sd || information==0 || (information&~7u))
+        return NT_ACL_UNSUPPORTED;
+    *needed=0;
+    const int parsed=nt_acl_validate_descriptor(sd,bytes);
+    if (parsed!=NT_ACL_ALLOWED)
+        return parsed;
+    size_t part[3]={0},length[3]={0};
+    for (int i=0;i<2;i++) {
+        if (!(information&(1u<<i)))
+            continue;
+        const uint32_t offset=get32(sd+4+(unsigned)i*4u);
+        if (!offset)
+            continue;
+        part[i]=offset;
+        length[i]=8u+(size_t)sd[offset+1]*4u;
+    }
+    const uint16_t oldcontrol=get16(sd+2);
+    if ((information&4u) && (oldcontrol&SD_DACL_PRESENT)) {
+        part[2]=get32(sd+16);
+        if (part[2]) length[2]=get16(sd+part[2]+2);
+    }
+    size_t total=SD_HEADER;
+    for (int i=0;i<3;i++) {
+        if (length[i]>SIZE_MAX-total)
+            return NT_ACL_INVALID;
+        total+=length[i];
+    }
+    *needed=total;
+    if (!out || capacity<total)
+        return NT_ACL_DENIED;
+    const uintptr_t a=(uintptr_t)out,b=(uintptr_t)sd;
+    if ((a<=b && b-a<total) || (a>b && a-b<bytes))
+        return NT_ACL_INVALID;
+    memset(out,0,total);
+    out[0]=1;
+    uint16_t flags=SD_SELF_RELATIVE;
+    if (information&4u) {
+        /* Preserve protected / inherited DACL state without importing
+         * unrelated SECURITY_DESCRIPTOR_CONTROL privilege flags. */
+        flags|=oldcontrol&UINT16_C(0x1404);
+    }
+    put16(out+2,flags);
+    size_t next=SD_HEADER;
+    for (int i=0;i<3;i++) {
+        if (!length[i])
+            continue;
+        const size_t offset_field=i==2 ? 16u : 4u+(size_t)i*4u;
+        const uint32_t offset=(uint32_t)next;
+        for (unsigned byte=0;byte<4;byte++)
+            out[offset_field+byte]=(uint8_t)(offset>>(8u*byte));
+        memcpy(out+next,sd+part[i],length[i]);
+        next+=length[i];
+    }
+    return nt_acl_validate_descriptor(out,total)==NT_ACL_ALLOWED ?
+           NT_ACL_ALLOWED : NT_ACL_INVALID;
+}
+
+/* Never translate named or DENY ACEs into chmod. Only a canonical,
+ * explicitly recognized owner/group/Everyone three-allow policy has an
+ * unambiguous POSIX mode rendering. */
+static int simple_mode_aces(const uint8_t *sd,size_t bytes,
+                            uint32_t *mode,size_t offsets[3])
+{
+    static const uint8_t everyone[12]=
+        {1,1,0,0,0,0,0,1,0,0,0,0};
+    struct acl acl={0};
+    int valid=sd_acl(sd,bytes,&acl);
+    if (valid!=NT_ACL_ALLOWED)
+        return valid;
+    if (acl.null_dacl || acl.count!=3)
+        return NT_ACL_UNSUPPORTED;
+    const uint32_t owner=get32(sd+4),group=get32(sd+8);
+    if (!owner || !group)
+        return NT_ACL_UNSUPPORTED;
+    size_t cursor=ACL_HEADER;
+    uint32_t projected=0;
+    for (unsigned i=0;i<3;i++) {
+        const uint8_t *ace=acl.start+cursor;
+        const size_t length=get16(ace+2);
+        const uint8_t *sid=ace+ACE_BASE;
+        const size_t sidlen=length-ACE_BASE;
+        const uint8_t *expected=i==0 ? sd+owner :
+                                i==1 ? sd+group : everyone;
+        const size_t expected_len=i==0 ? 8u+(size_t)sd[owner+1]*4u :
+                                  i==1 ? 8u+(size_t)sd[group+1]*4u :
+                                         sizeof(everyone);
+        if (ace[0]!=ACE_ALLOW ||
+            (ace[1]&ACE_INHERIT_ONLY) ||
+            sidlen!=expected_len ||
+            memcmp(sid,expected,sidlen)!=0)
+            return NT_ACL_UNSUPPORTED;
+        const uint32_t rights=get32(ace+4);
+        const uint32_t bits=((rights&1u) ? 4u : 0u) |
+                            ((rights&2u) ? 2u : 0u) |
+                            ((rights&32u) ? 1u : 0u);
+        projected |= bits<<(6u-3u*i);
+        if (offsets)
+            offsets[i]=(size_t)(acl.start-sd)+cursor;
+        cursor+=length;
+    }
+    if (mode) *mode=projected;
+    return NT_ACL_ALLOWED;
+}
+int nt_acl_simple_mode(const uint8_t *sd,size_t bytes,uint32_t *mode)
+{
+    if (!mode) return NT_ACL_INVALID;
+    *mode=0;
+    return simple_mode_aces(sd,bytes,mode,NULL);
+}
+static uint32_t chmod_rights(uint32_t bits,bool owner)
+{
+    uint32_t rights=owner ? (UINT32_C(0x00020000) |
+                             UINT32_C(0x00040000)) : 0u;
+    if (bits&4u)
+        rights|=UINT32_C(0x00120089); /* GENERIC_READ concrete mask */
+    if (bits&2u)
+        rights|=UINT32_C(0x00120156); /* WRITE incl directory delete-child */
+    if (bits&1u)
+        rights|=UINT32_C(0x001200a0); /* GENERIC_EXECUTE concrete mask */
+    return rights;
+}
+int nt_acl_chmod_simple_descriptor(const uint8_t *sd,size_t bytes,
+                                   uint32_t mode,uint8_t *out,
+                                   size_t capacity,size_t *needed)
+{
+    if (!needed || mode>0777u)
+        return NT_ACL_INVALID;
+    *needed=0;
+    size_t ace_offsets[3]={0};
+    const int state=simple_mode_aces(sd,bytes,NULL,ace_offsets);
+    if (state!=NT_ACL_ALLOWED)
+        return state;
+    *needed=bytes;
+    if (!out || capacity<bytes)
+        return NT_ACL_DENIED;
+    const uintptr_t a=(uintptr_t)out,b=(uintptr_t)sd;
+    if ((a<=b && b-a<bytes) || (a>b && a-b<bytes))
+        return NT_ACL_INVALID;
+    memcpy(out,sd,bytes);
+    for (unsigned i=0;i<3;i++) {
+        const uint32_t rights=chmod_rights(
+            (mode>>(6u-i*3u))&7u,i==0);
+        for (unsigned j=0;j<4;j++)
+            out[ace_offsets[i]+4+j]=(uint8_t)(rights>>(j*8));
+    }
+    /* chmod rewrites this simple DACL explicitly; do not silently
+     * re-inherit a different parent ACE later. */
+    const uint16_t control=(get16(out+2)|UINT16_C(0x1000)) &
+                           (uint16_t)~UINT16_C(0x0400);
+    put16(out+2,control);
+    return nt_acl_validate_descriptor(out,bytes);
+}
+
+static bool map_generic(uint32_t *rights,
+                        const struct nt_acl_generic_mapping *mapping)
+{
+    const uint32_t all_generic=UINT32_C(0xf0000000);
+    if (!(*rights&all_generic))
+        return true;
+    if (!mapping)
+        return false;
+    const uint32_t selected=*rights&all_generic;
+    *rights&=~all_generic;
+    if (selected&UINT32_C(0x80000000)) *rights|=mapping->read;
+    if (selected&UINT32_C(0x40000000)) *rights|=mapping->write;
+    if (selected&UINT32_C(0x20000000)) *rights|=mapping->execute;
+    if (selected&UINT32_C(0x10000000)) *rights|=mapping->all;
+    /* A caller must provide concrete rights, not nested GENERIC bits. */
+    return !(*rights&all_generic);
+}
+
 static bool token_has_sid(const struct nt_acl_token *token,
                           const uint8_t *sid,size_t sid_size,
                           bool for_allow) {
@@ -102,14 +384,16 @@ static bool token_has_sid(const struct nt_acl_token *token,
     return false;
 }
 
-int nt_acl_access_check(const uint8_t *sd,size_t bytes,
-                        const struct nt_acl_token *token,uint32_t requested,
-                        uint32_t *granted) {
+int nt_acl_access_check_mapped(const uint8_t *sd,size_t bytes,
+                               const struct nt_acl_token *token,
+                               uint32_t requested,
+                               const struct nt_acl_generic_mapping *mapping,
+                               uint32_t *granted) {
     if (granted) *granted=0;
     if (!token || token->count>32 || !granted)
         return NT_ACL_INVALID;
-    /* GENERIC_* translation requires object-specific GenericMapping. */
-    if (requested & UINT32_C(0xf0000000))
+    /* Generic mapping is entirely object-specific, never implicit. */
+    if (!map_generic(&requested,mapping))
         return NT_ACL_UNSUPPORTED;
     for (size_t i=0;i<token->count;i++)
         if (!token->sid[i] || !sid_valid(token->sid[i],token->length[i]) ||
@@ -130,7 +414,7 @@ int nt_acl_access_check(const uint8_t *sd,size_t bytes,
         const uint8_t *ace=acl.start+pos;
         size_t length=get16(ace+2);
         uint32_t rights=get32(ace+4);
-        if (rights & UINT32_C(0xf0000000))
+        if (!map_generic(&rights,mapping))
             return NT_ACL_UNSUPPORTED;
         if (!(ace[1]&ACE_INHERIT_ONLY) &&
             token_has_sid(token,ace+ACE_BASE,length-ACE_BASE,
@@ -146,6 +430,12 @@ int nt_acl_access_check(const uint8_t *sd,size_t bytes,
         return NT_ACL_DENIED;
     *granted=requested;
     return NT_ACL_ALLOWED;
+}
+
+int nt_acl_access_check(const uint8_t *sd,size_t bytes,
+                        const struct nt_acl_token *token,uint32_t requested,
+                        uint32_t *granted) {
+    return nt_acl_access_check_mapped(sd,bytes,token,requested,NULL,granted);
 }
 
 /* Copy inheritable access ACEs into an ACL_REVISION-2 buffer. It is NOT a
@@ -215,4 +505,186 @@ int nt_acl_inherit_dacl(const uint8_t *parent_sd,size_t bytes,
         pos+=size;
     }
     return NT_ACL_ALLOWED;
+}
+
+/* The SD, owner, group and output may point into the same caller
+ * allocation. Reject partial overlap rather than clobber a SID or parent
+ * descriptor midway through an inherited child build. */
+static bool acl_regions_overlap(const void *left,size_t left_bytes,
+                                const void *right,size_t right_bytes) {
+    const uintptr_t a=(uintptr_t)left, b=(uintptr_t)right;
+    return a<=b ? b-a<left_bytes : a-b<right_bytes;
+}
+
+/* Materialize an inherited self-relative SECURITY_DESCRIPTOR instead of
+ * only returning its ACL bytes. The parent is not modified, and no caller
+ * provided SID may be used until the trusted service authenticates it.
+ * CREATOR_OWNER/GROUP are placeholders *inside inherited ACEs* only. */
+int nt_acl_inherit_descriptor(const uint8_t *parent_sd,size_t bytes,
+                              bool child_directory,
+                              const uint8_t *owner,size_t owner_bytes,
+                              const uint8_t *group,size_t group_bytes,
+                              uint8_t *out,size_t capacity,size_t *needed)
+{
+    static const uint8_t creator_owner[12]=
+        {1,1,0,0,0,0,0,3,0,0,0,0};
+    static const uint8_t creator_group[12]=
+        {1,1,0,0,0,0,0,3,1,0,0,0};
+    if (!needed)
+        return NT_ACL_INVALID;
+    *needed=0;
+    if (!owner || !group ||
+        !sid_valid(owner,owner_bytes) || !sid_valid(group,group_bytes) ||
+        owner_bytes!=8u+(size_t)owner[1]*4u ||
+        group_bytes!=8u+(size_t)group[1]*4u)
+        return NT_ACL_INVALID;
+
+    size_t raw_size=0;
+    int state=nt_acl_inherit_dacl(parent_sd,bytes,child_directory,
+                                  NULL,0,&raw_size);
+    if (state<0)
+        return state;
+    if (raw_size<ACL_HEADER || raw_size>UINT16_MAX)
+        return NT_ACL_INVALID;
+    uint8_t *raw=malloc(raw_size);
+    if (!raw)
+        return NT_ACL_UNSUPPORTED;
+    state=nt_acl_inherit_dacl(parent_sd,bytes,child_directory,
+                              raw,raw_size,&raw_size);
+    if (state!=NT_ACL_ALLOWED) {
+        free(raw);
+        return state;
+    }
+    /* Measure exact descriptor/ACE sizes before touching output. */
+    size_t acl_size=ACL_HEADER;
+    size_t pos=ACL_HEADER;
+    const unsigned count=get16(raw+4);
+    for (unsigned i=0;i<count;i++) {
+        size_t ace_size=get16(raw+pos+2);
+        const uint8_t *sid=raw+pos+ACE_BASE;
+        const uint8_t *replacement=NULL;
+        size_t replacement_size=0;
+        if (ace_size==20 && memcmp(sid,creator_owner,12)==0) {
+            replacement=owner;
+            replacement_size=owner_bytes;
+        } else if (ace_size==20 && memcmp(sid,creator_group,12)==0) {
+            replacement=group;
+            replacement_size=group_bytes;
+        }
+        if (replacement) {
+            if (replacement_size>UINT16_MAX-ACE_BASE) {
+                free(raw);
+                return NT_ACL_UNSUPPORTED;
+            }
+            ace_size=ACE_BASE+replacement_size;
+        }
+        if (ace_size>UINT16_MAX-acl_size) {
+            free(raw);
+            return NT_ACL_UNSUPPORTED;
+        }
+        acl_size+=ace_size;
+        pos+=get16(raw+pos+2);
+    }
+    /* SID sizes are always multiples of 4; self-relative offsets aligned. */
+    const size_t header_and_sids=SD_HEADER+owner_bytes+group_bytes;
+    if (header_and_sids>SIZE_MAX-acl_size) {
+        free(raw);
+        return NT_ACL_INVALID;
+    }
+    const size_t total=header_and_sids+acl_size;
+    *needed=total;
+    if (!out || capacity<total) {
+        free(raw);
+        return NT_ACL_DENIED;
+    }
+    /* Explicitly prohibit in-place mutation, which would invalidate SID
+     * pointers supplied by the trusted caller before validation finishes. */
+    if (acl_regions_overlap(out,total,parent_sd,bytes) ||
+        acl_regions_overlap(out,total,owner,owner_bytes) ||
+        acl_regions_overlap(out,total,group,group_bytes)) {
+        free(raw);
+        return NT_ACL_INVALID;
+    }
+    memset(out,0,total);
+    out[0]=1;
+    put16(out+2,SD_SELF_RELATIVE|SD_DACL_PRESENT);
+    const size_t group_offset=SD_HEADER+owner_bytes;
+    const size_t acl_offset=group_offset+group_bytes;
+    /* The bounded input sizes ensure these offsets fit 32 bits. */
+    out[4]=(uint8_t)SD_HEADER;
+    out[8]=(uint8_t)group_offset;
+    out[9]=(uint8_t)(group_offset>>8);
+    out[10]=(uint8_t)(group_offset>>16);
+    out[11]=(uint8_t)(group_offset>>24);
+    out[16]=(uint8_t)acl_offset;
+    out[17]=(uint8_t)(acl_offset>>8);
+    out[18]=(uint8_t)(acl_offset>>16);
+    out[19]=(uint8_t)(acl_offset>>24);
+    memcpy(out+SD_HEADER,owner,owner_bytes);
+    memcpy(out+group_offset,group,group_bytes);
+    uint8_t *acl=out+acl_offset;
+    acl[0]=2;
+    put16(acl+2,(uint16_t)acl_size);
+    put16(acl+4,(uint16_t)count);
+    pos=ACL_HEADER;
+    size_t dst=ACL_HEADER;
+    for (unsigned i=0;i<count;i++) {
+        const uint8_t *ace=raw+pos;
+        const size_t old_size=get16(ace+2);
+        const uint8_t *replacement=NULL;
+        size_t replacement_size=0;
+        if (old_size==20 &&
+            memcmp(ace+ACE_BASE,creator_owner,12)==0) {
+            replacement=owner;
+            replacement_size=owner_bytes;
+        } else if (old_size==20 &&
+                   memcmp(ace+ACE_BASE,creator_group,12)==0) {
+            replacement=group;
+            replacement_size=group_bytes;
+        }
+        const size_t new_size=replacement ? ACE_BASE+replacement_size : old_size;
+        memcpy(acl+dst,ace,replacement ? ACE_BASE : old_size);
+        put16(acl+dst+2,(uint16_t)new_size);
+        if (replacement)
+            memcpy(acl+dst+ACE_BASE,replacement,replacement_size);
+        dst+=new_size;
+        pos+=old_size;
+    }
+    free(raw);
+    return nt_acl_validate_descriptor(out,total)==NT_ACL_ALLOWED ?
+           NT_ACL_ALLOWED : NT_ACL_INVALID;
+}
+
+/* The only SIDs in this synthetic token are those derivable from a
+ * verified Linux identity: current UNIX user, primary UNIX group and
+ * Everyone. A domain SID or guest-supplied group is never added. */
+bool nt_acl_unix_token_init(struct nt_acl_unix_token *out,
+                            uint32_t authenticated_uid,
+                            uint32_t authenticated_gid)
+{
+    if (!out)
+        return false;
+    memset(out,0,sizeof(*out));
+    /* S-1-22-1-uid and S-1-22-2-gid. */
+    for (unsigned i=0;i<2;i++) {
+        uint8_t *sid=out->sid_bytes[i];
+        sid[0]=1;sid[1]=2;sid[7]=22;
+        uint32_t kind=i==0 ? 1u : 2u;
+        uint32_t id=i==0 ? authenticated_uid : authenticated_gid;
+        for (unsigned k=0;k<4;k++) {
+            sid[8+k]=(uint8_t)(kind>>(k*8));
+            sid[12+k]=(uint8_t)(id>>(k*8));
+        }
+        out->token.sid[i]=sid;
+        out->token.length[i]=16;
+    }
+    /* S-1-1-0 (Everyone), not an unvalidated wildcard SID. */
+    uint8_t *everyone=out->sid_bytes[2];
+    everyone[0]=1;
+    everyone[1]=1;
+    everyone[7]=1;
+    out->token.sid[2]=everyone;
+    out->token.length[2]=12;
+    out->token.count=3;
+    return true;
 }

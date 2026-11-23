@@ -26,4 +26,73 @@ int nt_acl_access_check(const uint8_t *sd, size_t bytes,
 int nt_acl_inherit_dacl(const uint8_t *parent_sd, size_t bytes,
                         bool child_directory, uint8_t *out,
                         size_t capacity, size_t *needed);
+
+/* Object-specific, explicitly authenticated GENERIC_* translation.
+ * A null mapping does NOT give generic rights: the old entrypoint keeps
+ * rejecting masks it cannot interpret. The mapped output contains only
+ * concrete access bits, so the caller can compare it to its NT grants. */
+struct nt_acl_generic_mapping {
+    uint32_t read, write, execute, all;
+};
+int nt_acl_access_check_mapped(const uint8_t *sd, size_t bytes,
+                               const struct nt_acl_token *token,
+                               uint32_t requested,
+                               const struct nt_acl_generic_mapping *mapping,
+                               uint32_t *granted);
+
+/* Validate a complete self-relative descriptor (not merely parse an ACL
+ * header). No writes to filesystem; never accept a malformed SD to xattr. */
+int nt_acl_validate_descriptor(const uint8_t *sd, size_t bytes);
+
+/* DACL_SECURITY_INFORMATION=4 only. Merge a bounded self-relative
+ * incoming DACL with immutable owner/group from existing SD; if the
+ * inode was unmanaged, bootstrap owner/group from TRUSTED peer token.
+ * Refuses NULL DACL, SACL, unsupported ACEs and partial/aliased outputs.
+ * No filesystem side effects: the caller MUST check WRITE_DAC under WAL. */
+int nt_acl_replace_dacl(const uint8_t *existing, size_t existing_bytes,
+                        const uint8_t *incoming, size_t incoming_bytes,
+                        const uint8_t *trusted_owner, size_t owner_bytes,
+                        const uint8_t *trusted_group, size_t group_bytes,
+                        uint8_t *out, size_t capacity, size_t *needed);
+
+/* Return only the requested OWNER=1, GROUP=2 and DACL=4 sections of an
+ * already-validated self-relative descriptor, preserving DACL control bits.
+ * No SACL or unsupported SECURITY_INFORMATION values; no silent omission.
+ * Result 0 means buffer too small; *needed always reports exact bytes. */
+int nt_acl_project_descriptor(const uint8_t *sd,size_t bytes,
+                              uint32_t information,uint8_t *out,
+                              size_t capacity,size_t *needed);
+
+/* Strictly virtual POSIX mode bridge for a canonical 3-ACE
+ * owner/group/Everyone ALLOW DACL. A complex or named-SID DACL MUST
+ * return UNSUPPORTED rather than deleting a principal or a DENY ACE.
+ * The output is the same-sized SD with updated ACE masks, never chmod
+ * on the physical backing. Mode bits other than 0777 are invalid. */
+int nt_acl_simple_mode(const uint8_t *sd,size_t bytes,uint32_t *mode);
+int nt_acl_chmod_simple_descriptor(const uint8_t *sd,size_t bytes,
+                                   uint32_t mode,uint8_t *out,
+                                   size_t capacity,size_t *needed);
+
+/* Materialize a CHILD self-relative descriptor with authenticated owner
+ * and group SIDs, carrying forward inherited ACEs (including arbitrary
+ * binary SID values). CREATOR_OWNER/GROUP SIDs are substituted using the
+ * supplied identities. Only ACL revision 2 allow/deny ACEs are supported.
+ * Result 0 means insufficient capacity, with *needed set, no output. */
+int nt_acl_inherit_descriptor(const uint8_t *parent_sd, size_t bytes,
+                              bool child_directory,
+                              const uint8_t *owner, size_t owner_bytes,
+                              const uint8_t *group, size_t group_bytes,
+                              uint8_t *out, size_t capacity, size_t *needed);
+
+/* Narrow, explicit UNIX-backed SID identity. The caller is responsible for
+ * sourcing uid/gid from SO_PEERCRED or fuse_get_context, never guest IPC.
+ * Does NOT simulate domain SIDs, supplementary groups or impersonation.
+ * Its self-owned bytes make SID pointers valid until the struct is moved. */
+struct nt_acl_unix_token {
+    struct nt_acl_token token;
+    uint8_t sid_bytes[3][16];
+};
+bool nt_acl_unix_token_init(struct nt_acl_unix_token *out,
+                            uint32_t authenticated_uid,
+                            uint32_t authenticated_gid);
 #endif

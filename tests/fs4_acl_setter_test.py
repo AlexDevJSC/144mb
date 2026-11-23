@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Actual authenticated broker DACL path/HANDLE writer and inode checks.
+
+These offline tests exercise IPC + WAL + xattr durability, not a domain
+logon token or a physical Fedora/SELinux test.
+"""
+import os
+from pathlib import Path
+import struct
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fs4_handle_broker_test import Broker, OPEN, CLOSE, DUPLICATE
+from fs4_acl_enforcement_test import descriptor, sid
+
+SET_PATH, SET_HANDLE, GET_PATH = 30, 31, 25
+DACL_INFORMATION = 4
+READ = 0x80000000
+WRITE = 0x40000000
+WRITE_DAC = 0x00040000
+ERR_ACCESS = 5
+ERR_UNSUPPORTED = 50
+ERR_INVALID = 87
+EVERYONE = sid(1, 0)
+OWNER = sid(22, 1, os.geteuid())
+GROUP = sid(22, 2, os.getegid())
+READ_MASK = 0x00120089
+WRITE_MASK = 0x00120116
+WRITE_EXCLUSIVE_MASK = WRITE_MASK & ~READ_MASK
+
+
+class BrokerDACLWriter(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="fs4-ntacl-write-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "C"
+        self.root.mkdir(mode=0o700)
+        self.file = self.root / "secured.dat"
+        self.file.write_bytes(b"UNMODIFIED")
+        os.link(self.file, self.root / "alias.dat")
+        self.worker = Broker(self.root)
+        self.addCleanup(self.worker.close)
+
+    def path_write(self, sd, path=b"C:/secured.dat", info=4, **overrides):
+        payload = path + sd
+        return self.worker.call(SET_PATH, payload, access=info,
+                                share=len(path), disposition=len(sd),
+                                **overrides)
+
+    def read_dacl(self, path=b"C:/secured.dat"):
+        error, _, needed, sd = self.worker.call(
+            GET_PATH, path, access=7, disposition=2048)
+        self.assertEqual(error, 0)
+        self.assertEqual(needed, len(sd))
+        return sd
+
+    def test_bootstrap_unmanaged_sd_does_not_trust_guest_owner(self):
+        attacker_owner = sid(22, 1, 31337)
+        new = descriptor([
+            (0, 0, READ_MASK, EVERYONE),
+            (1, 0, WRITE_EXCLUSIVE_MASK, EVERYONE),
+        ], owner=attacker_owner)
+        self.assertEqual(self.path_write(new)[0], 0)
+        saved = self.read_dacl()
+        off = struct.unpack_from("<I", saved, 4)[0]
+        self.assertEqual(saved[off:off+len(OWNER)], OWNER,
+                         "guest owner SID must not be installed")
+        self.assertEqual(self.worker.call(OPEN, b"C:/secured.dat",
+                             access=READ, share=7, disposition=3)[0], 0)
+        for pathname in (b"C:/secured.dat", b"C:/alias.dat"):
+            self.assertEqual(self.worker.call(OPEN, pathname,
+                                 access=WRITE, share=7, disposition=3)[0],
+                             ERR_ACCESS)
+        self.assertEqual(self.file.read_bytes(), b"UNMODIFIED")
+        self.assertEqual(self.file.stat().st_ino,
+                         (self.root / "alias.dat").stat().st_ino)
+
+    def test_directory_dacl_and_pe_inheritance_before_publication(self):
+        directory = self.root / "managed"
+        directory.mkdir()
+        parent = descriptor([
+            (0, 3, READ_MASK | WRITE_MASK, EVERYONE),
+        ])
+        self.assertEqual(self.path_write(parent, b"C:/managed")[0], 0)
+        self.assertTrue(os.getxattr(directory,
+                         "user.ntnative.security.sd").startswith(b"NTSD0001"))
+        child = b"C:/managed/child.txt"
+        err, opened, _, _ = self.worker.call(
+            OPEN, child, access=WRITE, share=7, disposition=1)
+        if err==ERR_UNSUPPORTED:
+            self.skipTest("host filesystem lacks O_TMPFILE staging")
+        self.assertEqual(err, 0)
+        self.assertTrue((directory / "child.txt").exists())
+        self.assertTrue(os.getxattr(directory / "child.txt",
+                         "user.ntnative.security.sd").startswith(b"NTSD0001"))
+        self.assertEqual(self.worker.call(CLOSE, handle=opened)[0], 0)
+
+    def test_handle_security_access_is_not_inherited_from_read_handle(self):
+        initial = descriptor([(0, 0, READ_MASK | WRITE_MASK | WRITE_DAC, OWNER)])
+        self.assertEqual(self.path_write(initial)[0], 0)
+        err, readonly, _, _ = self.worker.call(
+            OPEN, b"C:/secured.dat", access=READ,
+            share=7, disposition=3)
+        self.assertEqual(err, 0)
+        replacement = descriptor([(0, 0, READ_MASK, EVERYONE)])
+        self.assertEqual(self.worker.call(
+            SET_HANDLE, replacement, handle=readonly,
+            access=DACL_INFORMATION)[0], ERR_ACCESS)
+        self.assertEqual(self.worker.call(CLOSE, handle=readonly)[0], 0)
+        # Native OPEN with WRITE_DAC only has no implicit DATA_READ/WRITE.
+        err, rights, _, _ = self.worker.call(
+            OPEN, b"C:/secured.dat", access=WRITE_DAC,
+            share=7, disposition=3)
+        self.assertEqual(err, 0)
+        err, cloned, _, _ = self.worker.call(
+            DUPLICATE, handle=rights, flags=2)
+        self.assertEqual(err, 0)
+        self.assertEqual(self.worker.call(
+            SET_HANDLE, replacement, handle=cloned,
+            access=DACL_INFORMATION)[0], 0)
+        self.assertEqual(self.worker.call(CLOSE, handle=cloned)[0], 0)
+        self.assertEqual(self.worker.call(CLOSE, handle=rights)[0], 0)
+        saved = self.read_dacl()
+        offset = struct.unpack_from("<I", saved, 16)[0]
+        self.assertEqual(saved[offset+8], 0)
+
+    def test_sigkill_after_fsync_recovery_preserves_security(self):
+        # Only the offline worker understands this crash flag. The
+        # app never controls production fault injection.
+        crash = Broker(self.root, crash="after-security-set")
+        saved_sd = descriptor([
+            (1, 0, WRITE_MASK, EVERYONE),
+            (0, 0, READ_MASK, EVERYONE),
+        ])
+        path = b"C:/secured.dat"
+        try:
+            with self.assertRaises(AssertionError):
+                crash.call(SET_PATH, path + saved_sd, access=4,
+                           share=len(path), disposition=len(saved_sd))
+        finally:
+            crash.close(expected_returncode=-9)
+        self.assertEqual(self.read_dacl()[0], 1)
+        self.assertTrue(os.getxattr(self.file,
+                        "user.ntnative.security.sd").startswith(b"NTSD0001"))
+        restarted = Broker(self.root)
+        try:
+            self.assertEqual(restarted.call(
+                OPEN, path, access=WRITE, share=7,
+                disposition=3)[0], ERR_ACCESS)
+            self.assertEqual(restarted.call(
+                OPEN, b"C:/alias.dat", access=WRITE, share=7,
+                disposition=3)[0], ERR_ACCESS)
+            self.assertEqual(self.file.read_bytes(), b"UNMODIFIED")
+        finally:
+            restarted.close()
+
+    def test_malformed_and_unauthorized_write_cannot_mutate_xattr(self):
+        valid = descriptor([(0, 0, READ_MASK | WRITE_MASK, OWNER)])
+        self.assertEqual(self.path_write(valid)[0], 0)
+        old = os.getxattr(self.file, "user.ntnative.security.sd")
+        # Malformed NULL-DACL: never grant all access.
+        wrong = bytearray(valid)
+        struct.pack_into("<I", wrong, 16, 0)
+        self.assertNotEqual(self.path_write(wrong)[0], 0)
+        self.assertEqual(self.path_write(valid, info=8)[0], ERR_INVALID)
+        self.assertEqual(os.getxattr(self.file, "user.ntnative.security.sd"), old)
+        # Size overflowing FS4_MAX must be rejected by the wire contract.
+        self.assertEqual(self.worker.call(SET_PATH, b"C:/secured.dat" + b"0"*40,
+                             access=4, share=14, disposition=0xffffffff,
+                             size=2)[0], ERR_INVALID)
+        self.assertEqual(os.getxattr(self.file, "user.ntnative.security.sd"), old)
+
+
+if __name__ == "__main__":
+    unittest.main()
