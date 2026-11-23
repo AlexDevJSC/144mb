@@ -268,6 +268,7 @@ static const struct runtime_export ntdll_exports[] = {
     NT_EXPORT(CreateFile),
     NT_EXPORT(OpenFile),
     NT_EXPORT(QuerySecurityObject),
+    NT_EXPORT(SetSecurityObject),
     NT_EXPORT(ReadFile),
     NT_EXPORT(WriteFile),
     NT_EXPORT(QueryInformationFile),
@@ -808,6 +809,8 @@ static const struct runtime_export imm32_exports[] = {
 static const struct runtime_export advapi32_exports[] = {
     WIN_EXPORT(GetFileSecurityA),
     WIN_EXPORT(GetFileSecurityW),
+    WIN_EXPORT(SetFileSecurityA),
+    WIN_EXPORT(SetFileSecurityW),
     WIN_EXPORT(RegOpenKeyExW),
     WIN_EXPORT(RegQueryValueExW),
     WIN_EXPORT(RegCloseKey)
