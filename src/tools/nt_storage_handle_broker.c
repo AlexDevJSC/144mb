@@ -582,6 +582,8 @@ static struct fs4_reply dispatch(struct session *s, const struct fs4_request *q,
         if (q->handle || q->access!=4 || q->flags ||
             q->offset!=-1 || q->share<4 ||
             q->share>FS4_PATH_MAX || q->disposition<28 ||
+            q->share>FS4_DATA_MAX ||
+            q->disposition>FS4_DATA_MAX-q->share ||
             q->size>FS4_DATA_MAX || q->size!=q->share+q->disposition ||
             n!=q->size || !to_wide(payload,q->share,path))
             break;
