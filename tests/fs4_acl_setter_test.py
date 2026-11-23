@@ -77,6 +77,26 @@ class BrokerDACLWriter(unittest.TestCase):
         self.assertEqual(self.file.stat().st_ino,
                          (self.root / "alias.dat").stat().st_ino)
 
+    def test_directory_dacl_and_pe_inheritance_before_publication(self):
+        directory = self.root / "managed"
+        directory.mkdir()
+        parent = descriptor([
+            (0, 3, READ_MASK | WRITE_MASK, EVERYONE),
+        ])
+        self.assertEqual(self.path_write(parent, b"C:/managed")[0], 0)
+        self.assertTrue(os.getxattr(directory,
+                         "user.ntnative.security.sd").startswith(b"NTSD0001"))
+        child = b"C:/managed/child.txt"
+        err, opened, _, _ = self.worker.call(
+            OPEN, child, access=WRITE, share=7, disposition=1)
+        if err==ERR_UNSUPPORTED:
+            self.skipTest("host filesystem lacks O_TMPFILE staging")
+        self.assertEqual(err, 0)
+        self.assertTrue((directory / "child.txt").exists())
+        self.assertTrue(os.getxattr(directory / "child.txt",
+                         "user.ntnative.security.sd").startswith(b"NTSD0001"))
+        self.assertEqual(self.worker.call(CLOSE, handle=opened)[0], 0)
+
     def test_handle_security_access_is_not_inherited_from_read_handle(self):
         initial = descriptor([(0, 0, READ_MASK | WRITE_MASK | WRITE_DAC, OWNER)])
         self.assertEqual(self.path_write(initial)[0], 0)
