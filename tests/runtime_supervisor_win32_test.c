@@ -146,6 +146,59 @@ static int NT_MS_ABI test_entry(void)
     if (nt_NtGetContextThread(thread, &native_context) != NT_STATUS_SUCCESS ||
         native_context.rip != context.rip || native_context.rsp != context.rsp)
         return 31;
+    /* This is a *protocol-only* fixture: the trusted parent owns the
+     * test's pinned instruction interval. START/DONE messages alone do
+     * NOT assert that a callback was actually executed by this C test.
+     * Verify the authenticated ledger against replay/misordered ACKs. */
+    struct nt_broker_thread_info apc_identity = {0};
+    uint64_t apc_cap = 0;
+    const uintptr_t callback_pc = (uintptr_t)native_context.rip;
+    if (!nt_runtime_supervisor_open_thread_handle(thread,
+            NT_BROKER_SUPERVISOR_SET_CONTEXT, &apc_identity, &apc_cap) ||
+        apc_identity.guest_thread_id != tid ||
+        nt_broker_client_supervisor_authorize_apc(
+            apc_cap, apc_identity.generation, callback_pc) != NT_STATUS_SUCCESS)
+        return 80;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation + 1, callback_pc, 1,
+            NT_APC_PHASE_START) != NT_STATUS_ACCESS_DENIED ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_DONE) != NT_STATUS_ACCESS_DENIED)
+        return 81;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_START) != NT_STATUS_SUCCESS)
+        return 82;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 2,
+            NT_APC_PHASE_START) != NT_STATUS_ACCESS_DENIED ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_START) != NT_STATUS_ACCESS_DENIED)
+        return 83;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_DONE) != NT_STATUS_SUCCESS ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_DONE) != NT_STATUS_ACCESS_DENIED ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 1,
+            NT_APC_PHASE_START) != NT_STATUS_ACCESS_DENIED)
+        return 84;
+    if (nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 2,
+            NT_APC_PHASE_START) != NT_STATUS_SUCCESS ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 2,
+            NT_APC_PHASE_ABORT) != NT_STATUS_SUCCESS ||
+        nt_broker_client_supervisor_apc_transition(
+            apc_cap, apc_identity.generation, callback_pc, 2,
+            NT_APC_PHASE_DONE) != NT_STATUS_ACCESS_DENIED ||
+        !nt_broker_client_supervisor_close(apc_cap))
+        return 85;
+
     _Alignas(16) struct nt_context64 integer = context;
     integer.flags = 0x100002u;
     const uint64_t rax = integer.rax;
