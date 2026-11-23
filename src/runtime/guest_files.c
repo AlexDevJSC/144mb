@@ -5542,6 +5542,25 @@ static int32_t security_descriptor_from_fd(int fd, uint32_t information,
     return 1;
 }
 
+/* The authenticated broker has already checked READ_CONTROL; it may
+ * query the exact opened inode even when a Windows HANDLE has no DATA_READ
+ * permission. Never expose the resulting Linux FD to the guest process. */
+int32_t nt_runtime_fs4_query_security_handle(uintptr_t handle,
+                  uint32_t information,void *descriptor,uint32_t size,
+                  uint32_t *needed)
+{
+    char dos[PATH_MAX];
+    int fd=nt_runtime_fs4_pin_security_handle(handle,dos,sizeof(dos));
+    if (fd<0) {
+        nt_SetLastError(NT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    int32_t result=security_descriptor_from_fd(
+        fd,information,descriptor,size,needed);
+    close(fd);
+    return result;
+}
+
 /* SetFileSecurity has no descriptor size parameter. Use Linux's safe
  * same-process read syscall to copy only the self-relative components we
  * have verified to be bounded. A bad PE pointer cannot SIGSEGV the
