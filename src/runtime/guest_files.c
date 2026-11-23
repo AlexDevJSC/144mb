@@ -2526,7 +2526,8 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
         nt_SetLastError(NT_ERROR_INVALID_PARAMETER);
         return UINTPTR_MAX;
     }
-    if ((desired & ~(generic_read | generic_write | UINT32_C(0x00010000))) != 0 ||
+    if ((desired & ~(generic_read | generic_write |
+                     UINT32_C(0x000f0000))) != 0 ||
         (desired == 0 && disposition != OPEN_EXISTING) ||
         (share & ~(FILE_READ | FILE_WRITE | FILE_DELETE)) != 0 ||
         (flags & ~(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
@@ -2554,6 +2555,10 @@ static uintptr_t create_file_common(const char *input, uint32_t desired,
     if (!guest_path(input, path)) {
         nt_SetLastError(path_error(errno, true));
         return UINTPTR_MAX;
+    }
+    if ((desired & UINT32_C(0x000e0000)) && !nt_fs4_remote_mode()) {
+        nt_SetLastError(NT_ERROR_NOT_SUPPORTED);
+        return UINTPTR_MAX; /* no unauthenticated local ACL bypass */
     }
     /* In PE service mode, the HANDLE never opens the Linux backing here.
      * The dedicated-UID Win32 broker owns its real FD and share leases. */
@@ -4585,7 +4590,7 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
         return NT_STATUS_INVALID_PARAMETER;
     /* Keep the explicitly supported access and create-option subset narrow.
      * In particular do not pretend READ_CONTROL/WRITE_DAC or reparse support. */
-    const uint32_t supported_access = UINT32_C(0xc0110003);
+    const uint32_t supported_access = UINT32_C(0xc01f0003);
     const uint32_t supported_options = UINT32_C(0x00001060);
     if (!disposition || attributes->root || attributes->security || attributes->qos ||
         (attributes->attributes & ~0x42u) || (allocation && *allocation) || ea || ea_length ||
@@ -4632,6 +4637,7 @@ nt_status NT_MS_ABI nt_NtCreateFile(uintptr_t *handle, uint32_t access,
         desired |= UINT32_C(0x40000000);
     if (access & 0x10000u)
         desired |= UINT32_C(0x10000);
+    desired |= access & UINT32_C(0x000e0000);
     const uint32_t win_flags = file_attributes |
         ((options & 0x1000u) ? FILE_FLAG_DELETE_ON_CLOSE : 0u);
     const struct security_attributes security = {sizeof(security), NULL, (attributes->attributes & 2u) != 0};
