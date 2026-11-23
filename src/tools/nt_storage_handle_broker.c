@@ -352,7 +352,7 @@ static uintptr_t fs4_create_managed_file(struct session *s,
         goto done;
     }
     result=nt_runtime_fs4_adopt_preleased_file(
-        fd,lease,dos,desired,share);
+        fd,lease,dos,desired & ~UINT32_C(0x000e0000),share);
     if (result==UINTPTR_MAX && published) {
         struct stat current,expected;
         if (fstat(fd,&expected)==0 &&
