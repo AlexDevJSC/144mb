@@ -2097,6 +2097,51 @@ static struct guest_file *find_handle(uintptr_t handle)
     return NULL;
 }
 
+uintptr_t nt_runtime_fs4_adopt_preleased_file(int fd,int lease,
+                const char *dos_path,uint32_t desired,uint32_t share)
+{
+    if (fd<0 || lease<0 || !dos_path ||
+        strncmp(dos_path,"C:/",3)!=0 ||
+        (desired & ~(UINT32_C(0xc0010000)))!=0 ||
+        (share & ~7u)!=0) {
+        errno=EINVAL;
+        return UINTPTR_MAX;
+    }
+    struct stat inode={0};
+    if (fstat(fd,&inode)!=0 || !S_ISREG(inode.st_mode)) {
+        errno=EINVAL;
+        return UINTPTR_MAX;
+    }
+    char normalized[PATH_MAX];
+    if (!guest_path(dos_path,normalized) ||
+        !private_c_path(normalized)) {
+        errno=EACCES;
+        return UINTPTR_MAX;
+    }
+    char *owned=strdup(normalized);
+    if (!owned) {errno=ENOMEM;return UINTPTR_MAX;}
+    pthread_mutex_lock(&file_lock);
+    struct guest_file *slot=new_file();
+    uintptr_t result=UINTPTR_MAX;
+    if (slot && next_handle<=UINTPTR_MAX-16) {
+        result=next_handle;
+        next_handle+=16;
+        *slot=(struct guest_file){
+            .owner=WIN_HANDLE,.handle=result,.fd=fd,
+            .access=((desired&UINT32_C(0x80000000)) ? FILE_READ : 0u) |
+                    ((desired&UINT32_C(0x40000000)) ? FILE_WRITE : 0u) |
+                    ((desired&UINT32_C(0x00010000)) ? FILE_DELETE : 0u),
+            .share=share,.share_lease_fd=lease,
+            .device=inode.st_dev,.inode=inode.st_ino,.path=owned
+        };
+        owned=NULL; /* fd and lease transferred only after success */
+    }
+    pthread_mutex_unlock(&file_lock);
+    free(owned);
+    if (result==UINTPTR_MAX) errno=ENOMEM;
+    return result;
+}
+
 int nt_runtime_fs4_pin_security_handle(uintptr_t handle,
                                        char *path,size_t capacity)
 {
