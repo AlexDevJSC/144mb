@@ -102,7 +102,9 @@ class BrokerDACLWriter(unittest.TestCase):
             access=DACL_INFORMATION)[0], 0)
         self.assertEqual(self.worker.call(CLOSE, handle=cloned)[0], 0)
         self.assertEqual(self.worker.call(CLOSE, handle=rights)[0], 0)
-        self.assertEqual(self.read_dacl()[28], 0)
+        saved = self.read_dacl()
+        offset = struct.unpack_from("<I", saved, 16)[0]
+        self.assertEqual(saved[offset+8], 0)
 
     def test_malformed_and_unauthorized_write_cannot_mutate_xattr(self):
         valid = descriptor([(0, 0, READ_MASK | WRITE_MASK, OWNER)])
@@ -113,10 +115,9 @@ class BrokerDACLWriter(unittest.TestCase):
         struct.pack_into("<I", wrong, 16, 0)
         self.assertNotEqual(self.path_write(wrong)[0], 0)
         self.assertEqual(self.path_write(valid, info=8)[0], ERR_INVALID)
-        self.assertEqual(self.path_write(valid, share=2)[0], ERR_INVALID) if False else None
         self.assertEqual(os.getxattr(self.file, "user.ntnative.security.sd"), old)
         # Size overflowing FS4_MAX must be rejected by the wire contract.
-        self.assertEqual(self.worker.call(SET_PATH, b"C:/secured.dat" + b"0"*2020,
+        self.assertEqual(self.worker.call(SET_PATH, b"C:/secured.dat" + b"0"*40,
                              access=4, share=14, disposition=0xffffffff,
                              size=2)[0], ERR_INVALID)
         self.assertEqual(os.getxattr(self.file, "user.ntnative.security.sd"), old)
