@@ -239,6 +239,43 @@ static int NT_MS_ABI test_entry(void)
     combined.flags = 0x10001au; /* DEBUG|INTEGER|FP */
     if (nt_NtSetContextThread(thread, &combined) != NT_STATUS_NOT_SUPPORTED)
         return 56;
+    /* Real CONTROL subset: reversible CPU carry flag without changing
+     * RIP/RSP/RBP, selectors, IF or TF of this suspended owned guest.
+     * Read the actual kernel PRSTATUS after each authenticated RPC. */
+    _Alignas(16) struct nt_context64 control = {0};
+    control.flags = 0x100001u;
+    if (nt_NtGetContextThread(thread, &control) != NT_STATUS_SUCCESS)
+        return 57;
+    _Alignas(16) struct nt_context64 changed_control = control;
+    changed_control.eflags ^= 1u;
+    if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_SUCCESS)
+        return 58;
+    _Alignas(16) struct nt_context64 checked_control = {0};
+    checked_control.flags = 0x100001u;
+    if (nt_NtGetContextThread(thread, &checked_control) != NT_STATUS_SUCCESS ||
+        checked_control.eflags != changed_control.eflags ||
+        checked_control.rip != control.rip ||
+        checked_control.rsp != control.rsp)
+        return 59;
+    if (nt_NtSetContextThread(thread, &control) != NT_STATUS_SUCCESS)
+        return 60;
+    checked_control.flags = 0x100001u;
+    if (nt_NtGetContextThread(thread, &checked_control) != NT_STATUS_SUCCESS ||
+        checked_control.eflags != control.eflags)
+        return 61;
+    changed_control = control;
+    changed_control.rip += 1u; /* arbitrary PC rewrite is NOT trusted */
+    if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_NOT_SUPPORTED)
+        return 62;
+    changed_control = control;
+    changed_control.rsp -= 16u; /* no authenticated stack replacement */
+    if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_NOT_SUPPORTED)
+        return 63;
+    changed_control = control;
+    changed_control.eflags ^= 0x200u; /* IF is not guest-controlled */
+    if (nt_NtSetContextThread(thread, &changed_control) != NT_STATUS_NOT_SUPPORTED)
+        return 64;
+
     _Alignas(16) struct nt_context64 invalid = {0};
     invalid.flags = 0x100010u; /* debug registers not yet supported */
     if (nt_NtGetContextThread(thread, &invalid) != NT_STATUS_INVALID_PARAMETER)
