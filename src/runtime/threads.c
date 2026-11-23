@@ -500,7 +500,8 @@ static void invoke_apc(struct guest_apc *apc)
  * runtime code, NOT supplied by the PE; a changed session generation or
  * lost ACK makes the operation ambiguous, never a fabricated completion.
  * No ptrace or external callback stack is accepted in this path. */
-static bool special_apc_parent_receipt(struct guest_apc *apc)
+static bool special_apc_parent_receipt(struct guest_apc *apc,
+                                       uint32_t phase)
 {
     if (!apc || apc->parent_generation == 0)
         return true; /* no parent broker in standalone runtime */
@@ -517,8 +518,9 @@ static bool special_apc_parent_receipt(struct guest_apc *apc)
     bool okay = identity.guest_process_id == (uint32_t)getpid() &&
         identity.guest_thread_id == (uint32_t)gettid() &&
         identity.generation == apc->parent_generation &&
-        nt_broker_client_supervisor_authorize_apc(
-            capability, identity.generation, callback) == NT_STATUS_SUCCESS;
+        nt_broker_client_supervisor_apc_transition(
+            capability, identity.generation, callback,
+            apc->cancellation_ticket, phase) == NT_STATUS_SUCCESS;
     if (!nt_broker_client_supervisor_close(capability))
         okay = false;
     return okay;
@@ -590,7 +592,8 @@ void nt_runtime_special_apc_checkpoint(void)
         pthread_mutex_unlock(&wait_lock);
         if (!apc)
             break;
-        const bool start_ack = special_apc_parent_receipt(apc);
+        const bool start_ack =
+            special_apc_parent_receipt(apc, NT_APC_PHASE_START);
         pthread_mutex_lock(&wait_lock);
         /* A canceler can win the race while START authentication is
          * blocking on IPC. No PE callback has run yet, so cancel now
@@ -611,7 +614,8 @@ void nt_runtime_special_apc_checkpoint(void)
         }
         current_ticketed_special_apc = NULL;
         const bool return_ack = start_ack &&
-            (cancelled_before_entry || special_apc_parent_receipt(apc));
+            special_apc_parent_receipt(apc, cancelled_before_entry ?
+                NT_APC_PHASE_ABORT : NT_APC_PHASE_DONE);
         pthread_mutex_lock(&wait_lock);
         if (queue->executing == apc) {
             record_apc_receipt_locked(queue, apc->cancellation_ticket,
@@ -750,7 +754,7 @@ static nt_status queue_apc_common(uintptr_t handle,
             struct guest_apc *apc = calloc(1, sizeof(*apc));
             if (apc == NULL) {
                 status = NT_STATUS_NO_MEMORY;
-            } else if (ticket_out && next_special_apc_ticket == 0) {
+            } else if (special && next_special_apc_ticket == 0) {
                 /* The ticket sequence must never wrap and alias a past
                  * cancel target even if an old HANDLE was recycled. */
                 free(apc);
@@ -761,9 +765,14 @@ static nt_status queue_apc_common(uintptr_t handle,
                     .first = first, .second = second, .third = third,
                     .parent_generation = parent_generation
                 };
-                if (ticket_out) {
+                /* Every special APC, including legacy QueueUserAPC2,
+                 * receives a private monotonic token for the parent
+                 * START/DONE ledger. Only the opt-in NTNATIVE extension
+                 * returns this token as an application-visible ticket. */
+                if (special) {
                     apc->cancellation_ticket = next_special_apc_ticket++;
-                    *ticket_out = apc->cancellation_ticket;
+                    if (ticket_out)
+                        *ticket_out = apc->cancellation_ticket;
                 }
                 if (queue->tail != NULL)
                     queue->tail->next = apc;
