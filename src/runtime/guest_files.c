@@ -2096,6 +2096,32 @@ static struct guest_file *find_handle(uintptr_t handle)
     return NULL;
 }
 
+int nt_runtime_fs4_pin_security_handle(uintptr_t handle,
+                                       char *path,size_t capacity)
+{
+    if (!path || capacity<4) {errno=EINVAL;return -1;}
+    pthread_mutex_lock(&file_lock);
+    const struct guest_file *file=find_handle(handle);
+    int fd=-1;
+    int error=0;
+    if (!file || !file->path || file->reparse_handle) {
+        error=EBADF;
+    } else {
+        const size_t n=strnlen(file->path,capacity);
+        if (n>=capacity)
+            error=ENAMETOOLONG;
+        else {
+            memcpy(path,file->path,n+1);
+            fd=fcntl(file->fd,F_DUPFD_CLOEXEC,3);
+            if (fd<0)
+                error=errno;
+        }
+    }
+    pthread_mutex_unlock(&file_lock);
+    if (error) errno=error;
+    return fd;
+}
+
 /* A user-mode completion port is a per-process queue, never a Linux root
  * capability or a handle to an arbitrary host process. This initial API
  * covers file OVERLAPPED completions and manually posted packets. */
