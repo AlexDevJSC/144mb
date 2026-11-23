@@ -42,11 +42,31 @@ aún no está instrumentado como lease de supervisor. La nueva operación
 RPC **no es una puerta de PTRACE**; no concede `SUP_SUSPEND` ni
 `SUP_SET_CONTEXT` al invitado.
 
-**Límite importante:** estas comprobaciones autentican la identidad y
-el código en cada cruce, pero NO son un registro independiente de
-START/DONE realizado por el padre. La comprobación real de ejecución
-está en la cola del hilo invitado y su recibo local; no debe
-confundirse con una certificación de CPU obtenida por ptrace.
+**Registro independiente de transiciones (ampliación de revisión):**
+el canal autenticado añade un ticket monotónico **interno incluso para
+QueueUserAPC2 y NtQueueApcThreadEx**, junto a `phase` en cada mensaje.
+El padre mantiene por sesión un ledger acotado que asocia
+`(TID, generación, callback, ticket)` y acepta únicamente
+`START → DONE` o `START → ABORT` para una APC por hilo. Rechaza
+el doble inicio, la finalización sin inicio, el replay de tickets, un
+callback diferente y una generación caducada; la revocación autenticada
+del TID invalida también cualquier estado START huérfano.
+
+Los mensajes iniciales de `AUTHORIZE` no alteran el ledger. El hilo
+avisa `START` **antes** de ejecutar su callback y solo puede publicar
+`COMPLETED` después del ACK `DONE` del padre. Si se cancela antes de
+entrar, tras recibir START envía `ABORT`; un rechazo de este ACK
+produce `ABORTED`, no una falsa finalización. Este registro del padre
+es independiente de la tabla de recibos del hijo, aunque su fuente
+de evidencia sigue siendo el runtime autenticado.
+
+**Límite importante:** un mensaje START/DONE **no demuestra por sí
+solo que el kernel haya observado realmente el RIP del callback**.
+El padre no ejecuta esa APC mediante ptrace ni controla su pila;
+no se afirma certificación de CPU por ptrace o cancelación forzosa
+de callbacks activos. Si el canal desaparece tras un START, el padre
+mantiene la operación ambigua hasta revocar la generación, y el
+invitado no declara un resultado completado.
 
 ## Ciclo de vida y cancelación
 
@@ -104,6 +124,7 @@ señales del anfitrión no se modifican para disimular ese límite.
 make -j2 check-pe-apc check-pe-special-apc-lifecycle
 make -j2 check-runtime-supervisor-launch check-runtime-supervisor-win32
 make -j2 check-supervisor-control-ipc check-supervisor-mixed-rollback
+make -j2 check-apc-parent-ledger
 make -j2 check
 ```
 
@@ -125,9 +146,11 @@ de comunicar un contrato como validado.
 
 Quedan por implementar, demostrar y comparar con Windows:
 
-- Estado START/DONE/CANCEL gestionado independientemente en el
-  supervisor padre, con ledger autenticado y confirmaciones de ejecución
-  inequívocas, no solo revalidación de leases.
+- Confirmación **independiente de ejecución a nivel de CPU**:
+  existe un ledger padre autenticado de START/DONE/ABORT, pero sus
+  mensajes siguen siendo declaraciones del runtime invitado y no
+  registros de ejecución inspeccionados por ptrace. Tampoco registra
+  todavía una petición CANCEL activa en el padre.
 - Cancelación activa **no cooperativa**: solo podría admitirse
   con un protocolo de recursos/stack/unwind que no permita dejar mutex
   del host o side effects invitados corruptos.
