@@ -355,11 +355,11 @@ static nt_status set_control_condition_flags(
     if (context->rip != before.rip || context->rsp != before.rsp ||
         context->rbp != before.rbp || context->cs != (uint16_t)before.cs ||
         context->ss != (uint16_t)before.ss ||
-        ((uint64_t)context->eflags & ~UINT64_C(CONDITION_MASK)) !=
-        (before.eflags & ~UINT64_C(CONDITION_MASK)))
+        ((uint64_t)context->eflags & ~(uint64_t)CONDITION_MASK) !=
+        (before.eflags & ~(uint64_t)CONDITION_MASK))
         return NT_STATUS_NOT_SUPPORTED;
     struct user_regs_struct changed = before;
-    changed.eflags = (before.eflags & ~UINT64_C(CONDITION_MASK)) |
+    changed.eflags = (before.eflags & ~(uint64_t)CONDITION_MASK) |
                      (context->eflags & CONDITION_MASK);
     if (changed.eflags == before.eflags)
         return NT_STATUS_SUCCESS;
