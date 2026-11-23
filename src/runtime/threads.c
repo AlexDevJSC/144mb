@@ -602,7 +602,11 @@ static void clear_apcs_locked(struct guest_apc_queue *queue)
     }
     /* Accesses are serialized by wait_lock; publish empty before the
      * underlying thread slot can be recycled. */
-    *queue = (struct guest_apc_queue){0};
+    queue->head = queue->tail = NULL;
+    queue->count = 0;
+    atomic_store_explicit(&queue->available, false, memory_order_release);
+    /* Keep bounded terminal receipts until the last HANDLE is closed.
+     * A recycled canonical slot starts with zeroed receipt history. */
 }
 
 /* Actual guest HANDLE -> parent-owned supervisor lease. The parent
