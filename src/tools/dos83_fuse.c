@@ -370,6 +370,30 @@ static int fs_getattr(const char *path, struct stat *st,
     if (result == 0 && service_mode) {
         st->st_uid = service_client_uid;
         st->st_gid = service_client_gid;
+        /* Only the exact canonical owner/group/Everyone ALLOW policy can
+         * be rendered as POSIX st_mode. A named or DENY ACE is NOT chmod
+         * and must not be converted to an over-permissive host mode. */
+        uint8_t *sd=malloc(NT_ACL_SD_MAX_BYTES);
+        if (!sd) {
+            error=ENOMEM;
+            result=-1;
+        } else {
+            size_t length=0;
+            int state=nt_acl_storage_read_fd(
+                fd,sd,NT_ACL_SD_MAX_BYTES,&length);
+            if (state==NT_ACL_STORAGE_PRESENT) {
+                uint32_t mode=0;
+                if (nt_acl_simple_mode(sd,length,&mode)==NT_ACL_ALLOWED)
+                    st->st_mode=(st->st_mode & ~(mode_t)0777) |
+                                (mode_t)mode;
+                else
+                    st->st_mode&=~(mode_t)0777; /* unknown => no DAC grant */
+            } else if (state==NT_ACL_STORAGE_ERROR) {
+                error=errno ? errno : EUCLEAN;
+                result=-1;
+            }
+            free(sd);
+        }
     }
     if (!fi || !fi->fh)
         close(fd);
