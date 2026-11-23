@@ -2107,7 +2107,7 @@ static int service_acl_selftest(void)
     int modefd=openat(lower_root,"ACLModeFixture",O_CREAT|O_EXCL|
                       O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600);
     if (modefd<0) failure=1;
-    uint8_t simple[132]={0};
+    uint8_t simple[128]={0};
     simple[0]=1;
     fs4_acl_test_put16(simple+2,UINT16_C(0x8004));
     fs4_acl_test_put32(simple+4,20);
@@ -2116,7 +2116,7 @@ static int service_acl_selftest(void)
     fs4_acl_test_sid(simple+20,1,(uint32_t)geteuid());
     fs4_acl_test_sid(simple+36,2,(uint32_t)getegid());
     simple[52]=2;
-    fs4_acl_test_put16(simple+54,80);
+    fs4_acl_test_put16(simple+54,76);
     fs4_acl_test_put16(simple+56,3);
     simple[60]=0;
     fs4_acl_test_put16(simple+62,24);
